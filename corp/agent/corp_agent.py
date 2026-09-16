@@ -7,9 +7,14 @@ Top-level cognitive operating system integrating microsecond fast spine
 from dataclasses import dataclass, field
 from typing import Any
 import asyncio
+import json
+import time
+import uuid
 import numpy as np
 import gymnasium as gym
 from nle import nethack
+
+from corp.telemetry.parquet_logger import TickRecord, EpisodeRecord
 
 from corp.env.auto_more import AutoMoreWrapper
 from corp.env.blstats import BottomLineStats, HungerState
@@ -54,11 +59,19 @@ class CORPAgent:
         nogood_store: NogoodStore | None = None,
         llm_provider: Any = None,
         enable_deliberative_autopsy: bool = False,
+        parquet_logger: Any = None,
+        eval_type: str = "fast_prelim",
+        mode: str = "random",
+        seed: int = 42,
     ):
         self.env = env
         self.nogood_store = nogood_store or NogoodStore()
         self.llm_provider = llm_provider or MockProvider()
         self.enable_deliberative_autopsy = enable_deliberative_autopsy
+        self.parquet_logger = parquet_logger
+        self.eval_type = eval_type
+        self.mode = mode
+        self.seed = seed
 
         # Fast spine subsystems
         self.profiler = PersonaProfiler()
@@ -74,6 +87,9 @@ class CORPAgent:
         self.autopsy_engine = AutopsyEngine(self.llm_provider, self.nogood_store)
 
         # Active episode state
+        import uuid
+        self.episode_id: str = str(uuid.uuid4())[:12]
+        self.step_counter: int = 0
         self.persona: PersonaTraitVector | None = None
         self.current_blstats: BottomLineStats | None = None
         self.current_chars: np.ndarray | None = None
@@ -84,6 +100,9 @@ class CORPAgent:
 
     def reset(self, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         """Initializes a new episode and derives continuous Turn-0 persona."""
+        import uuid
+        self.episode_id = str(uuid.uuid4())[:12]
+        self.step_counter = 0
         obs, info = self.env.reset(**kwargs)
         self.current_blstats = info["blstats"]
         self.current_chars = obs["chars"]
@@ -150,8 +169,12 @@ class CORPAgent:
         Executes one full cognitive step: selects tactical task, dispatches keystroke,
         and updates telemetry.
         """
+        t_start = time.perf_counter()
         task = self.select_action()
+        latency_us = (time.perf_counter() - t_start) * 1e6
+
         obs, reward, terminated, truncated, info = self.dispatcher.dispatch(task)
+        self.step_counter += 1
 
         self.current_blstats = info["blstats"]
         self.current_chars = obs["chars"]
@@ -163,6 +186,50 @@ class CORPAgent:
             self.is_terminal = True
             self.terminal_message = info.get("full_message", "")
 
+        # Log tick frame if ParquetLogger attached
+        if self.parquet_logger is not None:
+            monsters = self.combat_mgr.scan_monsters(obs["glyphs"], self.current_blstats)
+            closest_m = monsters[0] if monsters else None
+            tick = TickRecord(
+                episode_id=self.episode_id,
+                run_id=self.parquet_logger.run_id,
+                step=self.step_counter,
+                turn=self.current_blstats.turn,
+                timestamp=time.time(),
+                depth=self.current_blstats.depth,
+                dungeon_number=self.current_blstats.dungeon_number,
+                level_number=self.current_blstats.level_number,
+                x=self.current_blstats.x,
+                y=self.current_blstats.y,
+                hp=self.current_blstats.hp,
+                max_hp=self.current_blstats.max_hp,
+                energy=self.current_blstats.energy,
+                max_energy=self.current_blstats.max_energy,
+                ac=self.current_blstats.ac,
+                xp_level=self.current_blstats.experience,
+                xp_points=self.current_blstats.score,
+                gold=self.current_blstats.gold,
+                hunger_state=self.current_blstats.hunger_state,
+                encumbrance=self.current_blstats.encumbrance,
+                condition_bits=self.current_blstats.condition_bits,
+                predicate_mask=0,
+                active_nogoods_count=len(self.nogood_store.entries),
+                action_name=task.name,
+                action_index=0,
+                action_key_char="",
+                action_args_json=json.dumps(task.args),
+                decision_latency_us=latency_us,
+                visible_hostiles_count=len(monsters),
+                closest_monster_name=closest_m.name if closest_m else "",
+                closest_monster_dist=closest_m.distance if closest_m else -1,
+                closest_monster_speed=closest_m.speed if closest_m else 0,
+                closest_monster_threat=closest_m.threat_score if closest_m else 0.0,
+                cycle_detected=False,
+                llm_invoked=False,
+                reward=float(reward),
+            )
+            self.parquet_logger.log_tick(tick)
+
         return obs, reward, terminated, truncated, info
 
     async def run_episode_async(self, max_steps: int = 50000) -> EpisodeResult:
@@ -170,8 +237,6 @@ class CORPAgent:
         Runs the full autonomous game loop until game over or step budget exhaustion.
         Triggers post-mortem autopsy upon death.
         """
-        import time
-
         self.reset()
         start_time = time.perf_counter()
         steps = 0
@@ -202,6 +267,55 @@ class CORPAgent:
                 )
             except Exception:
                 pass # Autopsy failure must not crash benchmark runner
+
+        # Log episode frame if ParquetLogger attached
+        if self.parquet_logger is not None:
+            death_cat = "none"
+            msg_lower = self.terminal_message.lower()
+            if "starv" in msg_lower or "faint" in msg_lower:
+                death_cat = "starvation"
+            elif "poison" in msg_lower:
+                death_cat = "poison"
+            elif "drown" in msg_lower:
+                death_cat = "drowning"
+            elif "petrif" in msg_lower or "turned to stone" in msg_lower:
+                death_cat = "instakill"
+            elif "killed" in msg_lower or "died" in msg_lower:
+                death_cat = "combat"
+
+            ep_rec = EpisodeRecord(
+                episode_id=self.episode_id,
+                run_id=self.parquet_logger.run_id,
+                eval_type=self.eval_type,
+                seed=self.seed,
+                mode=self.mode,
+                character="*",
+                role="unknown",
+                race="unknown",
+                gender="unknown",
+                alignment="unknown",
+                persona_resilience=self.persona.resilience if self.persona else 0.5,
+                persona_ranged=self.persona.ranged if self.persona else 0.5,
+                persona_mana=self.persona.mana if self.persona else 0.5,
+                persona_stealth=self.persona.stealth if self.persona else 0.5,
+                persona_alignment=self.persona.alignment if self.persona else 0.5,
+                total_turns=self.current_blstats.turn if self.current_blstats else steps,
+                total_steps=steps,
+                max_depth=self.max_depth_reached,
+                final_score=self.current_blstats.score if self.current_blstats else 0,
+                final_hp=self.current_blstats.hp if self.current_blstats else 0,
+                final_gold=self.current_blstats.gold if self.current_blstats else 0,
+                is_ascended=is_ascended,
+                death_message=self.terminal_message or "Survived",
+                death_category=death_cat,
+                nogoods_active=len(self.nogood_store.entries),
+                nogoods_synthesized=0,
+                mean_sps=sps,
+                wall_duration_sec=elapsed,
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            self.parquet_logger.log_episode(ep_rec)
+            self.parquet_logger.flush_all()
 
         return EpisodeResult(
             turns=self.current_blstats.turn if self.current_blstats else steps,

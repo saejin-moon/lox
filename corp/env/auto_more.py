@@ -56,13 +56,14 @@ class AutoMoreWrapper(gym.Wrapper):
 
         # Synchronize initial state
         self.current_blstats = BottomLineStats.from_blstats(obs["blstats"])
-        self.inventory_tracker.synchronize(
-            obs["inv_strs"],
-            obs["inv_letters"],
-            obs["inv_glyphs"],
-            obs.get("inv_oclasses"),
-            turn=self.current_blstats.turn,
-        )
+        if "inv_strs" in obs and "inv_letters" in obs and "inv_glyphs" in obs:
+            self.inventory_tracker.synchronize(
+                obs["inv_strs"],
+                obs["inv_letters"],
+                obs["inv_glyphs"],
+                obs.get("inv_oclasses"),
+                turn=self.current_blstats.turn,
+            )
 
         anomalies = self.anomaly_sentry.evaluate(self.current_blstats, flushed_msg)
         self.flight_recorder.record(
@@ -95,14 +96,15 @@ class AutoMoreWrapper(gym.Wrapper):
         # Synchronize bottom-line stats
         self.current_blstats = BottomLineStats.from_blstats(obs["blstats"])
 
-        # Synchronize inventory
-        self.inventory_tracker.synchronize(
-            obs["inv_strs"],
-            obs["inv_letters"],
-            obs["inv_glyphs"],
-            obs.get("inv_oclasses"),
-            turn=self.current_blstats.turn,
-        )
+        # Synchronize inventory if tensors present
+        if "inv_strs" in obs and "inv_letters" in obs and "inv_glyphs" in obs:
+            self.inventory_tracker.synchronize(
+                obs["inv_strs"],
+                obs["inv_letters"],
+                obs["inv_glyphs"],
+                obs.get("inv_oclasses"),
+                turn=self.current_blstats.turn,
+            )
 
         # Evaluate physical invariants via Anomaly Sentry
         anomalies = self.anomaly_sentry.evaluate(self.current_blstats, full_msg)

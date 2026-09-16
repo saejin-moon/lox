@@ -22,6 +22,7 @@ from corp.planner.nogood import NogoodStore
 from corp.deliberative.providers.mock_provider import MockProvider
 from corp.deliberative.providers.llama_cpp import LlamaCppProvider
 from corp.deliberative.providers.openrouter import OpenRouterProvider
+from corp.telemetry import ParquetLogger, DuckDBConsolidator
 
 
 AUTOASCEND_BASELINES = {
@@ -41,12 +42,24 @@ AUTOASCEND_BASELINES = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="CORP Autonomous Benchmarking Runner")
+    parser = argparse.ArgumentParser(description="CORP Autonomous Benchmarking & Training Runner")
     parser.add_argument(
         "--mode",
         choices=["random", "competence"],
         default="random",
         help="Evaluation paradigm: 'random' (MODE_RANDOM_GENERALIST) or 'competence' (MODE_COMPETENCE_SELECTION)",
+    )
+    parser.add_argument(
+        "--eval-type",
+        choices=["fast_prelim", "research_grade", "training"],
+        default="fast_prelim",
+        help="Run categorization: 'fast_prelim', 'research_grade', or 'training'",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Unique identifier for this evaluation run (defaults to timestamp)",
     )
     parser.add_argument(
         "--episodes",
@@ -59,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5000,
         help="Max step budget per episode",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Base random seed",
     )
     parser.add_argument(
         "--provider",
@@ -78,6 +97,18 @@ def parse_args() -> argparse.Namespace:
         help="Path to JSON file storing persistent CDCL Nogood clauses",
     )
     parser.add_argument(
+        "--parquet-dir",
+        type=str,
+        default="logs/parquet",
+        help="Directory to stream snappy-compressed Parquet telemetry",
+    )
+    parser.add_argument(
+        "--duckdb-path",
+        type=str,
+        default="data/corp_telemetry.duckdb",
+        help="Path to consolidated DuckDB database",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="data/benchmark_results.json",
@@ -95,11 +126,13 @@ def get_llm_provider(provider_type: str) -> Any:
 
 
 async def run_benchmark(args: argparse.Namespace):
+    run_id = args.run_id or f"{args.eval_type}_{int(time.time())}"
     print("=" * 80)
-    print(f"CORP Neuro-Symbolic Cognitive OS: Benchmark Runner")
-    print(f"Mode: {'MODE_RANDOM_GENERALIST' if args.mode == 'random' else 'MODE_COMPETENCE_SELECTION'}")
+    print(f"CORP Neuro-Symbolic Cognitive OS: Benchmark & Training Runner")
+    print(f"Run ID: {run_id} | Type: {args.eval_type} | Mode: {'MODE_RANDOM_GENERALIST' if args.mode == 'random' else 'MODE_COMPETENCE_SELECTION'}")
     print(f"Episodes: {args.episodes} | Step Budget: {args.max_steps} | Provider: {args.provider}")
     print(f"Autopsy Engine: {'ENABLED' if args.enable_autopsy else 'DISABLED'}")
+    print(f"Telemetry: Parquet ({args.parquet_dir}) -> DuckDB ({args.duckdb_path})")
     print("=" * 80)
 
     nogood_store = NogoodStore()
@@ -109,6 +142,7 @@ async def run_benchmark(args: argparse.Namespace):
 
     competence_engine = CompetenceEngine()
     llm_provider = get_llm_provider(args.provider)
+    parquet_logger = ParquetLogger(base_dir=args.parquet_dir, run_id=run_id)
 
     results: list[dict[str, Any]] = []
     start_total_time = time.perf_counter()
@@ -121,6 +155,10 @@ async def run_benchmark(args: argparse.Namespace):
             nogood_store=nogood_store,
             llm_provider=llm_provider,
             enable_deliberative_autopsy=args.enable_autopsy,
+            parquet_logger=parquet_logger,
+            eval_type=args.eval_type,
+            mode=args.mode,
+            seed=args.seed + ep,
         )
 
         ep_start = time.perf_counter()
@@ -165,6 +203,16 @@ async def run_benchmark(args: argparse.Namespace):
     os.makedirs(os.path.dirname(args.nogood_path), exist_ok=True)
     nogood_store.save_to_json(args.nogood_path)
 
+    # Flush all remaining telemetry to Parquet
+    parquet_logger.flush_all()
+
+    # Consolidate into DuckDB
+    consolidator = DuckDBConsolidator(
+        db_path=args.duckdb_path,
+        parquet_dir=args.parquet_dir,
+    )
+    c_counts = consolidator.consolidate()
+
     # Compute aggregates
     total_elapsed = time.perf_counter() - start_total_time
     depths = [r["max_depth"] for r in results]
@@ -194,9 +242,19 @@ async def run_benchmark(args: argparse.Namespace):
     print(f"{'Fatal Error Recurrence':<30} | {'100% (Tabula Rasa)':<20} | {'0% (CDCL Nogoods)':<20}")
     print(f"{'Average Throughput (SPS)':<30} | {'~800 SPS':<20} | {f'{mean_sps:.1f} SPS':<20}")
     print("=" * 80)
+    print(f"DuckDB Telemetry: Consolidated {c_counts['episodes']} episodes & {c_counts['ticks']} ticks in {args.duckdb_path}")
+
+    # Display DuckDB analytical views
+    try:
+        print("\nDuckDB Summary View (v_eval_summary):")
+        print(consolidator.query_formatted("SELECT run_id, eval_type, mode, episodes_count, median_depth, avg_turns, avg_sps FROM v_eval_summary LIMIT 5"))
+    except Exception:
+        pass
 
     # Write results
     summary = {
+        "run_id": run_id,
+        "eval_type": args.eval_type,
         "mode": args.mode,
         "episodes": args.episodes,
         "total_elapsed_sec": total_elapsed,
@@ -205,6 +263,7 @@ async def run_benchmark(args: argparse.Namespace):
         "mean_score": mean_score,
         "ascension_rate": ascension_rate,
         "mean_sps": mean_sps,
+        "duckdb_counts": c_counts,
         "detailed_episodes": results,
     }
     os.makedirs(os.path.dirname(args.output), exist_ok=True)

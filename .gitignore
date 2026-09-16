@@ -12,6 +12,12 @@ data/raw/
 data/*.db
 data/*.db-journal
 data/*.json
+data/*.duckdb
+data/*.duckdb.wal
+data/*.parquet
+
+# Telemetry logs
+logs/
 
 # Keep directory structure
 !data/.gitkeep

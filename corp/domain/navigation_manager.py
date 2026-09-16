@@ -138,8 +138,8 @@ class NavigationManager:
                     hazard_costs=hazard_costs,
                 )
                 if path and len(path) > 1:
-                    next_r, next_c = path[1]
-                    return Task("STEP", is_primitive=True, args={"delta": (next_r - py, next_c - px)})
+                    next_node = path[1]
+                    return Task("STEP", is_primitive=True, args={"delta": (next_node.row - py, next_node.col - px)})
 
         # 4. Path to nearest frontier
         frontier = self.frontier_explorer.find_nearest_frontier(
@@ -155,8 +155,8 @@ class NavigationManager:
                 hazard_costs=hazard_costs,
             )
             if path and len(path) > 1:
-                next_r, next_c = path[1]
-                return Task("STEP", is_primitive=True, args={"delta": (next_r - py, next_c - px)})
+                next_node = path[1]
+                return Task("STEP", is_primitive=True, args={"delta": (next_node.row - py, next_node.col - px)})
 
         # 5. Fallback: Localized search or step to least-visited neighbor
         best_delta = self._find_least_visited_step(py, px, lvl, chars)
