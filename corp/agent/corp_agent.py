@@ -98,6 +98,7 @@ class CORPAgent:
         self.max_turn_reached: int = 1
         self.is_terminal: bool = False
         self.terminal_message: str = ""
+        self.current_message: str = ""
 
     def reset(self, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         """Initializes a new episode and derives continuous Turn-0 persona."""
@@ -112,6 +113,7 @@ class CORPAgent:
         self.max_turn_reached = self.current_blstats.turn
         self.is_terminal = False
         self.terminal_message = ""
+        self.current_message = info.get("full_message", "")
         self.cycle_detector.reset()
         self.nav_mgr.reset()
         self.inv_mgr = InventoryManager()
@@ -144,8 +146,10 @@ class CORPAgent:
             inventory=inv_tracker,
         )
 
-        # 2. Resource & Emergency Management (Prayer, Hunger, Equipment)
-        resource_task = self.inv_mgr.evaluate_resource_turn(blstats, inv_tracker)
+        # 2. Resource & Emergency Management (Prayer, Hunger, Floor Pickup, Equipment)
+        resource_task = self.inv_mgr.evaluate_resource_turn(
+            blstats, inv_tracker, message=self.current_message
+        )
         if resource_task is not None and not self._is_nogood(resource_task, state_mask):
             chosen_task = resource_task
         else:
@@ -189,10 +193,11 @@ class CORPAgent:
 
         self.current_chars = obs["chars"]
         self.current_glyphs = obs["glyphs"]
+        self.current_message = info.get("full_message", "")
 
         if terminated or truncated:
             self.is_terminal = True
-            self.terminal_message = info.get("full_message", "")
+            self.terminal_message = self.current_message
 
         # Log tick frame if ParquetLogger attached
         if self.parquet_logger is not None:

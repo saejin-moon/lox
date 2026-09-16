@@ -209,9 +209,9 @@ class AutoMoreWrapper(gym.Wrapper):
         # Confirm divine prayer when deliberately initiated
         if "really pray" in msg or "sure you want to pray" in msg:
             return self.ACTION_Y
-        # Confirm attack on peaceful monsters when combat engine committed to strike
+        # Never attack peaceful monsters or pets when prompted
         if "really attack" in msg:
-            return self.ACTION_Y
+            return self.ACTION_N
         # Identify items post-mortem
         if "possessions identified" in msg:
             return self.ACTION_Y

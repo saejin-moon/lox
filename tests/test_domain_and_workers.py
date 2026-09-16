@@ -180,3 +180,48 @@ def test_navigation_manager_frontier_and_search():
     assert task is not None
     # Will path towards frontier (5, 7) or search
     assert task.name in ("STEP", "SEARCH")
+
+
+def test_combat_manager_healing_rest_and_peaceful():
+    combat_mgr = TacticalCombatManager()
+    glyphs = np.full((21, 79), nle.nethack.NO_GLYPH, dtype=np.int32)
+    chars = np.full((21, 79), ord("."), dtype=np.uint8)
+
+    # 1. Damaged player (10/20 HP) with NO hostiles -> should REST (WAIT)
+    blstats_damaged = make_test_blstats(hp=10, max_hp=20, hunger_state=HungerState.NORMAL)
+    task = combat_mgr.evaluate_combat_turn(glyphs, chars, blstats_damaged)
+    assert task is not None
+    assert task.name == "WAIT"
+
+    # 2. Healthy player (20/20 HP) -> no combat action needed (returns None)
+    blstats_healthy = make_test_blstats(hp=20, max_hp=20, hunger_state=HungerState.NORMAL)
+    assert combat_mgr.evaluate_combat_turn(glyphs, chars, blstats_healthy) is None
+
+    # 3. Peaceful shopkeeper nearby -> should NOT attack
+    shopkeeper_id = None
+    for m in range(nle.nethack.NUMMONS):
+        pm = nle.nethack.permonst(m)
+        if "shopkeeper" in pm.mname:
+            shopkeeper_id = m
+            break
+    if shopkeeper_id is not None:
+        glyphs[10, 11] = nle.nethack.GLYPH_MON_OFF + shopkeeper_id
+        monsters = combat_mgr.scan_monsters(glyphs, blstats_healthy)
+        assert len(monsters) == 0  # Ignored peaceful entity
+
+
+def test_inventory_manager_floor_pickup():
+    inv_mgr = InventoryManager()
+    blstats = make_test_blstats(x=5, y=5, depth=1)
+    inv = InventoryNormalizer()
+
+    # Step on food ration message -> issue PICKUP
+    msg = "You see here a food ration."
+    task = inv_mgr.evaluate_resource_turn(blstats, inv, message=msg)
+    assert task is not None
+    assert task.name == "PICKUP"
+
+    # Subsequent check at same location should not repeat pickup
+    task2 = inv_mgr.evaluate_resource_turn(blstats, inv, message=msg)
+    assert task2 is None or task2.name != "PICKUP"
+

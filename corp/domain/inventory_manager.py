@@ -65,14 +65,20 @@ class InventoryManager:
 
     def __init__(self):
         self.prayer_state = PrayerState()
+        self.picked_positions: set[tuple[int, int, int]] = set()
+
+    def reset(self):
+        self.prayer_state = PrayerState()
+        self.picked_positions.clear()
 
     def evaluate_resource_turn(
         self,
         blstats: BottomLineStats,
         inv_tracker: InventoryNormalizer,
+        message: str = "",
     ) -> Task | None:
         """
-        Evaluates hunger, equipment, and prayer needs.
+        Evaluates hunger, floor pickup, equipment, and prayer needs.
         Returns the highest-priority resource Task, or None if satisfied.
         """
         # 1. Divine Prayer Check (Top survival priority when at extreme hazard)
@@ -81,12 +87,30 @@ class InventoryManager:
             self.prayer_state.prayer_count += 1
             return Task("PRAY", is_primitive=True)
 
-        # 2. Nutrition Engine
+        msg_lower = message.lower()
+
+        # 2. Safe Floor Corpse Consumption (when Hungry and standing over safe corpse)
+        if blstats.hunger_state >= HungerState.HUNGRY:
+            if "corpse here" in msg_lower or "corpse." in msg_lower:
+                if not any(bad in msg_lower for bad in self.UNSAFE_CORPSE_KEYWORDS):
+                    return Task("EAT", is_primitive=True, args={"slot": ""})
+
+        # 3. Floor Item Pickup (Food, potions, scrolls, weapons, gold, armor)
+        py, px = blstats.y, blstats.x
+        pos_key = (blstats.depth, py, px)
+        if pos_key not in self.picked_positions and blstats.encumbrance == 0:
+            has_item = any(k in msg_lower for k in ("you see here", "there is a ", "there are several objects", "things that are here"))
+            is_static = any(s in msg_lower for s in ("door", "staircase", "stairs", "altar", "fountain", "sink", "grave", "throne", "trap"))
+            if has_item and not is_static:
+                self.picked_positions.add(pos_key)
+                return Task("PICKUP", is_primitive=True)
+
+        # 4. Nutrition Engine (Carried inventory food)
         food_task = self._evaluate_nutrition(blstats, inv_tracker)
         if food_task is not None:
             return food_task
 
-        # 3. Equipment Optimization (Wield primary weapon if empty)
+        # 5. Equipment Optimization (Wield weapon, wear shield/armor)
         equip_task = self._evaluate_equipment(blstats, inv_tracker)
         if equip_task is not None:
             return equip_task
@@ -196,5 +220,16 @@ class InventoryManager:
 
             if best_slot is not None:
                 return Task("WIELD", is_primitive=True, args={"slot": best_slot})
+
+        # Check for unequipped safe armor/shield
+        for item in inv_tracker.active_items.values():
+            if item.buc_state == "CURSED":
+                continue
+            desc_lower = item.raw_str.lower()
+            if not item.equipped and "(being worn)" not in desc_lower:
+                if "shield" in desc_lower:
+                    return Task("WEAR", is_primitive=True, args={"slot": item.current_letter})
+                if any(a in desc_lower for a in ("helmet", "boots", "gloves", "cloak", "leather armor", "ring mail", "scale mail", "chain mail")):
+                    return Task("WEAR", is_primitive=True, args={"slot": item.current_letter})
 
         return None

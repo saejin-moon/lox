@@ -213,16 +213,31 @@ class NavigationManager:
             if path:
                 return self._step_or_open(py, px, path[0], chars)
 
-        # 6. Corridor dead-end secret door search burst
+        # 6. Corridor dead-end secret door search burst (up to 15 searches)
         if chars[py, px] == ord("#") and self._is_corridor_dead_end(lvl, py, px):
             searches_here = self.dead_end_searches.get((py, px), 0)
-            if searches_here < 6:
+            if searches_here < 15:
                 self.dead_end_searches[(py, px)] = searches_here + 1
                 return Task("SEARCH", is_primitive=True)
 
-        # 7. Fallback: Localized search for secret doors
-        return Task("SEARCH", is_primitive=True)
+        # 7. Perimeter wall search for secret doors
+        # If stairs down are not yet discovered, systematically search perimeter room walls
+        if not lvl.stairs_down:
+            wall_search_tile = self._find_unsearched_wall_tile(py, px, lvl, chars)
+            if wall_search_tile is not None:
+                if wall_search_tile == (py, px):
+                    lvl.searched[py, px] += 1
+                    return Task("SEARCH", is_primitive=True)
+                path = self.astar.find_path(
+                    (py, px),
+                    wall_search_tile,
+                    lvl.walkable,
+                    hazard_costs=hazard_costs,
+                )
+                if path:
+                    return self._step_or_open(py, px, path[0], chars)
 
+        # 8. Fallback: Localized search for secret doors
         return Task("SEARCH", is_primitive=True)
 
     def _is_level_mapped(self, lvl: LevelMap, chars: np.ndarray) -> bool:
@@ -274,3 +289,43 @@ class NavigationManager:
                             best_delta = (dr, dc)
 
         return best_delta
+
+    def _find_unsearched_wall_tile(
+        self,
+        py: int,
+        px: int,
+        lvl: LevelMap,
+        chars: np.ndarray,
+    ) -> tuple[int, int] | None:
+        """
+        Finds the closest walkable tile adjacent to a wall (| or -) or unrevealed boundary
+        that has been searched fewer than 12 times.
+        """
+        wall_chars = {ord("|"), ord("-"), 0, ord(" ")}
+        candidates: list[tuple[int, int]] = []
+        rows, cols = chars.shape
+
+        for r in range(rows):
+            for c in range(cols):
+                if not lvl.walkable[r, c]:
+                    continue
+                if lvl.searched[r, c] >= 12:
+                    continue
+                # Check if adjacent to a wall or unrevealed boundary
+                has_wall_neighbor = False
+                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        if chars[nr, nc] in wall_chars:
+                            has_wall_neighbor = True
+                            break
+                if has_wall_neighbor:
+                    candidates.append((r, c))
+
+        if not candidates:
+            return None
+
+        # Sort by Manhattan distance to player
+        candidates.sort(key=lambda pos: abs(pos[0] - py) + abs(pos[1] - px))
+        return candidates[0]
+

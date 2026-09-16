@@ -40,12 +40,25 @@ class TacticalCombatManager:
     # High-threat entity names
     INSTAKILL_NAMES = {
         "floating eye": 200.0,
+        "gas spore": 300.0,
         "cockatrice": 250.0,
         "chickatrice": 200.0,
         "mind flayer": 300.0,
         "master mind flayer": 400.0,
         "rust monster": 75.0,
         "disenchanter": 90.0,
+    }
+
+    # Peaceful / shopkeeper / guard entities to never provoke
+    PEACEFUL_NAMES = {
+        "shopkeeper",
+        "priest",
+        "priestess",
+        "watchman",
+        "aligned priest",
+        "high priest",
+        "oracle",
+        "guard",
     }
 
     def __init__(self, player_speed: int = 12):
@@ -77,6 +90,8 @@ class TacticalCombatManager:
                 mon_id = nethack.glyph_to_mon(g)
                 pm = nethack.permonst(mon_id)
                 mname = pm.mname.lower()
+                if any(p in mname for p in self.PEACEFUL_NAMES):
+                    continue
                 speed = int(pm.mmove)
                 level = int(pm.mlevel)
                 ac = int(pm.ac)
@@ -128,6 +143,10 @@ class TacticalCombatManager:
         """
         monsters = self.scan_monsters(glyphs, blstats)
         if not monsters:
+            # Tactical Healing Rest: If damaged, safely regenerate HP when no hostiles are visible.
+            # Valkyries heal 1 HP every few turns. Only rest if hunger is safe (not WEAK or FAINTING).
+            if blstats.hp < int(blstats.max_hp * 0.85) and blstats.hunger_state < 3:
+                return Task("WAIT", is_primitive=True)
             return None
 
         py, px = blstats.y, blstats.x
@@ -152,13 +171,14 @@ class TacticalCombatManager:
             dr = primary_target.pos[0] - py
             dc = primary_target.pos[1] - px
 
-            # Floating eye guard: Melee attack strictly forbidden unless blind
-            if "floating eye" in primary_target.name and not is_blind:
+            # Floating eye & Gas spore guard: Melee attack strictly forbidden
+            # Floating eye causes permanent paralysis; Gas spore explodes for 4d6 fatal damage
+            if ("floating eye" in primary_target.name and not is_blind) or "gas spore" in primary_target.name:
                 # Must not melee! Find a non-monster tile to step away
                 step_away_delta = self._find_escape_step(py, px, adjacent_monsters, chars)
                 if step_away_delta is not None:
                     return Task("STEP", is_primitive=True, args={"delta": step_away_delta})
-                # If cannot step away, wait rather than strike eye
+                # If cannot step away, wait rather than strike
                 return Task("WAIT", is_primitive=True)
 
             # Cockatrice guard: no unarmed combat (default weapons usually equipped)
