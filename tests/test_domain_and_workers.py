@@ -25,6 +25,7 @@ def make_test_blstats(
     depth: int = 1,
     hunger_state: int = HungerState.NORMAL,
     condition_mask: int = 0,
+    score: int = 0,
 ) -> BottomLineStats:
     raw = np.zeros(26, dtype=np.int32)
     raw[nle.nethack.NLE_BL_X] = x
@@ -35,7 +36,9 @@ def make_test_blstats(
     raw[nle.nethack.NLE_BL_TIME] = turn
     raw[nle.nethack.NLE_BL_HUNGER] = hunger_state
     raw[nle.nethack.NLE_BL_CONDITION] = condition_mask
+    raw[nle.nethack.NLE_BL_SCORE] = score
     return BottomLineStats.from_blstats(raw)
+
 
 
 def test_action_dispatcher_tables():

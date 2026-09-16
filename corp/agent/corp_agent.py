@@ -32,6 +32,8 @@ from corp.deliberative.autopsy_engine import AutopsyEngine
 from corp.deliberative.deadlock_resolver import DeadlockResolver
 from corp.deliberative.providers.mock_provider import MockProvider
 from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
+from corp.deliberative.impasse_evaluator import HolisticImpasseEvaluator, ImpasseEvaluation
+
 
 
 
@@ -77,7 +79,15 @@ class CORPAgent:
         self.eval_type = eval_type
         self.mode = mode
         self.seed = seed
-        self.throttler = LLMRateThrottler(throttler_config)
+        self.throttler = LLMRateThrottler(
+            throttler_config or ThrottlerConfig(
+                min_wall_seconds=0.0,
+                min_turn_gap=0,
+                max_in_game_per_episode=10,
+                escalation_threshold=1,
+            )
+        )
+        self.impasse_evaluator = HolisticImpasseEvaluator(threshold=1.0)
 
         # Fast spine subsystems
         self.profiler = PersonaProfiler()
@@ -132,6 +142,7 @@ class CORPAgent:
         self.nav_mgr.reset()
         self.inv_mgr = InventoryManager()
         self.throttler.reset_episode()
+        self.impasse_evaluator.reset()
         if hasattr(self.env, "inventory_tracker"):
             self.env.inventory_tracker.reset()
 
@@ -192,27 +203,48 @@ class CORPAgent:
         # 5. Cycle Detection & Oscillation Interlock across ALL tactical domains
         py, px = blstats.y, blstats.x
         if self.cycle_detector.record_and_check((py, px), chosen_task.name):
-            stall_count = self.throttler.record_stall(chosen_task.name)
-            if self.enable_in_game_deliberation and stall_count >= self.throttler.config.escalation_threshold:
-                self._deadlock_trigger = ("deadlock_cycle", chosen_task.name)
+            stall_count = self.impasse_evaluator.record_stall(chosen_task.name)
+            lvl_map = self.nav_mgr.get_or_create_level(blstats.depth)
+            inv_items = self.env.inventory_tracker.get_active_items() if hasattr(self.env, "inventory_tracker") else []
 
-            # Hierarchical symbolic fallback:
-            # 1st stall: localized SEARCH (discovers secret doors/traps)
-            # 2nd+ stall: random perturbation step into adjacent walkable tile
-            if stall_count <= 1:
+            # Extract names of visible adjacent monsters
+            adj_monsters = self.combat_mgr.scan_monsters(glyphs, blstats)
+            adj_names = [m.name for m in adj_monsters if m.is_adjacent]
+
+            # Calculate remaining prayer cooldown turns
+            prayer_cooldown = max(0, 850 - (blstats.turn - self.inv_mgr.prayer_state.last_prayer_turn))
+
+            # Multi-dimensional holistic evaluation
+            eval_res = self.impasse_evaluator.evaluate(
+                blstats=blstats,
+                chars=chars,
+                lvl_map=lvl_map,
+                inv_items=inv_items,
+                failed_task=chosen_task.name,
+                message=self.current_message,
+                adjacent_monster_names=adj_names,
+                prayer_cooldown_remaining=prayer_cooldown,
+            )
+
+            if self.enable_in_game_deliberation and eval_res.should_trigger:
+                self._deadlock_trigger = ("deadlock_macro_impasse", chosen_task.name)
+
+            # System 1 Hierarchical symbolic fallback:
+            # 1 to 5 stalls: localized SEARCH (discovers secret doors/traps)
+            # 6+ stalls: random perturbation step into adjacent walkable tile
+            if stall_count <= 5:
                 return Task("SEARCH", is_primitive=True)
             else:
                 import random
                 dirs = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
                 random.shuffle(dirs)
-                lvl = self.nav_mgr.get_or_create_level(blstats.depth)
                 for dr, dc in dirs:
                     nr, nc = py + dr, px + dc
-                    if 0 <= nr < 21 and 0 <= nc < 79 and lvl.walkable[nr, nc]:
+                    if 0 <= nr < 21 and 0 <= nc < 79 and lvl_map.walkable[nr, nc]:
                         return Task("STEP", is_primitive=True, args={"delta": (dr, dc)})
                 return Task("SEARCH", is_primitive=True)
         else:
-            self.throttler.clear_stall(chosen_task.name)
+            self.impasse_evaluator.clear_stall(chosen_task.name)
 
         return chosen_task
 
@@ -237,6 +269,11 @@ class CORPAgent:
                 self.max_depth_reached = new_blstats.depth
         elif self.current_blstats is None:
             self.current_blstats = new_blstats
+
+        # Update holistic progress history for sliding-window macro-stagnation
+        if self.current_blstats is not None:
+            lvl_map = self.nav_mgr.get_or_create_level(self.current_blstats.depth)
+            self.impasse_evaluator.record_step(self.current_blstats, lvl_map)
 
         self.current_chars = obs["chars"]
         self.current_glyphs = obs["glyphs"]

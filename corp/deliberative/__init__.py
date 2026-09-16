@@ -16,6 +16,7 @@ from corp.deliberative.providers.openrouter import OpenRouterProvider
 from corp.deliberative.autopsy_engine import AutopsyEngine
 from corp.deliberative.deadlock_resolver import DeadlockResolver
 from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
+from corp.deliberative.impasse_evaluator import HolisticImpasseEvaluator, ImpasseEvaluation
 
 __all__ = [
     "SubTaskSpec",
@@ -33,5 +34,8 @@ __all__ = [
     "DeadlockResolver",
     "LLMRateThrottler",
     "ThrottlerConfig",
+    "HolisticImpasseEvaluator",
+    "ImpasseEvaluation",
 ]
+
 
