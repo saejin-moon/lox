@@ -124,3 +124,30 @@ def test_parquet_logger_and_duckdb_consolidation():
 
         latency_rows = consolidator.query("SELECT action_name, action_count, p50_latency_us FROM v_latency_stats")
         assert len(latency_rows) == 2  # STEP and SEARCH
+
+
+def test_base62_run_id_generation():
+    from corp.telemetry.run_id import generate_base62_id, generate_run_id, BASE62_ALPHABET
+    from datetime import datetime, timezone
+
+    # Generate standalone IDs
+    id1 = generate_base62_id()
+    id2 = generate_base62_id()
+
+    assert len(id1) == 6
+    assert len(id2) == 6
+    assert all(c in BASE62_ALPHABET for c in id1)
+    assert all(c in BASE62_ALPHABET for c in id2)
+
+    # Prefix handling
+    prefixed = generate_run_id("train")
+    assert prefixed.startswith("train_")
+    assert len(prefixed.split("_")[1]) == 6
+
+    # Determinism with fixed datetime
+    dt = datetime(2026, 9, 16, 12, 0, 0, 123456, tzinfo=timezone.utc)
+    fixed_id1 = generate_base62_id(dt)
+    fixed_id2 = generate_base62_id(dt)
+    assert fixed_id1 == fixed_id2
+    assert len(fixed_id1) == 6
+

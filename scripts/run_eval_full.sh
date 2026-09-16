@@ -3,12 +3,15 @@ set -e
 
 # CORP Research-Grade Definitive Evaluation
 # Evaluates against AutoAscend baselines across 100+ seeds
-# Bash frontend
+# Usage: ./scripts/run_eval_full.sh [mode] [episodes] [steps] [model]
 
 MODE=${1:-competence}
 EPISODES=${2:-100}
 STEPS=${3:-50000}
-RUN_ID="research_grade_${MODE}_$(date +%s)"
+MODEL=${4:-${MODEL:-}}
+
+# Generate 6-character Base-62 run ID from date + time
+RUN_ID=$(uv run python scripts/gen_run_id.py)
 
 echo "================================================================================"
 echo "Starting CORP Research-Grade Evaluation: Mode=$MODE | $EPISODES Episodes"
@@ -27,13 +30,20 @@ else
     PROVIDER_ARGS="--provider mock --enable-autopsy"
 fi
 
+MODEL_ARGS=""
+if [ -n "$MODEL" ]; then
+    echo "[Info] Selected model override: $MODEL"
+    MODEL_ARGS="--model $MODEL"
+fi
+
 uv run python scripts/run_benchmark.py \
     --mode "$MODE" \
     --eval-type research_grade \
     --run-id "$RUN_ID" \
     --episodes "$EPISODES" \
     --max-steps "$STEPS" \
-    $PROVIDER_ARGS
+    $PROVIDER_ARGS \
+    $MODEL_ARGS
 
 echo ""
 echo "Research evaluation complete. Results consolidated into data/corp_telemetry.duckdb"

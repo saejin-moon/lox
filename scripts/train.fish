@@ -1,7 +1,7 @@
 #!/usr/bin/env fish
 
 # CORP Autonomous Training & CDCL Nogood Extraction Pipeline
-# Fish shell frontend
+# Usage: ./scripts/train.fish [episodes] [steps] [model]
 
 set -l EPISODES 20
 if test (count $argv) -ge 1
@@ -13,7 +13,15 @@ if test (count $argv) -ge 2
     set STEPS $argv[2]
 end
 
-set -l RUN_ID "train_"(date +%s)
+set -l MODEL ""
+if test (count $argv) -ge 3
+    set MODEL $argv[3]
+else if set -q MODEL
+    set MODEL $MODEL
+end
+
+# Generate 6-character Base-62 run ID from date + time
+set -l RUN_ID (uv run python scripts/gen_run_id.py)
 
 echo "================================================================================"
 echo "Starting CORP Autonomous Training: $EPISODES Episodes (Max $STEPS Steps/Ep)"
@@ -32,13 +40,20 @@ else
     set PROVIDER_ARGS "--provider" "mock" "--enable-autopsy"
 end
 
+set -l MODEL_ARGS
+if test -n "$MODEL"
+    echo "[Info] Selected model override: $MODEL"
+    set MODEL_ARGS "--model" "$MODEL"
+end
+
 uv run python scripts/run_benchmark.py \
     --mode random \
     --eval-type training \
     --run-id $RUN_ID \
     --episodes $EPISODES \
     --max-steps $STEPS \
-    $PROVIDER_ARGS
+    $PROVIDER_ARGS \
+    $MODEL_ARGS
 
 echo ""
 echo "Training complete. Telemetry saved to data/corp_telemetry.duckdb"

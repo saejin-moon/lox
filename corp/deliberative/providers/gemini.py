@@ -23,13 +23,13 @@ class GeminiProvider(LLMProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gemini-2.5-flash",
+        model: str | None = None,
         base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/",
         timeout: float = 45.0,
     ):
         resolved_key = api_key or os.environ.get("GEMINI_API_KEY", "EMPTY")
         self.client = AsyncOpenAI(base_url=base_url, api_key=resolved_key, timeout=timeout)
-        self.model = model
+        self.model = model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     async def generate_reasoning_and_json(
         self,

@@ -22,13 +22,13 @@ class OpenRouterProvider(LLMProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "deepseek/deepseek-r1:free",
+        model: str | None = None,
         base_url: str = "https://openrouter.ai/api/v1",
         timeout: float = 45.0,
     ):
         resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "EMPTY")
         self.client = AsyncOpenAI(base_url=base_url, api_key=resolved_key, timeout=timeout)
-        self.model = model
+        self.model = model or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-r1:free")
 
     async def generate_reasoning_and_json(
         self,

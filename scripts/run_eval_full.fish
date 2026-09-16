@@ -2,7 +2,7 @@
 
 # CORP Research-Grade Definitive Evaluation
 # Evaluates against AutoAscend baselines across 100+ seeds
-# Fish shell frontend
+# Usage: ./scripts/run_eval_full.fish [mode] [episodes] [steps] [model]
 
 set -l MODE "competence"
 if test (count $argv) -ge 1
@@ -19,7 +19,15 @@ if test (count $argv) -ge 3
     set STEPS $argv[3]
 end
 
-set -l RUN_ID "research_grade_"$MODE"_" (date +%s)
+set -l MODEL ""
+if test (count $argv) -ge 4
+    set MODEL $argv[4]
+else if set -q MODEL
+    set MODEL $MODEL
+end
+
+# Generate 6-character Base-62 run ID from date + time
+set -l RUN_ID (uv run python scripts/gen_run_id.py)
 
 echo "================================================================================"
 echo "Starting CORP Research-Grade Evaluation: Mode=$MODE | $EPISODES Episodes"
@@ -38,13 +46,20 @@ else
     set PROVIDER_ARGS "--provider" "mock" "--enable-autopsy"
 end
 
+set -l MODEL_ARGS
+if test -n "$MODEL"
+    echo "[Info] Selected model override: $MODEL"
+    set MODEL_ARGS "--model" "$MODEL"
+end
+
 uv run python scripts/run_benchmark.py \
     --mode $MODE \
     --eval-type research_grade \
     --run-id $RUN_ID \
     --episodes $EPISODES \
     --max-steps $STEPS \
-    $PROVIDER_ARGS
+    $PROVIDER_ARGS \
+    $MODEL_ARGS
 
 echo ""
 echo "Research evaluation complete. Results consolidated into data/corp_telemetry.duckdb"

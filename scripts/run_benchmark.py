@@ -23,7 +23,7 @@ from corp.deliberative.providers.mock_provider import MockProvider
 from corp.deliberative.providers.llama_cpp import LlamaCppProvider
 from corp.deliberative.providers.openrouter import OpenRouterProvider
 from corp.deliberative.providers.gemini import GeminiProvider
-from corp.telemetry import ParquetLogger, DuckDBConsolidator
+from corp.telemetry import ParquetLogger, DuckDBConsolidator, generate_base62_id
 
 
 AUTOASCEND_BASELINES = {
@@ -87,6 +87,12 @@ def parse_args() -> argparse.Namespace:
         help="LLM provider for post-mortem autopsies and deadlock resolution",
     )
     parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Specific model name/identifier for the LLM provider (e.g. 'qwen/qwq-32b', 'gemini-2.5-flash')",
+    )
+    parser.add_argument(
         "--enable-autopsy",
         action="store_true",
         help="Enable deliberative LLM post-mortem autopsy for cross-generational learning",
@@ -118,22 +124,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def get_llm_provider(provider_type: str) -> Any:
+def get_llm_provider(provider_type: str, model: str | None = None) -> Any:
     if provider_type == "llama_cpp":
-        return LlamaCppProvider()
+        return LlamaCppProvider(model=model)
     elif provider_type == "openrouter":
-        return OpenRouterProvider()
+        return OpenRouterProvider(model=model)
     elif provider_type == "gemini":
-        return GeminiProvider()
+        return GeminiProvider(model=model)
     return MockProvider()
 
 
 async def run_benchmark(args: argparse.Namespace):
-    run_id = args.run_id or f"{args.eval_type}_{int(time.time())}"
+    run_id = args.run_id or generate_base62_id()
+    llm_provider = get_llm_provider(args.provider, model=args.model)
+    model_name = getattr(llm_provider, "model", None) or "N/A"
+
     print("=" * 80)
     print(f"CORP Neuro-Symbolic Cognitive OS: Benchmark & Training Runner")
     print(f"Run ID: {run_id} | Type: {args.eval_type} | Mode: {'MODE_RANDOM_GENERALIST' if args.mode == 'random' else 'MODE_COMPETENCE_SELECTION'}")
-    print(f"Episodes: {args.episodes} | Step Budget: {args.max_steps} | Provider: {args.provider}")
+    print(f"Episodes: {args.episodes} | Step Budget: {args.max_steps} | Provider: {args.provider} (Model: {model_name})")
     print(f"Autopsy Engine: {'ENABLED' if args.enable_autopsy else 'DISABLED'}")
     print(f"Telemetry: Parquet ({args.parquet_dir}) -> DuckDB ({args.duckdb_path})")
     print("=" * 80)
@@ -144,7 +153,6 @@ async def run_benchmark(args: argparse.Namespace):
         print(f"Loaded {len(nogood_store.entries)} persistent Nogoods from {args.nogood_path}")
 
     competence_engine = CompetenceEngine()
-    llm_provider = get_llm_provider(args.provider)
     parquet_logger = ParquetLogger(base_dir=args.parquet_dir, run_id=run_id)
 
     results: list[dict[str, Any]] = []

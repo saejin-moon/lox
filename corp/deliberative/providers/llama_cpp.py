@@ -23,12 +23,13 @@ class LlamaCppProvider(LLMProvider):
         self,
         base_url: str = "http://localhost:8080/v1",
         api_key: str = "EMPTY",
-        model: str = "local-model",
+        model: str | None = None,
         temperature: float = 0.0,
         timeout: float = 30.0,
     ):
+        import os
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
-        self.model = model
+        self.model = model or os.environ.get("LLAMA_CPP_MODEL", "local-model")
         self.temperature = temperature
 
     async def generate_reasoning_and_json(

@@ -1,7 +1,7 @@
 #!/usr/bin/env fish
 
 # CORP Fast Preliminary Evaluation (~15-30s Sanity Benchmark)
-# Fish shell frontend
+# Usage: ./scripts/run_eval_fast.fish [episodes] [steps]
 
 set -l EPISODES 10
 if test (count $argv) -ge 1
@@ -13,7 +13,8 @@ if test (count $argv) -ge 2
     set STEPS $argv[2]
 end
 
-set -l RUN_ID "fast_prelim_"(date +%s)
+# Generate 6-character Base-62 run ID from date + time
+set -l RUN_ID (uv run python scripts/gen_run_id.py)
 
 echo "================================================================================"
 echo "Starting CORP Fast Preliminary Evaluation: $EPISODES Episodes (Max $STEPS Steps)"
