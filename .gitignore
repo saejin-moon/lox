@@ -11,6 +11,7 @@ __pycache__/
 data/raw/
 data/*.db
 data/*.db-journal
+data/*.json
 
 # Keep directory structure
 !data/.gitkeep
