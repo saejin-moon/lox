@@ -71,28 +71,55 @@ class PlanSignature:
 
 class CycleDetector:
     """
-    Detects behavioral oscillation loops (e.g. stepping back and forth between 2 tiles).
+    Detects behavioral oscillation loops (e.g. stepping back and forth between 2 tiles
+    or stalling on the same tile).
     """
 
-    def __init__(self, window_size: int = 10, max_repetitions: int = 3):
-        self.history: list[PlanSignature] = []
+    def __init__(self, window_size: int = 8, max_repetitions: int = 3):
+        self.pos_history: list[tuple[int, int]] = []
         self.window_size = window_size
         self.max_repetitions = max_repetitions
 
     def reset(self):
-        self.history.clear()
+        self.pos_history.clear()
 
-    def record_and_check(self, signature: PlanSignature) -> bool:
-        self.history.append(signature)
-        if len(self.history) > self.window_size:
-            self.history.pop(0)
+    def record_and_check(self, pos_or_sig: Any, task_name: str = "") -> bool:
+        """
+        Records position and detects 2-cycle or 3-cycle oscillation or stall.
+        Returns True once if cycle detected, then resets to prevent lock-in.
+        """
+        if isinstance(pos_or_sig, PlanSignature):
+            pos = pos_or_sig.target_pos
+            task_name = pos_or_sig.task_name
+        else:
+            pos = pos_or_sig
 
-        # Count identical (task_name, target_pos) occurrences in window
-        matches = [
-            s for s in self.history
-            if s.task_name == signature.task_name and s.target_pos == signature.target_pos
-        ]
-        return len(matches) >= self.max_repetitions
+        if task_name in ("SEARCH", "WAIT", "PRAY", "EAT"):
+            return False
+
+        self.pos_history.append(pos)
+        if len(self.pos_history) > self.window_size:
+            self.pos_history.pop(0)
+
+        h = self.pos_history
+        if len(h) >= 5:
+            # Check 2-cycle: A, B, A, B, A
+            if h[-1] == h[-3] == h[-5] and h[-2] == h[-4] and h[-1] != h[-2]:
+                self.reset()
+                return True
+
+        if len(h) >= 6:
+            # Check 3-cycle: A, B, C, A, B, C
+            if h[-1] == h[-4] and h[-2] == h[-5] and h[-3] == h[-6] and len(set(h[-3:])) == 3:
+                self.reset()
+                return True
+
+        # Check stall: same tile 4 times attempting movement
+        if len(h) >= 4 and all(p == pos for p in h[-4:]):
+            self.reset()
+            return True
+
+        return False
 
 
 class HTNPlanner:

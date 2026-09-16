@@ -32,7 +32,7 @@ if set -q OPENROUTER_API_KEY
     set PROVIDER_ARGS "--provider" "openrouter" "--enable-autopsy"
 else if set -q GEMINI_API_KEY
     echo "[Info] Live Gemini API key detected."
-    set PROVIDER_ARGS "--provider" "openrouter" "--enable-autopsy"
+    set PROVIDER_ARGS "--provider" "gemini" "--enable-autopsy"
 else
     echo "[Notice] Running with offline deterministic autopsies."
     set PROVIDER_ARGS "--provider" "mock" "--enable-autopsy"

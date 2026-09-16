@@ -6,6 +6,7 @@ from corp.deliberative.providers.base import LLMProvider, LLMResponse
 from corp.deliberative.providers.mock_provider import MockProvider
 from corp.deliberative.providers.llama_cpp import LlamaCppProvider
 from corp.deliberative.providers.openrouter import OpenRouterProvider
+from corp.deliberative.providers.gemini import GeminiProvider
 
 __all__ = [
     "LLMProvider",
@@ -13,4 +14,6 @@ __all__ = [
     "MockProvider",
     "LlamaCppProvider",
     "OpenRouterProvider",
+    "GeminiProvider",
 ]
+

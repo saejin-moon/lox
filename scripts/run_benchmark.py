@@ -22,6 +22,7 @@ from corp.planner.nogood import NogoodStore
 from corp.deliberative.providers.mock_provider import MockProvider
 from corp.deliberative.providers.llama_cpp import LlamaCppProvider
 from corp.deliberative.providers.openrouter import OpenRouterProvider
+from corp.deliberative.providers.gemini import GeminiProvider
 from corp.telemetry import ParquetLogger, DuckDBConsolidator
 
 
@@ -81,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--provider",
-        choices=["mock", "llama_cpp", "openrouter"],
+        choices=["mock", "llama_cpp", "openrouter", "gemini"],
         default="mock",
         help="LLM provider for post-mortem autopsies and deadlock resolution",
     )
@@ -122,6 +123,8 @@ def get_llm_provider(provider_type: str) -> Any:
         return LlamaCppProvider()
     elif provider_type == "openrouter":
         return OpenRouterProvider()
+    elif provider_type == "gemini":
+        return GeminiProvider()
     return MockProvider()
 
 

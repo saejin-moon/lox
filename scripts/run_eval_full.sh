@@ -21,7 +21,7 @@ if [ -n "$OPENROUTER_API_KEY" ]; then
     PROVIDER_ARGS="--provider openrouter --enable-autopsy"
 elif [ -n "$GEMINI_API_KEY" ]; then
     echo "[Info] Live Gemini API key detected."
-    PROVIDER_ARGS="--provider openrouter --enable-autopsy"
+    PROVIDER_ARGS="--provider gemini --enable-autopsy"
 else
     echo "[Notice] Running with offline deterministic autopsies."
     PROVIDER_ARGS="--provider mock --enable-autopsy"

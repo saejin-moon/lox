@@ -95,6 +95,7 @@ class CORPAgent:
         self.current_chars: np.ndarray | None = None
         self.current_glyphs: np.ndarray | None = None
         self.max_depth_reached: int = 1
+        self.max_turn_reached: int = 1
         self.is_terminal: bool = False
         self.terminal_message: str = ""
 
@@ -108,9 +109,12 @@ class CORPAgent:
         self.current_chars = obs["chars"]
         self.current_glyphs = obs["glyphs"]
         self.max_depth_reached = self.current_blstats.depth
+        self.max_turn_reached = self.current_blstats.turn
         self.is_terminal = False
         self.terminal_message = ""
         self.cycle_detector.reset()
+        self.nav_mgr.reset()
+        self.inv_mgr = InventoryManager()
 
         # Turn-0 Continuous Persona Profiling
         self.persona = self.profiler.derive_persona(
@@ -142,27 +146,24 @@ class CORPAgent:
 
         # 2. Resource & Emergency Management (Prayer, Hunger, Equipment)
         resource_task = self.inv_mgr.evaluate_resource_turn(blstats, inv_tracker)
-        if resource_task is not None:
-            if not self._is_nogood(resource_task, state_mask):
-                return resource_task
+        if resource_task is not None and not self._is_nogood(resource_task, state_mask):
+            chosen_task = resource_task
+        else:
+            # 3. Tactical Combat Management (Hostiles, Kiting, Corridor Funneling, Melee)
+            combat_task = self.combat_mgr.evaluate_combat_turn(glyphs, chars, blstats)
+            if combat_task is not None and not self._is_nogood(combat_task, state_mask):
+                chosen_task = combat_task
+            else:
+                # 4. Spatial Navigation & Exploration (Stairs, Frontiers, Secret Doors)
+                chosen_task = self.nav_mgr.evaluate_navigation_turn(chars, blstats)
 
-        # 3. Tactical Combat Management (Hostiles, Kiting, Corridor Funneling, Melee)
-        combat_task = self.combat_mgr.evaluate_combat_turn(glyphs, chars, blstats)
-        if combat_task is not None:
-            if not self._is_nogood(combat_task, state_mask):
-                return combat_task
-
-        # 4. Spatial Navigation & Exploration (Stairs, Frontiers, Secret Doors)
-        nav_task = self.nav_mgr.evaluate_navigation_turn(chars, blstats)
-
-        # 5. Cycle Detection & Oscillation Interlock
+        # 5. Cycle Detection & Oscillation Interlock across ALL tactical domains
         py, px = blstats.y, blstats.x
-        sig = PlanSignature(task_name=nav_task.name, target_pos=(py, px), turn=blstats.turn)
-        if self.cycle_detector.record_and_check(sig):
-            # Oscillation loop detected! Perform localized secret door search to break cycle
+        if self.cycle_detector.record_and_check((py, px), chosen_task.name):
+            # Oscillation or stall detected! Break pattern with localized search
             return Task("SEARCH", is_primitive=True)
 
-        return nav_task
+        return chosen_task
 
     def step(self) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """
@@ -176,11 +177,18 @@ class CORPAgent:
         obs, reward, terminated, truncated, info = self.dispatcher.dispatch(task)
         self.step_counter += 1
 
-        self.current_blstats = info["blstats"]
+        new_blstats = info["blstats"]
+        if new_blstats.turn > 0:
+            self.current_blstats = new_blstats
+            if new_blstats.turn > self.max_turn_reached:
+                self.max_turn_reached = new_blstats.turn
+            if new_blstats.depth > self.max_depth_reached:
+                self.max_depth_reached = new_blstats.depth
+        elif self.current_blstats is None:
+            self.current_blstats = new_blstats
+
         self.current_chars = obs["chars"]
         self.current_glyphs = obs["glyphs"]
-        if self.current_blstats.depth > self.max_depth_reached:
-            self.max_depth_reached = self.current_blstats.depth
 
         if terminated or truncated:
             self.is_terminal = True
@@ -190,13 +198,15 @@ class CORPAgent:
         if self.parquet_logger is not None:
             monsters = self.combat_mgr.scan_monsters(obs["glyphs"], self.current_blstats)
             closest_m = monsters[0] if monsters else None
+            effective_turn = self.current_blstats.turn if self.current_blstats.turn > 0 else self.max_turn_reached
+            effective_depth = self.current_blstats.depth if self.current_blstats.depth > 0 else self.max_depth_reached
             tick = TickRecord(
                 episode_id=self.episode_id,
                 run_id=self.parquet_logger.run_id,
                 step=self.step_counter,
-                turn=self.current_blstats.turn,
+                turn=effective_turn,
                 timestamp=time.time(),
-                depth=self.current_blstats.depth,
+                depth=effective_depth,
                 dungeon_number=self.current_blstats.dungeon_number,
                 level_number=self.current_blstats.level_number,
                 x=self.current_blstats.x,
@@ -299,7 +309,7 @@ class CORPAgent:
                 persona_mana=self.persona.mana if self.persona else 0.5,
                 persona_stealth=self.persona.stealth if self.persona else 0.5,
                 persona_alignment=self.persona.alignment if self.persona else 0.5,
-                total_turns=self.current_blstats.turn if self.current_blstats else steps,
+                total_turns=self.max_turn_reached if self.max_turn_reached > 0 else steps,
                 total_steps=steps,
                 max_depth=self.max_depth_reached,
                 final_score=self.current_blstats.score if self.current_blstats else 0,
@@ -318,7 +328,7 @@ class CORPAgent:
             self.parquet_logger.flush_all()
 
         return EpisodeResult(
-            turns=self.current_blstats.turn if self.current_blstats else steps,
+            turns=self.max_turn_reached if self.max_turn_reached > 0 else steps,
             max_depth=self.max_depth_reached,
             final_score=self.current_blstats.score if self.current_blstats else 0,
             final_hp=self.current_blstats.hp if self.current_blstats else 0,

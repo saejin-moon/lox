@@ -80,6 +80,9 @@ def build_action_tables(env: gym.Env) -> tuple[dict[tuple[int, int], int], dict[
         "THROW": char_to_index.get("t", 91),
         "APPLY": char_to_index.get("a", 24),
         "DROP": char_to_index.get("d", 33),
+        "OPEN": char_to_index.get("o", 57),
+        "CLOSE": char_to_index.get("c", 30),
+        "KICK": 48, # Command.KICK
         "SPACE": char_to_index.get(" ", 107),
     }
 
@@ -206,6 +209,22 @@ class ActionDispatcher:
             # 4. Return/enter
             enter_idx = self.name_to_index.get("MORE", 19)
             return self.env.step(enter_idx)
+
+        elif name == "OPEN":
+            dr, dc = args.get("delta", (0, 0))
+            dir_act = self.delta_to_action(dr, dc)
+            obs, r, term, trunc, info = self.env.step(self.name_to_index["OPEN"])
+            if term or trunc:
+                return obs, r, term, trunc, info
+            return self.env.step(dir_act)
+
+        elif name == "KICK":
+            dr, dc = args.get("delta", (0, 0))
+            dir_act = self.delta_to_action(dr, dc)
+            obs, r, term, trunc, info = self.env.step(self.name_to_index["KICK"])
+            if term or trunc:
+                return obs, r, term, trunc, info
+            return self.env.step(dir_act)
 
         # Fallback to WAIT
         return self.env.step(self.name_to_index["WAIT"])

@@ -63,6 +63,13 @@ class NavigationManager:
         self.astar = GridAStar()
         self.frontier_explorer = FrontierExplorer()
         self.dead_end_searches: dict[tuple[int, int], int] = {}
+        self.door_attempts: dict[tuple[int, int], int] = {}
+
+    def reset(self):
+        """Clears all level maps and exploration caches for a new episode."""
+        self.levels.clear()
+        self.dead_end_searches.clear()
+        self.door_attempts.clear()
 
     def get_or_create_level(self, depth: int, shape: tuple[int, int] = (21, 79)) -> LevelMap:
         if depth not in self.levels:
@@ -99,6 +106,35 @@ class NavigationManager:
         lvl.visited[py, px] += 1
         return lvl
 
+    def _step_or_open(self, py: int, px: int, next_node: Any, chars: np.ndarray) -> Task:
+        """Emits OPEN/KICK if next tile is a closed door (+), otherwise STEP."""
+        nr, nc = next_node.row, next_node.col
+        dr, dc = nr - py, nc - px
+        if chars[nr, nc] == ord("+"):
+            attempts = self.door_attempts.get((nr, nc), 0)
+            self.door_attempts[(nr, nc)] = attempts + 1
+            if attempts >= 2:
+                return Task("KICK", is_primitive=True, args={"delta": (dr, dc)})
+            return Task("OPEN", is_primitive=True, args={"delta": (dr, dc)})
+        return Task("STEP", is_primitive=True, args={"delta": (dr, dc)})
+
+    def find_nearest_unvisited(self, py: int, px: int, lvl: LevelMap) -> tuple[int, int] | None:
+        """Runs BFS on walkable grid to find the closest reachable unvisited tile."""
+        from collections import deque
+        queue = deque([(py, px)])
+        visited_bfs = {(py, px)}
+        while queue:
+            r, c = queue.popleft()
+            if lvl.visited[r, c] == 0:
+                return (r, c)
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < lvl.walkable.shape[0] and 0 <= nc < lvl.walkable.shape[1]:
+                    if lvl.walkable[nr, nc] and (nr, nc) not in visited_bfs:
+                        visited_bfs.add((nr, nc))
+                        queue.append((nr, nc))
+        return None
+
     def evaluate_navigation_turn(
         self,
         chars: np.ndarray,
@@ -107,69 +143,92 @@ class NavigationManager:
     ) -> Task:
         """
         Calculates the next navigation action:
-        1. If on stairs down and ready to descend -> DESCEND.
-        2. If dead-end corridor with unsearched neighbors -> SEARCH.
-        3. If stairs down known and level explored -> path to stairs down.
-        4. If unexplored frontiers remain -> path to nearest frontier.
-        5. Fallback -> localized SEARCH or random walkable step.
+        1. If on stairs down -> DESCEND.
+        2. If adjacent to closed door (+) -> OPEN / KICK.
+        3. If stairs down known -> navigate to stairs down.
+        4. If unopened doors exist -> navigate to door and open it.
+        5. If unvisited tiles exist -> BFS navigate to closest unvisited.
+        6. If corridor dead-end -> search for secret doors.
+        7. Fallback -> search for secret doors.
         """
         lvl = self.update_map(chars, blstats)
         py, px = blstats.y, blstats.x
+        lvl.walkable[py, px] = True
 
         # 1. On stairs down check
-        if lvl.stairs_down == (py, px) and (force_descend or self._is_level_mapped(lvl, chars)):
+        if lvl.stairs_down == (py, px):
             return Task("DESCEND", is_primitive=True)
 
-        # 2. Corridor dead-end secret door search burst
-        if chars[py, px] == ord("#") and self._is_corridor_dead_end(lvl, py, px):
-            searches_here = self.dead_end_searches.get((py, px), 0)
-            if searches_here < 4:
-                self.dead_end_searches[(py, px)] = searches_here + 1
-                return Task("SEARCH", is_primitive=True)
+        # 2. Check immediately adjacent closed doors
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = py + dr, px + dc
+            if 0 <= nr < chars.shape[0] and 0 <= nc < chars.shape[1]:
+                if chars[nr, nc] == ord("+"):
+                    attempts = self.door_attempts.get((nr, nc), 0)
+                    if attempts < 4:
+                        self.door_attempts[(nr, nc)] = attempts + 1
+                        if attempts >= 2:
+                            return Task("KICK", is_primitive=True, args={"delta": (dr, dc)})
+                        return Task("OPEN", is_primitive=True, args={"delta": (dr, dc)})
 
-        # 3. Path to stairs down if level mapped or descending
         hazard_costs = self._compute_hazard_costs(chars, lvl)
-        if lvl.stairs_down and (force_descend or self._is_level_mapped(lvl, chars)):
-            if (py, px) != lvl.stairs_down:
-                path = self.astar.find_path(
-                    (py, px),
-                    lvl.stairs_down,
-                    lvl.walkable,
-                    hazard_costs=hazard_costs,
-                )
-                if path and len(path) > 1:
-                    next_node = path[1]
-                    return Task("STEP", is_primitive=True, args={"delta": (next_node.row - py, next_node.col - px)})
 
-        # 4. Path to nearest frontier
-        frontier = self.frontier_explorer.find_nearest_frontier(
-            (py, px),
-            lvl.walkable,
-            chars,
-        )
-        if frontier:
+        # 3. Path to stairs down if known
+        if lvl.stairs_down:
             path = self.astar.find_path(
                 (py, px),
-                frontier,
+                lvl.stairs_down,
                 lvl.walkable,
                 hazard_costs=hazard_costs,
             )
-            if path and len(path) > 1:
-                next_node = path[1]
-                return Task("STEP", is_primitive=True, args={"delta": (next_node.row - py, next_node.col - px)})
+            if path:
+                return self._step_or_open(py, px, path[0], chars)
 
-        # 5. Fallback: Localized search or step to least-visited neighbor
-        best_delta = self._find_least_visited_step(py, px, lvl, chars)
-        if best_delta is not None:
-            return Task("STEP", is_primitive=True, args={"delta": best_delta})
+        # 4. Target nearest unopened door (+) on the level
+        unopened_doors = [
+            (r, c) for r in range(chars.shape[0]) for c in range(chars.shape[1])
+            if chars[r, c] == ord("+") and lvl.visited[r, c] == 0
+        ]
+        if unopened_doors:
+            unopened_doors.sort(key=lambda d: abs(d[0] - py) + abs(d[1] - px))
+            for door_pos in unopened_doors:
+                path = self.astar.find_path(
+                    (py, px),
+                    door_pos,
+                    lvl.walkable,
+                    hazard_costs=hazard_costs,
+                )
+                if path:
+                    return self._step_or_open(py, px, path[0], chars)
+
+        # 5. Target nearest unvisited reachable tile via BFS
+        unvisited_target = self.find_nearest_unvisited(py, px, lvl)
+        if unvisited_target:
+            path = self.astar.find_path(
+                (py, px),
+                unvisited_target,
+                lvl.walkable,
+                hazard_costs=hazard_costs,
+            )
+            if path:
+                return self._step_or_open(py, px, path[0], chars)
+
+        # 6. Corridor dead-end secret door search burst
+        if chars[py, px] == ord("#") and self._is_corridor_dead_end(lvl, py, px):
+            searches_here = self.dead_end_searches.get((py, px), 0)
+            if searches_here < 6:
+                self.dead_end_searches[(py, px)] = searches_here + 1
+                return Task("SEARCH", is_primitive=True)
+
+        # 7. Fallback: Localized search for secret doors
+        return Task("SEARCH", is_primitive=True)
 
         return Task("SEARCH", is_primitive=True)
 
     def _is_level_mapped(self, lvl: LevelMap, chars: np.ndarray) -> bool:
         """Determines if the current dungeon level has no remaining reachable frontiers."""
-        # Simple heuristic: if we have visited > 120 tiles and known stairs down exist
         visited_count = int(np.count_nonzero(lvl.visited > 0))
-        return visited_count >= 80 and lvl.stairs_down is not None
+        return visited_count >= 35 and lvl.stairs_down is not None
 
     def _is_corridor_dead_end(self, lvl: LevelMap, r: int, c: int) -> bool:
         """Checks if a corridor tile has only 1 walkable corridor neighbor."""

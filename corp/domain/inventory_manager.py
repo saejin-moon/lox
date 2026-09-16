@@ -44,6 +44,14 @@ class InventoryManager:
         "meat stick",
         "fortune cookie",
         "candy bar",
+        "orange",
+        "pear",
+        "banana",
+        "melon",
+        "clove of garlic",
+        "sprig of wolfsbane",
+        "tin",
+        "corpse",
     ]
 
     UNSAFE_CORPSE_KEYWORDS = [
@@ -128,11 +136,23 @@ class InventoryManager:
             return None
 
         # Player is HUNGRY (2), WEAK (3), or FAINTING (4)
-        # Search inventory for safe carried food
+        # 1. Prefer known safe rations / permafood
         for item in inv_tracker.active_items.values():
+            if item.buc_state == "CURSED":
+                continue
             desc_lower = item.raw_str.lower()
             if any(k in desc_lower for k in self.SAFE_RATION_KEYWORDS):
-                return Task("EAT", is_primitive=True, args={"slot": item.current_letter})
+                if not any(bad in desc_lower for bad in self.UNSAFE_CORPSE_KEYWORDS):
+                    return Task("EAT", is_primitive=True, args={"slot": item.current_letter})
+
+        # 2. Check any comestibles (oclass == 7) that are uncursed and not hazardous
+        for item in inv_tracker.active_items.values():
+            if item.buc_state == "CURSED":
+                continue
+            if item.oclass == 7:
+                desc_lower = item.raw_str.lower()
+                if not any(bad in desc_lower for bad in self.UNSAFE_CORPSE_KEYWORDS):
+                    return Task("EAT", is_primitive=True, args={"slot": item.current_letter})
 
         return None
 

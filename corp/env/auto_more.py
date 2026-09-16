@@ -203,9 +203,19 @@ class AutoMoreWrapper(gym.Wrapper):
     def _resolve_yn_action(self, obs: dict[str, Any]) -> int:
         """Determines whether to answer 'y' or 'n' to a prompt."""
         msg = self._extract_message(obs).lower()
-        # Default policy: answer 'y' to identify items post-mortem, 'n' to quitting/dying
+        # Confirm eating when prompted on the floor
+        if "eat it" in msg or "eat one" in msg:
+            return self.ACTION_Y
+        # Confirm divine prayer when deliberately initiated
+        if "really pray" in msg or "sure you want to pray" in msg:
+            return self.ACTION_Y
+        # Confirm attack on peaceful monsters when combat engine committed to strike
+        if "really attack" in msg:
+            return self.ACTION_Y
+        # Identify items post-mortem
         if "possessions identified" in msg:
             return self.ACTION_Y
+        # Safe default for dangers or quitting
         if "really quit" in msg or "die" in msg:
             return self.ACTION_N
         # Safe default is 'n'

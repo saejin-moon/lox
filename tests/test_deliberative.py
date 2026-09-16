@@ -9,6 +9,8 @@ import numpy as np
 from corp.deliberative.schemas import HTNGraphPatch, AutopsyReport, SubTaskSpec, NogoodClause
 from corp.deliberative.response_parser import ResponseParser, LLMParseError
 from corp.deliberative.providers.mock_provider import MockProvider
+from corp.deliberative.providers.openrouter import OpenRouterProvider
+from corp.deliberative.providers.gemini import GeminiProvider
 from corp.deliberative.autopsy_engine import AutopsyEngine
 from corp.deliberative.deadlock_resolver import DeadlockResolver
 from corp.env.flight_recorder import FlightRecorderRingBuffer
@@ -155,3 +157,13 @@ async def test_deadlock_resolver():
     assert tasks[0].is_primitive is True
     assert tasks[2].name == "STEP"
     assert tasks[2].args["direction"] == "h"
+
+
+def test_provider_initialization():
+    gemini = GeminiProvider(api_key="test_gemini_key")
+    assert gemini.model == "gemini-2.5-flash"
+    assert "generativelanguage.googleapis.com" in str(gemini.client.base_url)
+
+    openrouter = OpenRouterProvider(api_key="test_openrouter_key")
+    assert "openrouter.ai" in str(openrouter.client.base_url)
+
