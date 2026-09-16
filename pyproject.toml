@@ -1,0 +1,14 @@
+[project]
+name = "corp-nethack"
+version = "0.1.0"
+description = "Neuro-Symbolic Cognitive Operating System for NetHack NLE"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mwparserfromhell>=0.6.6",
+    "requests>=2.31.0",
+    "xxhash>=3.4.1",
+]
+
+[tool.uv]
+package = false
