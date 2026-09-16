@@ -75,57 +75,66 @@ class TacticalCombatManager:
         py, px = blstats.y, blstats.x
         monsters: list[MonsterTrack] = []
 
-        rows, cols = glyphs.shape
-        for r in range(rows):
-            for c in range(cols):
-                g = int(glyphs[r, c])
-                if not nethack.glyph_is_monster(g):
-                    continue
-                if nethack.glyph_is_pet(g):
-                    continue
-                if r == py and c == px:
-                    # The player character
-                    continue
+        # Vectorized glyph range mask for hostile / non-pet monsters:
+        # Hostile normal monsters: [GLYPH_MON_OFF, GLYPH_PET_OFF)
+        # Detected monsters:       [GLYPH_DETECT_OFF, GLYPH_BODY_OFF)
+        # Ridden monsters:         [GLYPH_RIDDEN_OFF, GLYPH_OBJ_OFF)
+        mon_mask = (
+            ((glyphs >= nethack.GLYPH_MON_OFF) & (glyphs < nethack.GLYPH_PET_OFF)) |
+            ((glyphs >= nethack.GLYPH_DETECT_OFF) & (glyphs < nethack.GLYPH_BODY_OFF)) |
+            ((glyphs >= nethack.GLYPH_RIDDEN_OFF) & (glyphs < nethack.GLYPH_OBJ_OFF))
+        )
+        if 0 <= py < glyphs.shape[0] and 0 <= px < glyphs.shape[1]:
+            mon_mask[py, px] = False
 
-                mon_id = nethack.glyph_to_mon(g)
-                pm = nethack.permonst(mon_id)
-                mname = pm.mname.lower()
-                if any(p in mname for p in self.PEACEFUL_NAMES):
-                    continue
-                speed = int(pm.mmove)
-                level = int(pm.mlevel)
-                ac = int(pm.ac)
+        mon_coords = np.argwhere(mon_mask)
+        if len(mon_coords) == 0:
+            return monsters
 
-                dist = max(abs(r - py), abs(c - px))
-                is_adj = dist == 1
+        for idx in range(len(mon_coords)):
+            r, c = int(mon_coords[idx, 0]), int(mon_coords[idx, 1])
+            g = int(glyphs[r, c])
 
-                # Calculate threat score
-                instakill_weight = 0.0
-                is_instakill = False
-                for ik_name, weight in self.INSTAKILL_NAMES.items():
-                    if ik_name in mname:
-                        instakill_weight = weight
-                        is_instakill = True
-                        break
+            mon_id = nethack.glyph_to_mon(g)
+            pm = nethack.permonst(mon_id)
+            mname = pm.mname.lower()
+            if any(p in mname for p in self.PEACEFUL_NAMES):
+                continue
 
-                base_dmg = max(1.0, float(level) * 2.5)
-                speed_ratio = float(speed) / 12.0
-                hp_ratio = float(max(1, blstats.hp)) / float(max(1, blstats.max_hp))
-                threat = ((base_dmg * speed_ratio) / hp_ratio) + instakill_weight
+            speed = int(pm.mmove)
+            level = int(pm.mlevel)
+            ac = int(pm.ac)
 
-                monsters.append(
-                    MonsterTrack(
-                        pos=(r, c),
-                        name=mname,
-                        level=level,
-                        speed=speed,
-                        ac=ac,
-                        distance=dist,
-                        is_adjacent=is_adj,
-                        is_instakill=is_instakill,
-                        threat_score=threat,
-                    )
+            dist = max(abs(r - py), abs(c - px))
+            is_adj = dist == 1
+
+            # Calculate threat score
+            instakill_weight = 0.0
+            is_instakill = False
+            for ik_name, weight in self.INSTAKILL_NAMES.items():
+                if ik_name in mname:
+                    instakill_weight = weight
+                    is_instakill = True
+                    break
+
+            base_dmg = max(1.0, float(level) * 2.5)
+            speed_ratio = float(speed) / 12.0
+            hp_ratio = float(max(1, blstats.hp)) / float(max(1, blstats.max_hp))
+            threat = ((base_dmg * speed_ratio) / hp_ratio) + instakill_weight
+
+            monsters.append(
+                MonsterTrack(
+                    pos=(r, c),
+                    name=mname,
+                    level=level,
+                    speed=speed,
+                    ac=ac,
+                    distance=dist,
+                    is_adjacent=is_adj,
+                    is_instakill=is_instakill,
+                    threat_score=threat,
                 )
+            )
 
         # Sort by distance ascending, then threat descending
         monsters.sort(key=lambda m: (m.distance, -m.threat_score))

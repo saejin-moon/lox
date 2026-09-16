@@ -31,6 +31,8 @@ from corp.epistemic.epistemic_manager import EpistemicManager
 from corp.deliberative.autopsy_engine import AutopsyEngine
 from corp.deliberative.deadlock_resolver import DeadlockResolver
 from corp.deliberative.providers.mock_provider import MockProvider
+from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
+
 
 
 @dataclass
@@ -59,19 +61,23 @@ class CORPAgent:
         nogood_store: NogoodStore | None = None,
         llm_provider: Any = None,
         enable_deliberative_autopsy: bool = False,
+        enable_in_game_deliberation: bool = False,
         parquet_logger: Any = None,
         eval_type: str = "fast_prelim",
         mode: str = "random",
         seed: int = 42,
+        throttler_config: ThrottlerConfig | None = None,
     ):
         self.env = env
         self.nogood_store = nogood_store or NogoodStore()
         self.llm_provider = llm_provider or MockProvider()
         self.enable_deliberative_autopsy = enable_deliberative_autopsy
+        self.enable_in_game_deliberation = enable_in_game_deliberation
         self.parquet_logger = parquet_logger
         self.eval_type = eval_type
         self.mode = mode
         self.seed = seed
+        self.throttler = LLMRateThrottler(throttler_config)
 
         # Fast spine subsystems
         self.profiler = PersonaProfiler()
@@ -100,6 +106,14 @@ class CORPAgent:
         self.terminal_message: str = ""
         self.current_message: str = ""
 
+        # LLM query telemetry & in-game plan injection
+        self.last_llm_turn: int = -1
+        self.last_llm_timestamp: float = 0.0
+        self.total_llm_queries: int = 0
+        self.llm_turn_intervals: list[int] = []
+        self.plan_queue: list[Task] = []
+        self._deadlock_trigger: tuple[str, str] | None = None
+
     def reset(self, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         """Initializes a new episode and derives continuous Turn-0 persona."""
         import uuid
@@ -117,6 +131,16 @@ class CORPAgent:
         self.cycle_detector.reset()
         self.nav_mgr.reset()
         self.inv_mgr = InventoryManager()
+        self.throttler.reset_episode()
+        if hasattr(self.env, "inventory_tracker"):
+            self.env.inventory_tracker.reset()
+
+        self.last_llm_turn = -1
+        self.last_llm_timestamp = 0.0
+        self.total_llm_queries = 0
+        self.llm_turn_intervals.clear()
+        self.plan_queue.clear()
+        self._deadlock_trigger = None
 
         # Turn-0 Continuous Persona Profiling
         self.persona = self.profiler.derive_persona(
@@ -139,6 +163,10 @@ class CORPAgent:
         chars = self.current_chars
         glyphs = self.current_glyphs
         inv_tracker = self.env.inventory_tracker
+
+        # 0. High-level deliberative plan queue overrides
+        if self.plan_queue:
+            return self.plan_queue.pop(0)
 
         # 1. Compile 64-bit state predicate mask
         state_mask = compile_predicate_mask(
@@ -164,8 +192,27 @@ class CORPAgent:
         # 5. Cycle Detection & Oscillation Interlock across ALL tactical domains
         py, px = blstats.y, blstats.x
         if self.cycle_detector.record_and_check((py, px), chosen_task.name):
-            # Oscillation or stall detected! Break pattern with localized search
-            return Task("SEARCH", is_primitive=True)
+            stall_count = self.throttler.record_stall(chosen_task.name)
+            if self.enable_in_game_deliberation and stall_count >= self.throttler.config.escalation_threshold:
+                self._deadlock_trigger = ("deadlock_cycle", chosen_task.name)
+
+            # Hierarchical symbolic fallback:
+            # 1st stall: localized SEARCH (discovers secret doors/traps)
+            # 2nd+ stall: random perturbation step into adjacent walkable tile
+            if stall_count <= 1:
+                return Task("SEARCH", is_primitive=True)
+            else:
+                import random
+                dirs = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+                random.shuffle(dirs)
+                lvl = self.nav_mgr.get_or_create_level(blstats.depth)
+                for dr, dc in dirs:
+                    nr, nc = py + dr, px + dc
+                    if 0 <= nr < 21 and 0 <= nc < 79 and lvl.walkable[nr, nc]:
+                        return Task("STEP", is_primitive=True, args={"delta": (dr, dc)})
+                return Task("SEARCH", is_primitive=True)
+        else:
+            self.throttler.clear_stall(chosen_task.name)
 
         return chosen_task
 
@@ -257,6 +304,79 @@ class CORPAgent:
         steps = 0
 
         while not self.is_terminal and steps < max_steps:
+            # In-game deliberative intervention on deadlock / stall
+            if self.enable_in_game_deliberation and self._deadlock_trigger is not None:
+                trigger_type, failed_task = self._deadlock_trigger
+                self._deadlock_trigger = None
+
+                state_hash = hash((
+                    self.current_blstats.depth if self.current_blstats else 0,
+                    self.current_blstats.y if self.current_blstats else 0,
+                    self.current_blstats.x if self.current_blstats else 0,
+                    failed_task,
+                ))
+
+                # Fast Path: Check LRU patch cache
+                cached_patch = self.throttler.get_cached_patch(state_hash)
+                if cached_patch is not None:
+                    injected = DeadlockResolver.patch_to_tasks(cached_patch)
+                    self.plan_queue.extend(injected)
+                else:
+                    turn_now = self.current_blstats.turn if self.current_blstats else self.max_turn_reached
+                    allowed, reason = self.throttler.should_allow_query(
+                        trigger_type=trigger_type,
+                        current_turn=turn_now,
+                        task_name=failed_task,
+                        state_hash=state_hash,
+                    )
+                    if allowed:
+                        t_llm_start = time.perf_counter()
+                        try:
+                            patch = await self.deadlock_resolver.resolve_deadlock(
+                                failed_task=failed_task,
+                                blstats=self.current_blstats,
+                                cycle_detected=True,
+                                extra_context=f"Dlvl {self.max_depth_reached} | Turns {turn_now}",
+                            )
+                            llm_latency = (time.perf_counter() - t_llm_start) * 1000.0
+                            time_now = time.time()
+                            turns_gap = turn_now - self.last_llm_turn if self.last_llm_turn >= 0 else -1
+                            wall_gap = time_now - self.last_llm_timestamp if self.last_llm_timestamp > 0 else -1.0
+                            self.last_llm_turn = turn_now
+                            self.last_llm_timestamp = time_now
+                            self.total_llm_queries += 1
+                            if turns_gap >= 0:
+                                self.llm_turn_intervals.append(turns_gap)
+
+                            self.throttler.record_query_dispatched(trigger_type, turn_now)
+                            self.throttler.store_cached_patch(state_hash, patch)
+
+                            injected = DeadlockResolver.patch_to_tasks(patch)
+                            self.plan_queue.extend(injected)
+
+                            if self.parquet_logger is not None:
+                                import uuid
+                                from corp.telemetry.parquet_logger import LLMQueryRecord
+                                q_rec = LLMQueryRecord(
+                                    query_id=str(uuid.uuid4())[:8],
+                                    episode_id=self.episode_id,
+                                    run_id=self.parquet_logger.run_id,
+                                    step=self.step_counter,
+                                    turn=turn_now,
+                                    timestamp=time_now,
+                                    trigger_type=trigger_type,
+                                    provider=self.llm_provider.__class__.__name__,
+                                    model=getattr(self.llm_provider, "model", "N/A"),
+                                    prompt_preview=f"Deadlock in {failed_task}",
+                                    tokens_consumed=0,
+                                    latency_ms=llm_latency,
+                                    turns_since_last_query=turns_gap,
+                                    wall_seconds_since_last_query=wall_gap,
+                                )
+                                self.parquet_logger.log_llm_query(q_rec)
+                        except Exception:
+                            pass
+
             self.step()
             steps += 1
 
@@ -271,17 +391,53 @@ class CORPAgent:
 
         # Post-mortem autopsy for cross-generational Nogood synthesis
         if self.is_terminal and not is_ascended and self.enable_deliberative_autopsy:
-            try:
-                trajectory = self.env.flight_recorder.get_recent_frames(50)
-                await self.autopsy_engine.conduct_autopsy(
-                    flight_trajectory=trajectory,
-                    death_message=self.terminal_message,
-                    revealed_inventory=[],
-                    dlvl=self.max_depth_reached,
-                    turn=self.current_blstats.turn if self.current_blstats else 0,
-                )
-            except Exception:
-                pass # Autopsy failure must not crash benchmark runner
+            turn_now = self.current_blstats.turn if self.current_blstats else self.max_turn_reached
+            allowed, reason = self.throttler.should_allow_query(
+                trigger_type="autopsy",
+                current_turn=turn_now,
+            )
+            if allowed:
+                try:
+                    t_llm_start = time.perf_counter()
+                    report, entry = await self.autopsy_engine.conduct_autopsy(
+                        recorder=self.env.flight_recorder,
+                        death_message=self.terminal_message,
+                        generation=1,
+                    )
+                    llm_latency = (time.perf_counter() - t_llm_start) * 1000.0
+                    time_now = time.time()
+                    turns_gap = turn_now - self.last_llm_turn if self.last_llm_turn >= 0 else -1
+                    wall_gap = time_now - self.last_llm_timestamp if self.last_llm_timestamp > 0 else -1.0
+                    self.last_llm_turn = turn_now
+                    self.last_llm_timestamp = time_now
+                    self.total_llm_queries += 1
+                    if turns_gap >= 0:
+                        self.llm_turn_intervals.append(turns_gap)
+
+                    self.throttler.record_query_dispatched("autopsy", turn_now)
+
+                    if self.parquet_logger is not None:
+                        import uuid
+                        from corp.telemetry.parquet_logger import LLMQueryRecord
+                        q_rec = LLMQueryRecord(
+                            query_id=str(uuid.uuid4())[:8],
+                            episode_id=self.episode_id,
+                            run_id=self.parquet_logger.run_id,
+                            step=self.step_counter,
+                            turn=turn_now,
+                            timestamp=time_now,
+                            trigger_type="autopsy",
+                            provider=self.llm_provider.__class__.__name__,
+                            model=getattr(self.llm_provider, "model", "N/A"),
+                            prompt_preview=f"Autopsy on death: {self.terminal_message[:60]}",
+                            tokens_consumed=0,
+                            latency_ms=llm_latency,
+                            turns_since_last_query=turns_gap,
+                            wall_seconds_since_last_query=wall_gap,
+                        )
+                        self.parquet_logger.log_llm_query(q_rec)
+                except Exception:
+                    pass # Autopsy failure must not crash benchmark runner
 
         # Log episode frame if ParquetLogger attached
         if self.parquet_logger is not None:

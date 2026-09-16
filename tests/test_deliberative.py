@@ -167,3 +167,88 @@ def test_provider_initialization():
     openrouter = OpenRouterProvider(api_key="test_openrouter_key")
     assert "openrouter.ai" in str(openrouter.client.base_url)
 
+
+def test_throttler_hierarchical_escalation():
+    from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
+    throttler = LLMRateThrottler(ThrottlerConfig(escalation_threshold=2, min_wall_seconds=0.0))
+
+    # First stall attempt: Should reject LLM and enforce symbolic resolution
+    throttler.record_stall("NAVIGATE")
+    allowed, reason = throttler.should_allow_query("deadlock_cycle", current_turn=10, task_name="NAVIGATE")
+    assert not allowed
+    assert "hierarchical_escalation_required" in reason
+
+    # Second stall attempt: Meets threshold, allowed
+    throttler.record_stall("NAVIGATE")
+    allowed, reason = throttler.should_allow_query("deadlock_cycle", current_turn=11, task_name="NAVIGATE")
+    assert allowed
+    assert "granted" in reason
+
+
+def test_throttler_quotas_and_cooldown():
+    from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
+    config = ThrottlerConfig(
+        max_in_game_per_episode=2,
+        min_wall_seconds=0.5,
+        min_turn_gap=50,
+        escalation_threshold=1,
+    )
+    throttler = LLMRateThrottler(config)
+
+    # 1. First query allowed
+    throttler.record_stall("NAVIGATE")
+    allowed, _ = throttler.should_allow_query("deadlock_cycle", current_turn=100, task_name="NAVIGATE")
+    assert allowed
+    throttler.record_query_dispatched("deadlock_cycle", current_turn=100)
+
+    # 2. Turn cooldown active
+    throttler.record_stall("NAVIGATE")
+    allowed, reason = throttler.should_allow_query("deadlock_cycle", current_turn=120, task_name="NAVIGATE")
+    assert not allowed
+    assert "turn_cooldown_active" in reason
+
+    # 3. Turn cooldown passed (turn 200), but wall cooldown active (< 0.5s)
+    allowed, reason = throttler.should_allow_query("deadlock_cycle", current_turn=200, task_name="NAVIGATE")
+    assert not allowed
+    assert "wall_cooldown_active" in reason
+
+    # 4. Sleep past wall cooldown
+    import time
+    time.sleep(0.55)
+    allowed, _ = throttler.should_allow_query("deadlock_cycle", current_turn=200, task_name="NAVIGATE")
+    assert allowed
+    throttler.record_query_dispatched("deadlock_cycle", current_turn=200)
+
+    # 5. Episode quota exhausted (2 out of 2)
+    time.sleep(0.55)
+    throttler.record_stall("NAVIGATE")
+    allowed, reason = throttler.should_allow_query("deadlock_cycle", current_turn=350, task_name="NAVIGATE")
+    assert not allowed
+    assert "in_game_quota_exceeded" in reason
+
+    # 6. Autopsy is NOT starved by in-game quota
+    allowed, reason = throttler.should_allow_query("autopsy", current_turn=350)
+    assert allowed
+    assert "autopsy_granted" in reason
+
+
+def test_throttler_state_cache():
+    from corp.deliberative.throttler import LLMRateThrottler
+    from corp.deliberative.schemas import HTNGraphPatch
+    throttler = LLMRateThrottler()
+
+    dummy_patch = HTNGraphPatch(
+        deadlock_cause="Test obstacle",
+        confidence=1.0,
+        abandon_current_macro=False,
+        injected_subtasks=[],
+    )
+    s_hash = 123456789
+    throttler.store_cached_patch(s_hash, dummy_patch)
+    assert throttler.get_cached_patch(s_hash) is dummy_patch
+
+    allowed, reason = throttler.should_allow_query("deadlock_cycle", current_turn=10, state_hash=s_hash)
+    assert not allowed
+    assert "cached_patch_available" in reason
+
+

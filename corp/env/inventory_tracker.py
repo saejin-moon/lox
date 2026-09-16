@@ -37,6 +37,14 @@ class InventoryNormalizer:
         self.active_items: dict[str, NormalizedItem] = {}  # Keyed by UID
         self.letter_to_uid: dict[str, str] = {}           # Maps 'a' -> UID
         self.uid_to_letter: dict[str, str] = {}           # Maps UID -> 'a'
+        self._last_inventory_sig: tuple[bytes, bytes, bytes, bytes] | None = None
+
+    def reset(self):
+        """Clears all inventory mappings and state cache."""
+        self.active_items.clear()
+        self.letter_to_uid.clear()
+        self.uid_to_letter.clear()
+        self._last_inventory_sig = None
 
     def synchronize(
         self,
@@ -48,8 +56,23 @@ class InventoryNormalizer:
     ) -> dict[str, NormalizedItem]:
         """
         Synchronizes raw NLE inventory observation tensors into stable UIDs
-        via bipartite Hungarian matching.
+        via bipartite Hungarian matching, with fast-path dirty-check bypass.
         """
+        # Fast Path: Check if raw inventory buffers are bitwise identical to previous step
+        current_sig = (
+            inv_letters.tobytes(),
+            inv_glyphs.tobytes(),
+            inv_strs.tobytes(),
+            inv_oclasses.tobytes() if inv_oclasses is not None else b"",
+        )
+        if self._last_inventory_sig == current_sig:
+            for it in self.active_items.values():
+                if it.is_active:
+                    it.last_updated_turn = turn
+            return self.active_items
+
+        self._last_inventory_sig = current_sig
+
         current_slots: list[dict] = []
         for i in range(len(inv_letters)):
             letter_byte = int(inv_letters[i])

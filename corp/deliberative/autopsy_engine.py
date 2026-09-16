@@ -36,6 +36,18 @@ class AutopsyEngine:
         self.llm = llm_provider
         self.nogood_store = nogood_store or NogoodStore()
 
+    async def conduct_autopsy(
+        self,
+        recorder: FlightRecorderRingBuffer | None = None,
+        death_message: str = "",
+        generation: int = 1,
+        **kwargs: Any,
+    ) -> Tuple[AutopsyReport, NogoodEntry]:
+        """Convenience wrapper accepting recorder or kwargs."""
+        if recorder is None and "flight_recorder" in kwargs:
+            recorder = kwargs["flight_recorder"]
+        return await self.execute_autopsy(recorder=recorder, death_message=death_message, generation=generation)
+
     async def execute_autopsy(
         self,
         recorder: FlightRecorderRingBuffer,

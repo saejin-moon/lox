@@ -15,6 +15,7 @@ from corp.deliberative.providers.llama_cpp import LlamaCppProvider
 from corp.deliberative.providers.openrouter import OpenRouterProvider
 from corp.deliberative.autopsy_engine import AutopsyEngine
 from corp.deliberative.deadlock_resolver import DeadlockResolver
+from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
 
 __all__ = [
     "SubTaskSpec",
@@ -30,4 +31,7 @@ __all__ = [
     "OpenRouterProvider",
     "AutopsyEngine",
     "DeadlockResolver",
+    "LLMRateThrottler",
+    "ThrottlerConfig",
 ]
+

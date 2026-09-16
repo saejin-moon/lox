@@ -84,6 +84,23 @@ EPISODE_SCHEMA = pa.schema([
     ("timestamp", pa.string()),
 ])
 
+LLM_QUERY_SCHEMA = pa.schema([
+    ("query_id", pa.string()),
+    ("episode_id", pa.string()),
+    ("run_id", pa.string()),
+    ("step", pa.int64()),
+    ("turn", pa.int64()),
+    ("timestamp", pa.float64()),
+    ("trigger_type", pa.string()),        # 'autopsy', 'deadlock_cycle', 'zero_progress_stall', etc.
+    ("provider", pa.string()),            # 'mock', 'gemini', 'openrouter', 'llama_cpp'
+    ("model", pa.string()),
+    ("prompt_preview", pa.string()),
+    ("tokens_consumed", pa.int32()),
+    ("latency_ms", pa.float64()),
+    ("turns_since_last_query", pa.int64()),
+    ("wall_seconds_since_last_query", pa.float64()),
+])
+
 
 @dataclass(slots=True)
 class TickRecord:
@@ -158,6 +175,24 @@ class EpisodeRecord:
     timestamp: str
 
 
+@dataclass(slots=True)
+class LLMQueryRecord:
+    query_id: str
+    episode_id: str
+    run_id: str
+    step: int
+    turn: int
+    timestamp: float
+    trigger_type: str
+    provider: str
+    model: str
+    prompt_preview: str
+    tokens_consumed: int
+    latency_ms: float
+    turns_since_last_query: int
+    wall_seconds_since_last_query: float
+
+
 class ParquetLogger:
     """
     Streaming Parquet telemetry logger. Buffers records in memory and flushes
@@ -176,13 +211,17 @@ class ParquetLogger:
 
         self.ticks_dir = os.path.join(base_dir, "ticks")
         self.episodes_dir = os.path.join(base_dir, "episodes")
+        self.llm_queries_dir = os.path.join(base_dir, "llm_queries")
         os.makedirs(self.ticks_dir, exist_ok=True)
         os.makedirs(self.episodes_dir, exist_ok=True)
+        os.makedirs(self.llm_queries_dir, exist_ok=True)
 
         self._tick_buffer: list[dict[str, Any]] = []
         self._episode_buffer: list[dict[str, Any]] = []
+        self._llm_query_buffer: list[dict[str, Any]] = []
         self._tick_file_counter = 0
         self._episode_file_counter = 0
+        self._llm_query_file_counter = 0
 
     def log_tick(self, record: TickRecord):
         """Buffers a tick frame and flushes if batch threshold reached."""
@@ -193,8 +232,12 @@ class ParquetLogger:
     def log_episode(self, record: EpisodeRecord):
         """Buffers an episode summary record."""
         self._episode_buffer.append(asdict(record))
-        # Flush episode record immediately to disk
         self._flush_episodes()
+
+    def log_llm_query(self, record: LLMQueryRecord):
+        """Buffers and immediately flushes an LLM query record."""
+        self._llm_query_buffer.append(asdict(record))
+        self._flush_llm_queries()
 
     def _flush_ticks(self):
         if not self._tick_buffer:
@@ -220,7 +263,20 @@ class ParquetLogger:
         self._episode_buffer.clear()
         self._episode_file_counter += 1
 
+    def _flush_llm_queries(self):
+        if not self._llm_query_buffer:
+            return
+        table = pa.Table.from_pylist(self._llm_query_buffer, schema=LLM_QUERY_SCHEMA)
+        out_path = os.path.join(
+            self.llm_queries_dir,
+            f"llm_queries_{self.run_id}_{self._llm_query_file_counter:04d}.parquet",
+        )
+        pq.write_table(table, out_path, compression="SNAPPY")
+        self._llm_query_buffer.clear()
+        self._llm_query_file_counter += 1
+
     def flush_all(self):
         """Flushes any remaining in-memory buffers."""
         self._flush_ticks()
         self._flush_episodes()
+        self._flush_llm_queries()

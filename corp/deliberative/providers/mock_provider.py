@@ -37,16 +37,55 @@ class MockProvider(LLMProvider):
             "schema": schema.__name__,
         })
 
-        if not self.canned_response:
-            raise ValueError("MockProvider called without canned_response set.")
+        raw_text = self.canned_response
+        if not raw_text:
+            if schema.__name__ == "AutopsyReport":
+                raw_text = """<think>
+Root cause analysis: Character died in tactical situation.
+Fatal action identified. Formulating Nogood constraint.
+</think>
+```json
+{
+  "death_cause": "Fatal combat or hazard encounter",
+  "lethal_turn": 100,
+  "causal_chain": ["Encountered danger", "Accumulated damage", "HP reduced to 0"],
+  "counterfactual_fix": "Retreat to corridor and rest to full HP before engaging",
+  "nogood": {
+    "trigger_predicates": {
+      "adjacent_floating_eye": false
+    },
+    "fatal_action": "MELEE_ATTACK",
+    "derived_constraint": "Avoid reckless melee without adequate HP"
+  }
+}
+```"""
+            elif schema.__name__ == "HTNGraphPatch":
+                raw_text = """<think>
+Resolving deadlock: Injecting search and step sequence to break spatial oscillation.
+</think>
+```json
+{
+  "deadlock_cause": "Spatial oscillation or exploration stall",
+  "confidence": 0.90,
+  "abandon_current_macro": false,
+  "injected_subtasks": [
+    {"task_name": "SEARCH"},
+    {"task_name": "SEARCH"},
+    {"task_name": "STEP", "target_direction": "l"}
+  ],
+  "new_invariants": []
+}
+```"""
+            else:
+                raise ValueError(f"MockProvider has no canned response for schema {schema.__name__}.")
 
-        thinking, parsed = ResponseParser.parse_dual_phase(self.canned_response, schema)
+        thinking, parsed = ResponseParser.parse_dual_phase(raw_text, schema)
         latency = (time.perf_counter() - start_time) * 1000.0
 
         return LLMResponse(
             thinking_content=thinking,
             parsed_payload=parsed,
-            raw_text=self.canned_response,
-            tokens_consumed=len(self.canned_response.split()),
+            raw_text=raw_text,
+            tokens_consumed=len(raw_text.split()),
             latency_ms=latency,
         )

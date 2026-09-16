@@ -24,6 +24,7 @@ class DuckDBConsolidator:
         self.parquet_dir = parquet_dir
         self.ticks_glob = os.path.join(parquet_dir, "ticks", "*.parquet")
         self.episodes_glob = os.path.join(parquet_dir, "episodes", "*.parquet")
+        self.llm_queries_glob = os.path.join(parquet_dir, "llm_queries", "*.parquet")
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
     def consolidate(self) -> dict[str, int]:
@@ -76,7 +77,65 @@ class DuckDBConsolidator:
             """)
             ticks_count = conn.execute("SELECT count(*) FROM ticks").fetchone()[0]
 
-        # 3. Build Canonical Analytical Views
+        # 3. Ingest LLM Queries
+        has_llm_queries = any(
+            f.endswith(".parquet")
+            for f in os.listdir(os.path.join(self.parquet_dir, "llm_queries"))
+        ) if os.path.exists(os.path.join(self.parquet_dir, "llm_queries")) else False
+
+        llm_queries_count = 0
+        if has_llm_queries:
+            conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS llm_queries AS 
+                SELECT * FROM read_parquet('{self.llm_queries_glob}') WHERE 1=0;
+            """)
+            conn.execute(f"""
+                INSERT INTO llm_queries
+                SELECT p.* FROM read_parquet('{self.llm_queries_glob}') p
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM llm_queries q 
+                    WHERE q.query_id = p.query_id
+                );
+            """)
+            llm_queries_count = conn.execute("SELECT count(*) FROM llm_queries").fetchone()[0]
+
+            # LLM query frequency view
+            conn.execute("""
+                CREATE OR REPLACE VIEW v_llm_query_frequency AS
+                SELECT 
+                    run_id,
+                    trigger_type,
+                    provider,
+                    count(*) as total_queries,
+                    round(avg(latency_ms), 1) as avg_latency_ms,
+                    round(avg(turns_since_last_query), 1) as avg_turn_gap,
+                    min(turns_since_last_query) as min_turn_gap,
+                    round(avg(wall_seconds_since_last_query), 2) as avg_sec_gap,
+                    round(case when avg(wall_seconds_since_last_query) > 0 then 60.0 / avg(wall_seconds_since_last_query) else 0.0 end, 1) as effective_rpm
+                FROM llm_queries
+                GROUP BY run_id, trigger_type, provider
+                ORDER BY run_id, count(*) DESC;
+            """)
+
+            # LLM run summary view
+            conn.execute("""
+                CREATE OR REPLACE VIEW v_llm_run_summary AS
+                SELECT 
+                    run_id,
+                    count(*) as total_llm_queries,
+                    count(distinct episode_id) as episodes_with_queries,
+                    round(count(*) * 1.0 / count(distinct episode_id), 2) as queries_per_episode,
+                    round(avg(latency_ms), 1) as avg_latency_ms,
+                    round(avg(turns_since_last_query), 1) as avg_turn_interval,
+                    min(turns_since_last_query) as min_turn_interval,
+                    round(avg(wall_seconds_since_last_query), 2) as avg_sec_interval,
+                    round(case when avg(wall_seconds_since_last_query) > 0 then 60.0 / avg(wall_seconds_since_last_query) else 0.0 end, 1) as effective_rpm
+                FROM llm_queries
+                GROUP BY run_id
+                ORDER BY run_id DESC;
+            """)
+
+        # 4. Build Canonical Analytical Views
         if has_episodes:
             conn.execute("""
                 CREATE OR REPLACE VIEW v_eval_summary AS

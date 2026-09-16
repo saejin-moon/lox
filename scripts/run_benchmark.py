@@ -98,6 +98,11 @@ def parse_args() -> argparse.Namespace:
         help="Enable deliberative LLM post-mortem autopsy for cross-generational learning",
     )
     parser.add_argument(
+        "--enable-in-game-llm",
+        action="store_true",
+        help="Enable in-game deliberative LLM deadlock resolution and plan injection",
+    )
+    parser.add_argument(
         "--nogood-path",
         type=str,
         default="data/nogoods.json",
@@ -166,6 +171,7 @@ async def run_benchmark(args: argparse.Namespace):
             nogood_store=nogood_store,
             llm_provider=llm_provider,
             enable_deliberative_autopsy=args.enable_autopsy,
+            enable_in_game_deliberation=args.enable_in_game_llm,
             parquet_logger=parquet_logger,
             eval_type=args.eval_type,
             mode=args.mode,
