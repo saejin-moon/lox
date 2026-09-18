@@ -1,11 +1,20 @@
 """
-GeminiProvider: Connects to Google AI Studio Gemini Flash API via OpenAI-compatible endpoint.
+GeminiProvider: Connects to Google AI Studio.
+
+Two paths (R3):
+- `generate_reasoning_and_json`: OpenAI-compatible endpoint (existing deliberative path).
+- `generate_text`: native `google-genai` SDK with thinking config (default: level=high)
+  — the policy-diff author path. Thinking moves the model's reasoning into a separate
+  channel so `response.text` is clean diff output. Falls back to the OpenAI-compatible
+  endpoint when `google-genai` is unavailable.
+
+Env: GEMINI_API_KEY (both paths) · GEMINI_MODEL (default model) ·
+GEMINI_THINKING_LEVEL (minimal|low|medium|high, default high; "off" disables).
 """
 
 import os
 import time
 from typing import Type, TypeVar
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from corp.deliberative.providers.base import LLMProvider, LLMResponse
@@ -16,8 +25,8 @@ T = TypeVar("T", bound=BaseModel)
 
 class GeminiProvider(LLMProvider):
     """
-    Executes deliberative reasoning via Google AI Studio (Gemini 2.5 Flash / 1.5 Flash).
-    The free tier provides up to 1,500 requests/day, easily covering research runs.
+    Executes deliberative reasoning via Google AI Studio. The free tier provides up to
+    1,500 requests/day, easily covering research runs.
     """
 
     def __init__(
@@ -26,11 +35,72 @@ class GeminiProvider(LLMProvider):
         model: str | None = None,
         base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/",
         timeout: float = 45.0,
+        thinking_level: str | None = None,
+        use_native_genai: bool | None = None,
     ):
-        resolved_key = api_key or os.environ.get("GEMINI_API_KEY", "EMPTY")
-        self.client = AsyncOpenAI(base_url=base_url, api_key=resolved_key, timeout=timeout)
-        self.model = model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "EMPTY")
+        self.model = model or os.environ.get("GEMINI_MODEL", "gemma-4-26b-a4b-it")
+        self.base_url = base_url
+        self.timeout = timeout
+        self.thinking_level = (thinking_level
+                               or os.environ.get("GEMINI_THINKING_LEVEL", "high")).lower()
 
+        # Native google-genai path (author path with thinking); auto-enabled when the
+        # SDK is importable, forced off with use_native_genai=False or GEMINI_USE_GENAI=0.
+        env_flag = os.environ.get("GEMINI_USE_GENAI", "1") not in ("0", "false", "False")
+        self._genai_client = None
+        if use_native_genai is None:
+            use_native_genai = env_flag
+        if use_native_genai:
+            try:
+                from google import genai as _genai  # noqa: PLC0415
+                self._genai_client = _genai.Client(api_key=self.api_key)
+            except ImportError:
+                self._genai_client = None
+
+        # OpenAI-compatible fallback client (lazy import keeps native path independent)
+        from openai import AsyncOpenAI
+        self.client = AsyncOpenAI(base_url=base_url, api_key=self.api_key, timeout=timeout)
+
+    # ------------------------------------------------------------------
+    # Native google-genai helpers
+    # ------------------------------------------------------------------
+    def _genai_config(self, extra: dict | None = None):
+        from google.genai import types  # noqa: PLC0415
+        cfg_kwargs: dict = {}
+        if self.thinking_level not in ("", "off", "none"):
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=self.thinking_level.upper())
+        if extra:
+            cfg_kwargs.update(extra)
+        return types.GenerateContentConfig(**cfg_kwargs) if cfg_kwargs else None
+
+    async def _genai_generate(self, system_prompt: str, user_prompt: str) -> tuple[str, int]:
+        """Runs the native SDK call in a worker thread (sync SDK) and returns (text, tokens).
+        The system prompt goes through `system_instruction`; thinking config moves the
+        model's reasoning out of `response.text` into the thought channel."""
+        import asyncio  # noqa: PLC0415
+        client = self._genai_client
+        config = self._genai_config({"system_instruction": system_prompt})
+
+        def _call():
+            resp = client.models.generate_content(
+                model=self.model,
+                contents=user_prompt,
+                config=config,
+            )
+            text = resp.text or ""
+            tokens = 0
+            um = getattr(resp, "usage_metadata", None)
+            if um is not None:
+                tokens = int(getattr(um, "total_token_count", 0) or 0)
+            return text, tokens
+
+        return await asyncio.to_thread(_call)
+
+    # ------------------------------------------------------------------
+    # JSON deliberative path (unchanged OpenAI-compatible endpoint)
+    # ------------------------------------------------------------------
     async def generate_reasoning_and_json(
         self,
         system_prompt: str,
@@ -61,26 +131,31 @@ class GeminiProvider(LLMProvider):
             latency_ms=latency,
         )
 
+    # ------------------------------------------------------------------
+    # Raw text path — the R3 policy-diff author path (native SDK + thinking)
+    # ------------------------------------------------------------------
     async def generate_text(
         self,
         system_prompt: str,
         user_prompt: str,
         context: dict | None = None,
     ) -> LLMResponse:
-        import time
         start_time = time.perf_counter()
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        raw_text = response.choices[0].message.content or ""
-        tokens = response.usage.total_tokens if response.usage else 0
+        if self._genai_client is not None:
+            raw_text, tokens = await self._genai_generate(system_prompt, user_prompt)
+        else:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            raw_text = response.choices[0].message.content or ""
+            tokens = response.usage.total_tokens if response.usage else 0
         latency = (time.perf_counter() - start_time) * 1000.0
         return LLMResponse(
-            thinking_content="",
+            thinking_content="",      # thinking lives in the SDK's thought channel
             parsed_payload=raw_text,
             raw_text=raw_text,
             tokens_consumed=tokens,

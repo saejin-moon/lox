@@ -3,6 +3,8 @@ Unit tests for Phase 4: Deliberative LLM Core, ResponseParser,
 AutopsyEngine, and DeadlockResolver.
 """
 
+import os
+
 import pytest
 import numpy as np
 
@@ -161,8 +163,11 @@ async def test_deadlock_resolver():
 
 def test_provider_initialization():
     gemini = GeminiProvider(api_key="test_gemini_key")
-    assert gemini.model == "gemini-2.5-flash"
+    assert gemini.model == os.environ.get("GEMINI_MODEL", "gemma-4-26b-a4b-it")
     assert "generativelanguage.googleapis.com" in str(gemini.client.base_url)
+    # native genai path: thinking-enabled author path (R3)
+    if gemini._genai_client is not None:
+        assert gemini.thinking_level == os.environ.get("GEMINI_THINKING_LEVEL", "high")
 
     openrouter = OpenRouterProvider(api_key="test_openrouter_key")
     assert "openrouter.ai" in str(openrouter.client.base_url)
