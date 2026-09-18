@@ -39,6 +39,7 @@ from corp.domain.navigation_manager import NavigationManager
 from corp.domain.inventory_manager import InventoryManager
 from corp.domain.skill_worker import SkillWorker
 from corp.domain.medusa_handler import MedusaHandler
+from corp.policy.config import PolicyConfig, default_config
 from corp.workers.dispatcher import ActionDispatcher
 from corp.epistemic.epistemic_manager import EpistemicManager
 from corp.epistemic.entropy_gates import ShannonSafeGate
@@ -96,6 +97,7 @@ class CORPAgent:
         seed: int = 42,
         role: str = "unknown",
         throttler_config: ThrottlerConfig | None = None,
+        policy_config: PolicyConfig | None = None,
     ):
         self.env = env
         self.nogood_store = nogood_store or NogoodStore()
@@ -120,14 +122,15 @@ class CORPAgent:
         self.profiler = PersonaProfiler()
         self.epistemic = EpistemicManager()
         self.epistemic_worker = EpistemicWorker(self.epistemic)
-        self.combat_mgr = TacticalCombatManager()
-        self.nav_mgr = NavigationManager()
-        self.inv_mgr = InventoryManager()
+        self.policy_config = policy_config or default_config()
+        self.combat_mgr = TacticalCombatManager(self.policy_config)
+        self.nav_mgr = NavigationManager(self.policy_config)
+        self.inv_mgr = InventoryManager(self.policy_config)
         self.skill_mgr = SkillWorker()
         self.medusa_handler = MedusaHandler()
         self.dungeon_graph = DungeonGraph()
         self.shop_mgr = ShopManager()
-        self.macro_director = MacroAscensionDirector()
+        self.macro_director = MacroAscensionDirector(self.policy_config)
         self.dispatcher = ActionDispatcher(env)
         self.cycle_detector = CycleDetector(window_size=10, max_repetitions=3)
         self.planner = HTNPlanner(nogood_store=self.nogood_store)
@@ -205,7 +208,7 @@ class CORPAgent:
 
         self.cycle_detector.reset()
         self.nav_mgr.reset()
-        self.inv_mgr = InventoryManager()
+        self.inv_mgr = InventoryManager(self.policy_config)
         self.combat_mgr.reset()
         self.skill_mgr.reset()
         self.medusa_handler.reset()
@@ -455,9 +458,10 @@ class CORPAgent:
             return False
         has_pr = agent.has_poison_resistance(agent.env.inventory_tracker)
         has_adj = any(m.is_adjacent for m in agent.combat_mgr.scan_monsters(agent.current_glyphs, blstats, has_poison_res=has_pr))
+        s = agent.policy_config.strategy
         return (
-            blstats.hp <= max(7, int(blstats.max_hp * 0.55))
-            or (has_adj and blstats.hp <= max(8, int(blstats.max_hp * 0.60)))
+            blstats.hp <= max(s.triage_min_hp, int(blstats.max_hp * s.triage_hp_frac))
+            or (has_adj and blstats.hp <= max(s.triage_adj_min_hp, int(blstats.max_hp * s.triage_adj_hp_frac)))
         )
 
     def _htn_do_emergency_triage(self, agent: Any) -> list[Task]:
@@ -491,7 +495,7 @@ class CORPAgent:
                     return [Task("READ", is_primitive=True, args={"slot": item.current_letter})]
 
         # 3. Divine prayer
-        if blstats.hp <= max(5, int(blstats.max_hp * 0.25)):
+        if blstats.hp <= max(5, int(blstats.max_hp * self.policy_config.survival.critical_retreat_frac)):
             if agent.inv_mgr.can_safely_pray(blstats):
                 agent.inv_mgr.prayer_state.last_prayer_turn = blstats.turn
                 agent.inv_mgr.prayer_state.prayer_count += 1
@@ -725,7 +729,7 @@ class CORPAgent:
         inv_tracker = self.env.inventory_tracker
 
         # 0. Anti-Stall Guard: If 4+ consecutive steps yielded 0 turns, force escape/wait to break deadlock
-        if self.consecutive_zero_turn_steps >= 4:
+        if self.consecutive_zero_turn_steps >= self.policy_config.strategy.zero_turn_limit:
             if self.consecutive_zero_turn_steps % 2 == 1:
                 return Task("ESCAPE", is_primitive=True)
             else:
@@ -757,7 +761,7 @@ class CORPAgent:
         msg_lower = self.current_message.lower()
         if self.locked_intent is not None:
             # Immediate emergency interrupt: health critical (<= 55%) or starving
-            if blstats.hp <= int(blstats.max_hp * 0.55) or blstats.hunger_state >= HungerState.WEAK:
+            if blstats.hp <= int(blstats.max_hp * self.policy_config.strategy.triage_hp_frac) or blstats.hunger_state >= HungerState.WEAK:
                 self.locked_intent = None
             elif self.locked_intent.name == "DOOR_KICK":
                 t_pos = self.locked_intent.target_pos
@@ -957,11 +961,11 @@ class CORPAgent:
         new_blstats = info.get("blstats")
         if new_blstats is not None and self.current_blstats is not None:
             # Check for critical burst damage or lethal status
-            if new_blstats.hp <= max(4, int(new_blstats.max_hp * 0.25)):
+            if new_blstats.hp <= max(4, int(new_blstats.max_hp * self.policy_config.survival.critical_retreat_frac)):
                 return False
             if new_blstats.hp < self.current_blstats.hp:
                 hp_loss = self.current_blstats.hp - new_blstats.hp
-                if hp_loss >= max(3, int(new_blstats.max_hp * 0.20)):
+                if hp_loss >= max(3, int(new_blstats.max_hp * self.policy_config.nutrition.moderate_emergency_hp_frac)):
                     return False
 
         msg = info.get("full_message", "").lower()

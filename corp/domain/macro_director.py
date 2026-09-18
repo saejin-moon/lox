@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from corp.env.blstats import BottomLineStats, HungerState
+from corp.policy.config import PolicyConfig, default_config
 
 
 class AscensionPhase(IntEnum):
@@ -44,7 +45,8 @@ class MacroAscensionDirector:
     6. Deep Ascent: Drives aggressive depth progression past DL 10 once fully geared.
     """
 
-    def __init__(self):
+    def __init__(self, config: PolicyConfig | None = None):
+        self.cfg = config or default_config()
         self.state = MacroDirectorState()
 
     def reset(self):
@@ -111,35 +113,35 @@ class MacroAscensionDirector:
 
         # Phase 1: Early Exploration (Floors 1-3)
         if self.state.current_phase == AscensionPhase.EARLY_EXPLORATION:
-            if is_lawful_fighter and blstats.experience_level >= 5 and not self.state.excalibur_obtained:
+            if is_lawful_fighter and blstats.experience_level >= self.cfg.strategy.excalibur_xl and not self.state.excalibur_obtained:
                 self.state.current_phase = AscensionPhase.EXCALIBUR_FORGE
                 self.state.total_steps_in_phase = 0
-            elif blstats.experience_level >= 4 or blstats.depth >= 4:
+            elif blstats.experience_level >= self.cfg.strategy.early_exit_xl or blstats.depth >= self.cfg.strategy.early_exit_depth:
                 self.state.current_phase = AscensionPhase.POISON_RES_HUNT
                 self.state.total_steps_in_phase = 0
 
         # Phase 2: Excalibur Forging
         elif self.state.current_phase == AscensionPhase.EXCALIBUR_FORGE:
-            if self.state.excalibur_obtained or self.state.total_steps_in_phase > 2000:
+            if self.state.excalibur_obtained or self.state.total_steps_in_phase > self.cfg.strategy.excalibur_timeout_steps:
                 self.state.current_phase = AscensionPhase.POISON_RES_HUNT
                 self.state.total_steps_in_phase = 0
 
         # Phase 3: Poison Resistance Hunt
         elif self.state.current_phase == AscensionPhase.POISON_RES_HUNT:
-            if self.state.poison_res_obtained or blstats.depth >= 6:
+            if self.state.poison_res_obtained or blstats.depth >= self.cfg.strategy.poison_exit_depth:
                 self.state.current_phase = AscensionPhase.SOKOBAN_PROGRESSION
                 self.state.total_steps_in_phase = 0
 
         # Phase 4: Sokoban Progression (Reflection)
         elif self.state.current_phase == AscensionPhase.SOKOBAN_PROGRESSION:
-            if self.state.reflection_obtained or blstats.depth >= 9 or self.state.sokoban_completed:
+            if self.state.reflection_obtained or blstats.depth >= self.cfg.strategy.sokoban_exit_depth or self.state.sokoban_completed:
                 self.state.current_phase = AscensionPhase.MINETOWN_PROTECTION
                 self.state.total_steps_in_phase = 0
 
         # Phase 5: Minetown Divine Protection
         elif self.state.current_phase == AscensionPhase.MINETOWN_PROTECTION:
             # Transition to deep descent once divine protection acquired (AC <= 0) or explored
-            if blstats.ac <= 0 or self.state.total_steps_in_phase > 3000 or blstats.depth >= 10:
+            if blstats.ac <= self.cfg.strategy.minetown_ac_target or self.state.total_steps_in_phase > self.cfg.strategy.minetown_timeout_steps or blstats.depth >= self.cfg.strategy.minetown_exit_depth:
                 self.state.current_phase = AscensionPhase.DEEP_DESCENT
                 self.state.total_steps_in_phase = 0
 
@@ -159,14 +161,15 @@ class MacroAscensionDirector:
         if blstats.hunger_state >= HungerState.WEAK:
             return False
 
+        s = self.cfg.strategy
         # On DL 1: Explore until unvisited tiles <= 15 or turns >= 120
         if blstats.depth == 1:
-            if unvisited_count > 15 and turns_spent < 120 and blstats.experience_level < 2:
+            if unvisited_count > s.farming_unvisited and turns_spent < s.farming_turns_d1 and blstats.experience_level < 2:
                 return True
 
         # On DL 2-3: Explore until unvisited tiles <= 15 or turns >= 150
         if blstats.depth in (2, 3):
-            if unvisited_count > 15 and turns_spent < 150 and blstats.experience_level < 3:
+            if unvisited_count > s.farming_unvisited and turns_spent < s.farming_turns_d23 and blstats.experience_level < 3:
                 return True
 
         return False
@@ -186,9 +189,9 @@ class MacroAscensionDirector:
 
         # 1. Mines retreat policy (branch dead-end: no downstairs exist below Mine's End)
         if dnum == 2:
-            if dlevel >= 10:
+            if dlevel >= self.cfg.descent.mines_end_dlevel:
                 return "ASCEND_FROM_MINES"
-            if self.state.minetown_visited and self.state.temple_donations_count >= 3:
+            if self.state.minetown_visited and self.state.temple_donations_count >= self.cfg.descent.minetown_donations_done:
                 return "ASCEND_FROM_MINES"
             if dungeon_graph is not None:
                 node = dungeon_graph.nodes.get((dnum, dlevel))
@@ -205,7 +208,7 @@ class MacroAscensionDirector:
             self.state.current_phase == AscensionPhase.MINETOWN_PROTECTION
             and dnum == 0
             and not self.state.minetown_visited
-            and 2 <= depth <= 4
+            and self.cfg.descent.minetown_depth_lo <= depth <= self.cfg.descent.minetown_depth_hi
         ):
             return "GOTO_MINETOWN"
 
@@ -220,7 +223,7 @@ class MacroAscensionDirector:
             and not self.state.sokoban_prize_collected
         ):
             # Cap the branch hunt so a fruitless search resumes normal descent progression
-            if self.state.total_steps_in_phase <= 6000:
+            if self.state.total_steps_in_phase <= self.cfg.descent.sokoban_hunt_step_cap:
                 return "ENTER_SOKOBAN"
 
         return None
@@ -237,8 +240,9 @@ class MacroAscensionDirector:
         NetHack Rule: Entering the Gnomish Mines under-leveled (XL < 6)
         leads to fatal wand of striking/lightning zaps from gnome lords.
         """
-        if blstats.experience_level >= 6:
+        s = self.cfg.strategy
+        if blstats.experience_level >= s.mines_enter_xl:
             return True
-        if self.state.excalibur_obtained and blstats.experience_level >= 5 and blstats.hp >= 35:
+        if self.state.excalibur_obtained and blstats.experience_level >= s.mines_alt_xl and blstats.hp >= s.mines_alt_hp:
             return True
         return False

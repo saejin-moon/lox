@@ -14,6 +14,7 @@ from corp.navigation.astar import GridAStar, PathNode
 from corp.navigation.frontier import FrontierExplorer
 from corp.planner.htn import Task, PrimitiveTask
 from corp.planner.guards import HTNGuards
+from corp.policy.config import PolicyConfig, default_config
 
 
 @dataclass
@@ -135,7 +136,8 @@ class NavigationManager:
     _bfs_epoch = 0
     _bfs_visited = [0] * SIZE
 
-    def __init__(self):
+    def __init__(self, config: PolicyConfig | None = None):
+        self.cfg = config or default_config()
         self.levels: LevelStore[tuple[int, int], LevelMap] = LevelStore()
         self.astar = GridAStar()
         self.frontier_explorer = FrontierExplorer()
@@ -506,7 +508,7 @@ class NavigationManager:
                         break
             if is_pushable:
                 soko_walkable[br, bc] = True
-                soko_costs[br, bc] += 30.0
+                soko_costs[br, bc] += self.cfg.navigation.boulder_push_cost
 
         return soko_walkable, soko_costs
 
@@ -546,7 +548,7 @@ class NavigationManager:
 
         if chars[nr, nc] == ord("+"):
             attempts = lvl.door_attempts.get((nr, nc), 0)
-            if attempts < 30:
+            if attempts < self.cfg.navigation.door_attempt_cap:
                 lvl.door_attempts[(nr, nc)] = attempts + 1
                 if attempts == 0:
                     return Task("OPEN", is_primitive=True, args={"delta": (dr, dc)})
@@ -862,13 +864,13 @@ class NavigationManager:
                     lvl.turns_spent,
                 )
             )
-            can_descend = HTNGuards.can_descend(blstats, has_poison_res=has_poison_res)
+            can_descend = HTNGuards.can_descend(blstats, has_poison_res=has_poison_res, config=self.cfg)
             if not defer_for_poi and not defer_for_macro and can_descend:
                 return Task("DESCEND", is_primitive=True)
             # Rest-on-stairs interlock (Phase 2): if HP is below the descent threshold but not
             # critical, WAIT here to regenerate instead of stepping off the stairs and wandering
             # away (the historic 1,000+ turn floor-stall loop)
-            if HTNGuards.should_rest_on_stairs(blstats, on_stairs_down=True):
+            if HTNGuards.should_rest_on_stairs(blstats, on_stairs_down=True, config=self.cfg):
                 return Task("WAIT", is_primitive=True)
 
         # 1.00 Step off blocked staircase / tile (e.g. freshly retreated from Gnomish Mines)
@@ -891,7 +893,7 @@ class NavigationManager:
                             )
 
         # 1.01 Safe retreat from Gnomish Mines if under-leveled (XL < 6 without poison resistance)
-        if blstats.dungeon_number == 2 and blstats.experience_level < 6 and not has_poison_res:
+        if blstats.dungeon_number == 2 and blstats.experience_level < self.cfg.descent.mines_retreat_xl and not has_poison_res:
             if lvl.stairs_up is None or lvl.stairs_up == (py, px) or lvl.turns_spent <= 2:
                 lvl.stairs_up = (py, px)
                 lvl.all_stairs_up.add((py, px))
@@ -918,7 +920,7 @@ class NavigationManager:
                 mines_retreat = dungeon_graph.should_ascend_from_mines(blstats, has_light=False, has_infravision=False)
             if not mines_retreat and lvl.stairs_down is None:
                 unvisited_left = int((lvl.mapped & lvl.walkable & (lvl.visited == 0)).sum())
-                if unvisited_left == 0 and lvl.turns_spent > 50:
+                if unvisited_left == 0 and lvl.turns_spent > self.cfg.descent.mines_linger_turns:
                     mines_retreat = True
             if mines_retreat:
                 if lvl.stairs_up is None or lvl.stairs_up == (py, px) or lvl.turns_spent <= 2:
@@ -963,7 +965,7 @@ class NavigationManager:
                         )
                     if path:
                         return self._step_or_open(py, px, path[0], chars, lvl, message=message, glyphs=glyphs, inv_tracker=inv_tracker)
-            if soko_lvl < 4:
+            if soko_lvl < self.cfg.descent.sokoban_prize_floor:
                 if lvl.stairs_up == (py, px):
                     return Task("ASCEND", is_primitive=True)
                 elif lvl.stairs_up:
@@ -987,9 +989,9 @@ class NavigationManager:
                         return self._step_or_open(py, px, path[0], chars, lvl, message=message, glyphs=glyphs, inv_tracker=inv_tracker)
             else:
                 # Top floor: descend back down to Dungeons of Doom after exploration
-                if lvl.stairs_down == (py, px) and lvl.turns_spent >= 60:
+                if lvl.stairs_down == (py, px) and lvl.turns_spent >= self.cfg.descent.sokoban_exit_min_turns:
                     return Task("DESCEND", is_primitive=True)
-                elif lvl.stairs_down and lvl.turns_spent >= 60:
+                elif lvl.stairs_down and lvl.turns_spent >= self.cfg.descent.sokoban_exit_min_turns:
                     path = self.astar.find_path(
                         (py, px),
                         lvl.stairs_down,
@@ -1060,8 +1062,9 @@ class NavigationManager:
         if not took_damage and blstats.hunger_state < HungerState.HUNGRY:
             visible_hostile_near = False
             if glyphs is not None:
-                for rr in range(max(0, py - 2), min(21, py + 3)):
-                    for cc in range(max(0, px - 2), min(79, px + 3)):
+                rad = self.cfg.survival.rest_hostile_radius
+                for rr in range(max(0, py - rad), min(21, py + rad + 1)):
+                    for cc in range(max(0, px - rad), min(79, px + rad + 1)):
                         g = int(glyphs[rr, cc])
                         if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
                             visible_hostile_near = True
@@ -1070,11 +1073,11 @@ class NavigationManager:
                     self._rest_active = False
             hp_frac = blstats.hp / max(1, blstats.max_hp)
             if self._rest_active:
-                if visible_hostile_near or blstats.hp >= int(blstats.max_hp * 0.85):
+                if visible_hostile_near or blstats.hp >= int(blstats.max_hp * self.cfg.survival.rest_until_frac):
                     self._rest_active = False
                 else:
                     return Task("WAIT", is_primitive=True)
-            elif blstats.hp < int(blstats.max_hp * 0.60) and not visible_hostile_near:
+            elif blstats.hp < int(blstats.max_hp * self.cfg.survival.rest_below_frac) and not visible_hostile_near:
                 self._rest_active = True
                 return Task("WAIT", is_primitive=True)
 
@@ -1118,7 +1121,7 @@ class NavigationManager:
                 for dc in (-1, 0, 1)
                 if 0 <= py + dr < 21 and 0 <= px + dc < 79 and chars[py + dr, px + dc] == ord("}")
             ]
-            if len(water_tiles) >= 2:
+            if len(water_tiles) >= self.cfg.navigation.water_body_min_tiles:
                 lev_tool = self._find_levitation_tool(inv_tracker)
                 if lev_tool is not None:
                     kind, slot = lev_tool
@@ -1162,7 +1165,7 @@ class NavigationManager:
                     and (nr, nc) not in lvl.shop_doors
                 ):
                     attempts = lvl.door_attempts.get((nr, nc), 0)
-                    if attempts < 30:
+                    if attempts < self.cfg.navigation.door_attempt_cap:
                         lvl.door_attempts[(nr, nc)] = attempts + 1
                         if attempts == 0:
                             return Task("OPEN", is_primitive=True, args={"delta": (dr, dc)})
@@ -1265,7 +1268,7 @@ class NavigationManager:
             if fresh_conveyors:
                 fresh_conveyors.sort(key=lambda c: abs(c[0] - py) + abs(c[1] - px))
                 closest_conv = fresh_conveyors[0]
-                if abs(closest_conv[0] - py) + abs(closest_conv[1] - px) <= 15:
+                if abs(closest_conv[0] - py) + abs(closest_conv[1] - px) <= self.cfg.nutrition.conveyor_radius:
                     path = self.astar.find_path(
                         (py, px),
                         closest_conv,
@@ -1282,7 +1285,7 @@ class NavigationManager:
         unvisited_count = int((lvl.walkable & (lvl.visited == 0)).sum())
         defer_for_poi = (
             ((target_fountain and lvl.fountains) or (target_altar and lvl.altars))
-            and lvl.turns_spent < 50
+            and lvl.turns_spent < self.cfg.navigation.poi_defer_turns
             and blstats.hunger_state < HungerState.HUNGRY
         )
         defer_for_macro = (
@@ -1299,6 +1302,7 @@ class NavigationManager:
                     unvisited_count=unvisited_count,
                     turns_spent=lvl.turns_spent,
                     has_poison_res=has_poison_res,
+                    config=self.cfg,
                 )
             )
         )
@@ -1317,7 +1321,7 @@ class NavigationManager:
             if food_targets:
                 food_targets.sort(key=lambda f: abs(f[0] - py) + abs(f[1] - px))
                 closest_food = food_targets[0]
-                if abs(closest_food[0] - py) + abs(closest_food[1] - px) <= 10:
+                if abs(closest_food[0] - py) + abs(closest_food[1] - px) <= self.cfg.nutrition.food_bridge_radius:
                     path = self.astar.find_path(
                         (py, px),
                         closest_food,
@@ -1372,7 +1376,7 @@ class NavigationManager:
         if unlooted_containers:
             unlooted_containers.sort(key=lambda c: abs(c[0] - py) + abs(c[1] - px))
             closest_container = unlooted_containers[0]
-            if abs(closest_container[0] - py) + abs(closest_container[1] - px) <= 10:
+            if abs(closest_container[0] - py) + abs(closest_container[1] - px) <= self.cfg.navigation.container_radius:
                 path = self.astar.find_path(
                     (py, px),
                     closest_container,
@@ -1388,7 +1392,7 @@ class NavigationManager:
         if uncollected_gold and blstats.encumbrance == 0:
             uncollected_gold.sort(key=lambda g: abs(g[0] - py) + abs(g[1] - px))
             closest_gold = uncollected_gold[0]
-            if abs(closest_gold[0] - py) + abs(closest_gold[1] - px) <= 12:
+            if abs(closest_gold[0] - py) + abs(closest_gold[1] - px) <= self.cfg.navigation.gold_radius:
                 path = self.astar.find_path(
                     (py, px),
                     closest_gold,
@@ -1417,7 +1421,7 @@ class NavigationManager:
                 closest_target = safe_targets[0]
                 # Starvation fix: while hungry or worse, chase fresh corpses/food across the
                 # whole mapped level — kills leave edible corpses exactly when needed
-                max_food_dist = 99 if blstats.hunger_state >= HungerState.HUNGRY else 8
+                max_food_dist = self.cfg.nutrition.food_radius_hungry if blstats.hunger_state >= HungerState.HUNGRY else self.cfg.nutrition.food_radius
                 if abs(closest_target[0] - py) + abs(closest_target[1] - px) <= max_food_dist:
                     path = self.astar.find_path(
                         (py, px),
@@ -1477,7 +1481,7 @@ class NavigationManager:
         if not lvl.stairs_down:
             # Adaptive burst cap (Phase 3): maze levels on DL 4+ hide stairs behind secret
             # doors requiring 15-25 searches to reveal.
-            burst_cap = 20 if lvl.depth >= 4 else 15
+            burst_cap = self.cfg.search.burst_cap_deep if lvl.depth >= 4 else self.cfg.search.burst_cap_early
             spot_searches = int(lvl.searched[py, px]) + int(lvl.dead_end_searches.get((py, px), 0))
             # Burst search: if currently at the search spot, continue searching up to the cap!
             # (Stall fix: the burst counter is cumulative — re-selecting the same spot must
@@ -1612,10 +1616,11 @@ class NavigationManager:
 
         # Hard cumulative cap (stall fix): a tile searched up to the adaptive limit is
         # permanently excluded so a lone dead-end candidate can never loop forever
+        s = self.cfg.search
         if lvl.stairs_down is None:
-            hard_cap = 25 if lvl.depth >= 4 else 20
+            hard_cap = s.hard_cap_deep if lvl.depth >= 4 else s.hard_cap_early
         else:
-            hard_cap = 8
+            hard_cap = s.hard_cap_stairs
 
         best_pos = None
         best_prio = -1e9
@@ -1646,10 +1651,11 @@ class NavigationManager:
     ) -> tuple[int, int] | None:
         """Finds the closest reachable corridor dead end that has been searched fewer than max_searches times."""
         # Adaptive limits (Phase 3): maze levels on DL 4+ need deep search bursts to find stairs
+        s = self.cfg.search
         if lvl.stairs_down is None:
-            max_searches = 20 if lvl.depth >= 4 else 15
+            max_searches = s.dead_end_none_deep if lvl.depth >= 4 else s.dead_end_none
         else:
-            max_searches = 6
+            max_searches = s.dead_end_stairs
         # Burst search: if already standing on a dead end, continue searching up to max_searches times
         if (py, px) in lvl.corridors and self._is_corridor_dead_end(lvl, py, px):
             if lvl.dead_end_searches.get((py, px), 0) < max_searches:
@@ -1686,19 +1692,20 @@ class NavigationManager:
     ) -> np.ndarray:
         """Computes cost penalties for known traps, water, loops, and hostile monsters."""
         costs = np.zeros(chars.shape, dtype=np.float32)
+        nav = self.cfg.navigation
         # Trap penalty (+100 for visible ^, +500 for known lvl.traps)
-        costs[chars == ord("^")] += 500.0
+        costs[chars == ord("^")] += nav.trap_cost
         for tr, tc in lvl.traps:
             if (tr, tc) not in lvl.disarmed_traps:
-                costs[tr, tc] += 500.0
+                costs[tr, tc] += nav.trap_cost
         # Visited loop damping (+2.0 per visit)
-        costs += np.minimum(lvl.visited * 2.0, 50.0).astype(np.float32)
+        costs += np.minimum(lvl.visited * nav.visit_cost_per, nav.visit_cost_cap).astype(np.float32)
         if glyphs is not None:
             # Monster/Pet tile penalty (+1000) so A* routes around entities during exploration
             mon_mask = (
                 (glyphs >= nethack.GLYPH_MON_OFF) & (glyphs < nethack.GLYPH_OBJ_OFF)
             )
-            costs[mon_mask] += 1000.0
+            costs[mon_mask] += self.cfg.navigation.monster_cost
         return costs
 
     def _find_least_visited_step(
@@ -1760,10 +1767,11 @@ class NavigationManager:
         Excludes corridors (#) to prevent endless search bursts while navigating corridors.
         """
         # Adaptive limits (Phase 3): DL 4+ maze levels hide secret doors requiring 15-25 searches
+        s = self.cfg.search
         if lvl.stairs_down is None:
-            max_searches = 20 if lvl.depth >= 4 else 15
+            max_searches = s.wall_none_deep if lvl.depth >= 4 else s.wall_none
         else:
-            max_searches = 5
+            max_searches = s.wall_stairs
         is_wall = lvl.walls | (chars == ord("|")) | (chars == ord("-"))
         has_wall = np.zeros_like(is_wall)
         has_wall[1:, :] |= is_wall[:-1, :]
@@ -1800,10 +1808,11 @@ class NavigationManager:
     ) -> list[tuple[int, int]]:
         """Returns candidate room wall tiles sorted by Manhattan distance."""
         # Adaptive limits (Phase 3): DL 4+ maze levels hide secret doors requiring 15-25 searches
+        s = self.cfg.search
         if lvl.stairs_down is None:
-            max_searches = 20 if lvl.depth >= 4 else 15
+            max_searches = s.wall_none_deep if lvl.depth >= 4 else s.wall_none
         else:
-            max_searches = 5
+            max_searches = s.wall_stairs
         is_wall = lvl.walls | (chars == ord("|")) | (chars == ord("-"))
         has_wall = np.zeros_like(is_wall)
         has_wall[1:, :] |= is_wall[:-1, :]

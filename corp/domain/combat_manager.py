@@ -9,7 +9,9 @@ from typing import Any
 import numpy as np
 from nle import nethack
 
-from corp.env.blstats import BottomLineStats, ConditionFlag, HungerState
+from corp.env.blstats import BottomLineStats
+from corp.policy.config import PolicyConfig, default_config
+from corp.env.blstats import ConditionFlag, HungerState
 from corp.planner.htn import Task, PrimitiveTask
 
 
@@ -172,8 +174,9 @@ class TacticalCombatManager:
         "minotaur",
     )
 
-    def __init__(self, player_speed: int = 12):
-        self.player_speed = player_speed
+    def __init__(self, config: PolicyConfig | None = None, player_speed: int | None = None):
+        self.cfg = config or default_config()
+        self.player_speed = player_speed if player_speed is not None else self.cfg.combat.player_speed
         self.elbereth_pos: tuple[int, int, int] | None = None  # (depth, py, px)
         self.elbereth_turns: int = 0
         self.elbereth_waited_turns: int = 0
@@ -351,7 +354,7 @@ class TacticalCombatManager:
             # definition already angry, and the heroes were observed dying helplessly
             # to pony kicks they were forbidden to answer (attrition-death fix).
             # The navigation layer separately forbids bump-attacks (unprovoked).
-            under_attack = self.turns_since_damaged < 3 and max(abs(r - py), abs(c - px)) == 1
+            under_attack = self.turns_since_damaged < self.cfg.survival.escape_grace_turns and max(abs(r - py), abs(c - px)) == 1
             if is_peaceful_type and not is_known_hostile:
                 is_peaceful_human = any(h in mname for h in self.PEACEFUL_HUMANS)
                 if is_peaceful_human or not under_attack:
@@ -384,7 +387,7 @@ class TacticalCombatManager:
                         is_instakill = True
                         break
 
-            base_dmg = max(1.0, float(level) * 2.5)
+            base_dmg = max(1.0, float(level) * self.cfg.combat.threat_damage_per_level)
             speed_ratio = float(speed) / 12.0
             hp_ratio = float(max(1, blstats.hp)) / float(max(1, blstats.max_hp))
             threat = ((base_dmg * speed_ratio) / hp_ratio) + instakill_weight
@@ -431,10 +434,10 @@ class TacticalCombatManager:
         # streak self-heals as soon as the message stops showing the failure).
         if "never mind" in msg_lower or "don't have that object" in msg_lower:
             self._ranged_fail_streak = getattr(self, "_ranged_fail_streak", 0) + 1
-            if self._ranged_fail_streak >= 3:
+            if self._ranged_fail_streak >= self.cfg.combat.ranged_fail_streak:
                 # Timed cooldown: stale-slot failures persist until the inventory tracker
                 # realigns, so a single clean turn must not re-enable the storm
-                self._ranged_cooldown_until = int(getattr(blstats, "turn", 0)) + 50
+                self._ranged_cooldown_until = int(getattr(blstats, "turn", 0)) + self.cfg.combat.ranged_fail_cooldown
                 self._ranged_fail_streak = 0
         else:
             self._ranged_fail_streak = 0
@@ -550,15 +553,16 @@ class TacticalCombatManager:
         # (a) HP is <= 60% or <= 8, OR
         # (b) Surrounded by >= 2 adjacent active monsters (in open space without immediate choke point)
         if adjacent_monsters and self.elbereth_turns <= 0 and self.elbereth_cooldown <= 0:
+            s = self.cfg.survival
             is_fragile = role.lower() in ("tourist", "wizard", "healer", "priest", "rogue")
-            hp_thresh = 0.75 if is_fragile else 0.60
+            hp_thresh = s.elbereth_fragile_hp_frac if is_fragile else s.elbereth_hp_frac
             min_hp = 10 if is_fragile else 8
             is_critical_hp = blstats.hp <= max(min_hp, int(blstats.max_hp * hp_thresh))
             is_surrounded = len(active_adjacent) >= 2
             if is_critical_hp or is_surrounded:
                 permanent_slot = self._find_athame_or_permanent_engraver(inv_tracker)
                 self.elbereth_pos = cur_pos
-                self.elbereth_turns = 12 if permanent_slot else 8
+                self.elbereth_turns = self.cfg.combat.elbereth_permanent_turns if permanent_slot else self.cfg.combat.elbereth_dust_turns
                 self.elbereth_waited_turns = 0
                 args = {"text": "Elbereth"}
                 if permanent_slot:
@@ -622,11 +626,11 @@ class TacticalCombatManager:
                     return Task("STEP", is_primitive=True, args={"delta": step_away_delta})
 
                 # If cannot step away and taking damage from an active attacker, do NOT wait!
-                if not is_spore and self.turns_since_damaged < 3:
+                if not is_spore and self.turns_since_damaged < self.cfg.survival.escape_grace_turns:
                     # Elbereth: eyes flee from it (gas spores are mindless and ignore it!)
                     if self.elbereth_turns <= 0 and self.elbereth_cooldown <= 0:
                         self.elbereth_pos = cur_pos
-                        self.elbereth_turns = 8
+                        self.elbereth_turns = self.cfg.combat.elbereth_dust_turns
                         self.elbereth_waited_turns = 0
                         return Task("ENGRAVE_DUST", is_primitive=True, args={"text": "Elbereth"})
                     # If cannot step away, wait rather than strike
@@ -688,7 +692,7 @@ class TacticalCombatManager:
                 if self.elbereth_turns <= 0 and self.elbereth_cooldown <= 0:
                     permanent_slot = self._find_athame_or_permanent_engraver(inv_tracker)
                     self.elbereth_pos = cur_pos
-                    self.elbereth_turns = 12 if permanent_slot else 8
+                    self.elbereth_turns = self.cfg.combat.elbereth_permanent_turns if permanent_slot else self.cfg.combat.elbereth_dust_turns
                     self.elbereth_waited_turns = 0
                     args = {"text": "Elbereth"}
                     if permanent_slot:
@@ -713,7 +717,8 @@ class TacticalCombatManager:
             # Heavy Hitter Tactical Kiting: When wounded (HP <= 65% or HP <= 16),
             # do not trade blows toe-to-toe with dwarf lords, gnome lords, or ogres!
             is_heavy_hitter = any(hh in primary_target.name for hh in self.HEAVY_HITTERS)
-            is_wounded_vs_heavy = is_heavy_hitter and (blstats.hp <= max(16, int(blstats.max_hp * 0.65)))
+            cb = self.cfg.combat
+            is_wounded_vs_heavy = is_heavy_hitter and (blstats.hp <= max(cb.heavy_wounded_min_hp, int(blstats.max_hp * cb.heavy_wounded_frac)))
             if is_wounded_vs_heavy:
                 if self.elbereth_turns > 0 and cur_pos == self.elbereth_pos:
                     self._prev_hp = blstats.hp
@@ -721,7 +726,7 @@ class TacticalCombatManager:
                 if self.elbereth_turns <= 0 and self.elbereth_cooldown <= 0:
                     permanent_slot = self._find_athame_or_permanent_engraver(inv_tracker)
                     self.elbereth_pos = cur_pos
-                    self.elbereth_turns = 12 if permanent_slot else 8
+                    self.elbereth_turns = self.cfg.combat.elbereth_permanent_turns if permanent_slot else self.cfg.combat.elbereth_dust_turns
                     self.elbereth_waited_turns = 0
                     args = {"text": "Elbereth"}
                     if permanent_slot:
@@ -766,7 +771,7 @@ class TacticalCombatManager:
             # to death at 3 HP against kittens and dogs. Engrave Elbereth (most monsters
             # flee), retreat maximizing separation, or fire ranged — melee is the last
             # resort only when fully cornered with zero alternatives.
-            if blstats.hp <= int(blstats.max_hp * 0.25) and not self._has_usable_healing(inv_tracker):
+            if blstats.hp <= int(blstats.max_hp * self.cfg.survival.critical_retreat_frac) and not self._has_usable_healing(inv_tracker):
                 # Ranged first: kill from a "distance" without exposing further
                 if inv_tracker is not None:
                     offensive_wand = self._find_offensive_wand_slot(inv_tracker)
@@ -793,7 +798,7 @@ class TacticalCombatManager:
                 if self.elbereth_turns <= 0 and self.elbereth_cooldown <= 0:
                     permanent_slot = self._find_athame_or_permanent_engraver(inv_tracker)
                     self.elbereth_pos = cur_pos
-                    self.elbereth_turns = 12 if permanent_slot else 8
+                    self.elbereth_turns = self.cfg.combat.elbereth_permanent_turns if permanent_slot else self.cfg.combat.elbereth_dust_turns
                     self.elbereth_waited_turns = 0
                     args = {"text": "Elbereth"}
                     if permanent_slot:
@@ -912,7 +917,7 @@ class TacticalCombatManager:
                 self._fast_wait_pos = closest_monster.pos
                 self._fast_wait_streak = 0
             self._fast_wait_streak = getattr(self, "_fast_wait_streak", 0) + 1
-            if self._fast_wait_streak <= 6:
+            if self._fast_wait_streak <= self.cfg.combat.fast_wait_streak:
                 self._prev_hp = blstats.hp
                 return Task("WAIT", is_primitive=True)
             self._fast_wait_streak = 0

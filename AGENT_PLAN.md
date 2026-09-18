@@ -249,7 +249,13 @@ the loop, validator, DSL, and program machinery are untouched.
 - [x] Trajectory reconstructed → `data/trajectory.csv` + `data/trajectory.png` (106 runs, Sep 15 → Sep 18: mean score 2→850, best-ever run `7dQBM4`: depth 11, score 2,933). Script: `scripts/trajectory.py`
 - [x] Ledger started → `data/revision_ledger.jsonl` (schema v1 recorded in init entry)
 
-### R1 — PolicyConfig Extraction (2–3 days)
+### R1 — PolicyConfig Extraction (2–3 days) — **[2026-09-18 DONE — 1 day]**
+> Wired: ~75 tunables across guards/navigation/combat/inventory/macro_director/corp_agent via typed
+> `PolicyConfig` (`corp/policy/config.py`) with `defaults()` byte-identical to pre-R1 behavior; `CORPAgent`
+> accepts `policy_config=` and propagates to all managers. Smoke test: 2-ep live run in expected distribution
+> (DL 5/1, scores 413/288, SPS ~650 — no perf regression). Remaining literals are domain *data* (name sets)
+> reserved for R4 tactic rules.
+> Original acceptance criteria:
 Refactor steps 2–3. Extract tunables from `navigation_manager.py` (HP descent gates 0.45/0.70, rest 0.60/0.85, search caps 15/20/6/5, food radii 8/99/10/15, door caps), `combat_manager.py` (retreat 0.25, speed ratio 1.3, wounded-vs-heavy 0.65, ranged cooldown 50, escape grace), `inventory_manager.py` + `guards.py` (nutrition priorities, prayer gaps 301/850/450, eat-before-descend radius 10), `corp_agent.py` (triage 0.55/0.60, zero-turn guard 4).
 **Accept**: 183+ tests pass; default program reproduces decision traces byte-for-byte.
 

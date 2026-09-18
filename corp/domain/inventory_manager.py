@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from corp.env.blstats import BottomLineStats, HungerState
+from corp.policy.config import PolicyConfig, default_config
 from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
 from corp.planner.htn import Task, PrimitiveTask
 from corp.epistemic.entropy_gates import ShannonSafeGate
@@ -117,7 +118,8 @@ class InventoryManager:
 
     UNSAFE_CORPSE_KEYWORDS = FATAL_CORPSE_KEYWORDS + POISONOUS_CORPSE_KEYWORDS
 
-    def __init__(self):
+    def __init__(self, config: PolicyConfig | None = None):
+        self.cfg = config or default_config()
         self.prayer_state = PrayerState()
         self.picked_positions: set[tuple[int, int, int]] = set()
         self.dip_attempts: dict[tuple[int, int], int] = {}
@@ -196,7 +198,7 @@ class InventoryManager:
                     return Task("QUAFF", is_primitive=True, args={"slot": item.current_letter})
 
         # 2.2 Emergency Escape Scroll Reading (when HP <= 25%)
-        if blstats.hp <= max(4, int(blstats.max_hp * 0.25)):
+        if blstats.hp <= max(4, int(blstats.max_hp * self.cfg.survival.critical_retreat_frac)):
             for item in active_items:
                 if item.buc_state in ("BLESSED", "UNCURSED") and "scroll of teleportation" in item.raw_str.lower():
                     if epistemic_mgr is not None:
@@ -309,7 +311,7 @@ class InventoryManager:
                 is_fresh = False
                 if lvl_map is not None:
                     spawn_turn = lvl_map.floor_corpses.get((py, px))
-                    if spawn_turn is not None and blstats.turn - spawn_turn <= 25:
+                    if spawn_turn is not None and blstats.turn - spawn_turn <= self.cfg.nutrition.corpse_fresh_turns:
                         is_fresh = True
                 elif lvl_map is None:
                     # Fallback for synthetic unit tests
@@ -322,7 +324,7 @@ class InventoryManager:
 
                 # Priority B: Poisonous resistance conveyors if healthy
                 if not is_poison_resistant and any(cand in msg_lower for cand in self.POISON_RES_CONVEYORS):
-                    if is_fresh and blstats.hp >= max(18, int(blstats.max_hp * 0.70)) and not any(bad in msg_lower for bad in self.FATAL_CORPSE_KEYWORDS):
+                    if is_fresh and blstats.hp >= max(18, int(blstats.max_hp * self.cfg.descent.deep_min_hp_frac)) and not any(bad in msg_lower for bad in self.FATAL_CORPSE_KEYWORDS):
                         return Task("EAT", is_primitive=True, args={"slot": ""})
 
                 # Priority C: Standard safe corpse consumption
@@ -373,7 +375,8 @@ class InventoryManager:
         hunger = blstats.hunger_state
 
         is_major_emergency = (hp <= 5) or (hunger == HungerState.FAINTING)
-        is_moderate_emergency = (hp <= max(5, int(blstats.max_hp * 0.20))) or (hunger == HungerState.WEAK)
+        n = self.cfg.nutrition
+        is_moderate_emergency = (hp <= max(n.moderate_emergency_min_hp, int(blstats.max_hp * n.moderate_emergency_hp_frac))) or (hunger == HungerState.WEAK)
 
         if not (is_major_emergency or is_moderate_emergency):
             return False

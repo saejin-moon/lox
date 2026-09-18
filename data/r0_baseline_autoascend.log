@@ -1,0 +1,19 @@
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+================================================================================
+AutoAscend Baseline Runner: 100 episodes | Role: val | Step Limit: 50000
+================================================================================
+Traceback (most recent call last):
+  File "/home/bae/corp/scripts/run_autoascend_eval.py", line 223, in <module>
+    main()
+  File "/home/bae/corp/scripts/run_autoascend_eval.py", line 175, in main
+    summary = run_autoascend_episode(role=args.role, seed=ep_seed, step_limit=args.step_limit)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bae/corp/scripts/run_autoascend_eval.py", line 96, in run_autoascend_episode
+    summary = env.get_summary()
+              ^^^^^^^^^^^^^^^^^
+  File "/home/bae/autoascend/autoascend/env_wrapper.py", line 379, in get_summary
+    'turns': self.agent.blstats.time,
+             ^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'blstats'
