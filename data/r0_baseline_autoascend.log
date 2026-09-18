@@ -68,16 +68,68 @@ Ep 59/100 | Turns:  2765 | Depth:  3 | Score:   559 | Steps:  3282 | Death: DEAT
 Ep 60/100 | Turns:  2338 | Depth:  2 | Score:   274 | Steps:  2736 | Death: DEATH: died. Killed by a wand.
 Ep 61/100 | Turns: 11768 | Depth:  8 | Score: 12426 | Steps: 25223 | Death: exception: ('turn inactivity', ['',
 Ep 62/100 | Turns:  4059 | Depth:  3 | Score:   530 | Steps:  4636 | Death: DEATH: died. Killed by a werejackal
-core: 23992 | Steps: 32857 | Death: exception: 
-Ep 65/100 | Turns: 11355 | Depth:  6 | Score:  4465 | Steps: 14119 | Death: DEATH: died. Killed by a gnome lord
-Ep 66/100 | Turns:  7694 | Depth:  8 | Score:  6735 | Steps: 12875 | Death: exception: ('You open the bag...   
-Ep 67/100 | Turns:  7033 | Depth:  5 | Score:  1710 | Steps:  7775 | Death: DEATH: starved to death.
-Ep 68/100 | Turns: 23461 | Depth: 14 | Score: 41857 | Steps: 50001 | Death: steplimit
-Ep 69/100 | Turns:  8963 | Depth:  8 | Score:  8951 | Steps: 15475 | Death: DEATH: died. Killed by a watch capt
-Ep 70/100 | Turns: 10119 | Depth:  9 | Score: 12838 | Steps: 18566 | Death: DEATH: died. Killed by a barrow wig
-Ep 71/100 | Turns: 19174 | Depth: 14 | Score: 21652 | Steps: 33147 | Death: exception: 
-Ep 72/100 | Turns:  7763 | Depth:  4 | Score:  1238 | Steps:  9296 | Death: DEATH: died. Killed by Ms. Kilgarva
-Ep 73/100 | Turns:  6341 | Depth:  6 | Score:  3190 | Steps:  9296 | Death: DEATH: died. Killed by a magic miss
-Ep 74/100 | Turns: 11315 | Depth:  7 | Score:  7086 | Steps: 15634 | Death: DEATH: died. Killed by a spotted je
-Ep 75/100 | Turns:  5312 | Depth:  5 | Score:  1794 | Steps:  7492 | Death: DEATH: was poisoned. Poisoned by an
-Ep 76/100 | Turns:  4929 | Depth:  4 | Score:   913 | Steps:  8228 | Death: DEATH: died. Killed by a bolt of li
+Ep 63/100 | Turns: 18344 | Depth: 13 | Score: 23656 | Steps: 31540 | Death: exception: 
+Ep 64/100 | Turns:  5087 | Depth:  5 | Score:  2085 | Steps:  6768 | Death: DEATH: died. Killed by a killer bee
+Ep 65/100 | Turns: 14075 | Depth:  7 | Score: 11605 | Steps: 20714 | Death: DEATH: died. Killed by a bolt of li
+Ep 66/100 | Turns:  5892 | Depth:  6 | Score:  3279 | Steps:  8772 | Death: exception: ('a moist towel', np.uin
+Ep 67/100 | Turns: 19259 | Depth: 10 | Score: 16659 | Steps: 40991 | Death: DEATH: was poisoned. Poisoned by a 
+Ep 68/100 | Turns:  6922 | Depth:  3 | Score:  1452 | Steps: 12652 | Death: DEATH: died. Killed by a hill orc, 
+Ep 69/100 | Turns: 19215 | Depth: 11 | Score: 21424 | Steps: 37769 | Death: DEATH: starved to death.
+Ep 70/100 | Turns:  2775 | Depth:  2 | Score:   250 | Steps:  3071 | Death: DEATH: died. Killed by a wand.
+Ep 71/100 | Turns:  5910 | Depth:  6 | Score:  2771 | Steps:  9403 | Death: DEATH: died. Killed by a hill orc.
+Ep 72/100 | Turns:  8742 | Depth:  5 | Score:  3994 | Steps: 18352 | Death: DEATH: died. Killed by Ms. Possogro
+Ep 73/100 | Turns: 15673 | Depth:  4 | Score:  8956 | Steps: 19646 | Death: DEATH: died. Killed by a soldier an
+Ep 74/100 | Turns: 13395 | Depth:  9 | Score: 17175 | Steps: 28929 | Death: DEATH: died. Killed by a chameleon 
+Ep 75/100 | Turns: 11787 | Depth:  3 | Score:  2320 | Steps: 11615 | Death: DEATH: starved to death.
+Ep 76/100 | Turns:  3452 | Depth:  2 | Score:   394 | Steps:  3366 | Death: DEATH: died. Killed by a magic miss
+Ep 77/100 | Turns:  1887 | Depth:  2 | Score:   382 | Steps:  2974 | Death: DEATH: died. Killed by Mr. Chicouti
+Ep 78/100 | Turns: 18437 | Depth: 13 | Score: 36798 | Steps: 37474 | Death: DEATH: turned to stone. Petrified b
+Ep 79/100 | Turns:  4237 | Depth:  5 | Score:  2003 | Steps:  5212 | Death: DEATH: died. Killed by a dwarf king
+Ep 80/100 | Turns:  5260 | Depth:  6 | Score:  3491 | Steps:  8422 | Death: DEATH: died. Killed by a rothe.
+Ep 81/100 | Turns:  4840 | Depth:  5 | Score:  2692 | Steps:  7361 | Death: DEATH: died. Killed by a killer bee
+Ep 82/100 | Turns: 23114 | Depth: 17 | Score: 48560 | Steps: 50001 | Death: steplimit
+Ep 83/100 | Turns:  6869 | Depth:  4 | Score:  1562 | Steps: 16981 | Death: DEATH: died. Killed by a rothe, whi
+Ep 84/100 | Turns:  3815 | Depth:  3 | Score:   563 | Steps:  7375 | Death: DEATH: died. Killed by a wand.
+Ep 85/100 | Turns: 12056 | Depth: 13 | Score: 15090 | Steps: 23561 | Death: exception: 
+Ep 86/100 | Turns:  3648 | Depth:  4 | Score:   705 | Steps:  5050 | Death: DEATH: died. Killed by a grid bug, 
+Ep 87/100 | Turns:  3994 | Depth:  2 | Score:   694 | Steps:  4643 | Death: DEATH: died. Killed by a homunculus
+Ep 88/100 | Turns:  5574 | Depth:  4 | Score:  3076 | Steps:  7976 | Death: DEATH: died. Killed by a water mocc
+Ep 89/100 | Turns:  4978 | Depth:  6 | Score:  2460 | Steps:  6754 | Death: DEATH: died. Killed by a hill orc.
+Ep 90/100 | Turns: 10058 | Depth:  7 | Score:  3778 | Steps: 13985 | Death: DEATH: starved to death.
+Ep 91/100 | Turns:  1671 | Depth:  2 | Score:   402 | Steps:  2288 | Death: DEATH: died. Killed by a wand.
+Ep 92/100 | Turns:  4516 | Depth:  5 | Score:  2296 | Steps:  6468 | Death: DEATH: died. Killed by a jaguar.
+Ep 93/100 | Turns:  4583 | Depth:  4 | Score:  1070 | Steps:  5592 | Death: DEATH: died. Killed by a wand.
+Ep 94/100 | Turns:  3520 | Depth:  4 | Score:  1400 | Steps:  4579 | Death: DEATH: died. Killed by a gnome, whi
+Ep 95/100 | Turns:  1863 | Depth:  2 | Score:   210 | Steps:  2198 | Death: DEATH: died. Killed by a wand.
+Ep 96/100 | Turns: 13722 | Depth: 13 | Score: 14180 | Steps: 26888 | Death: exception: 
+Ep 97/100 | Turns: 23132 | Depth: 11 | Score: 33488 | Steps: 50001 | Death: steplimit
+Ep 98/100 | Turns:  7580 | Depth:  7 | Score:  3735 | Steps: 10696 | Death: DEATH: was poisoned. Poisoned by an
+Ep 99/100 | Turns:  2970 | Depth:  3 | Score:   589 | Steps:  3711 | Death: DEATH: died. Killed by a bat.
+Ep 100/100 | Turns: 11533 | Depth:  9 | Score: 16009 | Steps: 18326 | Death: DEATH: died. Killed by a black unic
+================================================================================
+AutoAscend Empirical Baseline (Role: val):
+Mean Score: 10215.9 | Median Depth: 6.0 | Mean Turns: 10756.3 | Ascension: 0.0%
+================================================================================
+[telemetry] Stored 100 AutoAscend episodes in data/corp_telemetry.duckdb (run_id=aa_1789767370)
+Traceback (most recent call last):
+  File "/home/bae/corp/scripts/run_autoascend_eval.py", line 234, in <module>
+    main()
+  File "/home/bae/corp/scripts/run_autoascend_eval.py", line 229, in main
+    json.dump(payload, f, indent=2)
+  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+                 ^^^^^^^^
+  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/json/encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/json/encoder.py", line 326, in _iterencode_list
+    yield from chunks
+  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/json/encoder.py", line 439, in _iterencode
+    o = _default(o)
+        ^^^^^^^^^^^
+  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/json/encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type int64 is not JSON serializable

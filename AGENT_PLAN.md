@@ -349,10 +349,12 @@ unattended `run_revision_loop.py`; deliberative unification (step 9). RAG: NetHa
 **Accept**: ≥10 gated revisions unattended (dry-run first with MockProvider); ≥1 accepted revision with measured improvement on the next batch; 0 rejected-revision leaks.
 
 ### R4 — Tactic Rules + Profiles + Ablation Harness (3–4 days)
+**Operational spec: §8 (normative contract).**
 Refactor steps 13 + profiles. Three-arm harness (`run_ablation.py`): LLM-revision | frozen | random-perturbation-with-identical-gates — **this control arm is what makes every later claim falsifiable**.
 **Accept**: harness runs unattended; tactic-rule parity on default program; all-role reports.
 
-### R5 — Domain Suite + Tuning Campaign (2–4 weeks) — **transfer becomes a main result**
+### R5 — Domain Suite + Tuning Campaign (2–4 weeks)
+**Operational spec: §8 (normative contract).** — **transfer becomes a main result**
 Refactor steps 10–12 + 14. Port `DomainAdapter` to MiniHack, then Craftax/Crafter. Per-domain: **RAG corpus
 build first** (`policy/corpus.py` + `scripts/build_corpus.py` → `data/corpus/<domain>/`; NetHack reuses
 `data/wiki_index.db`; MiniHack = NetHack wiki + MiniHack task docs; Craftax = official docs + paper + source
@@ -363,18 +365,22 @@ revisions until plateau: target median depth ≥ 5, mean score ≥ 1,500).
 **Accept**: improvement curves on ≥2 transfer domains from cold-start programs; NetHack batch improvement beyond R0 baseline σ; **workshop paper checkpoint**.
 
 ### R6 — STRETCH: Ascension Knowledge Stack (4–8 weeks, only if R5 secured)
+**Operational spec: §8 (normative contract).**
 The NetHack-community headline, demoted per Trade 4. Ordered by mortality impact: survival intrinsics/MR (DL 8–12), armor/weapon upgrade loop (alone should push median depth 6–8), Gehennom survival, Castle/wishing, Vlad → Candelabrum → Invocation → Ascension run, role quest branches.
 **Accept**: ascension rate ≥ AutoAscend's 4.8% on Valkyrie (100-ep batches); each milestone certified before the LLM may re-prioritize around it.
 
 ### R7 — Cross-Role Generalization (2–4 weeks, overlaps R6)
+**Operational spec: §8 (normative contract).**
 `role_profiles` refinement by the loop (parameters generalize; capabilities need building): armor/weapon tiers generalize across fighters first. Spellcasting infrastructure (wizard/priest/healer) is **scope-gated**: required only if the paper claims all-role parity — otherwise report role-coverage honestly.
 **Accept**: fighter roles median depth ≥ 8 on 50-ep batches; ≥2 roles ascending (if R6 pursued); honest role-coverage table otherwise.
 
 ### R8 — Track A: LLM-Authored Goal Handlers (research stretch)
+**Operational spec: §8 (normative contract).**
 The full self-extension: the LLM proposes new *goal handlers* (declarative sub-programs + action schemas) against domain RAG; verified in shadow/certification harness before entering production. Only after the closed-vocabulary loop has a long, clean acceptance ledger.
 **Accept**: ≥3 LLM-proposed goal handlers certified and shipped with measured contribution; 0 unverified handlers in production.
 
 ### R9 — Paper
+**Operational spec: §8 (normative contract).**
 - **R5 checkpoint (workshop)**: "Agent-as-Developer" — trajectory figure, ledger, DSL artifact
 - **Main-track**: *"Grammar-constrained policy-diff synthesis: offline LLMs as optimizers of declarative agent policies across domains"* — requires (a) three-arm ablations with seeds, (b) ≥2-domain improvement curves, (c) NetHack ≥ AutoAscend at mid-game (ascension parity if R6 pursued), (d) cross-role evidence. If Track B domains stall, fall back to AAAI/IJCAI/CoG
 - **Nogood learning** framed as online constraint accumulation (ablated)
@@ -414,7 +420,132 @@ uv run python scripts/run_ablation.py --arms llm,frozen,random --episodes 100 --
 
 ---
 
-## 8. Known Risks & Mitigations
+
+---
+
+## 8. R4–R9 OPERATIONAL SPECIFICATIONS (per-phase contracts — nothing left to invent)
+
+### R4 — Tactic Rules, Profiles, Ablation Harness
+
+**Tactic-rule semantics** (`corp/policy/tactics.py`, new):
+```json
+{"match": {"monster": "coyote"}, "when": "(hp_frac <= 0.50)", "do": "retreat",
+ "unless": "(has_healing)", "note": "..."}
+```
+- Rules evaluate in program order at the TOP of `evaluate_combat_turn`, first match wins; a matched
+  rule's verb overrides the default melee/ranged branch for that target.
+- `match` keys: `monster` (substring, case-insensitive), `item` (tile glyph name: throne/water/...),
+  `depth_between`. Conditions use the same predicate evaluator as strategy_plan (§ policy/predicates).
+- **Branch classification (critical design decision)** — these combat branches stay HARD-CODED
+  interlocks and are NOT expressible as rules: floating-eye melee lockout, grid-bug diagonal tactics,
+  cockatrice no-touch, lethal-poison ranged-first, gas-spore no-melee, critical-HP universal retreat.
+  Rules may only choose among: `ranged_only, ranged_then_kill, retreat, retreat_when_wounded, avoid,
+  kite, elbereth_first, never_melee` — i.e., the LLM re-prioritizes *responses*, it can never disable a
+  safety interlock. The seven heavy-hitter/lethal-poison name sets (`HEAVY_HITTERS`, `LETHAL_POISON_NAMES`,
+  `INSTAKILL_NAMES`) become DEFAULT RULES shipped in the default program (same behavior, now visible
+  and editable).
+- `rule remove` by index; removed interlock-default rules are re-addable but the seven interlock
+  branches above can never be removed by a diff (enforced in validator invariant #9b).
+
+**Profiles** (`corp/policy/profiles.py`):
+- Overlay precedence: `PolicyConfig defaults ← domain_profile ← role_profile ← program.params (global)`.
+- Roles may tune: weapon-tier preferences, combat aggression fracs, food radii, search caps, shop
+  behavior. Roles may NOT touch: prayer cooldown model, corpse freshness, interlock branches.
+- Per-role certification: run_skill_certifications extended with role-parameterized fixtures
+  (at minimum: valkyrie/barbarian/samurai fighters + wizard keep-distance case).
+
+**Ablation harness** (`scripts/run_ablation.py`):
+- Arms: `llm` (revision loop live) | `frozen` (default program, no loop) | `random` (random
+  perturbation of the SAME param leaves within bounds, gated identically — the control).
+- Protocol: per arm, per domain: 100-ep batches. Seeded domains (minihack/craftax): 3 seeds × 34 eps.
+  NetHack: 100-ep batch (unseedable — σ acknowledged in the paper).
+- Statistics: report median depth, mean score with **bootstrap 95% CI** (10k resamples);
+  significance = arm-vs-frozen Mann-Whitney U, p < 0.05, plus effect size (Cliff's delta).
+- Acceptance for the paper: `llm` > `frozen` significant on ≥2 domains AND `llm` > `random`
+  significant on ≥1 domain (proves it's not the gate doing the work).
+- Cost ledger: tokens + USD per arm, reported.
+
+### R5 — Domain Suite
+
+- **MiniHack adapter** (first): `uv pip install minihack`; MiniHack is built ON NLE — observation dict
+  (glyphs/chars/blstats/message) is identical, so the adapter is a thin wrapper: map `blstats` (27-el),
+  restrict action space, expose 3–5 certified goals (`explore_floor`, `descend`→`reach_stairs`,
+  `hunt_poison_res`, `pickup_boost`) and ~8 predicates. Task choice: `MiniHack-Explore-HardFixed-v0`
+  + `MiniHack-Maze-HardReach-v0` (closest to the descent/showcase loop). Seeded: `env.seed()` honored.
+- **Craftax adapter** (second): JAX-based, runs CPU; obs = symbolic grid + flat inventory/stats.
+  Adapter must build a blstats-compatible state vector (hp/depth→floor level/xl→xp level mapping) and
+  a glyph-like char grid. Corpus: official docs + paper + source docstrings + achievement table
+  (`scripts/build_corpus.py` → FTS5 at `data/corpus/craftax/`). Goals: `explore_floor`, `gather_resources`,
+  `descend` (dungeon levels), `craft_upgrade`. 6–8 predicates.
+- **NetHack tuning campaign** (nightly, parallel): `run_revision_loop.py` cadence = 1 batch/night;
+  plateau detection = 3 consecutive batches with no accepted revision beyond 1σ → loop pauses and
+  writes a plateau report (the human decides: new capabilities vs accept plateau).
+- **Workshop paper checkpoint**: deadline-driven; needs R5's first two domain curves + trajectory figure.
+
+### R6 — STRETCH Ascension Stack (each milestone = goals + rules + code, human-approved)
+
+Ordered by mortality impact; each lands as: new goal handler(s) (code) + default-program entries +
+certification cases, THEN the loop may tune them. No milestone may be skipped-to.
+1. `survival_intrinsics`: MR acquisition goals (gray dragon/CR rings), level-drain counters
+   (avoid-wraith/draining tactics), lycanthropy, invisibility counterplay. Cert: survive DL 10–12
+   gauntlet fixtures.
+2. `equip_upgrade`: full armor AC ladder + weapon enchantment + twoweapon decisions. Cert: AC ≤ -15
+   by DL 10 on certification episodes.
+3. `gehennom_survival`: light logistics, maze mapping without walls, undead/demon tactics, curse
+   discipline. Cert: DL 14–20 traverse fixtures.
+4. `castle_wishing`: drawbridge (exists) + wand-of-wishing priority protocol. Cert: BoH/DSM acquired.
+5. `vlad_invocation`: Vlad's Tower, Candelabrum, Invocation protocol, Sanctum/High Altar.
+6. `ascension_run`: Wizard-hall discipline, Rider handling, Planes handling, Sanctum → ascension.
+**Accept (whole R6)**: Valkyrie ascension ≥ 4.8% on 100-ep batches; each milestone certified before
+the loop may re-prioritize around it.
+
+### R7 — Cross-Role Generalization
+- `role_profiles` for all 13 roles; fighter roles first (val/bar/sam/monk?), then ranged, then casters.
+- **Spellcasting infrastructure** (scope-gated): spell memory, success-rate-gated casting, power
+  management — build ONLY if the all-role-parity claim is chosen; otherwise report the honest
+  role-coverage table (which roles the method covers and why).
+- **Accept**: fighter roles median depth ≥ 8 (50-ep batches); casters ≥ 6 IF spell infra built;
+  ≥2 roles ascending if R6 pursued; per-role revision-acceptance rates reported.
+
+### R8 — Track A: LLM-Authored Goal Handlers
+- Proposal schema (same S-expr DSL + a declarative action sub-program):
+  ```lisp
+  (goal-handler propose collect_mine_gems
+    (when (and (in_mines) (depth_between 3 6)))
+    (plan (goto_feature "gem_tiles") (repeat_pickup gems) (until (inv_contains "gem"))))
+  ```
+  `plan` steps may only reference EXISTING primitives (`goto_*`, `pickup`, `use`, `until`) — a handler
+  is a declarative sub-program, still no code.
+- **Shadow harness**: proposed handlers run in a sandboxed episode set (not production); success/failure
+  + side-effect telemetry compared against the frozen program. Gate: ≥ X% episode improvement, 0
+  invariant breaks, 0 crashes across 50 shadow episodes.
+- **Promotion**: gate-passed handlers enter the program's vocabulary manifest with provenance; the
+  manifest diff is the paper artifact.
+- **Accept**: ≥3 handlers certified & shipped with measured contribution; 0 unverified handlers ever
+  in a production run; ledger shows the full proposal→shadow→promote trail.
+
+### R9 — Paper Package
+- **Section outline**: 1 Intro · 2 Related (FunSearch/AlphaEvolve, Voyager, DSPy/TextGrad, expert
+  systems AutoAscend) · 3 Policy program + diff DSL (MACRO.md condensation) · 4 Revision loop &
+  gates · 5 NetHack showcase · 6 Multi-domain transfer (R5) · 7 Ablations (three-arm + nogoods +
+  epistemic gates + RAG on/off + author-model tiers) · 8 Safety analysis (boundedness proof §MACRO
+  5.4, interlock invariants) · 9 Discussion/limits.
+- **Figures**: trajectory (Fig 1) · three-arm curves per domain (Fig 2–3) · author-model tier
+  comparison (Fig 4) · macro/vocabulary growth vs capability (Fig 5) · architecture diagram.
+- **Tables**: main results (3 domains × arms, 100-ep CIs) · role coverage · ablation matrix ·
+  cost-per-accepted-revision by author tier.
+- **Venue decision tree**: main track (NeurIPS/ICLR) iff (a) ≥2-domain significant curves AND
+  (b) NetHack ≥ AutoAscend mid-game AND (c) Track A or R6 ascension evidence. Otherwise
+  AAAI/IJCAI/CoG. Workshop at R5 regardless.
+- **Reproducibility package**: code + default program + full ledger + corpus indices + grammar +
+  Docker CPU-only + all batch JSONs. Open-source under MIT.
+
+### Post-R9 (beyond the paper)
+- More domains (the adapter list IS the generalization evidence curve)
+- Community DSL governance: vocabulary proposals from other users go through the same gate pipeline
+- Human-facing dashboard: ledger + goal_events → live view of what the LLM changed and why
+
+## 9. Known Risks & Mitigations
 
 | Risk | Mitigation |
 |---|---|

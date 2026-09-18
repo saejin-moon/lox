@@ -12,10 +12,10 @@ Outperform **AutoAscend** on NetHack (NLE 3.6.6 / `NetHackChallenge-v0`) and dem
 **The research contribution** (full contract: `AGENT_PLAN.md`, phases R0–R9):
 - **Policy program** (`data/policy_program.json`): strategy_plan + policy_params + tactic_rules + macros + role/domain profiles + nogoods. The symbolic core reads *only* this program's compiled `PolicyConfig` — no strategy constants in code.
 - **Offline LLM revision loop**: frontier API model as primary author, llama.cpp (GBNF-constrained) as reproducible path. Diffs are depth-limited S-expressions; **code emission is forbidden**. Every diff passes grammar → schema → bounds → macro-expansion closure → certification → quick-batch gates before acceptance, with a full provenance ledger.
-- **Bounded self-extension**: `defmacro` lets the LLM compose new predicates/goals from verified primitives (definitional expansion — closure preserved). Full goal-handler authorship is the post-core research stretch (AGENT_PLAN §5 R8).
+- **Bounded self-extension**: `defmacro` lets the LLM compose new predicates/goals from verified primitives (definitional expansion — closure preserved). Full goal-handler authorship is the post-core research stretch (AGENT_PLAN §5 R8 / §8 spec).
 - **Generalization**: the `DomainAdapter` boundary (predicates + goal handlers + env + certification set) is the transfer contract; porting a domain = one adapter + one certification set, loop untouched.
 - **Diff from AutoAscend**: their strategies are frozen human constants (~2 person-years); ours are a self-revising program with cross-episode CDCL nogood learning and gated, attributed revisions. Must cite FunSearch/AlphaEvolve/Voyager and ablate against random-perturbation-with-identical-gates.
-- **Ascension parity is a stretch goal** (AGENT_PLAN §5 R6), not the core claim: transfer + self-extension + learning are.
+- **Ascension parity is a stretch goal** (AGENT_PLAN §5 R6 / §8 spec), not the core claim: transfer + self-extension + learning are.
 
 > [!CAUTION]
 > **HONEST BASELINE (corrected after empirical measurement)**: Prior versions of this file claimed AutoAscend was "~650 mean turns, ~450 mean score, Depth 3–6". That was **wrong by 10–24x**. AutoAscend was empirically measured on 2026-09-18 (5 episodes @ 20k steps, Valkyrie) and reaches **Median Depth 10.0, Mean Score 10,713.6, Mean Turns 10,680**. All earlier "CORP crushed AutoAscend" claims were fabricated relative to reality and have been removed.
