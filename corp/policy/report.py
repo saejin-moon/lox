@@ -27,6 +27,13 @@ def _median(xs):
     return statistics.median(xs) if xs else 0
 
 
+SURVIVED_MARKERS = ("", "survived", "alive", "ascended")
+
+
+def _is_survived(death_message: str) -> bool:
+    return (death_message or "").strip().lower() in SURVIVED_MARKERS
+
+
 def build_report_bundle(
     db_path: str = DEFAULT_DB_PATH,
     ledger_path: str = DEFAULT_LEDGER_PATH,
@@ -51,7 +58,7 @@ def build_report_bundle(
         try:
             row = con.execute(
                 f"""SELECT COUNT(*), MEDIAN(max_depth), AVG(final_score), MAX(final_score),
-                           AVG(CASE WHEN death_message IS NULL OR death_message = '' THEN 1.0 ELSE 0.0 END),
+                           AVG(CASE WHEN LOWER(COALESCE(death_message, '')) IN ('', 'survived', 'alive', 'ascended') THEN 1.0 ELSE 0.0 END),
                            AVG(total_turns)
                     FROM (SELECT * FROM episodes ORDER BY rowid DESC LIMIT {last_n_episodes})"""
             ).fetchone()
@@ -63,10 +70,12 @@ def build_report_bundle(
                 }
 
             # Death taxonomy: LIKE-grouped death messages with depth/hp-at-death medians
+            # ('Survived' episodes are NOT deaths — excluded from the taxonomy)
             rows = con.execute(
                 f"""SELECT death_message, COUNT(*) AS n, MEDIAN(max_depth)
                     FROM (SELECT * FROM episodes
                           WHERE death_message IS NOT NULL AND death_message != ''
+                            AND LOWER(death_message) NOT IN ('survived', 'alive', 'ascended')
                           ORDER BY rowid DESC LIMIT {last_n_episodes})
                     GROUP BY death_message ORDER BY n DESC LIMIT 12"""
             ).fetchall()
