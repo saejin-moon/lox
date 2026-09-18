@@ -1,11 +1,22 @@
 {
   "version": 2,
   "domain": "nethack",
-  "params": {
-    "survival.rest_below_frac": 0.65
-  },
+  "params": {},
   "macros": [],
-  "tactic_rules": [],
+  "tactic_rules": [
+    {
+      "when": "(and (adjacent_hostiles) (hp_frac <= 0.5))",
+      "do": "retreat_when_wounded",
+      "unless": null,
+      "note": null
+    },
+    {
+      "when": "(adjacent_hostiles)",
+      "do": "ranged_then_kill",
+      "unless": null,
+      "note": null
+    }
+  ],
   "nogoods": [],
   "strategy_plan": [
     {
@@ -44,9 +55,9 @@
     }
   ],
   "provenance": {
-    "author": "mock",
+    "author": "strategy-tuning author",
     "note": "equivalent to pre-R2 MacroAscensionDirector phase machine",
     "parent_version": 1,
-    "reason": "mock: widen resting gate \u2014 stall telemetry shows HP-resting too timid"
+    "reason": "Agent is dying to early combat and small monsters; adding combat tactics and retreating when wounded."
   }
 }

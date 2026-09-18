@@ -1,14 +1,20 @@
 {
-  "version": 2,
+  "version": 3,
   "domain": "nethack",
   "params": {},
   "macros": [],
   "tactic_rules": [
     {
-      "when": "(and (adjacent_hostiles) (hp_frac <= 0.5))",
+      "when": "(and (adjacent_hostiles) (hp_frac <= 0.4))",
+      "do": "elbereth_first",
+      "unless": null,
+      "note": "emergency elbereth"
+    },
+    {
+      "when": "(and (adjacent_hostiles) (hp_frac <= 0.7))",
       "do": "retreat_when_wounded",
       "unless": null,
-      "note": null
+      "note": "retreat when low hp"
     },
     {
       "when": "(adjacent_hostiles)",
@@ -57,7 +63,7 @@
   "provenance": {
     "author": "strategy-tuning author",
     "note": "equivalent to pre-R2 MacroAscensionDirector phase machine",
-    "parent_version": 1,
-    "reason": "Agent is dying to early combat and small monsters; adding combat tactics and retreating when wounded."
+    "parent_version": 2,
+    "reason": "Agent dying to melee damage from small monsters at low depth; increasing retreat threshold and adding elbereth-first as an emergency defensive tactic."
   }
 }
