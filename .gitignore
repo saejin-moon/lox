@@ -21,3 +21,10 @@ logs/
 
 # Keep directory structure
 !data/.gitkeep
+
+# CORP-Ω exceptions: policy program + revision ledger are first-class artifacts (R0)
+!data/policy_program.json
+!data/policy_program/
+!data/revision_ledger.jsonl
+!data/trajectory.csv
+!data/revision_ledger.jsonl

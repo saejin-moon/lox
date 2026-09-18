@@ -243,11 +243,11 @@ the loop, validator, DSL, and program machinery are untouched.
 
 ## 5. Phases R0–R9
 
-### R0 — Checkpoint & Measurement (½ day) — **[START HERE]**
-- [ ] Commit ALL uncommitted work (last 3 days live only in the working tree)
-- [ ] NetHack baselines: 100-ep CORP + 100-ep AutoAscend (`run_baseline_suite.py`); freeze as the reference
-- [ ] Reconstruct trajectory figure from DuckDB (106 timestamped runs, 678 episodes already on disk)
-- [ ] Start `data/revision_ledger.jsonl`: every LLM call logs provider, tokens, cost estimate, wall-clock, accept/reject, measured delta
+### R0 — Checkpoint & Measurement (½ day) — **[2026-09-18 DONE]**
+- [x] Commit ALL uncommitted work → commits `a39a560` (core), `891deb5` (bench+tests), `cd6dc98` (docs); + `.gitignore` exceptions for policy program/ledger
+- [x] NetHack baselines **launched** (background, nice-10): CORP 100ep@20k (`data/r0_baseline_corp.log` → `data/baseline_corp_100ep.json`), then AutoAscend 100ep@50k val (`data/r0_baseline_autoascend.log` → `data/autoascend_val_100ep.json`). NOTE: earlier 100-ep attempts (Sep 18 09:47) died at startup with 0 episodes — verified dead and relaunched. Freeze as reference when both finish.
+- [x] Trajectory reconstructed → `data/trajectory.csv` + `data/trajectory.png` (106 runs, Sep 15 → Sep 18: mean score 2→850, best-ever run `7dQBM4`: depth 11, score 2,933). Script: `scripts/trajectory.py`
+- [x] Ledger started → `data/revision_ledger.jsonl` (schema v1 recorded in init entry)
 
 ### R1 — PolicyConfig Extraction (2–3 days)
 Refactor steps 2–3. Extract tunables from `navigation_manager.py` (HP descent gates 0.45/0.70, rest 0.60/0.85, search caps 15/20/6/5, food radii 8/99/10/15, door caps), `combat_manager.py` (retreat 0.25, speed ratio 1.3, wounded-vs-heavy 0.65, ranged cooldown 50, escape grace), `inventory_manager.py` + `guards.py` (nutrition priorities, prayer gaps 301/850/450, eat-before-descend radius 10), `corp_agent.py` (triage 0.55/0.60, zero-turn guard 4).
