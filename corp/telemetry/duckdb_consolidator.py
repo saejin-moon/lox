@@ -27,10 +27,10 @@ class DuckDBConsolidator:
         self.llm_queries_glob = os.path.join(parquet_dir, "llm_queries", "*.parquet")
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    def consolidate(self) -> dict[str, int]:
+    def consolidate(self, clean_parquet: bool = False) -> dict[str, Any]:
         """
-        Ingests all Parquet files into the persistent DuckDB database
-        and rebuilds analytical views.
+        Ingests all Parquet files into the persistent DuckDB database,
+        rebuilds analytical views, and optionally deletes raw Parquet files post-verification.
         """
         conn = duckdb.connect(self.db_path)
         episodes_count = 0
@@ -202,10 +202,47 @@ class DuckDBConsolidator:
             """)
 
         conn.close()
+        cleanup_stats = {}
+        if clean_parquet:
+            cleanup_stats = self.clean_parquet_files()
+
         return {
             "episodes": episodes_count,
             "ticks": ticks_count,
+            "llm_queries": llm_queries_count,
+            **cleanup_stats,
         }
+
+    def clean_parquet_files(self) -> dict[str, Any]:
+        """
+        Safely deletes all ingested Parquet files from logs/parquet/
+        once verified inside DuckDB.
+        """
+        deleted_count = 0
+        deleted_bytes = 0
+        for sub in ("episodes", "ticks", "llm_queries"):
+            sub_dir = os.path.join(self.parquet_dir, sub)
+            if not os.path.exists(sub_dir):
+                continue
+            for fname in os.listdir(sub_dir):
+                if fname.endswith(".parquet"):
+                    fpath = os.path.join(sub_dir, fname)
+                    try:
+                        deleted_bytes += os.path.getsize(fpath)
+                        os.unlink(fpath)
+                        deleted_count += 1
+                    except OSError:
+                        pass
+        return {
+            "deleted_files": deleted_count,
+            "freed_mb": round(deleted_bytes / (1024 * 1024), 2),
+        }
+
+    def vacuum(self) -> None:
+        """Runs VACUUM on DuckDB to reclaim free space."""
+        conn = duckdb.connect(self.db_path)
+        conn.execute("VACUUM;")
+        conn.close()
 
     def query(self, sql: str) -> list[tuple]:
         """Runs an arbitrary SQL query against the consolidated DuckDB database."""

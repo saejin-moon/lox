@@ -134,12 +134,35 @@ class HTNPlanner:
         self.methods: dict[str, list[Method]] = {}  # Keyed by compound task name
         self.nogood_store = nogood_store or NogoodStore()
         self.cycle_detector = CycleDetector()
+        self._sorted_methods_cache: dict[tuple[int, str], list[Method]] = {}
+
+    def clear_cache(self):
+        """Clears the persona method sort cache."""
+        self._sorted_methods_cache.clear()
 
     def register_method(self, method: Method):
         """Registers a decomposition method for a compound task."""
         if method.target_task not in self.methods:
             self.methods[method.target_task] = []
         self.methods[method.target_task].append(method)
+        self.clear_cache()
+
+    def _get_sorted_methods(self, task_name: str, persona: PersonaTraitVector) -> list[Method]:
+        """Returns candidate methods sorted by persona utility, with memoized caching."""
+        candidates = self.methods.get(task_name, [])
+        if len(candidates) <= 1:
+            return candidates
+        cache_key = (id(persona), task_name)
+        cached = self._sorted_methods_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        sorted_methods = sorted(
+            candidates,
+            key=lambda m: m.compute_priority(persona),
+            reverse=True,
+        )
+        self._sorted_methods_cache[cache_key] = sorted_methods
+        return sorted_methods
 
     def plan(
         self,
@@ -188,16 +211,9 @@ class HTNPlanner:
             return [task]  # type: ignore
 
         # Recursive Case: Compound Task
-        candidate_methods = self.methods.get(task.name, [])
-        if not candidate_methods:
+        sorted_methods = self._get_sorted_methods(task.name, persona)
+        if not sorted_methods:
             return None
-
-        # Sort candidate methods dynamically by continuous persona utility
-        sorted_methods = sorted(
-            candidate_methods,
-            key=lambda m: m.compute_priority(persona),
-            reverse=True,
-        )
 
         for method in sorted_methods:
             # 1. Evaluate method preconditions
@@ -208,6 +224,9 @@ class HTNPlanner:
             try:
                 subtasks = method.subtasks_fn(state)
             except Exception:
+                continue
+
+            if not subtasks:
                 continue
 
             subplan: list[PrimitiveTask] = []

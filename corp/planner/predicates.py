@@ -4,6 +4,7 @@ for sub-microsecond CDCL Nogood evaluation.
 """
 
 from enum import IntFlag
+from typing import Any
 import numpy as np
 from corp.env.blstats import BottomLineStats, ConditionFlag, HungerState
 from corp.env.inventory_tracker import InventoryNormalizer
@@ -55,6 +56,9 @@ class PredicateBit(IntFlag):
 def compile_predicate_mask(
     blstats: BottomLineStats,
     inventory: InventoryNormalizer | None = None,
+    monsters: list[Any] | None = None,
+    chars: np.ndarray | None = None,
+    lvl_map: Any = None,
     extra_flags: int = 0,
 ) -> int:
     """
@@ -103,5 +107,49 @@ def compile_predicate_mask(
                     mask |= PredicateBit.RANGED_WEAPON_WIELDED
                 if "shield of reflection" in s or "amulet of reflection" in s:
                     mask |= PredicateBit.REFLECTION_ACTIVE
+
+    # 6. Environmental & Spatial conditions
+    py, px = blstats.y, blstats.x
+    if chars is not None and 0 <= py < chars.shape[0] and 0 <= px < chars.shape[1]:
+        c = int(chars[py, px])
+        if c == ord(">"):
+            mask |= PredicateBit.STANDING_ON_STAIRS_DOWN
+        elif c == ord("_"):
+            mask |= PredicateBit.CURRENT_TILE_ALTAR
+        elif c == ord("^"):
+            mask |= PredicateBit.CURRENT_TILE_PIT_OR_WEB
+        elif c == ord("#"):
+            mask |= PredicateBit.CORRIDOR_CHOKEPOINT
+
+    if lvl_map is not None:
+        if getattr(lvl_map, "stairs_down", None) == (py, px):
+            mask |= PredicateBit.STANDING_ON_STAIRS_DOWN
+        if (py, px) in getattr(lvl_map, "altars", ()):
+            mask |= PredicateBit.CURRENT_TILE_ALTAR
+
+    # 7. Monster Adjacency & Threat conditions
+    if monsters:
+        adj_hostile_count = 0
+        for m in monsters:
+            if not getattr(m, "is_adjacent", False):
+                continue
+            mname = getattr(m, "name", "").lower()
+            if getattr(m, "is_peaceful", False):
+                mask |= PredicateBit.ADJACENT_PEACEFUL_NPC
+            else:
+                adj_hostile_count += 1
+                if "floating eye" in mname:
+                    mask |= PredicateBit.ADJACENT_FLOATING_EYE
+                if "cockatrice" in mname or "chickatrice" in mname:
+                    mask |= PredicateBit.ADJACENT_COCKATRICE
+                if "rust monster" in mname:
+                    mask |= PredicateBit.ADJACENT_RUST_MONSTER
+                if "mind flayer" in mname:
+                    mask |= PredicateBit.ADJACENT_MIND_FLAYER
+                if getattr(m, "speed", 12) > 12:
+                    mask |= PredicateBit.ADJACENT_MONSTER_FASTER
+
+        if adj_hostile_count >= 2:
+            mask |= PredicateBit.HOSTILE_COUNT_GE_2
 
     return mask

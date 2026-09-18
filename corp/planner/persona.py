@@ -111,3 +111,16 @@ class PersonaProfiler:
             stealth=float(t_stealth),
             alignment=float(t_align),
         )
+
+
+def parse_character_metadata(banner: str) -> dict[str, str]:
+    """Extracts role, race, gender, and alignment from the NetHack startup banner."""
+    banner_lower = banner.lower()
+    words = banner_lower.replace(".", " ").replace(",", " ").replace("!", " ").split()
+    role = next((w for w in words if w in ("archeologist", "barbarian", "caveman", "healer", "knight", "monk", "priest", "priestess", "ranger", "rogue", "samurai", "tourist", "valkyrie", "wizard")), "unknown")
+    if role == "priestess":
+        role = "priest"
+    race = next((w for w in words if w in ("human", "elf", "elven", "dwarf", "dwarven", "gnome", "gnomish", "orc", "orcish")), "unknown")
+    gender = next((w for w in words if w in ("male", "female")), "unknown")
+    align = next((w for w in words if w in ("lawful", "neutral", "chaotic")), "unknown")
+    return {"role": role, "race": race, "gender": gender, "alignment": align}

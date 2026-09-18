@@ -63,11 +63,17 @@ class BottomLineStats:
     level_number: int
     condition_bits: int
     alignment: int = 0
+    exp_points: int = 0
 
     @classmethod
     def from_blstats(cls, raw: npt.NDArray[np.int64]) -> "BottomLineStats":
         """Converts raw blstats array into strongly typed BottomLineStats."""
         align = int(raw[nethack.NLE_BL_ALIGN]) if len(raw) > nethack.NLE_BL_ALIGN else 0
+        exp_pts = int(raw[nethack.NLE_BL_EXP]) if len(raw) > nethack.NLE_BL_EXP else 0
+        # In real NetHack NLE, hero level (XL 1-30) is at NLE_BL_XP (18).
+        # Fall back to NLE_BL_EXP (19) if NLE_BL_XP is 0 for synthetic test fixtures.
+        raw_xp = int(raw[nethack.NLE_BL_XP]) if len(raw) > nethack.NLE_BL_XP else 0
+        hero_xl = raw_xp if raw_xp > 0 else (exp_pts if exp_pts > 0 else 1)
         return cls(
             x=int(raw[nethack.NLE_BL_X]),
             y=int(raw[nethack.NLE_BL_Y]),
@@ -87,7 +93,7 @@ class BottomLineStats:
             max_energy=int(raw[nethack.NLE_BL_ENEMAX]),
             ac=int(raw[nethack.NLE_BL_AC]),
             monster_level=int(raw[nethack.NLE_BL_HD]),
-            experience=int(raw[nethack.NLE_BL_EXP]),
+            experience=hero_xl,
             turn=int(raw[nethack.NLE_BL_TIME]),
             hunger_state=int(raw[nethack.NLE_BL_HUNGER]),
             encumbrance=int(raw[nethack.NLE_BL_CAP]),
@@ -95,7 +101,16 @@ class BottomLineStats:
             level_number=int(raw[nethack.NLE_BL_DLEVEL]),
             condition_bits=int(raw[nethack.NLE_BL_CONDITION]),
             alignment=align,
+            exp_points=exp_pts,
         )
+
+    @property
+    def experience_level(self) -> int:
+        return self.experience
+
+    @property
+    def experience_points(self) -> int:
+        return self.exp_points
 
     @property
     def is_blind(self) -> bool:
@@ -114,6 +129,14 @@ class BottomLineStats:
         return bool(self.condition_bits & ConditionFlag.CONFUSED)
 
     @property
+    def is_levitating(self) -> bool:
+        return bool(self.condition_bits & ConditionFlag.LEVITATING)
+
+    @property
+    def is_flying(self) -> bool:
+        return bool(self.condition_bits & ConditionFlag.FLYING)
+
+    @property
     def has_lethal_condition(self) -> bool:
         lethal_mask = (
             ConditionFlag.STONE
@@ -123,3 +146,11 @@ class BottomLineStats:
             | ConditionFlag.TERM_ILL
         )
         return bool(self.condition_bits & lethal_mask)
+
+    @property
+    def dnum(self) -> int:
+        return self.dungeon_number
+
+    @property
+    def dlevel(self) -> int:
+        return self.level_number

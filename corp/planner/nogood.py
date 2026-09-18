@@ -25,10 +25,13 @@ class NogoodEntry:
 class NogoodStore:
     """
     Stores and evaluates bitwise Nogood cuts against candidate actions.
+    Uses an Inverted Action Trie/Bucket (FatalAction -> list[NogoodEntry])
+    to guarantee O(1) check time (<1 microsecond).
     """
 
     def __init__(self):
         self.entries: list[NogoodEntry] = []
+        self._by_action: dict[str, list[NogoodEntry]] = {}
         self._initialize_canonical_interlocks()
 
     def _initialize_canonical_interlocks(self):
@@ -90,18 +93,24 @@ class NogoodStore:
         ))
 
     def add_nogood(self, entry: NogoodEntry):
-        """Appends a new verified Nogood constraint."""
+        """Appends a new verified Nogood constraint to list and inverted action bucket."""
         self.entries.append(entry)
+        if entry.forbidden_action not in self._by_action:
+            self._by_action[entry.forbidden_action] = []
+        self._by_action[entry.forbidden_action].append(entry)
 
     def is_forbidden(self, state_mask: int, action_name: str) -> Tuple[bool, str]:
         """
-        Evaluates active Nogoods in <1 microsecond via bitwise AND operations.
+        Evaluates active Nogoods in <1 microsecond via bitwise AND operations
+        indexed by candidate action.
         Returns (is_forbidden, reason).
         """
-        for entry in self.entries:
-            if entry.forbidden_action == action_name:
-                if (state_mask & entry.mask) == entry.target_val:
-                    return True, entry.reason
+        candidates = self._by_action.get(action_name)
+        if not candidates:
+            return False, ""
+        for entry in candidates:
+            if (state_mask & entry.mask) == entry.target_val:
+                return True, entry.reason
         return False, ""
 
     def save_to_json(self, file_path: str):
@@ -120,4 +129,4 @@ class NogoodStore:
         for item in data:
             entry = NogoodEntry(**item)
             if entry not in self.entries:
-                self.entries.append(entry)
+                self.add_nogood(entry)

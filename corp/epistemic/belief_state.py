@@ -43,6 +43,16 @@ class ItemBeliefState:
             self.identity_probs = np.full(k, 1.0 / k, dtype=np.float64)
 
     @property
+    def buc_state(self) -> str:
+        if self.p_blessed >= 0.99:
+            return "BLESSED"
+        elif self.p_uncursed >= 0.99:
+            return "UNCURSED"
+        elif self.p_cursed >= 0.99:
+            return "CURSED"
+        return "UNKNOWN"
+
+    @property
     def p_blessed(self) -> float:
         return float(self.p_buc[0])
 

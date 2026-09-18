@@ -36,12 +36,18 @@ class AltarListener:
         msg_lower = terminal_message.lower()
 
         # 2. Black light flash -> Cursed
-        if "black light" in msg_lower or "flash of black" in msg_lower:
+        if any(w in msg_lower for w in (
+            "black light", "flash of black", "black glow", "glows black"
+        )):
             item_belief.collapse_buc("CURSED")
             return True
 
         # 3. Amber / Purple flash -> Blessed
-        if "amber flash" in msg_lower or "purple flash" in msg_lower or "amber light" in msg_lower or "purple light" in msg_lower:
+        if any(w in msg_lower for w in (
+            "amber flash", "purple flash", "amber light", "purple light",
+            "amber glow", "purple glow", "glows amber", "glows purple",
+            "flash of amber", "flash of purple"
+        )):
             item_belief.collapse_buc("BLESSED")
             return True
 

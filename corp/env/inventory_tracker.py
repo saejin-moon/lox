@@ -33,14 +33,17 @@ class InventoryNormalizer:
     protecting higher-order planners against NetHack letter shifting race conditions.
     """
 
-    def __init__(self):
+    def __init__(self, role: str = ""):
+        self.role: str = role
         self.active_items: dict[str, NormalizedItem] = {}  # Keyed by UID
         self.letter_to_uid: dict[str, str] = {}           # Maps 'a' -> UID
         self.uid_to_letter: dict[str, str] = {}           # Maps UID -> 'a'
         self._last_inventory_sig: tuple[bytes, bytes, bytes, bytes] | None = None
 
-    def reset(self):
+    def reset(self, role: str = ""):
         """Clears all inventory mappings and state cache."""
+        if role:
+            self.role = role
         self.active_items.clear()
         self.letter_to_uid.clear()
         self.uid_to_letter.clear()
@@ -53,11 +56,15 @@ class InventoryNormalizer:
         inv_glyphs: npt.NDArray[np.int16],
         inv_oclasses: npt.NDArray[np.uint8] | None = None,
         turn: int = 0,
+        role: str = "",
     ) -> dict[str, NormalizedItem]:
         """
         Synchronizes raw NLE inventory observation tensors into stable UIDs
         via bipartite Hungarian matching, with fast-path dirty-check bypass.
         """
+        if role:
+            self.role = role
+
         # Fast Path: Check if raw inventory buffers are bitwise identical to previous step
         current_sig = (
             inv_letters.tobytes(),
@@ -85,13 +92,15 @@ class InventoryNormalizer:
             oclass = int(inv_oclasses[i]) if inv_oclasses is not None and i < len(inv_oclasses) else 0
 
             # Quick heuristic parse
-            equipped = "(weapon in hands)" in desc or "(being worn)" in desc or "(wielded)" in desc
+            equipped = "(weapon in hand" in desc or "(being worn)" in desc or "(wielded)" in desc
             buc = "UNKNOWN"
-            if "blessed" in desc:
+            if "uncursed" in desc:
+                buc = "UNCURSED"
+            elif "blessed" in desc:
                 buc = "BLESSED"
             elif "cursed" in desc:
                 buc = "CURSED"
-            elif "uncursed" in desc:
+            elif self.role and self.role.lower() == "priest":
                 buc = "UNCURSED"
 
             current_slots.append({
@@ -103,8 +112,11 @@ class InventoryNormalizer:
                 "buc": buc,
             })
 
-        # Previous active items
-        active_uids = [uid for uid, it in self.active_items.items() if it.is_active]
+        # Previous active items (plus recently dropped items within 10 turns to preserve BUC/UID across drops)
+        active_uids = [
+            uid for uid, it in self.active_items.items()
+            if it.is_active or (turn - it.last_updated_turn <= 10)
+        ]
 
         # Case 1: If no previous active items, initialize all
         if not active_uids:
