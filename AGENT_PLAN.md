@@ -241,6 +241,72 @@ the loop, validator, DSL, and program machinery are untouched.
 
 ---
 
+
+---
+
+## 4.5 R3 HANDOFF ADDENDUM — read before starting R3 (closes the documentation gaps)
+
+### Session-start protocol (any fresh session)
+1. Read, in order: `AGENTS.md` (mission + interlocks), `AGENT_PLAN.md` (this file), `MACRO.md` (DSL spec).
+2. Run `uv run pytest -q` → expect **193 passed**. Never proceed with fewer.
+3. Check background baselines: `data/autoascend_val_100ep.json` / `data/baseline_corp_100ep.json`.
+   CORP reference is **frozen** (`oPoU2l`: median 3.0 / mean 401.7 / 100ep@20k, SPS 759).
+   AutoAscend val 100ep@50k runs in background → `data/autoascend_val_100ep.json` (check
+   `data/r0_baseline_autoascend.log`; `grep -c "^Ep"` = episodes done).
+4. Read the existing seams before writing anything: `corp/policy/config.py` (PolicyConfig — the
+   tunable surface), `corp/policy/program.py` (`PolicyProgram.load/apply_overlay` — the container),
+   `corp/policy/predicates.py` (`parse/eval_condition/nethack_bindings` — the condition evaluator),
+   `corp/policy/goal_interpreter.py` (the strategy_plan walker), `corp/domain/macro_director.py`
+   (legacy reference implementation, kept for equivalence tests only).
+5. **Disambiguation**: `planner/predicates.py` = the legacy 64-bit mask compiler (leave it in place);
+   `policy/predicates.py` = the R2 condition evaluator. They coexist deliberately. R3 does NOT migrate.
+
+### R3 design decisions already made (do not re-litigate)
+- **Diff emission format**: S-expression text per MACRO.md §2.2 — NOT JSON, NOT free text.
+- **Provider calls**: `LLMProvider.generate_reasoning_and_json(system, user, schema)` returns JSON into
+  Pydantic only. For raw S-expression output, ADD a `generate_text(system, user) -> LLMResponse` method to
+  `providers/base.py` + OpenRouter/Gemini implementations (plain completion, no JSON parsing), and use
+  llama.cpp's GBNF `grammar` argument on the local path (`corp/policy/grammar/nethack.sexpr.gbnf`).
+- **Nogoods fold-in**: `data/nogoods.json` is a LIST of nogood entries (5 currently). Policy program gains
+  `"nogoods": [...]` with the SAME entry shape; `NogoodStore.load_from_json` gains a program-path branch.
+  Keep writing `data/nogoods.json` for backward compat until R4.
+- **In-game impasses**: `DeadlockResolver` emits a diff through the validator; accepted diffs take effect
+  **next episode** (v1 has no runtime re-compile — MACRO.md §10). The existing `plan_queue` transient-patch
+  path is REMOVED, replaced by: accepted deadlock diff → program update → next episode uses it.
+- **Run-report bundle schema** (the reviser's input, built from DuckDB by `policy/report.py`):
+  ```json
+  {
+    "domain": "nethack", "batch": {"episodes": 100, "median_depth": 3.0, "mean_score": 401.7,
+    "best_score": 1379, "survival_rate": 0.13, "mean_turns": 3939.7},
+    "death_taxonomy": [{"cause": "The bat bites!", "count": 9, "median_depth_at_death": 2,
+                        "median_hp_frac_at_death": 0.15}],
+    "stall_census": [{"goal": "explore_floor", "stalls": 4, "median_stall_turns": 1200}],
+    "goal_stats": [{"goal": "forge_excalibur", "completions": 12, "skips_budget": 3,
+                    "skips_when": 40, "median_steps": 700}],
+    "prev_revisions": [{"version": 14, "accepted": true, "delta_score": -30.0, "reason": "..."}],
+    "variance_note": "NetHackChallenge unseedable; deltas < 1 batch-sigma are noise"
+  }
+  ```
+  (Exact queries: death taxonomy from `episodes.death_message` LIKE-grouping; goal stats from
+  `goal_events`; hp-at-death from `ticks` last-rows per episode.)
+- **Author prompt template** (rendered by `policy/reviser.py`): system = role definition ("you are the
+  strategy-tuning author of a symbolic NetHack agent; you emit ONE policy diff; you may only use the
+  vocabulary manifest below; every change needs a reason grounded in the report") + MACRO.md §2.2 excerpt;
+  user = manifest (§4 MACRO.md) + run-report bundle + last 5 ledger entries + RAG slices. Output = one
+  diff, nothing else.
+- **Acceptance-gate thresholds** (validator step 12): quick batch = 3ep×5k steps; reject if mean score
+  drops >50% below the current program's rolling quick-batch mean; certification subset = the existing
+  `run_skill_certifications.py` suite must stay green.
+- **Mock-first development**: build the whole loop against `MockProvider` (deterministic canned diffs —
+  write 3: one valid `set`, one valid `rule add`, one out-of-vocab to test rejection). Only touch real
+  APIs after the dry-run acceptance criterion passes.
+
+### R3 acceptance (from §5, operationalized)
+1. `run_revision_loop.py --max-revisions 10 --provider mock` → 10 gated revisions unattended,
+   ledger shows mix of accept + reject with correct error codes.
+2. One live frontier-API revision accepted with the 3-ep quick batch passing.
+3. 0 rejected-diff leaks: program on disk always passes the full validator.
+
 ## 5. Phases R0–R9
 
 ### R0 — Checkpoint & Measurement (½ day) — **[2026-09-18 DONE]**
