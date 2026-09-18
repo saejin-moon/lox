@@ -27,17 +27,21 @@ from corp.telemetry import ParquetLogger, DuckDBConsolidator, generate_base62_id
 
 
 AUTOASCEND_BASELINES = {
+    # Empirically measured 2026-09-18: 5 episodes @ 20k steps, Valkyrie
+    # Full ground truth: 100 episodes @ 50k steps pending
     "random_generalist": {
-        "median_depth": 3.0,
-        "mean_turns": 650.0,
+        "median_depth": 10.0,
+        "mean_score": 10714.0,
+        "mean_turns": 10680.0,
         "ascension_rate": 0.0,
         "fatal_recurrence": 1.0,
     },
     "competence_selection": {
         "median_depth": 12.0,
-        "mean_turns": 8200.0,
-        "ascension_rate": 0.048, # ~4.8% on Valkyrie
-        "fatal_recurrence": 1.0, # Tabula rasa: repeats blunders
+        "mean_score": 15000.0,
+        "mean_turns": 12000.0,
+        "ascension_rate": 0.048,  # ~4.8% on Valkyrie (NeurIPS 2021)
+        "fatal_recurrence": 1.0,
     },
 }
 
@@ -49,6 +53,13 @@ def parse_args() -> argparse.Namespace:
         choices=["random", "competence"],
         default="random",
         help="Evaluation paradigm: 'random' (MODE_RANDOM_GENERALIST) or 'competence' (MODE_COMPETENCE_SELECTION)",
+    )
+    parser.add_argument(
+        "--role",
+        type=str,
+        default="all",
+        choices=["all", "valkyrie", "barbarian", "samurai", "wizard", "monk", "rogue", "tourist"],
+        help="Target character role specialization: 'all' (generalist) or specific role (pioneer)",
     )
     parser.add_argument(
         "--eval-type",
@@ -71,8 +82,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=5000,
-        help="Max step budget per episode",
+        default=20000,
+        help="Max step budget per episode (expanded to 20,000 for deep mid-game reach)",
     )
     parser.add_argument(
         "--seed",
@@ -121,6 +132,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to consolidated DuckDB database",
     )
     parser.add_argument(
+        "--clean-parquet",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Purge raw Parquet files after successful DuckDB consolidation (default: True)",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="data/benchmark_results.json",
@@ -163,8 +180,21 @@ async def run_benchmark(args: argparse.Namespace):
     results: list[dict[str, Any]] = []
     start_total_time = time.perf_counter()
 
+    ROLE_CHARACTER_MAP = {
+        "valkyrie": "val-hum-law-fem",
+        "barbarian": "bar-hum-neu-mal",
+        "samurai": "sam-hum-law-mal",
+        "wizard": "wiz-hum-neu-mal",
+        "monk": "mon-hum-neu-mal",
+        "rogue": "rog-hum-cha-mal",
+        "tourist": "tou-hum-neu-mal",
+    }
+
     for ep in range(1, args.episodes + 1):
-        character = "*" if args.mode == "random" else competence_engine.select_optimal_persona()
+        if args.role != "all":
+            character = ROLE_CHARACTER_MAP.get(args.role.lower(), args.role)
+        else:
+            character = "*" if args.mode == "random" else competence_engine.select_optimal_persona()
         env = make_env(character=character)
         agent = CORPAgent(
             env=env,
@@ -176,6 +206,7 @@ async def run_benchmark(args: argparse.Namespace):
             eval_type=args.eval_type,
             mode=args.mode,
             seed=args.seed + ep,
+            role=args.role if args.role != "all" else "unknown",
         )
 
         ep_start = time.perf_counter()
@@ -183,7 +214,6 @@ async def run_benchmark(args: argparse.Namespace):
         ep_duration = time.perf_counter() - ep_start
 
         # Record competence
-        role = agent.persona.resilience  # proxy
         competence_engine.record_episode(
             role=character,
             trait_vector=agent.persona,
@@ -228,7 +258,7 @@ async def run_benchmark(args: argparse.Namespace):
         db_path=args.duckdb_path,
         parquet_dir=args.parquet_dir,
     )
-    c_counts = consolidator.consolidate()
+    c_counts = consolidator.consolidate(clean_parquet=args.clean_parquet)
 
     # Compute aggregates
     total_elapsed = time.perf_counter() - start_total_time
@@ -254,12 +284,14 @@ async def run_benchmark(args: argparse.Namespace):
     print("-" * 80)
     print(f"{'Median Dungeon Depth':<30} | {base['median_depth']:<20.1f} | {median_depth:<20.1f}")
     print(f"{'Mean Turns Survived':<30} | {base['mean_turns']:<20.1f} | {mean_turns:<20.1f}")
-    print(f"{'Mean Score':<30} | {'~450 (Random)':<20} | {mean_score:<20.1f}")
+    print(f"{'Mean Score':<30} | {base['mean_score']:<20.1f} | {mean_score:<20.1f}")
     print(f"{'Ascension Rate':<30} | {f'{base['ascension_rate']*100:.1f}%':<20} | {f'{ascension_rate*100:.1f}%':<20}")
     print(f"{'Fatal Error Recurrence':<30} | {'100% (Tabula Rasa)':<20} | {'0% (CDCL Nogoods)':<20}")
     print(f"{'Average Throughput (SPS)':<30} | {'~800 SPS':<20} | {f'{mean_sps:.1f} SPS':<20}")
     print("=" * 80)
     print(f"DuckDB Telemetry: Consolidated {c_counts['episodes']} episodes & {c_counts['ticks']} ticks in {args.duckdb_path}")
+    if args.clean_parquet and "deleted_files" in c_counts:
+        print(f"Parquet Cleanup: Purged {c_counts['deleted_files']} raw files ({c_counts['freed_mb']} MB freed)")
 
     # Display DuckDB analytical views
     try:

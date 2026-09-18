@@ -158,3 +158,50 @@ def test_anomaly_sentry_burst_and_lethal():
     bl_3 = BottomLineStats.from_blstats(raw_bl_3)
     events_3 = sentry.evaluate(bl_3)
     assert any(e.condition_name == "LETHAL_STATUS" for e in events_3)
+
+
+def test_auto_more_wishing_and_payment_interception():
+    from corp.env.auto_more import AutoMoreWrapper
+    import gymnasium as gym
+
+    class MockInnerEnv(gym.Env):
+        def __init__(self):
+            super().__init__()
+            self.actions = [type("Act", (), {"value": i})() for i in range(128)]
+
+    mock_env = MockInnerEnv()
+    wrapper = AutoMoreWrapper(mock_env)
+
+    # 1. Wish prompt detection
+    obs_wish = {"message": np.frombuffer(b"For what do you wish?\x00", dtype=np.uint8)}
+    assert wrapper._is_wish_prompt(obs_wish) is True
+
+    # 2. Payment confirmation
+    obs_pay = {"message": np.frombuffer(b"Pay 40 zm for a food ration? [yn]\x00", dtype=np.uint8)}
+    assert wrapper._is_yn_prompt(obs_pay) is True
+    assert wrapper._resolve_yn_action(obs_pay) == AutoMoreWrapper.ACTION_Y
+
+
+def test_auto_more_menu_dismissal():
+    from corp.env.auto_more import AutoMoreWrapper
+    import gymnasium as gym
+
+    # Verify menu patterns (X of Y) and (end) are recognized as needing pagination/dismissal
+    class MockInnerEnv(gym.Env):
+        def __init__(self):
+            super().__init__()
+            self.actions = [type("Act", (), {"value": i})() for i in range(128)]
+
+    mock_env = MockInnerEnv()
+    wrapper = AutoMoreWrapper(mock_env)
+
+    obs_menu_p1 = {"tty_chars": np.frombuffer(b"Skills (1 of 2) ...", dtype=np.uint8)}
+    obs_menu_p2 = {"tty_chars": np.frombuffer(b"Skills (2 of 2) ...", dtype=np.uint8)}
+    obs_menu_end = {"tty_chars": np.frombuffer(b"Skills (end) ...", dtype=np.uint8)}
+
+    assert wrapper._is_more(obs_menu_p1) is True
+    assert wrapper._is_more(obs_menu_p2) is True
+    assert wrapper._is_more(obs_menu_end) is True
+    assert wrapper.ACTION_ESC == 38
+    assert wrapper.ACTION_SPACE == 107
+
