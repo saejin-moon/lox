@@ -1,20 +1,16 @@
 {
-  "version": 2,
+  "version": 3,
   "domain": "nethack",
-  "params": {},
+  "params": {
+    "survival.rest_below_frac": 0.65
+  },
   "macros": [],
   "tactic_rules": [
     {
-      "when": "(and (is_fighting) (hp_frac <= 0.4))",
-      "do": "retreat_when_wounded",
+      "when": "(and (in_mines) (hp_frac <= 0.4))",
+      "do": "retreat",
       "unless": null,
-      "note": "Emergency retreat when wounded"
-    },
-    {
-      "when": "(is_fighting)",
-      "do": "ranged_then_kill",
-      "unless": null,
-      "note": "Softening enemies from range"
+      "note": "mines attrition fix"
     }
   ],
   "nogoods": [],
@@ -55,9 +51,9 @@
     }
   ],
   "provenance": {
-    "author": "strategy-tuning author",
+    "author": "mock",
     "note": "equivalent to pre-R2 MacroAscensionDirector phase machine",
-    "parent_version": 1,
-    "reason": "Deaths at low HP and high HP from melee combat suggest lack of ranged combat and retreat tactics. Adding combat rules to prioritize ranged engagement and emergency retreats."
+    "parent_version": 2,
+    "reason": "mock: mines attrition \u2014 retreat when wounded underground"
   }
 }
