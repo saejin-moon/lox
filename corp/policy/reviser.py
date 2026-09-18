@@ -125,7 +125,7 @@ class Reviser:
             ledger_tail=self.ledger.tail(5),
             rag_slices=self.rag_slices,
         )
-        context = {"version": program.version}
+        context = {"version": program.version, "domain": manifest.domain}
         start = time.perf_counter()
         resp = await self.provider.generate_text(system, user, context)
         self.last_meta = {

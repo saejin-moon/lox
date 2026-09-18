@@ -37,8 +37,8 @@ Outperform **AutoAscend** on NetHack (NLE 3.6.6 / `NetHackChallenge-v0`) and dem
    - **ALWAYS** prefix Python and Pytest commands with `uv run`.
    - Examples: `uv run python scripts/run_benchmark.py ...`, `uv run pytest`.
 3. **100% REGRESSION-FREE TEST SUITE**:
-   - The test suite (`uv run pytest`) currently has **286 passing tests** taking ~4s.
-   - Every single pull request, edit, or commit MUST maintain 286/286 passing tests. Never disable or skip tests to mask errors.
+   - The test suite (`uv run pytest`) currently has **297 passing tests** taking ~4s.
+   - Every single pull request, edit, or commit MUST maintain 297/297 passing tests. Never disable or skip tests to mask errors.
 4. **CLEAN TELEMETRY & ZERO DISK BACKLOG**:
    - Streaming telemetry generates columnar Snappy-compressed Parquet files in `logs/parquet/`.
    - These files MUST be consolidated into DuckDB (`data/corp_telemetry.duckdb`) and automatically purged using the `--clean-parquet` flag on `run_benchmark.py` or via `scripts/clean_telemetry.py`.
@@ -60,7 +60,12 @@ corp/
 │                              #   validator.py (gate pipeline) · reviser.py · ledger.py · report.py
 │                              #   tactics.py (R4 rule engine) · profiles.py (role/domain overlays)
 │                              #   grammar/ (GBNF for the llama.cpp repro path)
-├── executor/                  # [R5, PLANNED] DomainAdapter ABC + registry; nethack facade; minihack/craftax adapters
+├── executor/                  # [R5 CORE DONE] DomainAdapter ABC + registry; nethack facade
+│   ├── interface.py           # DomainAdapter ABC, DomainSpec, registries (the transfer contract)
+│   ├── nethack_adapter.py     # thin facade over the incumbent NetHack flow
+│   ├── minihack_adapter.py    # MiniHack transfer domain: agent + goals + certs (seeded)
+│   ├── autopsy_engine.py      # Translates flight recorder crash logs into persistent CDCL Nogoods
+│   ├── deadlock_resolver.py   # R3: emits policy diffs through the validator (next-episode effect)
 │   ├── autopsy_engine.py      # Translates flight recorder crash logs into persistent CDCL Nogoods
 │   ├── deadlock_resolver.py   # R3: emits policy diffs through the validator (next-episode effect)
 │   ├── providers/             # Provider abstractions (Mock, LlamaCpp, OpenRouter, Gemini)
@@ -291,7 +296,7 @@ The test suite is fast, comprehensive, and regression-free:
 ```bash
 uv run pytest
 ```
-Output: **286 passed in ~4s** (257 post-R3 + 29 new R4 tests).
+Output: **297 passed in ~4s** (286 post-R4 + 11 new R5 tests).
 
 Key test modules:
 - `tests/test_macro_director.py`: Macro ascension progression phase transitions, Excalibur readiness, and farming deferral.
@@ -355,6 +360,8 @@ stretch goal (R6).
 | **Query Evaluation Summary** | `uv run python scripts/query_duckdb.py "SELECT * FROM v_eval_summary;"` |
 | **Clean Parquet Backlog** | `uv run python scripts/clean_telemetry.py` |
 | **Search NetHack 3.6.6 Wiki** | `uv run python scripts/wiki_search.py "<search query>"` |
+| **Run Transfer-Domain Batch** | `uv run python scripts/run_domain_eval.py --domain minihack --episodes 10` |
+| **Run Tuning Campaign** | `uv run python scripts/run_campaign.py --nights 7 --provider gemini --model gemma-4-26b-a4b-it` |
 | **Run Baseline Comparison Suite** | `uv run python scripts/run_baseline_suite.py --episodes 100 --step-limit 50000 --role val`
 | **Run LLM Revision Loop** | `uv run python scripts/run_revision_loop.py --max-revisions 10 --author api --repro local`
 | **Run Ablation Harness** | `uv run python scripts/run_ablation.py --arms llm,frozen,random --episodes 100 --domain all`

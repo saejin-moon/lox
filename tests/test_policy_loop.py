@@ -131,7 +131,8 @@ class TestRevisionLoop:
         from argparse import Namespace
         args = Namespace(max_revisions=10, provider="mock", model=None,
                          program_path=program_path, ledger_path=ledger_path,
-                         db_path="/nonexistent/telemetry.duckdb", live_gates=False,
+                         db_path="/nonexistent/telemetry.duckdb", domain="nethack",
+                         report_episodes=5, live_gates=False,
                          fixture_shadow=True, quick_batch_episodes=3,
                          quick_batch_steps=5000, no_git=True)
         rc = await run_loop(args)

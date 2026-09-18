@@ -135,9 +135,22 @@ def commit_program(program: PolicyProgram, program_path: str, no_git: bool) -> N
 
 async def run_loop(args) -> int:
     ledger = RevisionLedger(args.ledger_path)
+    if args.program_path is None:
+        args.program_path = (DEFAULT_PROGRAM_PATH if args.domain == "nethack"
+                             else f"data/policy_program_{args.domain}.json")
     program_path = args.program_path
     program = PolicyProgram.load(program_path)
+    if args.domain != "nethack" and program.domain != args.domain:
+        # cold-start: seed the file with the adapter's default program on first run
+        from corp.executor import get_adapter  # noqa: PLC0415
+        PolicyProgram.from_dict(get_adapter(args.domain).default_program()).save(program_path)
+        program = PolicyProgram.load(program_path)
     print(f"[loop] program v{program.version} from {program_path} | provider={args.provider}")
+
+    adapter = None
+    if args.domain != "nethack":
+        from corp.executor import get_adapter  # noqa: PLC0415
+        adapter = get_adapter(args.domain)
 
     provider = get_provider(args.provider, args.model)
     model_name = args.model or getattr(provider, "model", args.provider)
@@ -155,18 +168,35 @@ async def run_loop(args) -> int:
         print(f"[loop] quick-batch baseline (v{program.version}): "
               f"mean_score={hooks_kwargs['baseline_score']}")
     if args.fixture_shadow:
-        from corp.policy.predicates import default_ctx
-        hooks_kwargs["fixture_states"] = [
-            default_ctx(), default_ctx(depth=6, hp=10, max_hp=50, hunger_state=3, is_fighting=True),
-            default_ctx(dnum=2, depth=3, adjacent_hostiles=1, has_healing=False),
-            default_ctx(dnum=3, depth=7),
-        ]
+        from corp.policy.predicates import default_ctx  # noqa: PLC0415
+        if adapter is not None:
+            # domain shadow fixtures: the domain ctx over the shared vocabulary
+            hooks_kwargs["fixture_states"] = [
+                {"stairs_known": False, "hp": 10, "max_hp": 10, "adjacent_hostiles": 0,
+                 "depth": 1, "turn": 1},
+                {"stairs_known": True, "hp": 3, "max_hp": 10, "adjacent_hostiles": 1,
+                 "monster_name": "jackal", "depth": 1, "turn": 200},
+            ]
+        else:
+            hooks_kwargs["fixture_states"] = [
+                default_ctx(), default_ctx(depth=6, hp=10, max_hp=50, hunger_state=3, is_fighting=True),
+                default_ctx(dnum=2, depth=3, adjacent_hostiles=1, has_healing=False),
+                default_ctx(dnum=3, depth=7),
+            ]
 
     n_accepted = 0
     for rev_idx in range(1, args.max_revisions + 1):
-        manifest = build_manifest(program.version, program.domain,
-                                  live_macros={m["name"]: m["body"] for m in program.macros})
-        bundle = build_report_bundle(args.db_path, args.ledger_path, program.domain)
+        if adapter is not None:
+            manifest = adapter.manifest(program.version)
+            # transfer domains: the batch report = a seeded run of the CURRENT program
+            batch = [adapter.run_episode(adapter.make_env(seed=s), program, s,
+                                         adapter.spec.step_limit_default)
+                     for s in range(args.report_episodes)]
+            bundle = adapter.report_bundle(batch)
+        else:
+            manifest = build_manifest(program.version, program.domain,
+                                      live_macros={m["name"]: m["body"] for m in program.macros})
+            bundle = build_report_bundle(args.db_path, args.ledger_path, program.domain)
         print(f"\n=== revision {rev_idx}/{args.max_revisions} | program v{program.version} ===")
 
         t0 = time.perf_counter()
@@ -232,7 +262,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--provider", choices=["mock", "gemini", "openrouter", "llama_cpp"], default="mock")
     p.add_argument("--model", type=str, default=None,
                    help="author model id (e.g. 'gemma-3-27b-it')")
-    p.add_argument("--program-path", type=str, default=DEFAULT_PROGRAM_PATH)
+    p.add_argument("--program-path", type=str, default=None,
+                   help="defaults to data/policy_program.json (nethack) or data/policy_program_<domain>.json")
+    p.add_argument("--domain", type=str, default="nethack",
+                   help="adapter domain: nethack | minihack")
+    p.add_argument("--report-episodes", type=int, default=5,
+                   help="transfer domains: seeded episodes run per revision for the batch report")
     p.add_argument("--ledger-path", type=str, default=DEFAULT_LEDGER_PATH)
     p.add_argument("--db-path", type=str, default=DEFAULT_DB_PATH)
     p.add_argument("--live-gates", action="store_true",

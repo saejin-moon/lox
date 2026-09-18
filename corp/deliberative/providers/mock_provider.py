@@ -23,19 +23,32 @@ class MockProvider(LLMProvider):
 
     CANNED_DIFF_TEMPLATES: list[str] = [
         # 1. valid set op (accepted)
-        '(revision {revision} (parent {parent}) (author "mock") (domain nethack) (reason "mock: widen resting gate — stall telemetry shows HP-resting too timid"))\n'
-        '(set policy_params.survival.rest_below_frac 0.65)',
-        # 2. valid rule add (accepted)
-        '(revision {revision} (parent {parent}) (author "mock") (domain nethack) (reason "mock: mines attrition — retreat when wounded underground"))\n'
-        '(rule add tactic_rules (when (and (in_mines) (hp_frac <= 0.40))) (do retreat) (note "mines attrition fix"))',
+        '(revision {revision} (parent {parent}) (author "mock") (domain {domain}) (reason "mock: widen resting gate — stall telemetry shows HP-resting too timid"))\n'
+        '(set policy_params.{rest_param} {rest_value})',
+        # 2. valid rule add (accepted) — minihack gets a domain-legal verb/predicate
+        '(revision {revision} (parent {parent}) (author "mock") (domain {domain}) (reason "mock: mines attrition — retreat when wounded underground"))\n'
+        '{rule_op}',
         # 3. out-of-vocab param (rejected: ERR_BOUNDS)
-        '(revision {revision} (parent {parent}) (author "mock") (domain nethack) (reason "mock: attempt an unknown param"))\n'
+        '(revision {revision} (parent {parent}) (author "mock") (domain {domain}) (reason "mock: attempt an unknown param"))\n'
         '(set policy_params.survival.no_such_param 0.5)',
         # 4. valid defmacro + use (accepted)
-        '(revision {revision} (parent {parent}) (author "mock") (domain nethack) (reason "mock: compose when_endangered macro"))\n'
+        '(revision {revision} (parent {parent}) (author "mock") (domain {domain}) (reason "mock: compose when_endangered macro"))\n'
         '(defmacro when_endangered (and (adjacent_hostiles) (hp_frac <= 0.40) (not has_healing)))\n'
-        '(rule add tactic_rules (when (and (in_dungeons) (when_endangered))) (do retreat))',
+        '{macro_rule_op}',
     ]
+
+    DOMAIN_TEMPLATES: dict[str, dict] = {
+        "nethack": {
+            "rest_param": "survival.rest_below_frac", "rest_value": "0.65",
+            "rule_op": '(rule add tactic_rules (when (and (in_mines) (hp_frac <= 0.40))) (do retreat) (note "mines attrition fix"))',
+            "macro_rule_op": '(rule add tactic_rules (when (and (in_dungeons) (when_endangered))) (do retreat))',
+        },
+        "minihack": {
+            "rest_param": "explore.stuck_patience", "rest_value": "40",
+            "rule_op": '(rule add tactic_rules (when (and (monster "j") (hp_frac <= 0.30))) (do retreat) (note "wounded: avoid monsters"))',
+            "macro_rule_op": '(rule add tactic_rules (when (and (stairs_known) (when_endangered))) (do retreat))',
+        },
+    }
 
     def __init__(self, canned_response: str | None = None):
         self.canned_response = canned_response
@@ -124,11 +137,14 @@ Resolving deadlock: Injecting search and step sequence to break spatial oscillat
             "context": context,
         })
         version = int((context or {}).get("version", 1))
+        domain = (context or {}).get("domain", "nethack")
+        fills = dict(self.DOMAIN_TEMPLATES.get(domain, self.DOMAIN_TEMPLATES["nethack"]))
+        fills.update({"revision": version + 1, "parent": version, "domain": domain})
         if self.canned_response:
-            raw = self.canned_response.format(revision=version + 1, parent=version)
+            raw = self.canned_response.format(revision=version + 1, parent=version, domain=domain)
         else:
             template = self.CANNED_DIFF_TEMPLATES[self._text_call_count % len(self.CANNED_DIFF_TEMPLATES)]
-            raw = template.format(revision=version + 1, parent=version)
+            raw = template.format(**fills)
         self._text_call_count += 1
         latency = (time.perf_counter() - start_time) * 1000.0
         return LLMResponse(

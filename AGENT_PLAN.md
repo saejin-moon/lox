@@ -387,7 +387,29 @@ unattended `run_revision_loop.py`; deliberative unification (step 9). RAG: NetHa
 Refactor steps 13 + profiles. Three-arm harness (`run_ablation.py`): LLM-revision | frozen | random-perturbation-with-identical-gates — **this control arm is what makes every later claim falsifiable**.
 **Accept**: harness runs unattended; tactic-rule parity on default program; all-role reports.
 
-### R5 — Domain Suite + Tuning Campaign (2–4 weeks)
+### R5 — Domain Suite + Tuning Campaign — **[2026-09-18: CORE DONE — 1 day; craftax port + 100-ep curves pending]**
+> Shipped: `executor/interface.py` (DomainAdapter ABC + DomainSpec/PredicateBinding/ParamLeaf/GoalHandler/
+> CertCase + registry with lazy loading; adapter.machine-generated `manifest(version)` closes the drift
+> guard), `executor/nethack_adapter.py` (thin facade over the incumbent flow), `executor/minihack_adapter.py`
+> (**first transfer domain, fully working**): MiniHack-ExploreMaze family (plan's Explore-HardFixed/
+> Maze-HardReach task names don't exist in minihack 1.0.2 — noted in spec), 12-action compass space,
+> MiniHackAgent (A* to stairs when known / frontier-BFS exploration otherwise, hostile combat with
+> retreat gate), 7 domain param leaves (explore/nav/combat) diff-tunable, 2 certified goals
+> (explore_floor/reach_stairs), 2 certification cases (mapped-Easy A* reaches stairs in 10 steps;
+> unmapped-Hard frontier progress) — both green. `policy/corpus.py` + `scripts/build_corpus.py`-equivalent:
+> FTS5 corpora built for nethack (40 docs / 472 chunks from wiki_index.db) and minihack (17 docs / 91
+> chunks = task docs + targeted wiki articles); coverage checks green; RAG slices wired into the reviser.
+> Revision loop is domain-aware (`--domain minihack`: adapter manifest, seeded episode batches as the
+> run report, cold-start program auto-seeded to data/policy_program_minihack.json); mock + LIVE gemma
+> revision accepted on minihack (v4: generalized the mock's monster-specific retreat rule from telemetry).
+> `scripts/run_domain_eval.py` (seeded batch evaluator) + `scripts/run_campaign.py` (nightly loop +
+> engineering batch + 3-dry-night plateau detection → data/plateau_report.json).
+> HONEST findings: (1) ExploreMaze reward saturates at 100% success — mean_reward cannot distinguish
+> revisions; step-efficiency must join the domain report metric before the tuning campaign claims gains
+> (v4 measured: same success, 44 vs 35 mean steps on 6 seeds — within noise but the metric gap is real).
+> (2) Craftax NOT ported yet — corpus builder raises until `craftax` is installed (JAX dependency);
+> adapter is the next work item. (3) 100-ep three-arm transfer curves not yet run — that is the R5
+> acceptance remainder.
 **Operational spec: §8 (normative contract).** — **transfer becomes a main result**
 Refactor steps 10–12 + 14. Port `DomainAdapter` to MiniHack, then Craftax/Crafter. Per-domain: **RAG corpus
 build first** (`policy/corpus.py` + `scripts/build_corpus.py` → `data/corpus/<domain>/`; NetHack reuses
