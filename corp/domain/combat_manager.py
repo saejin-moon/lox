@@ -174,9 +174,14 @@ class TacticalCombatManager:
         "minotaur",
     )
 
-    def __init__(self, config: PolicyConfig | None = None, player_speed: int | None = None):
+    def __init__(self, config: PolicyConfig | None = None, player_speed: int | None = None,
+                 tactic_rules: list[dict] | None = None):
         self.cfg = config or default_config()
         self.player_speed = player_speed if player_speed is not None else self.cfg.combat.player_speed
+        # R4: tactic-rule engine (first match wins, program order). Defaults to the
+        # program's interlock rules — byte-equivalent triggers to the pre-R4 hardcoded
+        # branches. corp_agent swaps in the live program's rules after construction.
+        self.tactic_engine = TacticalCombatManager.tactic_engine_from(tactic_rules)
         self.elbereth_pos: tuple[int, int, int] | None = None  # (depth, py, px)
         self.elbereth_turns: int = 0
         self.elbereth_waited_turns: int = 0
@@ -185,6 +190,15 @@ class TacticalCombatManager:
         self.turns_since_damaged: int = 100
         self.peaceful_positions: set[tuple[int, int]] = set()
         self.hostile_names: set[str] = set()
+
+    @staticmethod
+    def tactic_engine_from(rules: list[dict] | None):
+        """Builds a TacticRuleEngine; None rules → the default interlock set."""
+        from corp.policy.tactics import TacticRuleEngine  # noqa: PLC0415
+        if rules is None:
+            from corp.policy.program import DEFAULT_TACTIC_RULES  # noqa: PLC0415
+            rules = DEFAULT_TACTIC_RULES
+        return TacticRuleEngine(rules)
 
     @property
     def on_elbereth_turns(self) -> int:
@@ -676,72 +690,36 @@ class TacticalCombatManager:
                         self.elbereth_turns = 0
                         return Task("STEP", is_primitive=True, args={"delta": diag_step})
 
-            # Lethal poison biters (Giant spider, queen bee, scorpion) without poison resistance:
-            # NetHack 3.6.6: giant spider poison bites can deal instakill or fatal strength drain.
-            # Avoid direct melee: engrave dust Elbereth (spiders/bees flee immediately), shoot missiles, or step away!
-            is_lethal_poison_target = (
-                not has_poison_res
-                and any(p in primary_target.name for p in self.LETHAL_POISON_NAMES)
-            )
-            if is_lethal_poison_target:
-                # If already standing on active Elbereth, wait for it to flee!
-                if self.elbereth_turns > 0 and cur_pos == self.elbereth_pos:
+            # R4 TACTIC RULES (§8): first match wins, program order. The matched verb
+            # overrides the default branch for this target. The default program's
+            # interlock rules (lethal poison → elbereth-first, heavy hitters →
+            # retreat-when-wounded) reproduce the pre-R4 hardcoded branches exactly;
+            # the LLM can add rules but never remove interlocks (validator #9b) and
+            # never disable the grid-bug/critical-HP branches above/below.
+            tactic_ctx = {
+                "monster_name": primary_target.name,
+                "item_name": self._tile_item_name(chars, primary_target.pos, (py, px)),
+                "depth": blstats.depth,
+                "hp": blstats.hp,
+                "max_hp": blstats.max_hp,
+                "hunger_state": blstats.hunger_state,
+                "xl": blstats.experience_level,
+                "turn": blstats.turn,
+                "has_poison_res": has_poison_res,
+                "has_reflection": has_reflection,
+                "adjacent_hostiles": len(adjacent_monsters),
+                "has_healing": self._has_usable_healing(inv_tracker) if inv_tracker is not None else False,
+                "is_fighting": True,
+            }
+            match = self.tactic_engine.evaluate(tactic_ctx) if self.tactic_engine else None
+            if match is not None:
+                response = self._verb_response(
+                    match.verb, blstats, inv_tracker, cur_pos, py, px,
+                    adjacent_monsters, chars, glyphs, primary_target,
+                )
+                if response is not self.RULE_FALLTHROUGH:
                     self._prev_hp = blstats.hp
-                    return Task("WAIT", is_primitive=True)
-                # Engrave Elbereth if available
-                if self.elbereth_turns <= 0 and self.elbereth_cooldown <= 0:
-                    permanent_slot = self._find_athame_or_permanent_engraver(inv_tracker)
-                    self.elbereth_pos = cur_pos
-                    self.elbereth_turns = self.cfg.combat.elbereth_permanent_turns if permanent_slot else self.cfg.combat.elbereth_dust_turns
-                    self.elbereth_waited_turns = 0
-                    args = {"text": "Elbereth"}
-                    if permanent_slot:
-                        args["slot"] = permanent_slot
-                    self._prev_hp = blstats.hp
-                    return Task("ENGRAVE_DUST", is_primitive=True, args=args)
-                # Step away to safe tile first (kiting: break adjacent melee contact!)
-                step_away = self._find_escape_step(py, px, adjacent_monsters, chars, glyphs=glyphs)
-                if step_away is not None:
-                    return Task("STEP", is_primitive=True, args={"delta": step_away})
-                # If cornered (cannot step away), try ranged attack (wand, fire, throw)
-                if inv_tracker is not None:
-                    offensive_wand = self._find_offensive_wand_slot(inv_tracker)
-                    if offensive_wand is not None:
-                        return Task("ZAP_WAND", is_primitive=True, args={"slot": offensive_wand, "delta": (dr, dc)})
-                    missile_slot, is_quivered = self._find_quivered_or_missile(inv_tracker)
-                    if is_quivered:
-                        return Task("FIRE", is_primitive=True, args={"delta": (dr, dc)})
-                    if missile_slot is not None:
-                        return Task("THROW", is_primitive=True, args={"slot": missile_slot, "delta": (dr, dc)})
-
-            # Heavy Hitter Tactical Kiting: When wounded (HP <= 65% or HP <= 16),
-            # do not trade blows toe-to-toe with dwarf lords, gnome lords, or ogres!
-            is_heavy_hitter = any(hh in primary_target.name for hh in self.HEAVY_HITTERS)
-            cb = self.cfg.combat
-            is_wounded_vs_heavy = is_heavy_hitter and (blstats.hp <= max(cb.heavy_wounded_min_hp, int(blstats.max_hp * cb.heavy_wounded_frac)))
-            if is_wounded_vs_heavy:
-                if self.elbereth_turns > 0 and cur_pos == self.elbereth_pos:
-                    self._prev_hp = blstats.hp
-                    return Task("WAIT", is_primitive=True)
-                if self.elbereth_turns <= 0 and self.elbereth_cooldown <= 0:
-                    permanent_slot = self._find_athame_or_permanent_engraver(inv_tracker)
-                    self.elbereth_pos = cur_pos
-                    self.elbereth_turns = self.cfg.combat.elbereth_permanent_turns if permanent_slot else self.cfg.combat.elbereth_dust_turns
-                    self.elbereth_waited_turns = 0
-                    args = {"text": "Elbereth"}
-                    if permanent_slot:
-                        args["slot"] = permanent_slot
-                    self._prev_hp = blstats.hp
-                    return Task("ENGRAVE_DUST", is_primitive=True, args=args)
-                step_away = self._find_escape_step(py, px, adjacent_monsters, chars, glyphs=glyphs)
-                if step_away is not None:
-                    return Task("STEP", is_primitive=True, args={"delta": step_away})
-                if inv_tracker is not None:
-                    missile_slot, is_quivered = self._find_quivered_or_missile(inv_tracker)
-                    if is_quivered:
-                        return Task("FIRE", is_primitive=True, args={"delta": (dr, dc)})
-                    if missile_slot is not None:
-                        return Task("THROW", is_primitive=True, args={"slot": missile_slot, "delta": (dr, dc)})
+                    return response
 
             # Phase 3: Speed-differential constraint — fast monsters (speed > 1.3x hero, e.g.
             # giant bats speed 22, soldier ants 18, killer bees 18) shred the hero with
@@ -927,6 +905,129 @@ class TacticalCombatManager:
 
         self._prev_hp = blstats.hp
         return None
+
+    # ------------------------------------------------------------------
+    # R4: tactic-verb responses (§8). The rule engine chooses the verb; these
+    # methods implement it using the same code paths as the pre-R4 branches.
+    # ------------------------------------------------------------------
+
+    RULE_FALLTHROUGH = object()   # sentinel: verb condition not met → default flow
+
+    # Tile-char → item name (for the (item "...") match predicate)
+    ITEM_CHAR_NAMES = {
+        ord("}"): "water", ord("^"): "trap", ord("_"): "altar",
+        ord("{"): "fountain", ord("\\"): "throne", ord("&"): "sink",
+    }
+
+    @staticmethod
+    def _tile_item_name(chars, *positions) -> str:
+        """Space-joined item names of the given tiles (target + hero) so an
+        (item "throne") match predicate can match either tile."""
+        names = [TacticalCombatManager.ITEM_CHAR_NAMES.get(int(chars[r, c]), "")
+                 for r, c in positions if 0 <= int(r) < chars.shape[0] and 0 <= int(c) < chars.shape[1]]
+        return " ".join(n for n in names if n)
+
+    def _ranged_attack_response(self, blstats, inv_tracker, py, px, primary_target):
+        """Wand → quivered fire → thrown missile toward the primary target (elbereth-
+        erasing, as in the pre-R4 ranged paths). Returns None when unarmed."""
+        if inv_tracker is None:
+            return None
+        dr = primary_target.pos[0] - py
+        dc = primary_target.pos[1] - px
+        offensive_wand = self._find_offensive_wand_slot(inv_tracker)
+        if offensive_wand is not None:
+            self.elbereth_pos = None
+            self.elbereth_turns = 0
+            return Task("ZAP_WAND", is_primitive=True, args={"slot": offensive_wand, "delta": (dr, dc)})
+        missile_slot, is_quivered = self._find_quivered_or_missile(inv_tracker)
+        if is_quivered:
+            self.elbereth_pos = None
+            self.elbereth_turns = 0
+            return Task("FIRE", is_primitive=True, args={"delta": (dr, dc)})
+        if missile_slot is not None:
+            self.elbereth_pos = None
+            self.elbereth_turns = 0
+            return Task("THROW", is_primitive=True, args={"slot": missile_slot, "delta": (dr, dc)})
+        return None
+
+    def _defensive_kite_response(self, blstats, inv_tracker, cur_pos, py, px,
+                                 adjacent_monsters, chars, glyphs, primary_target):
+        """The pre-R4 lethal-poison/heavy-hitter response, verbatim: wait on an active
+        Elbereth ward → engrave → escape step → cornered ranged attack."""
+        if self.elbereth_turns > 0 and cur_pos == self.elbereth_pos:
+            return Task("WAIT", is_primitive=True)
+        if self.elbereth_turns <= 0 and self.elbereth_cooldown <= 0:
+            permanent_slot = self._find_athame_or_permanent_engraver(inv_tracker)
+            self.elbereth_pos = cur_pos
+            self.elbereth_turns = self.cfg.combat.elbereth_permanent_turns if permanent_slot else self.cfg.combat.elbereth_dust_turns
+            self.elbereth_waited_turns = 0
+            args = {"text": "Elbereth"}
+            if permanent_slot:
+                args["slot"] = permanent_slot
+            return Task("ENGRAVE_DUST", is_primitive=True, args=args)
+        step_away = self._find_escape_step(py, px, adjacent_monsters, chars, glyphs=glyphs)
+        if step_away is not None:
+            return Task("STEP", is_primitive=True, args={"delta": step_away})
+        if inv_tracker is not None:
+            offensive_wand = self._find_offensive_wand_slot(inv_tracker)
+            if offensive_wand is not None:
+                self.elbereth_pos = None
+                self.elbereth_turns = 0
+                dr = primary_target.pos[0] - py
+                dc = primary_target.pos[1] - px
+                return Task("ZAP_WAND", is_primitive=True, args={"slot": offensive_wand, "delta": (dr, dc)})
+            missile_slot, is_quivered = self._find_quivered_or_missile(inv_tracker)
+            if is_quivered:
+                dr = primary_target.pos[0] - py
+                dc = primary_target.pos[1] - px
+                return Task("FIRE", is_primitive=True, args={"delta": (dr, dc)})
+            if missile_slot is not None:
+                dr = primary_target.pos[0] - py
+                dc = primary_target.pos[1] - px
+                return Task("THROW", is_primitive=True, args={"slot": missile_slot, "delta": (dr, dc)})
+        return None
+
+    def _verb_response(self, verb, blstats, inv_tracker, cur_pos, py, px,
+                       adjacent_monsters, chars, glyphs, primary_target):
+        """Maps a matched tactic verb to a concrete Task. Returns RULE_FALLTHROUGH when
+        the verb's condition is unmet this turn (e.g. unwounded vs retreat_when_wounded,
+        unarmed ranged_then_kill) so the default combat flow resumes."""
+        if verb == "elbereth_first":
+            return self._defensive_kite_response(
+                blstats, inv_tracker, cur_pos, py, px, adjacent_monsters, chars, glyphs, primary_target)
+        if verb == "retreat_when_wounded":
+            cb = self.cfg.combat
+            if blstats.hp <= max(cb.heavy_wounded_min_hp, int(blstats.max_hp * cb.heavy_wounded_frac)):
+                return self._defensive_kite_response(
+                    blstats, inv_tracker, cur_pos, py, px, adjacent_monsters, chars, glyphs, primary_target)
+            return self.RULE_FALLTHROUGH
+        if verb in ("ranged_only", "never_melee"):
+            # NEVER melee: ranged → escape → hold ground (interlock-safe by construction)
+            t = self._ranged_attack_response(blstats, inv_tracker, py, px, primary_target)
+            if t is not None:
+                return t
+            step_away = self._find_escape_step(py, px, adjacent_monsters, chars, glyphs=glyphs)
+            if step_away is not None:
+                return Task("STEP", is_primitive=True, args={"delta": step_away})
+            return Task("WAIT", is_primitive=True)
+        if verb == "ranged_then_kill":
+            t = self._ranged_attack_response(blstats, inv_tracker, py, px, primary_target)
+            return t if t is not None else self.RULE_FALLTHROUGH
+        if verb == "kite":
+            t = self._ranged_attack_response(blstats, inv_tracker, py, px, primary_target)
+            if t is not None:
+                return t
+            step_away = self._find_escape_step(py, px, adjacent_monsters, chars, glyphs=glyphs)
+            if step_away is not None:
+                return Task("STEP", is_primitive=True, args={"delta": step_away})
+            return self.RULE_FALLTHROUGH
+        if verb in ("retreat", "avoid"):
+            step_away = self._find_escape_step(py, px, adjacent_monsters, chars, glyphs=glyphs)
+            if step_away is not None:
+                return Task("STEP", is_primitive=True, args={"delta": step_away})
+            # Never engage: hold ground rather than melee
+            return Task("WAIT", is_primitive=True)
+        return self.RULE_FALLTHROUGH
 
     def _find_escape_step(
         self,

@@ -1,15 +1,22 @@
 {
-  "version": 7,
+  "version": 6,
   "domain": "nethack",
   "params": {
-    "survival.rest_below_frac": 0.65
+    "nutrition.conveyor_radius": 22,
+    "descent.minetown_donations_done": 1,
+    "nutrition.pray_routine": 484,
+    "nutrition.moderate_emergency_hp_frac": 0.2819,
+    "strategy.minetown_ac_target": -7,
+    "combat.ranged_fail_cooldown": 31,
+    "search.burst_cap_early": 9,
+    "combat.ranged_fail_streak": 3,
+    "descent.sokoban_prize_floor": 7,
+    "descent.mines_min_xl": 7,
+    "descent.sokoban_exit_min_turns": 56,
+    "strategy.triage_adj_min_hp": 11,
+    "combat.player_speed": 21
   },
-  "macros": [
-    {
-      "name": "when_endangered",
-      "body": "(and (adjacent_hostiles) (hp_frac <= 0.4) (not has_healing))"
-    }
-  ],
+  "macros": [],
   "tactic_rules": [
     {
       "when": "(and (monster \"giant spider\") (not has_poison_res))",
@@ -148,30 +155,6 @@
       "do": "retreat_when_wounded",
       "note": "interlock: heavy hitter 'minotaur' \u2014 never trade blows when wounded",
       "interlock": true
-    },
-    {
-      "when": "(and (in_mines) (hp_frac <= 0.4))",
-      "do": "retreat",
-      "unless": null,
-      "note": "mines attrition fix"
-    },
-    {
-      "when": "(and (in_dungeons) (and (adjacent_hostiles) (hp_frac <= 0.4) (not has_healing)))",
-      "do": "retreat",
-      "unless": null,
-      "note": null
-    },
-    {
-      "when": "(and (in_mines) (hp_frac <= 0.4))",
-      "do": "retreat",
-      "unless": null,
-      "note": "mines attrition fix"
-    },
-    {
-      "when": "(and (in_dungeons) (and (adjacent_hostiles) (hp_frac <= 0.4) (not has_healing)))",
-      "do": "retreat",
-      "unless": null,
-      "note": null
     }
   ],
   "nogoods": [],
@@ -214,9 +197,9 @@
     }
   ],
   "provenance": {
-    "author": "mock",
+    "author": "random-control",
     "note": "equivalent to pre-R2 MacroAscensionDirector phase machine",
-    "parent_version": 6,
-    "reason": "mock: compose when_endangered macro"
+    "parent_version": 5,
+    "reason": "random perturbation within bounds (control arm)"
   }
 }

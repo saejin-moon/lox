@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "domain": "nethack",
   "params": {},
   "macros": [],
@@ -21,6 +21,144 @@
       "do": "ranged_then_kill",
       "unless": null,
       "note": null
+    },
+    {
+      "when": "(and (monster \"giant spider\") (not has_poison_res))",
+      "do": "elbereth_first",
+      "note": "interlock: lethal poison biter 'giant spider' \u2014 engrave/ward, never melee",
+      "interlock": true
+    },
+    {
+      "when": "(and (monster \"killer bee\") (not has_poison_res))",
+      "do": "elbereth_first",
+      "note": "interlock: lethal poison biter 'killer bee' \u2014 engrave/ward, never melee",
+      "interlock": true
+    },
+    {
+      "when": "(and (monster \"queen bee\") (not has_poison_res))",
+      "do": "elbereth_first",
+      "note": "interlock: lethal poison biter 'queen bee' \u2014 engrave/ward, never melee",
+      "interlock": true
+    },
+    {
+      "when": "(and (monster \"soldier ant\") (not has_poison_res))",
+      "do": "elbereth_first",
+      "note": "interlock: lethal poison biter 'soldier ant' \u2014 engrave/ward, never melee",
+      "interlock": true
+    },
+    {
+      "when": "(and (monster \"scorpion\") (not has_poison_res))",
+      "do": "elbereth_first",
+      "note": "interlock: lethal poison biter 'scorpion' \u2014 engrave/ward, never melee",
+      "interlock": true
+    },
+    {
+      "when": "(and (monster \"pit viper\") (not has_poison_res))",
+      "do": "elbereth_first",
+      "note": "interlock: lethal poison biter 'pit viper' \u2014 engrave/ward, never melee",
+      "interlock": true
+    },
+    {
+      "when": "(and (monster \"water moccasin\") (not has_poison_res))",
+      "do": "elbereth_first",
+      "note": "interlock: lethal poison biter 'water moccasin' \u2014 engrave/ward, never melee",
+      "interlock": true
+    },
+    {
+      "when": "(and (monster \"snake\") (not has_poison_res))",
+      "do": "elbereth_first",
+      "note": "interlock: lethal poison biter 'snake' \u2014 engrave/ward, never melee",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"ogre\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'ogre' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"ogre lord\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'ogre lord' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"ogre king\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'ogre king' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"gnome lord\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'gnome lord' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"gnome king\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'gnome king' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"dwarf lord\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'dwarf lord' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"dwarf king\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'dwarf king' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"soldier ant\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'soldier ant' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"rothe\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'rothe' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"mumak\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'mumak' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"leocrotta\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'leocrotta' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"stalker\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'stalker' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"giant\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'giant' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"ettin\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'ettin' \u2014 never trade blows when wounded",
+      "interlock": true
+    },
+    {
+      "when": "(monster \"minotaur\")",
+      "do": "retreat_when_wounded",
+      "note": "interlock: heavy hitter 'minotaur' \u2014 never trade blows when wounded",
+      "interlock": true
     }
   ],
   "nogoods": [],
@@ -61,9 +199,9 @@
     }
   ],
   "provenance": {
-    "author": "strategy-tuning author",
+    "author": "r4-interlock-migration",
     "note": "equivalent to pre-R2 MacroAscensionDirector phase machine",
-    "parent_version": 2,
-    "reason": "Agent dying to melee damage from small monsters at low depth; increasing retreat threshold and adding elbereth-first as an emergency defensive tactic."
+    "parent_version": 3,
+    "reason": "R4: append interlock tactic rules (lethal poison/heavy hitters) \u2014 parity with pre-R4 branches"
   }
 }

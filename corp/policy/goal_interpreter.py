@@ -33,6 +33,17 @@ class GoalInterpreter:
         self.state = MacroDirectorState()
         self.reset()
 
+    def apply_role_profile(self, role: str) -> list[str]:
+        """R4: applies the program's role_profile overlay onto the live config.
+        Precedence: defaults ← domain_profile ← role_profile ← program.params (the
+        params overlay already ran at construction, so a role profile value for a path
+        also present in params is overridden here — role is the more specific scope)."""
+        from corp.policy.profiles import apply_profile_overlay  # noqa: PLC0415
+        rp = (self.program.role_profiles or {}).get((role or "").lower())
+        if not rp:
+            return []
+        return apply_profile_overlay(self.cfg, rp, f"role_profile[{role}]")
+
     # ------------------------------------------------------------------
     def reset(self) -> None:
         self.state = MacroDirectorState()

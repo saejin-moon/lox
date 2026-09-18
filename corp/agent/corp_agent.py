@@ -132,6 +132,10 @@ class CORPAgent:
         self.dungeon_graph = DungeonGraph()
         self.shop_mgr = ShopManager()
         self.goals = GoalInterpreter(self.policy_config)
+        # R4: the combat manager's tactic engine runs the LIVE program's rules
+        # (program v4+ carries the interlock rules alongside LLM-authored ones)
+        self.combat_mgr.tactic_engine = TacticalCombatManager.tactic_engine_from(
+            self.goals.program.tactic_rules)
         self.dispatcher = ActionDispatcher(env)
         self.cycle_detector = CycleDetector(window_size=10, max_repetitions=3)
         self.planner = HTNPlanner(nogood_store=self.nogood_store)
@@ -189,6 +193,9 @@ class CORPAgent:
         meta = parse_character_metadata(self.current_message)
         if meta["role"] != "unknown":
             self.current_role = meta["role"]
+            # R4: role profile overlay (defaults ← domain ← role ← params)
+            if hasattr(self.goals, "apply_role_profile"):
+                self.goals.apply_role_profile(self.current_role)
         self.current_race = meta["race"]
         self.current_gender = meta["gender"]
         self.current_alignment = meta["alignment"]

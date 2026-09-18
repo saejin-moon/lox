@@ -54,6 +54,9 @@ PREDICATE_SIGNATURES: dict[str, dict] = {
     "minetown_known":  {"args": [], "desc": "Minetown discovered"},
     "stairs_known":    {"args": [], "desc": "stairs located on this floor"},
     "failures_in_10_episodes_ge": {"args": [("int",), ("str",)], "desc": "goal failed >= n times in last 10 episodes"},
+    # R4 tactic-rule match predicates
+    "monster":        {"args": [("str",)], "desc": "primary target monster name contains substring (case-insensitive)"},
+    "item":           {"args": [("str",)], "desc": "target/hero tile item name contains substring (water/trap/altar/fountain/throne/sink)"},
 }
 
 VERBS: dict[str, str] = {

@@ -178,6 +178,9 @@ def nethack_bindings(ctx: dict) -> dict:
         "minetown_known": lambda: bool(_c(ctx, "minetown_visited", False)),
         "stairs_known": lambda: bool(_c(ctx, "stairs_known", False)),
         "failures_in_10_episodes_ge": lambda n, goal="": failures.get(goal, _c(ctx, "failures_total", 0)) >= int(n) if failures else _c(ctx, "failures_total", 0) >= int(n),
+        # R4 tactic-rule match predicates (combat context: monster_name, item_name)
+        "monster": lambda name: str(name).lower() in str(_c(ctx, "monster_name", "")).lower(),
+        "item": lambda name: str(name).lower() in str(_c(ctx, "item_name", "")).lower(),
         "xl_ge": lambda n: ctx["xl"] >= int(n),
         "xl_le": lambda n: ctx["xl"] <= int(n),
         "depth_ge": lambda n: ctx["depth"] >= int(n),

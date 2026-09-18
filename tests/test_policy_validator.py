@@ -102,8 +102,9 @@ class TestGates:
                           '(rule add tactic_rules (when (and (in_mines) (when_endangered))) (do retreat))'))
         assert r.ok, r.detail
         assert r.candidate.macros[0]["name"] == "when_endangered"
-        # rules store the EXPANDED condition (executor never sees macros — MACRO.md §7)
-        assert r.candidate.tactic_rules[0]["when"] == \
+        # rules store the EXPANDED condition (executor never sees macros — MACRO.md §7);
+        # the appended LLM rule lands after the default interlock rules (R4)
+        assert r.candidate.tactic_rules[-1]["when"] == \
             "(and (in_mines) (and (adjacent_hostiles) (hp_frac <= 0.4)))"
 
     def test_macro_redefinition_allowed(self):

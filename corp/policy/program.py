@@ -13,7 +13,14 @@ import json
 import os
 from dataclasses import dataclass, field
 
+from corp.policy import tactics as tactic_mod
+
 DEFAULT_PROGRAM_PATH = "data/policy_program.json"
+
+# Default interlock tactic rules (R4): lethal poison → elbereth-first kiting, heavy
+# hitters → retreat-when-wounded. Same behavior as the pre-R4 hardcoded branches, now
+# visible and editable in the program (removal blocked by validator invariant #9b).
+DEFAULT_TACTIC_RULES: list[dict] = tactic_mod.build_default_tactic_rules()
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +69,7 @@ DEFAULT_PROGRAM: dict = {
     "domain": "nethack",
     "params": {},
     "macros": [],
-    "tactic_rules": [],
+    "tactic_rules": DEFAULT_TACTIC_RULES,
     "nogoods": [],
     "strategy_plan": DEFAULT_STRATEGY_PLAN,
     "provenance": {"author": "r2-default", "note": "equivalent to pre-R2 MacroAscensionDirector phase machine"},
@@ -90,8 +97,10 @@ class PolicyProgram:
     params: dict                                    # dotted-path overlay onto PolicyConfig
     strategy_plan: list[GoalSpec]
     macros: list[dict] = field(default_factory=list)
-    tactic_rules: list[dict] = field(default_factory=list)   # R3 storage (evaluator lands R4)
+    tactic_rules: list[dict] = field(default_factory=list)   # R4: engine-evaluated (tactics.py)
     nogoods: list[dict] = field(default_factory=list)        # R3 fold-in (mask + declarative forms)
+    role_profiles: dict = field(default_factory=dict)        # R4: role → {param-path: value}
+    domain_profiles: dict = field(default_factory=dict)      # R4: domain → {param-path: value}
     provenance: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------------
@@ -113,6 +122,8 @@ class PolicyProgram:
             macros=list(d.get("macros", [])),
             tactic_rules=list(d.get("tactic_rules", [])),
             nogoods=list(d.get("nogoods", [])),
+            role_profiles=dict(d.get("role_profiles", {})),
+            domain_profiles=dict(d.get("domain_profiles", {})),
             provenance=dict(d.get("provenance", {})),
         )
 
@@ -146,6 +157,8 @@ class PolicyProgram:
             "macros": self.macros,
             "tactic_rules": self.tactic_rules,
             "nogoods": self.nogoods,
+            "role_profiles": self.role_profiles,
+            "domain_profiles": self.domain_profiles,
             "strategy_plan": [g.raw for g in self.strategy_plan],
             "provenance": self.provenance,
         }

@@ -368,7 +368,21 @@ unattended `run_revision_loop.py`; deliberative unification (step 9). RAG: NetHa
 `data/wiki_index.db`; transfer-domain corpora arrive in R5 (before their author prompts go live).
 **Accept**: ≥10 gated revisions unattended (dry-run first with MockProvider); ≥1 accepted revision with measured improvement on the next batch; 0 rejected-revision leaks.
 
-### R4 — Tactic Rules + Profiles + Ablation Harness (3–4 days)
+### R4 — Tactic Rules + Profiles + Ablation Harness — **[2026-09-18 DONE — 1 day]**
+> Shipped: `policy/tactics.py` (TacticRuleEngine: first-match-wins over program-ordered rules; canonical
+> name sets moved here — TACTIC_LETHAL_POISON_NAMES / TACTIC_HEAVY_HITTER_NAMES — with drift-guard parity
+> tests vs combat_manager), combat_manager wired: the two hardcoded name-set branches (lethal poison,
+> heavy-hitter kiting) are now ENGINE-DRIVEN with verbatim-identical responses (`_defensive_kite_response`,
+> `_ranged_attack_response`, `_verb_response`); grid-bug + critical-HP retreat stay hardcoded interlocks;
+> new verbs ranged_only/never_melee/avoid never fall through to melee. INSTAKILL_NAMES deliberately remain
+> scan_monsters threat data (their lockouts are NogoodStore interlocks, not tactic decisions — deviation
+> from §8's letter, documented). Validator invariant #9b: interlock-flagged rules cannot be removed by any
+> diff. `policy/profiles.py` (role/domain overlays, precedence defaults ← domain ← role ← params;
+> protected paths: prayer model + corpse freshness). Live program migrated v3→v4: interlock rules appended
+> alongside LLM rules (26 rules). `scripts/run_ablation.py` (frozen | random-gated | llm arms; bootstrap
+> 95% CI, Mann-Whitney U, Cliff's δ; unattended smoke: 3 arms × 2ep green). 286 tests green (29 new).
+> 10-ep v4 live batch: median depth 2.5 / mean 344.9 (within historical batch σ; rules executed cleanly).
+> Original acceptance criteria:
 **Operational spec: §8 (normative contract).**
 Refactor steps 13 + profiles. Three-arm harness (`run_ablation.py`): LLM-revision | frozen | random-perturbation-with-identical-gates — **this control arm is what makes every later claim falsifiable**.
 **Accept**: harness runs unattended; tactic-rule parity on default program; all-role reports.

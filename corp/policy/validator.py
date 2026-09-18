@@ -374,11 +374,19 @@ def _mount(diff: PolicyDiff, program: PolicyProgram, expanded: dict,
                 if not (0 <= op.index < len(cand.tactic_rules)):
                     return GateResult.reject("ERR_BOUNDS", "mount",
                                              f"rule remove index {op.index} out of range", diff)
+                if cand.tactic_rules[op.index].get("interlock"):
+                    return GateResult.reject("ERR_INVARIANT", "invariants",
+                                             f"rule {op.index} is a safety interlock and "
+                                             "cannot be removed by a diff (#9b)", diff)
                 cand.tactic_rules.pop(op.index)
             else:
                 rendered = _render_rule(op.rule, expanded)
                 for i, r in enumerate(cand.tactic_rules):
                     if r.get("when") == rendered["when"] and r.get("do") == rendered["do"]:
+                        if r.get("interlock"):
+                            return GateResult.reject("ERR_INVARIANT", "invariants",
+                                                     "matched rule is a safety interlock and "
+                                                     "cannot be removed by a diff (#9b)", diff)
                         cand.tactic_rules.pop(i)
                         break
                 else:
