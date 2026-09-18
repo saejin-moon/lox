@@ -259,7 +259,17 @@ the loop, validator, DSL, and program machinery are untouched.
 Refactor steps 2–3. Extract tunables from `navigation_manager.py` (HP descent gates 0.45/0.70, rest 0.60/0.85, search caps 15/20/6/5, food radii 8/99/10/15, door caps), `combat_manager.py` (retreat 0.25, speed ratio 1.3, wounded-vs-heavy 0.65, ranged cooldown 50, escape grace), `inventory_manager.py` + `guards.py` (nutrition priorities, prayer gaps 301/850/450, eat-before-descend radius 10), `corp_agent.py` (triage 0.55/0.60, zero-turn guard 4).
 **Accept**: 183+ tests pass; default program reproduces decision traces byte-for-byte.
 
-### R2 — Policy Program + Goal Interpreter (3–4 days)
+### R2 — Policy Program + Goal Interpreter (3–4 days) — **[2026-09-18 DONE — 1 day]**
+> Shipped: `policy/program.py` (versioned PolicyProgram + params overlay + default program equivalent to the
+> pre-R2 phase machine), `policy/predicates.py` (S-expression condition evaluator over the closed vocabulary,
+> depth ≤ 3), `policy/goal_interpreter.py` (drop-in for MacroAscensionDirector: update_state /
+> get_navigation_directive / should_defer_stairs_for_farming; safety pre-passes for mines/sokoban retained as
+> policy-independent interlocks), `data/policy_program.json`, `goal_events` DuckDB table (activation/completion/
+> skip telemetry per goal). Equivalence proven by scripted scenario tests against the phase machine; found and
+> fixed a one-tick prize-flag ordering bug in the machine itself. 193 tests green. Live smoke: goal transitions
+> persisted end-to-end.
+> Original acceptance criteria:
+>
 Refactor steps 4–5. Strategy-plan interpreter replaces `MacroAscensionDirector`; named predicate registry; `goal_events` DuckDB table feeding `failures_in_10_episodes`.
 **Accept**: default program equivalence; goal telemetry live.
 

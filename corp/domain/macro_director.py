@@ -107,6 +107,12 @@ class MacroAscensionDirector:
         if "welcome to minetown" in msg_lower:
             self.state.minetown_visited = True
 
+        # Sokoban prize tracking (after reflection flag updates — R2 ordering fix):
+        # once reflection is obtained inside Sokoban, the branch is done; exit by descending
+        # back to the Dungeons of Doom (prevents floor 3/4 oscillation)
+        if getattr(blstats, "dungeon_number", 0) == 3 and self.state.reflection_obtained:
+            self.state.sokoban_prize_collected = True
+
         # Phase transition machine
         r_lower = role.lower()
         is_lawful_fighter = (blstats.alignment == 1) or (r_lower in ("valkyrie", "samurai", "knight"))

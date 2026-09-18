@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "domain": "nethack",
+  "params": {},
+  "macros": [],
+  "strategy_plan": [
+    {
+      "goal": "explore_floor",
+      "when": "(true)",
+      "until": "(or (xl_ge 4) (depth_ge 4))"
+    },
+    {
+      "goal": "forge_excalibur",
+      "when": "(and (lawful) (xl_ge 5) (not has_excalibur))",
+      "until": "(has_excalibur)",
+      "max_steps": 2000
+    },
+    {
+      "goal": "hunt_poison_res",
+      "when": "(true)",
+      "until": "(or (has_poison_res) (depth_ge 6))"
+    },
+    {
+      "goal": "enter_sokoban",
+      "when": "(true)",
+      "until": "(or (has_reflection) (depth_ge 9) (sokoban_completed))",
+      "directive": "ENTER_SOKOBAN"
+    },
+    {
+      "goal": "goto_minetown",
+      "when": "(true)",
+      "until": "(or (ac_le 0) (steps_in_goal_ge 3000) (depth_ge 10))",
+      "directive": "GOTO_MINETOWN"
+    },
+    {
+      "goal": "descend",
+      "when": "(true)",
+      "until": "(false)",
+      "directive": "DESCEND"
+    }
+  ],
+  "provenance": {
+    "author": "r2-default",
+    "note": "equivalent to pre-R2 MacroAscensionDirector phase machine"
+  }
+}

@@ -47,6 +47,7 @@ from corp.domain.epistemic_worker import EpistemicWorker
 from corp.domain.dungeon_graph import DungeonGraph
 from corp.domain.shop_manager import ShopManager
 from corp.domain.macro_director import MacroAscensionDirector, AscensionPhase
+from corp.policy.goal_interpreter import GoalInterpreter
 from corp.deliberative.autopsy_engine import AutopsyEngine
 from corp.deliberative.deadlock_resolver import DeadlockResolver
 from corp.deliberative.providers.mock_provider import MockProvider
@@ -130,7 +131,7 @@ class CORPAgent:
         self.medusa_handler = MedusaHandler()
         self.dungeon_graph = DungeonGraph()
         self.shop_mgr = ShopManager()
-        self.macro_director = MacroAscensionDirector(self.policy_config)
+        self.goals = GoalInterpreter(self.policy_config)
         self.dispatcher = ActionDispatcher(env)
         self.cycle_detector = CycleDetector(window_size=10, max_repetitions=3)
         self.planner = HTNPlanner(nogood_store=self.nogood_store)
@@ -198,7 +199,7 @@ class CORPAgent:
         # Reset subsystems
         self.dungeon_graph.reset()
         self.shop_mgr.reset()
-        self.macro_director.reset()
+        self.goals.reset()
         self.locked_intent = None
 
         # Track intrinsics (Barbarians, Healers, and Orcs start with intrinsic poison resistance)
@@ -694,7 +695,7 @@ class CORPAgent:
             has_poison_res=has_poison_res,
             long_sword_slot=long_sword_slot,
             dungeon_graph=agent.dungeon_graph,
-            macro_director=agent.macro_director,
+            macro_director=agent.goals,
         )
         if task is not None:
             if task.name == "KICK" and "delta" in task.args:
@@ -746,7 +747,7 @@ class CORPAgent:
         # 0.05 Update macro ascension director state
         has_pr = self.has_poison_resistance(inv_tracker)
         has_refl = self.has_reflection(inv_tracker)
-        self.macro_director.update_state(
+        self.goals.update_state(
             blstats=blstats,
             message=self.current_message,
             inv_tracker=inv_tracker,
@@ -1131,6 +1132,7 @@ class CORPAgent:
         Triggers post-mortem autopsy upon death.
         """
         self.reset()
+        goal_flush_target = getattr(self.parquet_logger, "run_id", "norun") if self.parquet_logger else "norun"
         start_time = time.perf_counter()
         steps = 0
 
@@ -1210,6 +1212,12 @@ class CORPAgent:
 
             self.step()
             steps += 1
+
+        # R2: persist goal transitions to the DuckDB goal_events table
+        try:
+            self.goals.flush_events("data/corp_telemetry.duckdb", goal_flush_target, self.episode_id)
+        except Exception:
+            pass
 
         elapsed = max(1e-4, time.perf_counter() - start_time)
         sps = float(steps) / elapsed
