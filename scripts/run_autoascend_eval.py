@@ -29,9 +29,10 @@ from corp.telemetry import DuckDBConsolidator
 class GymFromGymnasium(gym.Env):
     """Bridges modern Gymnasium 5-tuple step/2-tuple reset to legacy gym interface used by AutoAscend.
 
-    Note: blstats is passed through with all 27 NLE 3.6.6 elements intact.
-    Truncating to 26 elements drops the final element (alignment), and older code
-    that truncated dropped condition_bits, degrading AutoAscend's strategy detection.
+    NOTE: blstats MUST be truncated to 26 elements. AutoAscend's BLStats class has exactly 26
+    fields (its layout predates NLE adding the 27th `alignment` element); passing all 27 raises
+    "BLStats.__new__() takes 27 positional arguments but 28 were given". condition_bits (idx 25)
+    is included in the 26 - nothing AutoAscend reads is lost.
     """
     def __init__(self, gym_env):
         self.env = gym_env
@@ -52,6 +53,7 @@ class GymFromGymnasium(gym.Env):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
+        obs['blstats'] = obs['blstats'][:26]  # AutoAscend BLStats arity (see class docstring)
         self._steps = 0
         self._turns = int(obs['blstats'][20])
         self.last_observation = (obs['glyphs'], obs['chars'])
@@ -60,6 +62,7 @@ class GymFromGymnasium(gym.Env):
     def step(self, action):
         self._steps += 1
         obs, reward, term, trunc, info = self.env.step(action)
+        obs['blstats'] = obs['blstats'][:26]  # AutoAscend BLStats arity (see class docstring)
         self._turns = int(obs['blstats'][20])
         self.last_observation = (obs['glyphs'], obs['chars'])
         return obs, reward, term or trunc, info
@@ -93,7 +96,15 @@ def run_autoascend_episode(role: str = "val", seed: int = 42, step_limit: int = 
         env.end_reason = f"exception: {e}"
 
     duration = time.time() - start_time
-    summary = env.get_summary()
+    try:
+        summary = env.get_summary()
+    except Exception as e:
+        # env.main() teardown can null the agent before get_summary when the episode itself crashed
+        summary = {
+            'score': 0, 'steps': wrapped._steps, 'turns': wrapped._turns, 'level_num': 1,
+            'experience_level': 1, 'milestone': 'crashed', 'panic_num': 0,
+            'character': char_str, 'end_reason': f"summary-failed: {e}",
+        }
     summary['duration'] = duration
     summary['character'] = char_str
     summary['seed'] = seed
