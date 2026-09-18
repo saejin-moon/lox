@@ -17,6 +17,10 @@ class LLMResponse:
     raw_text: str
     tokens_consumed: int = 0
     latency_ms: float = 0.0
+    # R3 extended usage breakdown (0 when the provider doesn't report it)
+    tokens_in: int = 0        # prompt tokens
+    tokens_out: int = 0       # completion tokens (excluding thoughts)
+    tokens_thought: int = 0   # thinking tokens (native thought channel)
 
 
 class LLMProvider(ABC):

@@ -129,9 +129,14 @@ class Reviser:
         start = time.perf_counter()
         resp = await self.provider.generate_text(system, user, context)
         self.last_meta = {
-            "tokens_in": resp.tokens_consumed,
+            "tokens_in": getattr(resp, "tokens_in", 0) or resp.tokens_consumed,
+            "tokens_out": getattr(resp, "tokens_out", 0),
+            "tokens_thought": getattr(resp, "tokens_thought", 0),
+            "latency_ms": resp.latency_ms,
             "wall_sec": time.perf_counter() - start,
             "model": getattr(self.provider, "model", "mock"),
+            "thinking": (resp.thinking_content or "")[:8000],
+            "response_text": (resp.raw_text or "")[:8000],
         }
         try:
             return extract_diff_text(resp.raw_text)
@@ -142,7 +147,10 @@ class Reviser:
                 f"{e}\nEmit ONE valid diff document. The FIRST form must be (revision ...)."
             )
             resp2 = await self.provider.generate_text(system, repair_user, context)
-            self.last_meta["tokens_in"] += resp2.tokens_consumed
+            for k in ("tokens_in", "tokens_out", "tokens_thought"):
+                self.last_meta[k] += getattr(resp2, k, 0) or 0
             self.last_meta["wall_sec"] = time.perf_counter() - start
             self.last_meta["repaired"] = True
+            self.last_meta["thinking"] += "\n--- repair ---\n" + (resp2.thinking_content or "")[:4000]
+            self.last_meta["response_text"] += "\n--- repair ---\n" + (resp2.raw_text or "")[:4000]
             return extract_diff_text(resp2.raw_text)  # may raise → caller rejects ERR_PARSE

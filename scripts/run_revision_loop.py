@@ -195,7 +195,10 @@ async def run_loop(args) -> int:
                 revision=candidate.version, parent_version=program.version,
                 author_model=model_name, provider=args.provider, accepted=True,
                 reason=result.diff.header.reason, diff_text=diff_text,
-                tokens_in=meta.get("tokens_in", 0),
+                tokens_in=meta.get("tokens_in", 0), tokens_out=meta.get("tokens_out", 0),
+                tokens_thought=meta.get("tokens_thought", 0),
+                latency_ms=meta.get("latency_ms", 0.0),
+                thinking=meta.get("thinking", ""), response_text=meta.get("response_text", ""),
                 wall_sec=meta.get("wall_sec", 0.0), delta=delta))
             print(f"  ACCEPT v{candidate.version}: {result.diff.header.reason[:90]}")
             print(f"  ops: {len(result.diff.sets)} set, {len(result.diff.rules)} rule, "
@@ -211,6 +214,10 @@ async def run_loop(args) -> int:
                 reject_code=result.error_code, reject_detail=result.detail[:300],
                 gate=result.gate, reason=result.diff.header.reason if result.diff else "",
                 diff_text=diff_text[:2000], tokens_in=meta.get("tokens_in", 0),
+                tokens_out=meta.get("tokens_out", 0),
+                tokens_thought=meta.get("tokens_thought", 0),
+                latency_ms=meta.get("latency_ms", 0.0),
+                thinking=meta.get("thinking", ""), response_text=meta.get("response_text", ""),
                 wall_sec=meta.get("wall_sec", 0.0)))
             print(f"  REJECT {result.error_code} @ {result.gate}: {result.detail[:120]}")
 

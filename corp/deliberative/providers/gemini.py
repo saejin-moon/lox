@@ -75,10 +75,11 @@ class GeminiProvider(LLMProvider):
             cfg_kwargs.update(extra)
         return types.GenerateContentConfig(**cfg_kwargs) if cfg_kwargs else None
 
-    async def _genai_generate(self, system_prompt: str, user_prompt: str) -> tuple[str, int]:
-        """Runs the native SDK call in a worker thread (sync SDK) and returns (text, tokens).
-        The system prompt goes through `system_instruction`; thinking config moves the
-        model's reasoning out of `response.text` into the thought channel."""
+    async def _genai_generate(self, system_prompt: str, user_prompt: str) -> dict:
+        """Runs the native SDK call in a worker thread (sync SDK). Returns a dict with
+        the answer text, the THOUGHT-channel text (captured for the ledger), and the
+        full token breakdown. The system prompt goes through `system_instruction`;
+        thinking config moves the model's reasoning out of `response.text`."""
         import asyncio  # noqa: PLC0415
         client = self._genai_client
         config = self._genai_config({"system_instruction": system_prompt})
@@ -89,12 +90,29 @@ class GeminiProvider(LLMProvider):
                 contents=user_prompt,
                 config=config,
             )
-            text = resp.text or ""
-            tokens = 0
+            # Split thought-channel parts from answer parts (candidates[0].content.parts)
+            answer_parts: list[str] = []
+            thought_parts: list[str] = []
+            for cand in getattr(resp, "candidates", None) or []:
+                content = getattr(cand, "content", None)
+                for part in getattr(content, "parts", None) or []:
+                    text = getattr(part, "text", None) or ""
+                    if not text:
+                        continue
+                    if getattr(part, "thought", False):
+                        thought_parts.append(text)
+                    else:
+                        answer_parts.append(text)
+            answer = "".join(answer_parts) or (resp.text or "")
+            thought = "".join(thought_parts)
             um = getattr(resp, "usage_metadata", None)
-            if um is not None:
-                tokens = int(getattr(um, "total_token_count", 0) or 0)
-            return text, tokens
+            usage = {
+                "in": int(getattr(um, "prompt_token_count", 0) or 0),
+                "out": int(getattr(um, "candidates_token_count", 0) or 0),
+                "thought": int(getattr(um, "thoughts_token_count", 0) or 0),
+                "total": int(getattr(um, "total_token_count", 0) or 0),
+            }
+            return {"answer": answer, "thought": thought, "usage": usage}
 
         return await asyncio.to_thread(_call)
 
@@ -142,7 +160,11 @@ class GeminiProvider(LLMProvider):
     ) -> LLMResponse:
         start_time = time.perf_counter()
         if self._genai_client is not None:
-            raw_text, tokens = await self._genai_generate(system_prompt, user_prompt)
+            out = await self._genai_generate(system_prompt, user_prompt)
+            raw_text = out["answer"]
+            thought_text = out["thought"]
+            usage = out["usage"]
+            tokens = usage["total"]
         else:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -152,12 +174,17 @@ class GeminiProvider(LLMProvider):
                 ],
             )
             raw_text = response.choices[0].message.content or ""
+            thought_text = ""
+            usage = {"in": 0, "out": 0, "thought": 0}
             tokens = response.usage.total_tokens if response.usage else 0
         latency = (time.perf_counter() - start_time) * 1000.0
         return LLMResponse(
-            thinking_content="",      # thinking lives in the SDK's thought channel
+            thinking_content=thought_text,   # native thought-channel output (ledger-captured)
             parsed_payload=raw_text,
             raw_text=raw_text,
             tokens_consumed=tokens,
             latency_ms=latency,
+            tokens_in=usage["in"],
+            tokens_out=usage["out"],
+            tokens_thought=usage["thought"],
         )

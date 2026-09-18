@@ -137,4 +137,7 @@ Resolving deadlock: Injecting search and step sequence to break spatial oscillat
             raw_text=raw,
             tokens_consumed=len(raw.split()),
             latency_ms=latency,
+            tokens_in=len(system_prompt.split()) + len(user_prompt.split()),
+            tokens_out=len(raw.split()),
+            tokens_thought=0,
         )
