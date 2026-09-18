@@ -62,6 +62,8 @@ DEFAULT_PROGRAM: dict = {
     "domain": "nethack",
     "params": {},
     "macros": [],
+    "tactic_rules": [],
+    "nogoods": [],
     "strategy_plan": DEFAULT_STRATEGY_PLAN,
     "provenance": {"author": "r2-default", "note": "equivalent to pre-R2 MacroAscensionDirector phase machine"},
 }
@@ -88,6 +90,8 @@ class PolicyProgram:
     params: dict                                    # dotted-path overlay onto PolicyConfig
     strategy_plan: list[GoalSpec]
     macros: list[dict] = field(default_factory=list)
+    tactic_rules: list[dict] = field(default_factory=list)   # R3 storage (evaluator lands R4)
+    nogoods: list[dict] = field(default_factory=list)        # R3 fold-in (mask + declarative forms)
     provenance: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------------
@@ -107,6 +111,8 @@ class PolicyProgram:
             params=dict(d.get("params", {})),
             strategy_plan=plan,
             macros=list(d.get("macros", [])),
+            tactic_rules=list(d.get("tactic_rules", [])),
+            nogoods=list(d.get("nogoods", [])),
             provenance=dict(d.get("provenance", {})),
         )
 
@@ -138,6 +144,8 @@ class PolicyProgram:
             "domain": self.domain,
             "params": self.params,
             "macros": self.macros,
+            "tactic_rules": self.tactic_rules,
+            "nogoods": self.nogoods,
             "strategy_plan": [g.raw for g in self.strategy_plan],
             "provenance": self.provenance,
         }

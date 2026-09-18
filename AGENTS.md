@@ -37,8 +37,8 @@ Outperform **AutoAscend** on NetHack (NLE 3.6.6 / `NetHackChallenge-v0`) and dem
    - **ALWAYS** prefix Python and Pytest commands with `uv run`.
    - Examples: `uv run python scripts/run_benchmark.py ...`, `uv run pytest`.
 3. **100% REGRESSION-FREE TEST SUITE**:
-   - The test suite (`uv run pytest`) currently has **183 passing tests** taking ~4.7s.
-   - Every single pull request, edit, or commit MUST maintain 183/183 passing tests. Never disable or skip tests to mask errors.
+   - The test suite (`uv run pytest`) currently has **257 passing tests** taking ~4s.
+   - Every single pull request, edit, or commit MUST maintain 257/257 passing tests. Never disable or skip tests to mask errors.
 4. **CLEAN TELEMETRY & ZERO DISK BACKLOG**:
    - Streaming telemetry generates columnar Snappy-compressed Parquet files in `logs/parquet/`.
    - These files MUST be consolidated into DuckDB (`data/corp_telemetry.duckdb`) and automatically purged using the `--clean-parquet` flag on `run_benchmark.py` or via `scripts/clean_telemetry.py`.
@@ -54,13 +54,14 @@ corp/
 │   ├── corp_agent.py          # Master agent loop, LockedIntent multi-turn commitment, role-prefixed IDs
 │   └── competence.py          # Turn-0 competence evaluator for archetype selection
 ├── deliberative/              # Slow Core LLM reasoning (autopsies, deadlock resolution → unified onto diff contract)
-├── policy/                    # [R1-R3, PLANNED] The entire LLM-facing surface:
-│                              #   config.py (PolicyConfig) · program.py · predicates.py · macros.py (defmacro)
-│                              #   dsl.py (S-expr reader) · grammar/ (GBNF) · validator.py · reviser.py
-│                              #   goal_interpreter.py · profiles.py · ledger.py · report.py
+├── policy/                    # [R1-R3 DONE] The entire LLM-facing surface:
+│                              #   config.py (PolicyConfig) · program.py · predicates.py · goal_interpreter.py
+│                              #   dsl.py (S-expr diff reader) · macros.py (defmacro) · manifest.py (vocab)
+│                              #   validator.py (gate pipeline) · reviser.py · ledger.py · report.py
+│                              #   grammar/ (GBNF for the llama.cpp repro path)
 ├── executor/                  # [R5, PLANNED] DomainAdapter ABC + registry; nethack facade; minihack/craftax adapters
 │   ├── autopsy_engine.py      # Translates flight recorder crash logs into persistent CDCL Nogoods
-│   ├── deadlock_resolver.py   # Synthesizes HTN graph patches during tactical impasses
+│   ├── deadlock_resolver.py   # R3: emits policy diffs through the validator (next-episode effect)
 │   ├── providers/             # Provider abstractions (Mock, LlamaCpp, OpenRouter, Gemini)
 │   └── schemas.py             # Pydantic structured output models
 ├── domain/                    # Tactical Domain Managers (<0.5ms execution)
@@ -289,7 +290,7 @@ The test suite is fast, comprehensive, and regression-free:
 ```bash
 uv run pytest
 ```
-Output: **183 passed in ~4.7s** (151 legacy + 32 new Phase 1–4 regression tests).
+Output: **257 passed in ~4s** (193 pre-R3 + 64 new R3 tests).
 
 Key test modules:
 - `tests/test_macro_director.py`: Macro ascension progression phase transitions, Excalibur readiness, and farming deferral.

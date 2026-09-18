@@ -339,7 +339,27 @@ Refactor steps 2–3. Extract tunables from `navigation_manager.py` (HP descent 
 Refactor steps 4–5. Strategy-plan interpreter replaces `MacroAscensionDirector`; named predicate registry; `goal_events` DuckDB table feeding `failures_in_10_episodes`.
 **Accept**: default program equivalence; goal telemetry live.
 
-### R3 — Revision Loop + Diff DSL + Macros (3–4 days) — **LLM goes live**
+### R3 — Revision Loop + Diff DSL + Macros (3–4 days) — **[2026-09-18 DONE — 1 day]**
+> Shipped: `policy/dsl.py` (S-expression diff reader, depth ≤ 4 form nesting / ≤ 3 condition nesting,
+> bare-symbol leniency for API authors), `policy/macros.py` (defmacro expansion: closure + cycle +
+> depth-budget + free-symbol checks; parameterless v1), `policy/manifest.py` (machine-generated
+> vocabulary manifest: 30 predicates, 8 verbs, 6 certified goals, 93 param leaves with derived bounds
+> — ±50% floats, `_frac` capped to [d/2, min(1, d·1.5)] per MACRO §4.1), `policy/validator.py` (full
+> gate pipeline §6: parse→header→vocab→bounds→budgets→macro→expansion→mount→invariants→shadow, with
+> certification/quick-batch as injectable gates), `policy/ledger.py` (append-only JSONL, per-author
+> acceptance-rate metric), `policy/report.py` (run-report bundle from DuckDB + ledger), `policy/reviser.py`
+> (author prompt + parse-and-reject with ONE repair retry), `policy/grammar/nethack.sexpr.gbnf` (local
+> GBNF path), `scripts/run_revision_loop.py` (unattended loop: baseline quick batch → author → gates →
+> commit + git + ledger). Providers gained `generate_text` (raw completion, R3 contract).
+> Deliberative unification (step 9): DeadlockResolver now emits diffs through the validator
+> (`patch_to_diff` + `emit_deadlock_diff`); the in-game `plan_queue` transient-injection path is REMOVED —
+> accepted deadlock nogoods take effect next episode (MACRO §10).
+> Live result: mid-tier `gemma-4-26b-a4b-it` (Google AI Studio) authored accepted revision v2 — 2 combat
+> tactic rules grounded in melee-death telemetry; baseline quick batch 493.0, certification suite green,
+> candidate quick batch passed. Mock dry-run: 10 gated revisions, 8 accept / 2 ERR_BOUNDS reject, 0 leaks.
+> 257 tests green (64 new). Author-acceptance rate is now ledger-tracked per model (R9 Fig 4 data).
+> Original acceptance criteria:
+>
 Refactor steps 6–8. Dual author (frontier API primary + llama.cpp GBNF repro path); **tiered authorship**:
 frontier for cold-start programs and stalled loops, mid-tier (Gemma-class ~30B via OpenRouter, or local) for
 routine tuning — acceptance rate per author model is tracked in the ledger and becomes its own ablation ("how

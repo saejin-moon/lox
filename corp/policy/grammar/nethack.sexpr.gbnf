@@ -1,0 +1,46 @@
+# CORP policy-diff S-expression grammar (MACRO.md §2–3) for llama.cpp GBNF decoding.
+# Depth ≤ 3 nesting on conditions; closed vocabulary enforced by the validator post-decode.
+# Reference: corp/policy/dsl.py + corp/policy/grammar/nethack.sexpr.gbnf
+
+root        ::= ws diff ws
+diff        ::= header (ws top-form)*
+header      ::= "(" ws "revision" ws int ws "(" ws "parent" ws int ")" ws "(" ws "author" ws string ")" ws "(" ws "domain" ws symbol ")" ws "(" ws "reason" ws string ")" ")"
+top-form    ::= set-op | rule-op | goal-op | nogood-op | defmacro-op | note-op
+
+set-op      ::= "(" ws "set" ws param-path ws value ")"
+param-path  ::= "policy_params." symbol
+value       ::= int | float | bool
+
+rule-op     ::= "(" ws "rule" ws ("add" | "remove") ws "tactic_rules" (ws int | (ws rule-clause)+ ")"
+rule-clause ::= when-clause | do-clause | unless-clause | note-clause
+when-clause ::= "(" ws "when" ws expr ")"
+do-clause   ::= "(" ws "do" ws verb ")"
+unless-clause ::= "(" ws "unless" ws expr ")"
+note-clause ::= "(" ws "note" ws string ")"
+verb        ::= "ranged_only" | "ranged_then_kill" | "retreat" | "retreat_when_wounded" | "avoid" | "kite" | "elbereth_first" | "never_melee"
+
+goal-op     ::= "(" ws "goal" ws ("prioritize" | "deprioritize" | "set_threshold") ws symbol (ws expr | ws param-leaf ws value)* ")"
+param-leaf  ::= symbol ("." symbol)*
+
+nogood-op   ::= "(" ws "nogood" ws "add" ws when-clause ws "(" ws "cause" ws string ")" (ws "(" ws "forbid" ws symbol ")")? ")"
+
+defmacro-op ::= "(" ws "defmacro" ws macro-name ws expr ")"
+macro-name  ::= symbol
+
+note-op     ::= "(" ws "note" ws string ")"
+
+# Conditions: depth ≤ 3 — combinator/predicate nesting is bounded below by construction:
+# expr (1) → and/or/not args (2) → predicate calls (3). Comparison values are atoms.
+expr        ::= combinator | pred-call
+combinator  ::= "(" ws ("and" | "or") (ws expr)* ")" | "(" ws "not" ws expr ")"
+pred-call   ::= "(" ws symbol (ws atom)* ")"
+atom        ::= int | float | bool | symbol | string | op | bare-symbol
+op          ::= "<=" | ">=" | "<" | ">" | "=="
+bare-symbol ::= symbol
+
+int         ::= "-"? [0-9]+
+float       ::= "-"? [0-9]+ "." [0-9]+
+bool        ::= "true" | "false"
+symbol      ::= [a-z] [a-z0-9_]*
+string      ::= "\"" ( [^"\\] | "\\" . )* "\""
+ws          ::= [ \t\n;]*

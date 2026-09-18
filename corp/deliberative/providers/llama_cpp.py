@@ -62,3 +62,31 @@ class LlamaCppProvider(LLMProvider):
             tokens_consumed=tokens,
             latency_ms=latency,
         )
+
+    async def generate_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        context: dict | None = None,
+    ) -> LLMResponse:
+        import time
+        start_time = time.perf_counter()
+        kwargs: dict = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        kwargs["temperature"] = self.temperature
+        response = await self.client.chat.completions.create(**kwargs)
+        raw_text = response.choices[0].message.content or ""
+        tokens = response.usage.total_tokens if response.usage else 0
+        latency = (time.perf_counter() - start_time) * 1000.0
+        return LLMResponse(
+            thinking_content="",
+            parsed_payload=raw_text,
+            raw_text=raw_text,
+            tokens_consumed=tokens,
+            latency_ms=latency,
+        )

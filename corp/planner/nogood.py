@@ -121,12 +121,24 @@ class NogoodStore:
             json.dump(data, f, indent=2)
 
     def load_from_json(self, file_path: str):
-        """Loads persistent Nogood constraints from disk."""
+        """Loads persistent Nogood constraints from disk.
+
+        R3 program-path branch (AGENT_PLAN §4.5): if the file is a policy program
+        (has 'strategy_plan'), nogoods are read from its 'nogoods' list. Mask-form
+        entries (same shape as data/nogoods.json) load directly; declarative entries
+        {'when', 'cause', 'forbid'} from accepted diffs are stored for R4 mask
+        compilation and skipped here (they have no mask yet).
+        """
         if not os.path.exists(file_path):
             return
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        for item in data:
-            entry = NogoodEntry(**item)
+        items: list = data.get("nogoods", []) if isinstance(data, dict) and "strategy_plan" in data else data
+        for item in items:
+            if "mask" not in item:
+                # Declarative (diff-authored) nogood — mask compilation lands in R4.
+                continue
+            entry = NogoodEntry(**{k: v for k, v in item.items()
+                                   if k in NogoodEntry.__dataclass_fields__})
             if entry not in self.entries:
                 self.add_nogood(entry)

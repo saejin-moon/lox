@@ -24,6 +24,7 @@ from corp.policy.program import PolicyProgram, DEFAULT_PROGRAM_PATH
 class GoalInterpreter:
     def __init__(self, config: PolicyConfig | None = None, program_path: str = DEFAULT_PROGRAM_PATH):
         self.cfg = config or default_config()
+        self.program_path = program_path
         self.program = PolicyProgram.load(program_path)
         # R2: apply the params overlay onto a private copy of the config so the executor
         # reads program-tuned values while defaults stay untouched for other consumers.

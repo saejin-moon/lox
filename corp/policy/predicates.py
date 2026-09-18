@@ -104,12 +104,80 @@ def _atom(tok: str):
 # context snapshot assembled by the GoalInterpreter.
 # ---------------------------------------------------------------------------
 
+def _c(ctx: dict, key: str, default):
+    """Robust context read: fixture states and partial contexts must never KeyError."""
+    v = ctx.get(key, default)
+    return default if v is None else v
+
+
+DEFAULT_FIXTURE_CTX: dict = {
+    "xl": 1, "depth": 1, "dnum": 0, "lawful": False,
+    "has_poison_res": False, "has_reflection": False, "has_excalibur": False,
+    "sokoban_completed": False, "minetown_visited": False, "donations_count": 0,
+    "ac": 9, "steps_in_goal": 0, "turn": 1,
+    "hp": 20, "max_hp": 20, "hunger_state": 1, "adjacent_hostiles": 0,
+    "has_healing": True, "is_fighting": False, "encumbrance": 0,
+    "stairs_known": False, "failures": {}, "failures_total": 0,
+}
+
+
+def default_ctx(**overrides) -> dict:
+    """A complete context for shadow/fixture evaluation, with safe overrides."""
+    ctx = dict(DEFAULT_FIXTURE_CTX)
+    ctx.update(overrides)
+    return ctx
+
+
+def _cmp(a, op: str, b) -> bool:
+    op = str(op)
+    if op == "<=":
+        return a <= b
+    if op == ">=":
+        return a >= b
+    if op == "<":
+        return a < b
+    if op == ">":
+        return a > b
+    if op == "==":
+        return a == b
+    raise ValueError(f"ERR_SIGNATURE: bad comparison operator {op!r}")
+
+
+_HUNGER_LEVELS = {"satiated": 0, "normal": 1, "hungry": 2, "weak": 3, "fainting": 4}
+
+
+def _hunger_level(level) -> int:
+    s = str(level)
+    if s in _HUNGER_LEVELS:
+        return _HUNGER_LEVELS[s]
+    if s.isdigit():
+        return int(s)
+    raise ValueError(f"ERR_SIGNATURE: bad hunger level {level!r}")
+
+
 def nethack_bindings(ctx: dict) -> dict:
     """ctx keys: xl, depth, dnum, lawful, has_poison_res, has_reflection, has_excalibur,
-    minetown_visited, donations_count, ac, steps_in_goal, turn."""
+    minetown_visited, donations_count, ac, steps_in_goal, turn — plus R3 additions:
+    hp, max_hp, hunger_state, adjacent_hostiles, has_healing, is_fighting,
+    encumbrance, stairs_known, failures (dict goal→count). Missing keys default safely
+    (R3 manifest predicates must be evaluable on partial/fixture contexts)."""
+    hp_frac = (_c(ctx, "hp", 0) / max(1, _c(ctx, "max_hp", 1)))
+    hunger_raw = _c(ctx, "hunger_state", 1)
+    failures = ctx.get("failures") or {}
     return {
         "true": lambda: True,
         "false": lambda: False,
+        # R3 comparison-sugar predicates: (hp_frac <= 0.40)
+        "hp_frac": lambda op, v: _cmp(hp_frac, op, float(v)),
+        "hunger_ge": lambda level: hunger_raw >= _hunger_level(level),
+        "adjacent_hostiles": lambda: _c(ctx, "adjacent_hostiles", 0) > 0,
+        "has_healing": lambda: bool(_c(ctx, "has_healing", False)),
+        "is_fighting": lambda: bool(_c(ctx, "is_fighting", False)),
+        "encumbrance_le": lambda n: _c(ctx, "encumbrance", 0) <= int(n),
+        "donations_lt": lambda n: _c(ctx, "donations_count", 0) < int(n),
+        "minetown_known": lambda: bool(_c(ctx, "minetown_visited", False)),
+        "stairs_known": lambda: bool(_c(ctx, "stairs_known", False)),
+        "failures_in_10_episodes_ge": lambda n, goal="": failures.get(goal, _c(ctx, "failures_total", 0)) >= int(n) if failures else _c(ctx, "failures_total", 0) >= int(n),
         "xl_ge": lambda n: ctx["xl"] >= int(n),
         "xl_le": lambda n: ctx["xl"] <= int(n),
         "depth_ge": lambda n: ctx["depth"] >= int(n),

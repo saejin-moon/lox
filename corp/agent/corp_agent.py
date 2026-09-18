@@ -49,7 +49,7 @@ from corp.domain.shop_manager import ShopManager
 from corp.domain.macro_director import MacroAscensionDirector, AscensionPhase
 from corp.policy.goal_interpreter import GoalInterpreter
 from corp.deliberative.autopsy_engine import AutopsyEngine
-from corp.deliberative.deadlock_resolver import DeadlockResolver
+from corp.deliberative.deadlock_resolver import DeadlockResolver, emit_deadlock_diff
 from corp.deliberative.providers.mock_provider import MockProvider
 from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
 from corp.deliberative.impasse_evaluator import HolisticImpasseEvaluator, ImpasseEvaluation
@@ -975,6 +975,39 @@ class CORPAgent:
 
         return True
 
+    def _emit_deadlock_diff(self, patch, failed_task: str) -> None:
+        """R3 (AGENT_PLAN step 9): converts a DeadlockResolver patch into a policy diff,
+        validates it through the gate pipeline, and persists the bumped program on
+        acceptance (next-episode effect). Ledger records accept AND reject."""
+        try:
+            program = self.goals.program
+            diff_text = DeadlockResolver.patch_to_diff(
+                patch,
+                parent_version=program.version,
+                failed_task=failed_task,
+                depth=self.current_blstats.depth if self.current_blstats else None,
+                turn=self.current_blstats.turn if self.current_blstats else 0,
+            )
+            accepted = emit_deadlock_diff(
+                diff_text, program,
+                program_path=getattr(self.goals, "program_path", "data/policy_program.json"),
+            )
+            if accepted:
+                # Re-load so the CURRENT episode keeps running on its compiled config;
+                # the next episode's GoalInterpreter picks up the bumped program.
+                from corp.policy.program import PolicyProgram
+                self.goals.program = PolicyProgram.load(
+                    getattr(self.goals, "program_path", "data/policy_program.json"))
+            from corp.policy.ledger import RevisionLedger
+            RevisionLedger().append({
+                "type": "deadlock_revision",
+                "accepted": accepted,
+                "failed_task": failed_task,
+                "diff": diff_text[:500],
+            })
+        except Exception as e:  # noqa: BLE001 — deliberation must never kill the loop
+            print(f"[agent] deadlock diff emission failed: {e}")
+
     def step(self) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """
         Executes one full cognitive step: selects tactical task, dispatches keystroke,
@@ -1152,8 +1185,9 @@ class CORPAgent:
                 # Fast Path: Check LRU patch cache
                 cached_patch = self.throttler.get_cached_patch(state_hash)
                 if cached_patch is not None:
-                    injected = DeadlockResolver.patch_to_tasks(cached_patch)
-                    self.plan_queue.extend(injected)
+                    # R3: cached deadlock verdicts re-emit as policy diffs (idempotent
+                    # — the nogood already lives in the program if it was accepted).
+                    self._emit_deadlock_diff(cached_patch, failed_task)
                 else:
                     turn_now = self.current_blstats.turn if self.current_blstats else self.max_turn_reached
                     allowed, reason = self.throttler.should_allow_query(
@@ -1184,8 +1218,11 @@ class CORPAgent:
                             self.throttler.record_query_dispatched(trigger_type, turn_now)
                             self.throttler.store_cached_patch(state_hash, patch)
 
-                            injected = DeadlockResolver.patch_to_tasks(patch)
-                            self.plan_queue.extend(injected)
+                            # R3: deadlock → policy diff through the validator (next-
+                            # episode effect). The transient plan_queue injection path
+                            # is removed per MACRO.md §10 — the LLM may never bypass
+                            # the executor's priority cascade mid-episode.
+                            self._emit_deadlock_diff(patch, failed_task)
 
                             if self.parquet_logger is not None:
                                 import uuid

@@ -35,3 +35,18 @@ class LLMProvider(ABC):
         Executes reasoning call, extracting <think> and validating structured JSON into schema.
         """
         pass
+
+    @abstractmethod
+    async def generate_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        context: dict | None = None,
+    ) -> LLMResponse:
+        """
+        Plain text completion (R3 policy-diff author path, AGENT_PLAN §4.5). No JSON
+        parsing — `parsed_payload` carries the raw text. `context` lets deterministic
+        providers (Mock) format canned outputs (e.g. current program version); API
+        providers ignore it.
+        """
+        raise NotImplementedError

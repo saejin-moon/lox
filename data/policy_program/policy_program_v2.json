@@ -3,6 +3,8 @@
   "domain": "nethack",
   "params": {},
   "macros": [],
+  "tactic_rules": [],
+  "nogoods": [],
   "strategy_plan": [
     {
       "goal": "explore_floor",
