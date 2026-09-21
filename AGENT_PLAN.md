@@ -307,6 +307,136 @@ the loop, validator, DSL, and program machinery are untouched.
 2. One live frontier-API revision accepted with the 3-ep quick batch passing.
 3. 0 rejected-diff leaks: program on disk always passes the full validator.
 
+
+### 4.6 R5→R6 HANDOFF ADDENDUM — read before starting the next session (R6, Craftax, or the pre-gate checklist)
+
+#### Session-start protocol (updated)
+1. Read, in order: `AGENTS.md` → this file (incl. the R6 EXECUTION PLAN in the R5 section) → `MACRO.md`.
+2. `uv run pytest -q` → expect **297 passed**. NOTE: two tests are FLAKY (see Ops lessons) — if
+   `test_combat_manager_standard_melee` or `test_fragile_role_elbereth_threshold` fail transiently,
+   rerun once before diagnosing; then FIX the isolation bug (do not remove the tests).
+3. Check live programs: NetHack = `data/policy_program.json` (v4), MiniHack = `data/policy_program_minihack.json`
+   (v4 — CAREFUL: the gated-ablation llm arm ran in `data/ablation_work/program_llm_minihack.json` at v3,
+   its own copy; the live file holds a separate 5-revision gated run's v4. Divergence is expected; the
+   scaled ablation regenerates its own arms).
+4. Check for unconsolidated parquet: `uv run python scripts/clean_telemetry.py`.
+5. Read the seams before writing: `corp/policy/{dsl,macros,manifest,validator,reviser,ledger,report,tactics,
+   profiles,corpus}.py`, `corp/executor/{interface,nethack_adapter,minihack_adapter}.py`,
+   `scripts/{run_revision_loop,run_ablation,run_domain_eval,run_campaign}.py`.
+
+#### WHERE WE LEFT OFF (exact state)
+- R3+R4+R5-core DONE; live NetHack program v4 (3 llm-authored combat rules + 23 interlock rules); the
+  combat manager EXECUTES tactic rules (first-match-wins) — llm rules are no longer inert.
+- First GATED three-arm transfer ablation complete (`data/ablation_minihack_r5_gated.json`):
+  frozen 31.0 / random 32.0 / llm-v3 **29.0** median steps (all 102/102 success). random ≈ frozen
+  (control behaves). llm direction POSITIVE but NOT significant (p=0.37, δ=-0.072 @ 102 eps).
+- The live in-loop transfer gate now catches drift: it rejected 3/5 revisions with
+  `ERR_CERT_FAIL: median_steps_on_success X > 1.2× baseline` and the author recovered after each.
+- R6 coding is GATED (see R6 EXECUTION PLAN) on: (a) significance on minihack, (b) NetHack 100-ep
+  post-R4 baseline ≥ R0 reference (401.7 mean / 3.0 median, run `oPoU2l`).
+
+#### NEXT-TASK CHECKLIST (exact commands; do in this order)
+1. **Fix the 2 flaky tests** (`tests/test_domain_and_workers.py::test_combat_manager_standard_melee`,
+   `tests/test_food_light_intrinsics.py::test_fragile_role_elbereth_threshold`). Suspected cause: NetHack
+   env/global state leaking across tests (they failed transiently twice, passed on rerun; the failures
+   once broke a `pytest && launch` chain and silently killed a background job). Likely fix: force-fresh
+   NLE env per test / reset module-level buffers (FrontierExplorer `_bfs_epoch`, GridAStar epoch buffers
+   are CLASS-LEVEL state — check these first).
+2. **Multiprocessing batch runner** (`scripts/run_parallel_batch.py`, new): N worker processes, each
+   builds its own env+agent and runs a slice of episodes; merge per-episode dicts; ~10–30× statistics
+   throughput. Verified feasible: 36 cores, 2 concurrent NLE episodes ran interference-free (3.2s wall).
+   Use for: the 100-ep baselines (item 4) and every future batch. NetHack SPS is dominated by NLE's
+   C-side env stepping, NOT Python — parallelism is the lever, not language rewrites.
+3. **Scaled minihack ablation** (opens/closes the R6 evidence gate):
+   `uv run python scripts/run_ablation.py --domain minihack --arms frozen,random,llm --episodes 100
+   --seed-bases 0,100,200,300,400 --llm-provider gemini --llm-model gemma-4-26b-a4b-it
+   --llm-revisions 5 --report-episodes 3 --out data/ablation_minihack_scaled.json`
+   (≈1,500 eps/arm equivalent — cheap). Acceptance for R6 gate: llm vs frozen p<0.05 on
+   steps_on_success, δ direction preserved. NOTE: ExploreMaze reward saturates at 1.0 — mean_reward is
+   NOT a valid comparison metric; steps_on_success (lower=better) is. Craftax won't have this problem
+   (achievements don't saturate).
+4. **NetHack 100-ep post-R4 baseline** (background/overnight, nice-10):
+   `uv run python scripts/run_benchmark.py --role valkyrie --episodes 100 --max-steps 20000
+   --output data/postR4_baseline_100ep.json` → compare to R0 frozen reference (median 3.0 / mean 401.7
+   / mean turns 3939.7). Verifies the live tactic rules didn't regress; becomes the frozen arm reference.
+5. **Craftax feasibility probe**: `uv add craftax` — if the JAX dependency tree fights CPU-only/uv,
+   document and defer; if it installs, follow the Craftax adapter plan in the R5 section (obs bridge to
+   blstats-compatible vector is the crux — reuse GridAStar/FrontierExplorer unchanged).
+6. **`corp/policy/goal_state.py` extraction**: move `AscensionPhase` + `MacroDirectorState` out of
+   `corp/domain/macro_director.py` (goal_interpreter imports them), then DELETE the legacy phase machine
+   + `tests/test_macro_director.py` equivalence tests (decision-trace equivalence was proven in R2;
+   equivalence tests shipped green since). Behavior-preserving; one commit.
+
+#### MiniHack env contract (hard-won facts — minihack 1.0.2 / NLE 1.3.0)
+- Tasks: `MiniHack-ExploreMaze-Hard-v0` (default), `MiniHack-ExploreMaze-Easy-Mapped-v0` (cert). The plan's
+  original `Explore-HardFixed/Maze-HardReach` names DO NOT EXIST in this version.
+- Action space: Discrete(12) = [N,E,S,W,NE,SE,SW,NW,OPEN,KICK,SEARCH,EAT] as `nle.nethack`
+  enums (N=107, E=108, S=106, W=104, NE=117, SE=110, SW=98, NW=121, OPEN=111, KICK=4,
+  SEARCH=115, EAT=101). Discrete INDEX = position in `env.unwrapped.actions` — resolve with
+  `actions.index(CompassDirection.N)`; the enum VALUE is NOT the index.
+- blstats: [0]=x(col), [1]=y(row), [10]=HP, [11]=HPMAX. Hero char `@` at (row,col)=(blstats[1],blstats[0]).
+- `save_ttyrec` kwarg is NOT accepted by task envs (TypeError) — do not pass it.
+- Walkable chars: `.#+><}`; stairs `>`; unmapped tiles ` `. Frontier = walkable tile adjacent to a ` ` tile.
+- Set `TERM=dumb` in subprocesses/probes to avoid tty noise.
+- 100% success rate is the CEILING on ExploreMaze — revisions are distinguished ONLY by
+  median_steps_on_success (lower better). The domain report carries this (R5 metric-gap fix).
+
+#### Provider facts (google-genai native path)
+- `gemma-4-26b-a4b-it` WORKS on Google AI Studio; `gemma-3-27b-it` and `gemini-2.5-flash` return 404
+  for this account. Default model is set accordingly in `GeminiProvider`.
+- `generate_text` uses the native SDK with `ThinkingConfig(thinking_level="high")` (env:
+  `GEMINI_THINKING_LEVEL`, "off" disables; `GEMINI_USE_GENAI=0` forces the OpenAI-compat fallback).
+- contents must be ONE string; system prompt goes via `config=GenerateContentConfig(
+  system_instruction=...)`. Passing `[system, user]` as contents creates TWO user turns and the model
+  answers both (observed: "OKSay OK").
+- Thinking output lives in `resp.candidates[0].content.parts` with `part.thought=True` — captured into
+  `LLMResponse.thinking_content` and ledgered (`thinking`, `response_text`, `tokens_in/out/thought`,
+  `latency_ms`). thinking=high ≈ 2.5k+ thought tokens even on trivial prompts; full revision call ≈
+  90–130s, ~9–12k prompt tokens. The "Direct use of AFC" warning is benign.
+- Author-format reliability: thinking-high produces surgical diffs (correct index-shift rule removals,
+  ordering-aware adds). Known past artifacts, now guarded: `[(note ...)]` bracket-notation copying
+  (prompt fixed), bare `(when is_fighting)` symbol conditions (parser wraps bare strings into zero-arg
+  calls), interleaved reasoning (native channel fixed).
+
+#### Validator/DSL gotchas (each one cost a debugging cycle)
+- Param paths in diffs carry the `policy_params.` prefix; manifest leaves and `program.params` storage
+  do NOT — `_leaf_path()` strips it. Storing the prefixed path silently no-ops the overlay.
+- Form-nesting budget: whole-form paren depth ≤ 4 (top form = 0) which equals the spec's "condition
+  depth ≤ 3"; macro bodies are node-depth ≤ 3 POST-expansion; expansion consumes the caller's budget.
+- `macros.expand` must pass numeric/bool atoms through unchanged (comparison values are atoms, not
+  nodes); `render_node` emits zero-arg calls without trailing space and lowercases bools.
+- `extract_diff_text` must capture the WHOLE top-level form sequence (balance per form, continue while
+  the next non-ws char is `(`) — an early version captured only the header and silently dropped all ops.
+- Cycle rejection: forward-referencing macros fail with ERR_MACRO_CLOSURE (closure is checked before
+  the name is added), self/mutual cycles among LIVE macros fail with ERR_MACRO_CYCLE — either is a
+  correct rejection.
+- Interlock rules carry `"interlock": true` in the program; validator #9b rejects their removal by
+  index OR match. Diff-authored rules never get the flag.
+- `MockProvider.generate_text` canned diffs are domain-aware via `context={"version","domain"}`
+  (reviser fills both); nethack + minihack templates in `DOMAIN_TEMPLATES`.
+
+#### Ops lessons (background jobs + tests)
+- Background `nohup` jobs: Python stdout is BLOCK-buffered when redirected — the log lags until flush.
+  Use `uv run python -u` for unbuffered, and verify progress via output files, not the log.
+- NEVER chain `pytest && <critical launch>`: a flaky test failure (happened twice) silently skips the
+  launch. Run pytest, then launch in separate tool calls, and verify the PID + output files.
+- Two parallel NLE episodes run interference-free in separate processes (verified) — NLE is process-safe,
+  not thread-safe; use multiprocessing, not threads.
+- Watch for stale `data/ablation_work/` artifacts when re-running the harness (arm programs persist).
+
+#### Efficiency posture (decided)
+- Rust conversion: NO for now. NLE C-side stepping dominates SPS (~700–1,100); Python rewrites of A*
+  (currently <0.35ms) move a minor term. If speed ever matters, the candidates are
+  `navigation/astar.py`, `navigation/frontier.py`, `planner/nogood.py` mask checks — self-contained,
+  hot, well-tested. Research value lives in the loop, not the language.
+- The efficiency lever is multiprocessing episode execution (item 2) — pursue it before any 100-ep run.
+
+#### Test suite audit (decided)
+- Keep all 297 (~4.5s, guards real invariants). Removal candidates ONLY when legacy code goes:
+  `tests/test_macro_director.py` equivalence tests (~20) die with `macro_director.py` (item 6).
+- The 2 flaky combat tests get FIXED (isolation), never removed — see Ops lessons.
+
+
 ## 5. Phases R0–R9
 
 ### R0 — Checkpoint & Measurement (½ day) — **[2026-09-18 DONE]**
