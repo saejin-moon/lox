@@ -1,9 +1,27 @@
 {
-  "version": 6,
+  "version": 5,
   "domain": "nethack",
   "params": {},
   "macros": [],
   "tactic_rules": [
+    {
+      "when": "(and (adjacent_hostiles) (hp_frac <= 0.4))",
+      "do": "elbereth_first",
+      "unless": null,
+      "note": "emergency elbereth"
+    },
+    {
+      "when": "(and (adjacent_hostiles) (hp_frac <= 0.7))",
+      "do": "retreat_when_wounded",
+      "unless": null,
+      "note": "retreat when low hp"
+    },
+    {
+      "when": "(adjacent_hostiles)",
+      "do": "ranged_then_kill",
+      "unless": null,
+      "note": null
+    },
     {
       "when": "(and (monster \"giant spider\") (not has_poison_res))",
       "do": "elbereth_first",
@@ -223,10 +241,10 @@
     }
   ],
   "provenance": {
-    "author": "human-revert",
-    "note": "REVERT of 3 llm-authored combat rules: A/B on v5 (100 eps each, parallel runner) showed mean score 217.0 WITH rules vs 396.4 WITHOUT (median depth 2 vs 3). Rules engraved Elbereth while adjacent at <=40% HP and forced ranged_then_kill against everything \u2014 wrong response tier for DL1-3 melee deaths. Superseded by interlock-only rule set.",
+    "author": "r6-milestones",
+    "note": "R6 ascension stack: 13-goal mortality-driven plan (early_survival_stack, equip_upgrade, survival_intrinsics, enter_gehennom, castle_wishing, vlad_invocation, ascension_run). Human-approved milestone landing per AGENT_PLAN R6.",
     "parent_version": 3,
     "reason": "R4: append interlock tactic rules (lethal poison/heavy hitters) \u2014 parity with pre-R4 branches",
-    "parent_author": "gemma-4-26b@ablation"
+    "parent_author": "r4-interlock-migration"
   }
 }

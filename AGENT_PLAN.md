@@ -336,7 +336,16 @@ the loop, validator, DSL, and program machinery are untouched.
 - **NLE MiniHack resets are NOT seed-deterministic** (same seed → different episode steps across runs —
   measured). Transfer gates on small samples (3 eps) wobble around the 1.2× threshold; the mock-revision
   loop test now accepts both gate-consistent outcomes.
-- R6 milestone structure LANDED (program v5, 13 goals, 18 cert tests, gauntlet suite CERTIFIED) — but the
+- **v4/v5 llm combat-rule regression ROOT-CAUSED AND REVERTED (2026-09-19)**: controlled A/B on v5
+  (100 eps × 2 arms, parallel runner): WITH the 3 llm-authored rules mean score 217.0 / median depth 2.0;
+  WITHOUT them 396.4 / 3.0 — full recovery to the R0 reference (401.7/3.0). The rules engraved Elbereth
+  while adjacent-and-wounded and forced ranged_then_kill against everything (wrong response tier for the
+  DL1-3 melee-death taxonomy). Live program → **v6, interlock-only rule set**; regression archived at
+  `data/policy_program/v5_llm_rules_regressed.json`. LESSON for the loop: author-prompt should require
+  combat rules to be monster-conditional (the `(adjacent_hostiles)` catch-all was the killer), and the
+  nethack quick-batch gate (3ep×5k) is too noisy to catch a −45% regression — gate on ≥10 eps for combat
+  rules.
+- R6 milestone structure LANDED (program v6, 13 goals, 18 cert tests, gauntlet suite CERTIFIED) — but the
   R6 loop-gate is NOT met: scaled minihack ablation llm vs frozen p=0.19 (δ=0.048, direction positive),
   and the NetHack 100-ep post-R4 baseline (v4) REGRESSED vs R0 reference (267.2 vs 401.7 mean score).
   NEXT: diagnose the v4 combat-rule regression (death taxonomy in postR4_baseline_100ep.json: starvation
