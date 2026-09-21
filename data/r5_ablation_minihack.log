@@ -1,1 +1,39 @@
 Direct use of automatic function calling (AFC) in Models.generate_content is not recommended. Instead, we recommend to use AFC in Chat.send_message. Similarly, direct use of AFC in Models.generate_content_stream is not recommended. Instead, we recommend to use AFC in Chat.send_message_stream.
+[ablation] arms=['frozen', 'random', 'llm'] episodes=34 role=valkyrie
+  [frozen] program v1 (23 rules, 0 tuned params)
+  [random] program v1 (0 rules, 0 tuned params)
+[loop] program v1 from data/ablation_work/program_llm_minihack.json | provider=gemini
+
+=== revision 1/5 | program v1 ===
+  ACCEPT v2: Increase exploration speed by boosting frontier bias and reducing unknown tile penalty, wh
+  ops: 3 set, 0 rule, 0 goal, 0 macro, 0 nogood
+
+=== revision 2/5 | program v2 ===
+  ACCEPT v3: Success rate is 1.0; maximizing exploration intensity and minimizing backtracking to reduc
+  ops: 3 set, 0 rule, 0 goal, 0 macro, 0 nogood
+
+=== revision 3/5 | program v3 ===
+  ACCEPT v4: reduce median_steps_on_success by lowering monster_cost, retreat_hp_frac, and stuck_patien
+  ops: 3 set, 0 rule, 0 goal, 0 macro, 0 nogood
+
+=== revision 4/5 | program v4 ===
+  ACCEPT v5: Add retreat tactic to mitigate long combat encounters which increase step counts and cause
+  ops: 0 set, 1 rule, 0 goal, 0 macro, 0 nogood
+
+=== revision 5/5 | program v5 ===
+  ACCEPT v6: The agent is already operating at the bounds of exploration intensity (max frontier_bias, 
+  ops: 1 set, 0 rule, 0 goal, 0 macro, 0 nogood
+
+[loop] done: 5/5 accepted | acceptance rate: 1.00
+  [llm] program v6 (1 rules, 6 tuned params)
+[ablation] benchmarking arm=frozen ...
+  [frozen] success_rate=None median_steps_on_success=None
+[ablation] benchmarking arm=random ...
+  [random] success_rate=None median_steps_on_success=None
+[ablation] benchmarking arm=llm ...
+  [llm] success_rate=None median_steps_on_success=None
+  [random vs frozen] p=0.8914477909459066 cliffs_delta=-0.011 ci95=(32.872549019607845, 38.627450980392155)
+  [llm vs frozen] p=0.5730428785551163 cliffs_delta=0.046 ci95=(34.068627450980394, 40.0296568627451)
+[ablation] results written to data/ablation_minihack_r5.json
+  [random] significant vs frozen: False (δ=-0.011) — requires 100-ep batches for the paper
+  [llm] significant vs frozen: False (δ=0.046) — requires 100-ep batches for the paper

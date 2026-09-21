@@ -157,7 +157,7 @@ async def run_loop(args) -> int:
     reviser = Reviser(provider, ledger)
 
     hooks_kwargs: dict = {}
-    if args.live_gates:
+    if args.live_gates and args.domain == "nethack":
         hooks_kwargs["certification"] = make_certification_gate(args)
         hooks_kwargs["quick_batch"] = make_quick_batch_gate(args)
         # §6 step 12 baseline: the current program's own quick-batch mean. A revision
@@ -167,6 +167,37 @@ async def run_loop(args) -> int:
         hooks_kwargs["baseline_score"] = baseline_stats.get("mean_score")
         print(f"[loop] quick-batch baseline (v{program.version}): "
               f"mean_score={hooks_kwargs['baseline_score']}")
+    elif args.domain != "nethack":
+        # Transfer domains: the in-loop gate is ALWAYS live (cheap seeded episodes).
+        # Regress = success_rate drop or median-steps-on-success worse by >20%
+        # (step-efficiency is the discriminating metric on ExploreMaze — R5 finding).
+        adapter_ref = adapter
+
+        def transfer_gate(candidate: PolicyProgram) -> None:
+            batch = [adapter_ref.run_episode(adapter_ref.make_env(seed=s), candidate, s,
+                                             adapter_ref.spec.step_limit_default)
+                     for s in range(args.quick_batch_episodes)]
+            stats = adapter_ref.report_bundle(batch)["batch"]
+            b = hooks_kwargs.get("baseline_transfer") or {}
+            if stats["success_rate"] < b.get("success_rate", 1.0) - 1e-9:
+                raise RuntimeError(
+                    f"success_rate {stats['success_rate']} < baseline {b.get('success_rate')}")
+            b_steps = b.get("median_steps_on_success")
+            c_steps = stats.get("median_steps_on_success")
+            if b_steps and c_steps and c_steps > b_steps * 1.20:
+                raise RuntimeError(
+                    f"median_steps_on_success {c_steps} > 1.2× baseline {b_steps}")
+
+        baseline_batch = [adapter.run_episode(adapter.make_env(seed=s), program, s,
+                                              adapter.spec.step_limit_default)
+                          for s in range(args.quick_batch_episodes)]
+        baseline_stats = adapter.report_bundle(baseline_batch)["batch"]
+        hooks_kwargs["certification"] = transfer_gate
+        hooks_kwargs["baseline_transfer"] = {
+            "success_rate": baseline_stats["success_rate"],
+            "median_steps_on_success": baseline_stats["median_steps_on_success"],
+        }
+        print(f"[loop] transfer baseline (v{program.version}): {baseline_stats}")
     if args.fixture_shadow:
         from corp.policy.predicates import default_ctx  # noqa: PLC0415
         if adapter is not None:

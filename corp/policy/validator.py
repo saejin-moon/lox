@@ -143,6 +143,7 @@ class ValidatorHooks:
     certification: object | None = None    # fn(candidate) -> None (raise on fail)
     quick_batch: object | None = None      # fn(candidate) -> {"mean_score": float}
     baseline_score: float | None = None    # current program's rolling quick-batch mean
+    baseline_transfer: dict = field(default_factory=dict)  # R5: success_rate + median_steps_on_success
 
 
 # ---------------------------------------------------------------------------

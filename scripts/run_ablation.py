@@ -64,15 +64,24 @@ def prepare_frozen_arm(workdir: str) -> str:
 
 
 def prepare_random_arm(workdir: str, n_revisions: int = 5, ops_per_rev: int = 3,
-                       seed: int = 7) -> str:
+                       seed: int = 7, domain: str = "nethack") -> str:
     """Arm 3: random perturbation WITHIN declared bounds, gated through the SAME
     validator pipeline. Identical acceptance machinery to the llm arm — only the
     proposal distribution differs (this is the control that makes the claim
     'the LLM adds value beyond gated search' falsifiable)."""
-    program = PolicyProgram.from_dict(DEFAULT_PROGRAM)
+    program = PolicyProgram.from_dict(
+        DEFAULT_PROGRAM if domain == "nethack"
+        else __import__("corp.executor", fromlist=["get_adapter"]).get_adapter(domain).default_program()
+    )
     rng = random.Random(seed)
-    leaves = param_leaves_from_config()
-    numeric = {p: s for p, s in leaves.items() if s["type"] in ("int", "float")}
+    if domain == "nethack":
+        numeric = {p: s for p, s in param_leaves_from_config().items()
+                   if s["type"] in ("int", "float")}
+    else:
+        from corp.executor import get_adapter  # noqa: PLC0415
+        numeric = {p: {"type": s.type, "min": s.min, "max": s.max}
+                   for p, s in get_adapter(domain).param_leaves().items()
+                   if s.type in ("int", "float")}
     for _ in range(n_revisions):
         ops = []
         for path in rng.sample(sorted(numeric), min(ops_per_rev, len(numeric))):
@@ -246,7 +255,7 @@ def main() -> int:
         if arm == "frozen":
             programs[arm] = prepare_frozen_arm(args.workdir)
         elif arm == "random":
-            programs[arm] = prepare_random_arm(args.workdir)
+            programs[arm] = prepare_random_arm(args.workdir, domain=args.domain)
         elif arm == "llm":
             programs[arm] = prepare_llm_arm(args.workdir, args)
         else:
@@ -275,17 +284,19 @@ def main() -> int:
         else:
             stats = run_domain_batch(programs[arm], out_path, args)
             episodes = stats.get("detailed_episodes", [])
+            batch = stats.get("batch", {})
             success_steps = sorted(e["steps"] for e in episodes if e.get("success"))
             results["arms"][arm] = {
-                "success_rate": stats.get("success_rate"),
-                "mean_reward": stats.get("mean_reward"),
+                "success_rate": batch.get("success_rate"),
+                "mean_reward": batch.get("mean_reward"),
                 "steps_on_success": success_steps,
-                "median_steps_on_success": stats.get("median_steps_on_success"),
+                "median_steps_on_success": batch.get("median_steps_on_success"),
+                "mean_coverage": batch.get("mean_coverage"),
                 "wall_sec": stats.get("wall_sec"),
                 "program_version": stats.get("program_version"),
             }
-            print(f"  [{arm}] success_rate={stats.get('success_rate')} "
-                  f"median_steps_on_success={stats.get('median_steps_on_success')}")
+            print(f"  [{arm}] success_rate={batch.get('success_rate')} "
+                  f"median_steps_on_success={batch.get('median_steps_on_success')}")
 
     if "frozen" in results["arms"]:
         frozen = results["arms"]["frozen"]

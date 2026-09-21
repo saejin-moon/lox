@@ -471,6 +471,15 @@ Landing pattern per milestone (unchanged from §8): new goal handlers (CODE, hum
 + default-program entries + certification cases → THEN the loop may tune them. R6 overlaps
 R7 (armor/weapon tiers generalize across fighter roles) — build profiles alongside.
 
+**First three-arm transfer ablation result (2026-09-18, 102 eps × 3 arms, seeded):**
+random ≈ frozen (δ=-0.011, p=0.89 — control arm behaves: gates alone don't move the metric);
+llm accepted 5/5 revisions but DRIFTED SLOWER (34.5 vs 31.0 median steps) — the in-loop
+acceptance gate for transfer domains was the dry-run set. FIX LANDED: transfer domains now
+ALWAYS gate live in-loop (cheap seeded episodes): reject on success_rate drop OR
+median_steps_on_success > 1.2× baseline. First live gate catch: ERR_CERT_FAIL
+"median_steps_on_success 39 > 1.2× baseline 32" → author revised and recovered. Relaunching
+the gated ablation (data/ablation_minihack_r5_gated.json).
+
 **Craftax adapter plan (R5 remainder, parallel with R6 #1):**
 1. `uv add craftax` (JAX CPU) — verify install feasibility first; defer if the dependency
    tree fights the CPU-only constraint.

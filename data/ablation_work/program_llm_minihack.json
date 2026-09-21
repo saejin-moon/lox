@@ -1,18 +1,21 @@
 {
-  "version": 4,
+  "version": 6,
   "domain": "minihack",
   "params": {
     "explore.frontier_bias": 2.4,
     "nav.unknown_penalty": 1.0,
-    "explore.revisit_cap": 3
+    "explore.revisit_cap": 3,
+    "nav.monster_cost": 100.0,
+    "combat.retreat_hp_frac": 0.175,
+    "explore.stuck_patience": 15
   },
   "macros": [],
   "tactic_rules": [
     {
-      "when": "(and (adjacent_hostiles) (hp_frac < 0.4))",
+      "when": "(adjacent_hostiles)",
       "do": "retreat",
-      "unless": null,
-      "note": "retreat if wounded to prevent combat delay"
+      "unless": "(hp_frac > 0.2)",
+      "note": "retreat to avoid combat-induced step increases"
     }
   ],
   "nogoods": [],
@@ -31,9 +34,9 @@
     }
   ],
   "provenance": {
-    "author": "strategy-tuning-agent",
+    "author": "CORP",
     "note": "minihack cold-start: reach stairs when known, else explore",
-    "parent_version": 3,
-    "reason": "maximizing exploration aggression by pushing frontier bias to limit and minimizing unknown penalty and revisit cap to find stairs in fewer steps"
+    "parent_version": 5,
+    "reason": "The agent is already operating at the bounds of exploration intensity (max frontier_bias, min unknown_penalty, min monster_cost, min revisit_cap). To further reduce median_steps_on_success, I am lowering the retreat_hp_frac to its minimum bound to minimize the frequency of retreat maneuvers that increase path length."
   }
 }
