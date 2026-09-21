@@ -66,7 +66,9 @@ class TestAgentDiffPath:
         from corp.agent.corp_agent import CORPAgent
         assert hasattr(CORPAgent, "_emit_deadlock_diff")
         import inspect
-        src = inspect.getsource(CORPAgent)
+        # source check spans the MRO (behavior-preserving split moved the runner
+        # into corp/agent/episode_runner.py)
+        src = "\n".join(inspect.getsource(c) for c in CORPAgent.__mro__ if c is not object)
         # plan_queue injection removed; diff emission wired
         assert "plan_queue.extend" not in src
         assert "_emit_deadlock_diff" in src

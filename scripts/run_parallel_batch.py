@@ -78,6 +78,7 @@ def _worker_main(worker_cfg: dict[str, Any]) -> dict[str, Any]:
             mode="random",
             seed=worker_cfg["seed"] + ep_no,
             role=worker_cfg["role"] if worker_cfg["role"] != "all" else "unknown",
+            program_path=worker_cfg.get("program_path"),
         )
         ep_start = time.perf_counter()
         try:
@@ -148,6 +149,8 @@ def main() -> None:
     parser.add_argument("--clean-parquet", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--no-consolidate", action="store_true",
                         help="Skip DuckDB consolidation (parquet stays on disk)")
+    parser.add_argument("--program-path", type=str, default=None,
+                        help="Policy program override (A/B arms, ablations; default: live program)")
     parser.add_argument("--output", type=str, default="data/parallel_batch_results.json")
     args = parser.parse_args()
 
@@ -168,6 +171,7 @@ def main() -> None:
         "eval_type": args.eval_type,
         "nogood_path": args.nogood_path,
         "parquet_dir": args.parquet_dir,
+        "program_path": args.program_path,
     } for w in range(args.jobs) if assignments[w]]
 
     print("=" * 80)
