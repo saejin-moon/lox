@@ -139,8 +139,8 @@ data/
 ## 3. Scaling: Episode Throughput (the engine's fuel)
 
 - Hardware: **36 cores / 31 GB RAM**. NLE is process-safe, single-threaded per env → workers scale linearly.
-- `scripts/run_parallel_batch.py --jobs 30` is the default for campaigns (~3× the 10-worker baseline):
-  **NetHack ≈ 5–6k eps/hr** at 20k-step caps; MiniHack/Craftax curricula (short episodes) **10–50k eps/hr**.
+- Campaigns pass `--jobs 30` explicitly (the script default is a conservative 8): **NetHack ≈ 5–6k eps/hr**
+  at 20k-step caps; MiniHack/Craftax curricula (short episodes) **10–50k eps/hr**.
 - Campaign discipline: consolidate DuckDB at campaign boundaries; keep per-worker parquet partitions.
 - Leave 4–6 cores headroom (OS, consolidation, on-demand llama.cpp).
 - Curriculum episodes use per-phase step budgets (most deaths occur < 6k turns; survivors of the budget
@@ -208,9 +208,10 @@ the mechanical guardrails (§4) stay in code.
 
 - `data/corp_telemetry.duckdb`: `episodes`, `ticks` (6.6M+), `goal_events`, views `v_eval_summary`,
   `v_lethal_taxonomy`. The author's `query_duckdb` tool reads this read-only.
-- Test suite: `uv run pytest` → **321 passed (~5s)**. Includes: R6 milestone certifications (18),
-  target-conditionality invariant tests, food-security policy locks (6), validator gates, combat/navigation
-  mixins, loop tests, epistemic, telemetry, adapters.
+- Test suite: `uv run pytest` → **321 passed (~5s)**. Flake protocol: one transient failure → rerun once
+  before diagnosing (combat-manager suites are timing-sensitive); never skip. Includes: R6 milestone
+  certifications (18), target-conditionality invariant tests, food-security policy locks (6), validator
+  gates, combat/navigation mixins, loop tests, epistemic, telemetry, adapters.
 - Certifications: `scripts/run_skill_certifications.py` (4 suites, incl. the R6 Early Survival Gauntlet) —
   all CERTIFIED. Per-domain adapter certification suites gate handler promotion.
 - Every campaign appends to `data/revision_ledger.jsonl` (author, tokens, cost, latency, accept/reject,

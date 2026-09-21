@@ -30,6 +30,51 @@ Parity is the crossover; the design goal is that our loop's improvement rate **c
 
 ---
 
+## 0.5 WHERE WE ARE (state of record, 2026-09-19) — read before working
+
+**Program**: live NetHack program = **v6** (`data/policy_program.json`; interlock-only tactic rules — the 3
+llm-authored combat rules were reverted after an A/B showed they cost 45% mean score). MiniHack program v4.
+**Current NetHack baseline band (100-ep batches, valkyrie, v6 rules)**: mean score **330–396**, median depth
+**2–3** (unseeded batch σ is wide; the 396.4 control ran on pre-refactor code — treat 396 as the optimistic
+edge). Death taxonomy: starvation faints 18–28% (chronic, NOT fixed — the food chase is locked OFF, see
+AGENTS.md §4.14), DL-1–3 melee bites dominant, occasional prayer-prompt deaths. **128 of ~330 recent episodes
+died at depth 1 after a median of ~4,400 turns** — stalling + early survival is the wall, not turn budget.
+AutoAscend empirical foil: median depth 10.0 / mean score 10,713.6 / 4.8% ascension (5 eps @ 20k).
+
+**Decision ledger (do not re-litigate)**:
+- **No AutoAscend port** — the contribution is grown knowledge beating engineered knowledge; porting an
+  expert HTN falsifies the claim and breaks the baseline-free novel-env story (user decision, final).
+- **1a**: combat-verb tactic rules MUST be target-conditional — `(monster "…")`/`(item "…")` required in
+  `when` (validator invariant + author prompt). Macro bodies are parameterless (no string atoms), so the
+  target match lives in the rule's own `when`; macros compose state conditions around it.
+- **1b**: tiered quick-batch gate — rule-ADD revisions gate on 10ep×10k; param-only stay 3ep×5k
+  (`make_quick_batch_gate(args, parent_program=…)` in run_revision_loop.py).
+- **1c**: transfer report bundles carry per-seed spread; report-episodes defaults 10.
+- **Storage**: per-file `.sexpr` authoring tree (`data/program/<domain>/`) + compiled JSON artifact
+  (`corp/policy/compiler.py` → `data/compiled/<domain>.json`). Executor contract unchanged.
+- **Naming**: architecture = **LOX-ψ** (LLM-Oriented Creation of Symbolic policies); **CORP** = the system.
+- **Food chase stays disabled** (dose-response A/B, 4×100 eps: none 396.4 > tight 275.4 > design 310.8 >
+  wide 250.0; faints RISE with chase capability). Locked by `tests/test_food_security.py`.
+
+**Session-critical facts**:
+- Providers: `.env` holds `GEMINI_API_KEY`; default model `gemma-4-26b-a4b-it` (works on Google AI Studio;
+  `gemini-2.5-flash`/`gemma-3-27b-it` 404 for this account). Revision-loop/ablation scripts auto-load `.env`.
+  `generate_text` = native google-genai with thinking-high (env-tunable); full revision call ≈ 90–130 s.
+- **MiniHack/NLE resets are NOT seed-deterministic** (same seed → different episode steps across runs,
+  measured). Transfer gates on small samples wobble around thresholds; never gate a single comparison on 3 eps.
+- `run_parallel_batch.py` `--jobs` default is conservative (8) — campaigns must pass **`--jobs 30`**
+  (36 cores; ~6k NetHack eps/hr; leave 4–6 cores headroom).
+- Flake protocol: if exactly one test fails, rerun once before diagnosing (two known timing-sensitive
+  tests: combat-manager suites; a full-suite order dependence was observed once, not reproduced).
+- `docs/architecture/*.md` are LEGACY (pre-Gen-2 topology, old naming) — superseded by AGENTS.md §2; do not
+  trust or rename them; they get rewritten in S1.
+- `MACRO.md` says macros are "parameterless" (line 276) but also describes parameterized substitution (§153):
+  the IMPLEMENTATION is parameterless today; parameterization is the S3 ladder's first rung.
+- MockProvider canned diffs are domain-aware and model the corrected author idioms (target-conditional
+  rules); keep them aligned when the DSL changes.
+
+---
+
 ## 1. Target architecture (already partially built)
 
 ```
