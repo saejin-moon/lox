@@ -1,846 +1,228 @@
-# CORP-Ω: Grammar-Constrained Policy-Diff Synthesis for Symbolic HTN Executors
-## Roadmap from current state (NetHack: Median Depth 2–4, Mean Score 281–848) to a General Multi-Domain Method
+# CORP-Ω Gen-2: Policy Synthesis Engine
+## Roadmap from a gated revision loop to a knowledge-growing agent that beats AutoAscend — and its equivalents everywhere else
 
-> **Mission**: Beat AutoAscend (NetHack: Median Depth 10.0 / Mean Score 10,713.6 / 4.8% Valkyrie ascension) and
-> demonstrate that an **offline LLM authoring S-expression policy diffs** against a declarative **policy program**,
-> executed by a **CPU-only symbolic HTN executor**, is a *general, statistically rigorous protocol for
-> LLM-maintained embodied agents* — validated on NetHack (hard showcase) **and 2–3 seeded transfer domains**
-> (ablation core), across roles, with bounded self-extension (macros) in the core experiments.
+> **Mission**: an LLM author — given *everything* (full environment schema, every action, all run telemetry,
+> trajectories, the wiki) — **grows a declarative policy program** through a safety-gated synthesis loop until
+> the resulting agent decisively beats AutoAscend on NetHack (median depth 10.0 / mean score 10,713.6 /
+> 4.8% Valkyrie ascension) and the strongest published equivalents on MiniHack and Craftax.
 >
-> **Status of the four impact trades (all accepted)**:
-> 1. Multi-domain benchmark suite — MiniHack/Craftax-class seeded domains join the ablation core; NetHack demoted
->    to hard showcase. Track B (transfer) promoted into the **main results**.
-> 2. Frontier API LLMs allowed as the policy **author** (llama.cpp stays the reproducible path). The **executor**
->    remains strictly CPU-only.
-> 3. **Macro-extension** (`defmacro`) promoted into the core DSL: the LLM composes new predicates/goals from
->    existing primitives via definitional expansion — bounded self-extension lands in the main paper, not a
->    future-work section. Full Track A (goal-handler authorship) remains post-core.
-> 4. **Ascension parity demoted to stretch goal.** The R6 endgame knowledge port is pursued only if the core
->    evidence is already secured; novelty lives in transfer + self-extension + learning, not in the NetHack
->    community headline.
+> **Non-negotiables**: (1) the contribution is fully novel — no expert HTN is copied (no AutoAscend lineage);
+> (2) humans provide only primitives, interlocks, and certification gates; (3) the LLM's only write path is a
+> grammar-constrained diff validated by machine-checkable gates; (4) CPU-only execution.
 >
-> **Honest baseline note**: `NetHackChallenge-v0` forbids seeding — NetHack claims require 100-episode batches.
-> Seeded domains get full seed-controlled statistics. AutoAscend's ~2 person-years of human expert labor is the
-> comparison axis for the development-loop claim.
+> **Honest baseline note**: `NetHackChallenge-v0` forbids seeding → NetHack claims need 100-ep batches
+> (σ acknowledged). Seeded domains (MiniHack, Craftax) carry full seed-controlled statistics.
 
 ---
 
-## 1. Target Architecture
+## 0. Why AutoAscend is beatable (structural argument)
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│ OFFLINE LLM REVISION LOOP (runs indefinitely between batches)      │
-│  author   : frontier API model (primary) + llama.cpp (repro path)  │
-│  input    : run-report bundle (DuckDB) + current policy program    │
-│             + revision ledger + domain wiki/docs RAG               │
-│  output   : S-EXPRESSION POLICY DIFF (GBNF-constrained, depth ≤ 3) │
-└───────────────┬────────────────────────────────────────────────────┘
-                ▼ validator gate: grammar → schema → bounds → macro expansion
-                  → certification subset → quick-batch non-regression
-┌────────────────────────────────────────────────────────────────────┐
-│ POLICY PROGRAM  (data/policy_program.json — canonical, versioned)  │
-│  policy_params · strategy_plan · tactic_rules · macros             │
-│  role/domain profiles · nogoods · provenance/ledger                │
-└───────────────┬────────────────────────────────────────────────────┘
-                ▼ compile: typed PolicyConfig → HTN method registry
-┌────────────────────────────────────────────────────────────────────┐
-│ SYMBOLIC EXECUTOR CORE (CPU-only, stable)                          │
-│  GoalInterpreter → HTN planner ← Domain Managers ← A*/epistemics   │
-│         ▲                                                          │
-│  ┌──────┴───────────────────────────────────────────────┐          │
-│  │ DomainAdapter ABC — one adapter per environment       │          │
-│  │  nethack (existing) · minihack · craftax · (crafter)  │          │
-│  └───────────────────────────────────────────────────────┘          │
-└────────────────────────────────────────────────────────────────────┘
-```
+AutoAscend is a static expert system with four structural weaknesses, each mapped to a pillar below:
 
-**Division of authority (the safety + novelty claim):**
-- The LLM expresses **what to value and when** — goals, priorities, thresholds, tactics, and (via `defmacro`)
-  *compositions of existing primitives*. It can never express *how to act*: no code emission, no escape hatch.
-  Macro expansion is purely definitional — a macro is sugar over already-verified primitives, so verification
-  stays trivial and the system remains closed.
-- The executor owns *how*: pathfinding, combat mechanics, inventory actions, menu/prompt handling.
-
----
-
-## 2. The Policy Diff DSL (emission format)
-
-**Decision**: the LLM emits **S-expression policy diffs** — depth ≤ 3 nesting, one form per line — against the
-policy program. Storage remains typed JSON. (S-expressions over bespoke line-DSL and raw JSON: one recursive
-grammar + ~50-line parser, LLMs know Lisp deeply from training data, trivially GBNF-constrainable, connects to
-the program-synthesis / DSL literature — DreamCoder et al. — for the paper.)
-
-### 2.1 Why diffs, and why not raw JSON or code
-- Full-document regeneration causes semantic drift in untouched sections (unattributable revisions).
-- Long JSON is bracket-fragile and token-expensive at the iteration frequency we need.
-- **Code emission is explicitly forbidden** — the safety claim. Macros are the *controlled* widening:
-  definitional expansion over verified primitives, never new mechanisms.
-- Diffs over a stable program give 1:1 attribution between LLM hypothesis and measured delta — the ablation
-  (LLM-revision vs frozen vs random-perturbation-with-identical-gates) stays falsifiable.
-
-### 2.2 Format spec (v1)
-
-```lisp
-(revision 15
-  (parent 14)
-  (author "claude-opus@api")            ; or "llama3.1-70b@local"
-  (domain nethack)                       ; diffs are domain-scoped
-  (reason "coyote-fight death t2891: hp 23->6 while resting; widen retreat"))
-
-(set policy_params.survival.rest_below_frac 0.65)          ; bounded: 0.40..0.85
-
-;; BOUNDED SELF-EXTENSION: a macro is definitional sugar over existing primitives
-(defmacro when_endangered
-  (and (adjacent_hostiles) (hp_frac <= 0.40) (not has_healing)))
-
-(rule add tactic_rules
-  (when (and (monster "coyote") (when_endangered)))
-  (do retreat))
-
-(rule add tactic_rules
-  (when (item "throne"))
-  (do avoid)
-  (note "2 electric-shock deaths in runs 21-22"))
-
-(goal prioritize hunt_poison_res
-  (when (and (depth >= 5) (not has_poison_res)))
-  (until has_poison_res))
-
-(goal deprioritize enter_sokoban
-  (after (failures_in_10_episodes >= 2)))
-
-(nogood add
-  (when (and (task "SIT") (depth <= 5)))
-  (cause "throne electric shock fatality"))
-```
-
-### 2.3 Closed vocabulary (the LLM composes; it cannot invent mechanisms)
-
-| Category | Primitives (bound to code) |
+| AutoAscend weakness | Our attack |
 |---|---|
-| Predicates | `hp_frac<=/>=`, `hunger>=`, `depth in a-b`, `xl>=`, `lawful`, `has_poison_res`, `has_reflection`, `has_healing`, `minetown_known`, `minetown_visited`, `donations<n`, `stairs_known`, `adjacent_hostiles`, `is_fighting`, `encumbrance<=`, `turn>=`, `failures_in_10_episodes>=`, `(*domain-specific bindings per adapter*)` |
-| Param paths | `policy_params.*` (typed leaves; each has min/max bounds in the schema) |
-| Tactic verbs | `ranged_only`, `ranged_then_kill`, `retreat`, `retreat_when_wounded`, `avoid`, `kite`, `elbereth_first`, `never_melee` |
-| Goal names | `explore_floor`, `forge_excalibur`, `hunt_poison_res`, `enter_sokoban`, `goto_minetown`, `donate_temple`, `descend`, `equip_upgrade`, `shop_sell_loot`, `ascend` (each = a certified goal handler; per-domain sets) |
-| Nogoods | `WHEN <predicate> DO forbid(task)` |
-| Macros | `defmacro name expr` — pure definitional expansion over the above; expansion happens at validation; expanded forms are re-validated against the same closure |
+| Fixed knowledge, frozen at ship time | **Evolution engine**: knowledge grows every campaign; nogoods + program revisions compound |
+| Single strategy, no self-observation | **Evidence engine**: trajectories, failure counters, counterfactual probes → the author sees failure modes and rewrites strategy |
+| One program | **Population search**: K candidates evaluated in parallel (~6k NetHack eps/hr); winners breed the next generation |
+| ~2 person-years of hand knowledge | **Author agent + RAG**: the wiki (FTS5, full 3.6.6 dump) + telemetry give the LLM the raw material experts used — acquired in machine-time, not person-years |
 
-**Normative spec**: the complete language, macro semantics, exposed-vocabulary manifest, validation pipeline,
-error taxonomy, and implementation checklist live in **`MACRO.md`** — the implementation contract for
-`corp/policy/dsl.py`, `macros.py`, `validator.py`, `program.py`, and the GBNF grammar files.
-
-### 2.4 Constrained decoding
-llama.cpp natively supports GBNF: ship the **s-expression grammar (depth ≤ 3, closed vocabulary)** so invalid
-output is impossible at decode time locally. Frontier API paths (the primary author) get structured
-output/parse-and-reject with one repair retry. Nothing unparseable reaches the validator.
+Parity is the crossover; the design goal is that our loop's improvement rate **compounds** while theirs is zero.
 
 ---
 
-## 3. The Policy Program (canonical storage, `data/policy_program.json`)
-
-Typed JSON with:
-
-1. **`policy_params`** — every tunable the symbolic core reads. Each leaf: `{type, min, max, default, description, tuning_history[]}`.
-2. **`strategy_plan`** — ordered goals replacing `MacroAscensionDirector`'s hardcoded 6-phase machine: `{goal, when?, until?, on_fail?, priority}` evaluated top-down each turn by the GoalInterpreter.
-3. **`tactic_rules`** — ordered match→policy rules replacing the hardcoded monster sets (`INSTAKILL_NAMES`, `LETHAL_POISON_NAMES`, `HEAVY_HITTERS`) and inline guard branches.
-4. **`macros`** — definitional expansions validated at compile time (depth-bounded, closure-checked).
-5. **`role_profiles` / `domain_profiles`** — per-role overlays (NetHack) and per-domain overlays (transfer suite): weapon tiers, keep-distance flags, shop behavior, skill priorities.
-6. **`nogoods`** — current `data/nogoods.json` folded in.
-7. **`provenance`** — version, parent, author model, prompt/revision ids, accept/reject history with measured deltas and cost.
-
----
-
-## 4. Complete Codebase Refactor Blueprint
-
-This is the engineering contract. Migration order is dependency-ordered; every behavior-preserving step must
-reproduce decision traces on certification episodes before the next step lands.
-
-### 4.1 Target module tree
+## 1. Target architecture (already partially built)
 
 ```
-corp/
-├── policy/                          # NEW — the entire LLM-facing surface
-│   ├── config.py                    # PolicyConfig typed tree + bounds registry + (de)serialization
-│   ├── program.py                   # PolicyProgram Pydantic models + versioned load/save + overlay merge
-│   ├── predicates.py                # Named predicate registry (replaces/adapts planner/predicates.py bitmask compiler)
-│   ├── macros.py                    # defmacro definitional expansion + closure checker
-│   ├── dsl.py                       # S-expression reader (depth ≤ 3) → typed diff objects
-│   ├── grammar/                     # GBNF grammar files (nethack.sexpr.gbnf, minihack.sexpr.gbnf, ...)
-│   ├── macros.py                    # defmacro definitional expansion + closure checker
-│   ├── grammar/                     # GBNF grammar files (nethack.sexpr.gbnf, minihack.sexpr.gbnf, ...)
-│   ├── validator.py                 # Full gate pipeline (parse → schema → bounds → certs → quick-batch)
-│   ├── reviser.py                   # Run-report bundle builder + provider calls + diff proposal
-│   ├── goal_interpreter.py          # strategy_plan evaluator → navigation directives
-│   ├── profiles.py                  # role/domain overlay resolution
-│   ├── ledger.py                    # Revision ledger (append-only JSONL): cost, latency, accept/reject, deltas
-│   ├── corpus.py                    # Per-domain RAG corpus: ingest + FTS index + rag_context slices
-│   └── report.py                    # Run-report bundle builder (DuckDB → death taxonomy, stall census, goal stats)
-├── executor/                        # NEW — the domain-agnostic boundary
-│   ├── interface.py                 # DomainAdapter ABC + DomainSpec (see 4.3)
-│   ├── registry.py                  # adapter lookup by domain name
-│   └── nethack/                     # adapter facade over the existing managers (thin!)
-├── agent/                           # corp_agent.py slims to: loop + priority cascade + delegation
-├── domain/                          # existing managers (nethack-specific, unchanged behavior)
-├── deliberative/                    # AutopsyEngine + DeadlockResolver rewritten onto diff contract
-├── env/ · navigation/ · planner/    # existing (planner/predicates.py migrates into policy/predicates.py)
-├── telemetry/                       # existing + goal_events table + revision ledger views
-└── workers/dispatcher.py            # existing
-scripts/
-├── run_benchmark.py                 # --domain flag; adapter-aware
-├── run_baseline_suite.py            # per-domain baselines
-├── run_revision_loop.py             # NEW — the unattended loop
-└── run_ablation.py                  # NEW — three-arm harness (LLM-revision | frozen | random-gated)
-data/
-├── policy_program.json              # canonical program (versioned, git-tracked)
-├── policy_program/                  # version history
-└── revision_ledger.jsonl            # append-only
+AUTHOR AGENT (agentic LLM: gemini primary, llama.cpp repro)
+  tools: query_duckdb(sql, read-only) · wiki_search(q) · read_trajectory(ep, turn_range)
+         read_env_schema() · read_manifest() · read_program_tree()
+  output: S-expression policy diff → VALIDATOR GATES → authoring tree commit
+POLICY PROGRAM  data/program/<domain>/  (per-file .sexpr workspace; compiled to JSON)
+EVOLUTION ENGINE  population × parallel gated evaluation → selection (ledger lineage)
+EXECUTOR  unchanged contract: compiled JSON → GoalInterpreter → HTN → managers
+CURRICULA  data/curricula/<skill>/ — short targeted episodes for fast per-skill iteration
 ```
 
-### 4.2 Refactor steps (dependency-ordered)
+### 1.1 Storage decision (made): per-file tree + compiled artifact
 
-| # | Step | Files touched | Behavior change | Gate |
-|---|---|---|---|---|
-| 1 | Commit current state; start ledger | git, `data/revision_ledger.jsonl` | none | — |
-| 2 | `policy/config.py` extraction: ~80–100 tunables out of managers | nav/combat/inventory/guards/corp_agent | **none** | decision-trace equivalence on certification episodes |
-| 3 | `policy/program.py` + `policy/program.json` (defaults == current behavior) | new | none | equivalence |
-| 4 | `policy/goal_interpreter.py` replaces `MacroAscensionDirector` phases; directives via existing `get_navigation_directive()` seam | macro_director → goal_interpreter, nav_manager seam | none | equivalence + `goal_events` DuckDB table |
-| 5 | `policy/predicates.py` named registry (migrate `planner/predicates.py`) | planner/predicates → policy/predicates | none | equivalence |
-| 6 | `policy/dsl.py` + `grammar/` + `policy/macros.py` | new | new capability (off by default) | grammar unit tests + closure checker tests |
-| 7 | `policy/validator.py` + `policy/report.py` + `policy/ledger.py` + `policy/reviser.py` | new | new capability | gate pipeline tests; repair-retry tests |
-| 8 | `scripts/run_revision_loop.py` + `scripts/run_ablation.py` | new | new capability | 10-revision unattended dry-run with MockProvider |
-| 9 | `deliberative/` unification: AutopsyEngine + DeadlockResolver emit diffs through the validator | deliberative/* | low (same intent, new format) | existing deliberative tests adapted |
-| 10 | `executor/interface.py` DomainAdapter ABC; wrap NetHack managers as `executor/nethack/` (thin facade) | new + thin re-exports | none | NetHack benchmark unchanged |
-| 11 | `executor/minihack/` adapter (first transfer domain) | new | new capability | MiniHack certification set |
-| 12 | `executor/craftax/` (or Crafter) adapter (second transfer domain) | new | new capability | domain-2 certification set |
-| 13 | Tactic-rules evaluator in `combat_manager.py`; profiles in `policy/profiles.py` | combat_manager, benchmark | none-by-default | equivalence on default program |
-| 14 | Per-domain RAG corpus build (`policy/corpus.py` + `scripts/build_corpus.py` → `data/corpus/<domain>/`): ingest docs/paper/source-docstrings, FTS index, RAG slices wired into `adapter.rag_context()` and the reviser prompt | new | new capability | corpus coverage check (task/achievement lists present, slices non-empty); author-prompt smoke test |
+The LLM authors into **individual `.sexpr` files** under `data/program/<domain>/`
+(`macros/*.sexpr`, `rules/*.sexpr`, `goals/*.sexpr`, `handlers/*.sexpr`, `params.json`, `nogoods.jsonl`).
+Rationale: per-unit git diffs, per-file provenance, natural review units for humans, no monolithic merge
+conflicts for the evolution engine, and file identity = rule identity. `corp/policy/compiler.py` assembles +
+validates the tree into `data/compiled/<domain>.json` — the executor's contract is unchanged (zero executor
+rewrites). The validator remains the ONLY writer of accepted trees; every compiled artifact is archived under
+`data/programs/archive/`.
 
-### 4.3 The `DomainAdapter` ABC (the generalization contract)
+### 1.2 The Policy ISA (S1 — the big enabler)
 
-```python
-class DomainAdapter(ABC):
-    spec: DomainSpec                      # name, obs vector layout, grid shape, action space
-    def predicates(self) -> dict[str, PredicateBinding]   # domain-specific named predicates
-    def goal_handlers(self) -> dict[str, GoalHandler]     # certified goal handlers
-    def make_env(self, seed: int | None, **cfg) -> EnvLike
-    def report_bundle(self, duckdb) -> dict               # run-report for the reviser
-    def certification_suite(self) -> list[CertCase]       # per-domain skill cases
-    def rag_context(self) -> list[str]                    # wiki/docs slices for the author LLM
-```
+The strategy content of the current hardcoded cascade (~4k lines across managers) is re-expressed as the
+default program in the DSL. The ISA:
 
-The policy diff DSL references **only** what an adapter's `predicates()` and `goal_handlers()` expose — the
-same grammar, different bindings. Porting a domain = implementing the adapter + writing its certification set;
-the loop, validator, DSL, and program machinery are untouched.
+- **Predicates** (30+ today): hp_frac, hunger, depth, xl, inventory/weapon/armor state, monster/item
+  presence, dungeon topology, epistemic flags (BUC, identity), failure counters.
+- **Verbs** (8): ranged_only, ranged_then_kill, retreat, retreat_when_wounded, avoid, kite, elbereth_first,
+  never_melee — target-conditional only (v6 invariant).
+- **Goals** (13 today, extensible by certification): ordered strategy_plan entries with when/until/directive.
+- **Behavior primitives** (NEW, S1/S3 — the plan vocabulary): goto(tile_class), pickup, eat(slot|floor),
+  wield/wear/puton/quaff/read/zap/apply(slot), engrave(text), descend/ascend, pray, search, attack, wait —
+  each mapped to existing dispatcher Tasks with machine-readable preconditions/effects in the manifest.
+- **Macros**: parameterized in S3 (MACRO.md already specifies substitution semantics); boolean composition
+  only — never behavior.
+- **Handlers** (S3): declarative sub-programs `(goal-handler <name> (when …) (plan <primitive>+) (until …))`
+  proposed by the LLM, shadow-validated, certified, then promotable into goals.
+- **Params** (~100 typed leaves, bounds-enforced).
 
-### 4.4 Interfaces the refactor must preserve (regression anchors)
+Hardcoded code retains ONLY the interlocks (AGENTS.md §4) and the mechanisms. Everything the LLM may want to
+change is data.
 
-- `CORPAgent.select_action()` priority ordering and all documented interlocks (AGENTS.md §3) — untouched
-- `get_navigation_directive()` seam signature — GoalInterpreter plugs in here
-- Dispatcher fiber semantics (`THROW`/`EAT`/etc. multi-key handling, prompt interception in `AutoMoreWrapper`)
-- Telemetry schemas (ticks/episodes) + `goal_events` added, never removed
+### 1.3 Evidence engine (S0 — everything the author sees)
 
----
+- `query_duckdb(sql)` — read-only author tool over 6.6M+ ticks, episodes, goal_events, death taxonomy.
+- `wiki_search(q)` — the full NetHack 3.6.6 wiki FTS5 dump (the manual the experts used).
+- `read_trajectory(ep_id, turn_range)` — flight-recorder markdown autopsies (per-episode, per-death last-N).
+- `read_env_schema()` — every action, its dispatcher task, preconditions, effects; every observation channel.
+- `read_manifest()` / `read_program_tree()` — the full vocabulary and the current program source.
+- Goal-failure counters wired from goal_events into the condition vocabulary (deprioritize what keeps
+  failing); per-death state dumps; stall census.
+- **Counterfactual probes** (S2): candidate params re-evaluated on death-adjacent situations (paired batches
+  on NetHack; seeded replay on transfer domains).
 
+### 1.4 Evolution engine (S2)
 
----
+- Population of K candidates as program trees; each generation: LLM proposes per-candidate mutations
+  (conditioned on that candidate's evidence) → gates → parallel tiered evaluation → selection by gated
+  metrics (NetHack: mean score + median depth, 100-ep CIs; curricula: skill pass-rate; transfer:
+  steps-on-success / achievement curves) → winners become the base; losers archived with full lineage.
+- This is FunSearch/AlphaEvolve's selection shape applied to **executable agent policies** — with the
+  difference that our mutation operator is an evidence-conditioned agentic author, our search space is a
+  *declarative, safety-bounded policy language*, and our evaluation is whole-episode agent performance with
+  interlock invariants.
 
-## 4.5 R3 HANDOFF ADDENDUM — read before starting R3 (closes the documentation gaps)
+### 1.5 Curricula (S4)
 
-### Session-start protocol (any fresh session)
-1. Read, in order: `AGENTS.md` (mission + interlocks), `AGENT_PLAN.md` (this file), `MACRO.md` (DSL spec).
-2. Run `uv run pytest -q` → expect **193 passed**. Never proceed with fewer.
-3. Check background baselines: `data/autoascend_val_100ep.json` / `data/baseline_corp_100ep.json`.
-   CORP reference is **frozen** (`oPoU2l`: median 3.0 / mean 401.7 / 100ep@20k, SPS 759).
-   AutoAscend val 100ep@50k runs in background → `data/autoascend_val_100ep.json` (check
-   `data/r0_baseline_autoascend.log`; `grep -c "^Ep"` = episodes done).
-4. Read the existing seams before writing anything: `corp/policy/config.py` (PolicyConfig — the
-   tunable surface), `corp/policy/program.py` (`PolicyProgram.load/apply_overlay` — the container),
-   `corp/policy/predicates.py` (`parse/eval_condition/nethack_bindings` — the condition evaluator),
-   `corp/policy/goal_interpreter.py` (the strategy_plan walker), `corp/domain/macro_director.py`
-   (legacy reference implementation, kept for equivalence tests only).
-5. **Disambiguation**: `planner/predicates.py` = the legacy 64-bit mask compiler (leave it in place);
-   `policy/predicates.py` = the R2 condition evaluator. They coexist deliberately. R3 does NOT migrate.
+`data/curricula/<skill>/`: miniature scenarios isolating one skill (retreat discipline, corpse timing,
+altar BUC, wand usage, store etiquette, boulder routes). MiniHack custom levels for transfer-usable skills;
+NetHack fixture episodes for NetHack-specific ones. The loop iterates against 30-second episodes (~100× the
+full-game iteration rate); certified improvements deploy to the full game. Train on synthetic, evaluate on
+vanilla — no test contamination.
 
-### R3 design decisions already made (do not re-litigate)
-- **Diff emission format**: S-expression text per MACRO.md §2.2 — NOT JSON, NOT free text.
-- **Provider calls**: `LLMProvider.generate_reasoning_and_json(system, user, schema)` returns JSON into
-  Pydantic only. For raw S-expression output, ADD a `generate_text(system, user) -> LLMResponse` method to
-  `providers/base.py` + OpenRouter/Gemini implementations (plain completion, no JSON parsing), and use
-  llama.cpp's GBNF `grammar` argument on the local path (`corp/policy/grammar/nethack.sexpr.gbnf`).
-- **Nogoods fold-in**: `data/nogoods.json` is a LIST of nogood entries (5 currently). Policy program gains
-  `"nogoods": [...]` with the SAME entry shape; `NogoodStore.load_from_json` gains a program-path branch.
-  Keep writing `data/nogoods.json` for backward compat until R4.
-- **In-game impasses**: `DeadlockResolver` emits a diff through the validator; accepted diffs take effect
-  **next episode** (v1 has no runtime re-compile — MACRO.md §10). The existing `plan_queue` transient-patch
-  path is REMOVED, replaced by: accepted deadlock diff → program update → next episode uses it.
-- **Run-report bundle schema** (the reviser's input, built from DuckDB by `policy/report.py`):
-  ```json
-  {
-    "domain": "nethack", "batch": {"episodes": 100, "median_depth": 3.0, "mean_score": 401.7,
-    "best_score": 1379, "survival_rate": 0.13, "mean_turns": 3939.7},
-    "death_taxonomy": [{"cause": "The bat bites!", "count": 9, "median_depth_at_death": 2,
-                        "median_hp_frac_at_death": 0.15}],
-    "stall_census": [{"goal": "explore_floor", "stalls": 4, "median_stall_turns": 1200}],
-    "goal_stats": [{"goal": "forge_excalibur", "completions": 12, "skips_budget": 3,
-                    "skips_when": 40, "median_steps": 700}],
-    "prev_revisions": [{"version": 14, "accepted": true, "delta_score": -30.0, "reason": "..."}],
-    "variance_note": "NetHackChallenge unseedable; deltas < 1 batch-sigma are noise"
-  }
-  ```
-  (Exact queries: death taxonomy from `episodes.death_message` LIKE-grouping; goal stats from
-  `goal_events`; hp-at-death from `ticks` last-rows per episode.)
-- **Author prompt template** (rendered by `policy/reviser.py`): system = role definition ("you are the
-  strategy-tuning author of a symbolic NetHack agent; you emit ONE policy diff; you may only use the
-  vocabulary manifest below; every change needs a reason grounded in the report") + MACRO.md §2.2 excerpt;
-  user = manifest (§4 MACRO.md) + run-report bundle + last 5 ledger entries + RAG slices. Output = one
-  diff, nothing else.
-- **Acceptance-gate thresholds** (validator step 12): quick batch = 3ep×5k steps; reject if mean score
-  drops >50% below the current program's rolling quick-batch mean; certification subset = the existing
-  `run_skill_certifications.py` suite must stay green.
-- **Mock-first development**: build the whole loop against `MockProvider` (deterministic canned diffs —
-  write 3: one valid `set`, one valid `rule add`, one out-of-vocab to test rejection). Only touch real
-  APIs after the dry-run acceptance criterion passes.
+### 1.6 Prompt program (S0, continuous)
 
-### R3 acceptance (from §5, operationalized)
-1. `run_revision_loop.py --max-revisions 10 --provider mock` → 10 gated revisions unattended,
-   ledger shows mix of accept + reject with correct error codes.
-2. One live frontier-API revision accepted with the 3-ep quick batch passing.
-3. 0 rejected-diff leaks: program on disk always passes the full validator.
-
-
-### 4.6 R5→R6 HANDOFF ADDENDUM — read before starting the next session (R6, Craftax, or the pre-gate checklist)
-
-#### Session-start protocol (updated)
-1. Read, in order: `AGENTS.md` → this file (incl. the R6 EXECUTION PLAN in the R5 section) → `MACRO.md`.
-2. `uv run pytest -q` → expect **297 passed**. NOTE: two tests are FLAKY (see Ops lessons) — if
-   `test_combat_manager_standard_melee` or `test_fragile_role_elbereth_threshold` fail transiently,
-   rerun once before diagnosing; then FIX the isolation bug (do not remove the tests).
-3. Check live programs: NetHack = `data/policy_program.json` (v4), MiniHack = `data/policy_program_minihack.json`
-   (v4 — CAREFUL: the gated-ablation llm arm ran in `data/ablation_work/program_llm_minihack.json` at v3,
-   its own copy; the live file holds a separate 5-revision gated run's v4. Divergence is expected; the
-   scaled ablation regenerates its own arms).
-4. Check for unconsolidated parquet: `uv run python scripts/clean_telemetry.py`.
-5. Read the seams before writing: `corp/policy/{dsl,macros,manifest,validator,reviser,ledger,report,tactics,
-   profiles,corpus}.py`, `corp/executor/{interface,nethack_adapter,minihack_adapter}.py`,
-   `scripts/{run_revision_loop,run_ablation,run_domain_eval,run_campaign}.py`.
-
-#### WHERE WE LEFT OFF (exact state — updated 2026-09-19, R5→R6 checklist + R6 milestone structure DONE)
-- R3+R4+R5-core DONE; live NetHack program **v5** (13-goal R6 ascension plan + 26 tactic rules: 3 llm-authored
-  + 23 interlock); the combat manager EXECUTES tactic rules (first-match-wins).
-- R5→R6 checklist COMPLETE: flaky-test hardening (tests/conftest.py autouse epoch reset + tactic-engine
-  snapshot); `scripts/run_parallel_batch.py` (multiprocessing batch runner — 100 eps @ 20k in 152s wall,
-  ~1790 wall SPS-equiv, 0 errors; USE THIS for all future batches); goal_state extraction + legacy
-  MacroAscensionDirector DELETED (tests migrated to GoalInterpreter seam, `activate_goal`/
-  `get_minetown_donation_target` added); craftax feasibility probe PASS (JAX 0.11.2 CPU, Craftax-Classic-
-  Symbolic-v1: 1345-dim obs, 17 actions, 67 achievements, fast) — adapter port is the next R5 remainder.
-- **NLE MiniHack resets are NOT seed-deterministic** (same seed → different episode steps across runs —
-  measured). Transfer gates on small samples (3 eps) wobble around the 1.2× threshold; the mock-revision
-  loop test now accepts both gate-consistent outcomes.
-- **v4/v5 llm combat-rule regression ROOT-CAUSED AND REVERTED (2026-09-19)**: controlled A/B on v5
-  (100 eps × 2 arms, parallel runner): WITH the 3 llm-authored rules mean score 217.0 / median depth 2.0;
-  WITHOUT them 396.4 / 3.0 — full recovery to the R0 reference (401.7/3.0). The rules engraved Elbereth
-  while adjacent-and-wounded and forced ranged_then_kill against everything (wrong response tier for the
-  DL1-3 melee-death taxonomy). Live program → **v6, interlock-only rule set**; regression archived at
-  `data/policy_program/v5_llm_rules_regressed.json`. LESSON for the loop: author-prompt should require
-  combat rules to be monster-conditional (the `(adjacent_hostiles)` catch-all was the killer), and the
-  nethack quick-batch gate (3ep×5k) is too noisy to catch a −45% regression — gate on ≥10 eps for combat
-  rules.
-- **STARVATION / FOOD-CHASE: NEGATIVE RESULT, fully mapped (2026-09-19, 4-arm dose-response A/B)**: the
-  food-chase machinery was dead code — `%` (food/corpse) is not in WALKABLE_CHARS, so every
-  `astar.find_path` to a food tile silently returned None. Enabling it at increasing radii made EVERYTHING
-  worse, monotonically (100 eps/arm, v6 rules): **no chase = 396.4 mean / 18 faints; tight ≤8 = 275.4 / 26;
-  design radii (8/99) = 310.8 / 29; level-wide = 250.0 / 28.** Chasing mapped food burns the hunger budget
-  on walking and delays descent to fresh kills (kills = new corpses = the actual food supply). REVERTED to
-  the no-chase behavior (`git show 177ef25` state); `tests/test_food_security.py` locks the learned policy
-  (WEAK+ agents descend past mapped food). CARRIED-food eating is proactive at HUNGRY (3a premise already
-  true — no knob added). **Loop consequence: the author must never re-enable the chase** — treat
-  `nutrition.food_radius*` as inert-until-redesigned; a future fix must change the MECHANISM (e.g. eat-at-
-  kill discipline), not the radius.
-- R6 milestone structure LANDED (program v6, 13 goals, 18 cert tests, gauntlet suite CERTIFIED) — but the
-  R6 loop-gate is NOT met: scaled minihack ablation llm vs frozen p=0.19 (δ=0.048, direction positive),
-  and the NetHack 100-ep post-R4 baseline (v4) REGRESSED vs R0 reference (267.2 vs 401.7 mean score).
-  NEXT: diagnose the v4 combat-rule regression (death taxonomy in postR4_baseline_100ep.json: starvation
-  faints ×2, a prayer-prompt death, melee bites still dominant) before re-running the gate.
-
-#### NEXT-TASK CHECKLIST (exact commands; do in this order)
-1. **Fix the 2 flaky tests** (`tests/test_domain_and_workers.py::test_combat_manager_standard_melee`,
-   `tests/test_food_light_intrinsics.py::test_fragile_role_elbereth_threshold`). Suspected cause: NetHack
-   env/global state leaking across tests (they failed transiently twice, passed on rerun; the failures
-   once broke a `pytest && launch` chain and silently killed a background job). Likely fix: force-fresh
-   NLE env per test / reset module-level buffers (FrontierExplorer `_bfs_epoch`, GridAStar epoch buffers
-   are CLASS-LEVEL state — check these first).
-2. **Multiprocessing batch runner** (`scripts/run_parallel_batch.py`, new): N worker processes, each
-   builds its own env+agent and runs a slice of episodes; merge per-episode dicts; ~10–30× statistics
-   throughput. Verified feasible: 36 cores, 2 concurrent NLE episodes ran interference-free (3.2s wall).
-   Use for: the 100-ep baselines (item 4) and every future batch. NetHack SPS is dominated by NLE's
-   C-side env stepping, NOT Python — parallelism is the lever, not language rewrites.
-3. **Scaled minihack ablation** (opens/closes the R6 evidence gate):
-   `uv run python scripts/run_ablation.py --domain minihack --arms frozen,random,llm --episodes 100
-   --seed-bases 0,100,200,300,400 --llm-provider gemini --llm-model gemma-4-26b-a4b-it
-   --llm-revisions 5 --report-episodes 3 --out data/ablation_minihack_scaled.json`
-   (≈1,500 eps/arm equivalent — cheap). Acceptance for R6 gate: llm vs frozen p<0.05 on
-   steps_on_success, δ direction preserved. NOTE: ExploreMaze reward saturates at 1.0 — mean_reward is
-   NOT a valid comparison metric; steps_on_success (lower=better) is. Craftax won't have this problem
-   (achievements don't saturate).
-4. **NetHack 100-ep post-R4 baseline** (background/overnight, nice-10):
-   `uv run python scripts/run_benchmark.py --role valkyrie --episodes 100 --max-steps 20000
-   --output data/postR4_baseline_100ep.json` → compare to R0 frozen reference (median 3.0 / mean 401.7
-   / mean turns 3939.7). Verifies the live tactic rules didn't regress; becomes the frozen arm reference.
-5. **Craftax feasibility probe**: `uv add craftax` — if the JAX dependency tree fights CPU-only/uv,
-   document and defer; if it installs, follow the Craftax adapter plan in the R5 section (obs bridge to
-   blstats-compatible vector is the crux — reuse GridAStar/FrontierExplorer unchanged).
-6. **`corp/policy/goal_state.py` extraction**: move `AscensionPhase` + `MacroDirectorState` out of
-   `corp/domain/macro_director.py` (goal_interpreter imports them), then DELETE the legacy phase machine
-   + `tests/test_macro_director.py` equivalence tests (decision-trace equivalence was proven in R2;
-   equivalence tests shipped green since). Behavior-preserving; one commit.
-
-#### MiniHack env contract (hard-won facts — minihack 1.0.2 / NLE 1.3.0)
-- Tasks: `MiniHack-ExploreMaze-Hard-v0` (default), `MiniHack-ExploreMaze-Easy-Mapped-v0` (cert). The plan's
-  original `Explore-HardFixed/Maze-HardReach` names DO NOT EXIST in this version.
-- Action space: Discrete(12) = [N,E,S,W,NE,SE,SW,NW,OPEN,KICK,SEARCH,EAT] as `nle.nethack`
-  enums (N=107, E=108, S=106, W=104, NE=117, SE=110, SW=98, NW=121, OPEN=111, KICK=4,
-  SEARCH=115, EAT=101). Discrete INDEX = position in `env.unwrapped.actions` — resolve with
-  `actions.index(CompassDirection.N)`; the enum VALUE is NOT the index.
-- blstats: [0]=x(col), [1]=y(row), [10]=HP, [11]=HPMAX. Hero char `@` at (row,col)=(blstats[1],blstats[0]).
-- `save_ttyrec` kwarg is NOT accepted by task envs (TypeError) — do not pass it.
-- Walkable chars: `.#+><}`; stairs `>`; unmapped tiles ` `. Frontier = walkable tile adjacent to a ` ` tile.
-- Set `TERM=dumb` in subprocesses/probes to avoid tty noise.
-- 100% success rate is the CEILING on ExploreMaze — revisions are distinguished ONLY by
-  median_steps_on_success (lower better). The domain report carries this (R5 metric-gap fix).
-
-#### Provider facts (google-genai native path)
-- `gemma-4-26b-a4b-it` WORKS on Google AI Studio; `gemma-3-27b-it` and `gemini-2.5-flash` return 404
-  for this account. Default model is set accordingly in `GeminiProvider`.
-- `generate_text` uses the native SDK with `ThinkingConfig(thinking_level="high")` (env:
-  `GEMINI_THINKING_LEVEL`, "off" disables; `GEMINI_USE_GENAI=0` forces the OpenAI-compat fallback).
-- contents must be ONE string; system prompt goes via `config=GenerateContentConfig(
-  system_instruction=...)`. Passing `[system, user]` as contents creates TWO user turns and the model
-  answers both (observed: "OKSay OK").
-- Thinking output lives in `resp.candidates[0].content.parts` with `part.thought=True` — captured into
-  `LLMResponse.thinking_content` and ledgered (`thinking`, `response_text`, `tokens_in/out/thought`,
-  `latency_ms`). thinking=high ≈ 2.5k+ thought tokens even on trivial prompts; full revision call ≈
-  90–130s, ~9–12k prompt tokens. The "Direct use of AFC" warning is benign.
-- Author-format reliability: thinking-high produces surgical diffs (correct index-shift rule removals,
-  ordering-aware adds). Known past artifacts, now guarded: `[(note ...)]` bracket-notation copying
-  (prompt fixed), bare `(when is_fighting)` symbol conditions (parser wraps bare strings into zero-arg
-  calls), interleaved reasoning (native channel fixed).
-
-#### Validator/DSL gotchas (each one cost a debugging cycle)
-- Param paths in diffs carry the `policy_params.` prefix; manifest leaves and `program.params` storage
-  do NOT — `_leaf_path()` strips it. Storing the prefixed path silently no-ops the overlay.
-- Form-nesting budget: whole-form paren depth ≤ 4 (top form = 0) which equals the spec's "condition
-  depth ≤ 3"; macro bodies are node-depth ≤ 3 POST-expansion; expansion consumes the caller's budget.
-- `macros.expand` must pass numeric/bool atoms through unchanged (comparison values are atoms, not
-  nodes); `render_node` emits zero-arg calls without trailing space and lowercases bools.
-- `extract_diff_text` must capture the WHOLE top-level form sequence (balance per form, continue while
-  the next non-ws char is `(`) — an early version captured only the header and silently dropped all ops.
-- Cycle rejection: forward-referencing macros fail with ERR_MACRO_CLOSURE (closure is checked before
-  the name is added), self/mutual cycles among LIVE macros fail with ERR_MACRO_CYCLE — either is a
-  correct rejection.
-- Interlock rules carry `"interlock": true` in the program; validator #9b rejects their removal by
-  index OR match. Diff-authored rules never get the flag.
-- `MockProvider.generate_text` canned diffs are domain-aware via `context={"version","domain"}`
-  (reviser fills both); nethack + minihack templates in `DOMAIN_TEMPLATES`.
-
-#### Ops lessons (background jobs + tests)
-- Background `nohup` jobs: Python stdout is BLOCK-buffered when redirected — the log lags until flush.
-  Use `uv run python -u` for unbuffered, and verify progress via output files, not the log.
-- NEVER chain `pytest && <critical launch>`: a flaky test failure (happened twice) silently skips the
-  launch. Run pytest, then launch in separate tool calls, and verify the PID + output files.
-- Two parallel NLE episodes run interference-free in separate processes (verified) — NLE is process-safe,
-  not thread-safe; use multiprocessing, not threads.
-- Watch for stale `data/ablation_work/` artifacts when re-running the harness (arm programs persist).
-
-#### Efficiency posture (decided)
-- Rust conversion: NO for now. NLE C-side stepping dominates SPS (~700–1,100); Python rewrites of A*
-  (currently <0.35ms) move a minor term. If speed ever matters, the candidates are
-  `navigation/astar.py`, `navigation/frontier.py`, `planner/nogood.py` mask checks — self-contained,
-  hot, well-tested. Research value lives in the loop, not the language.
-- The efficiency lever is multiprocessing episode execution (item 2) — pursue it before any 100-ep run.
-
-#### Test suite audit (decided)
-- Keep all 297 (~4.5s, guards real invariants). Removal candidates ONLY when legacy code goes:
-  `tests/test_macro_director.py` equivalence tests (~20) die with `macro_director.py` (item 6).
-- The 2 flaky combat tests get FIXED (isolation), never removed — see Ops lessons.
-
-
-## 5. Phases R0–R9
-
-### R0 — Checkpoint & Measurement (½ day) — **[2026-09-18 DONE]**
-- [x] Commit ALL uncommitted work → commits `a39a560` (core), `891deb5` (bench+tests), `cd6dc98` (docs); + `.gitignore` exceptions for policy program/ledger
-- [x] NetHack baselines **launched** (background, nice-10): CORP 100ep@20k (`data/r0_baseline_corp.log` → `data/baseline_corp_100ep.json`), then AutoAscend 100ep@50k val (`data/r0_baseline_autoascend.log` → `data/autoascend_val_100ep.json`). NOTE: earlier 100-ep attempts (Sep 18 09:47) died at startup with 0 episodes — verified dead and relaunched. Freeze as reference when both finish.
-- [x] Trajectory reconstructed → `data/trajectory.csv` + `data/trajectory.png` (106 runs, Sep 15 → Sep 18: mean score 2→850, best-ever run `7dQBM4`: depth 11, score 2,933). Script: `scripts/trajectory.py`
-- [x] Ledger started → `data/revision_ledger.jsonl` (schema v1 recorded in init entry)
-
-### R1 — PolicyConfig Extraction (2–3 days) — **[2026-09-18 DONE — 1 day]**
-> Wired: ~75 tunables across guards/navigation/combat/inventory/macro_director/corp_agent via typed
-> `PolicyConfig` (`corp/policy/config.py`) with `defaults()` byte-identical to pre-R1 behavior; `CORPAgent`
-> accepts `policy_config=` and propagates to all managers. Smoke test: 2-ep live run in expected distribution
-> (DL 5/1, scores 413/288, SPS ~650 — no perf regression). Remaining literals are domain *data* (name sets)
-> reserved for R4 tactic rules.
-> Original acceptance criteria:
-Refactor steps 2–3. Extract tunables from `navigation_manager.py` (HP descent gates 0.45/0.70, rest 0.60/0.85, search caps 15/20/6/5, food radii 8/99/10/15, door caps), `combat_manager.py` (retreat 0.25, speed ratio 1.3, wounded-vs-heavy 0.65, ranged cooldown 50, escape grace), `inventory_manager.py` + `guards.py` (nutrition priorities, prayer gaps 301/850/450, eat-before-descend radius 10), `corp_agent.py` (triage 0.55/0.60, zero-turn guard 4).
-**Accept**: 183+ tests pass; default program reproduces decision traces byte-for-byte.
-
-### R2 — Policy Program + Goal Interpreter (3–4 days) — **[2026-09-18 DONE — 1 day]**
-> Shipped: `policy/program.py` (versioned PolicyProgram + params overlay + default program equivalent to the
-> pre-R2 phase machine), `policy/predicates.py` (S-expression condition evaluator over the closed vocabulary,
-> depth ≤ 3), `policy/goal_interpreter.py` (drop-in for MacroAscensionDirector: update_state /
-> get_navigation_directive / should_defer_stairs_for_farming; safety pre-passes for mines/sokoban retained as
-> policy-independent interlocks), `data/policy_program.json`, `goal_events` DuckDB table (activation/completion/
-> skip telemetry per goal). Equivalence proven by scripted scenario tests against the phase machine; found and
-> fixed a one-tick prize-flag ordering bug in the machine itself. 193 tests green. Live smoke: goal transitions
-> persisted end-to-end.
-> Original acceptance criteria:
->
-Refactor steps 4–5. Strategy-plan interpreter replaces `MacroAscensionDirector`; named predicate registry; `goal_events` DuckDB table feeding `failures_in_10_episodes`.
-**Accept**: default program equivalence; goal telemetry live.
-
-### R3 — Revision Loop + Diff DSL + Macros (3–4 days) — **[2026-09-18 DONE — 1 day]**
-> Shipped: `policy/dsl.py` (S-expression diff reader, depth ≤ 4 form nesting / ≤ 3 condition nesting,
-> bare-symbol leniency for API authors), `policy/macros.py` (defmacro expansion: closure + cycle +
-> depth-budget + free-symbol checks; parameterless v1), `policy/manifest.py` (machine-generated
-> vocabulary manifest: 30 predicates, 8 verbs, 6 certified goals, 93 param leaves with derived bounds
-> — ±50% floats, `_frac` capped to [d/2, min(1, d·1.5)] per MACRO §4.1), `policy/validator.py` (full
-> gate pipeline §6: parse→header→vocab→bounds→budgets→macro→expansion→mount→invariants→shadow, with
-> certification/quick-batch as injectable gates), `policy/ledger.py` (append-only JSONL, per-author
-> acceptance-rate metric), `policy/report.py` (run-report bundle from DuckDB + ledger), `policy/reviser.py`
-> (author prompt + parse-and-reject with ONE repair retry), `policy/grammar/nethack.sexpr.gbnf` (local
-> GBNF path), `scripts/run_revision_loop.py` (unattended loop: baseline quick batch → author → gates →
-> commit + git + ledger). Providers gained `generate_text` (raw completion, R3 contract).
-> Deliberative unification (step 9): DeadlockResolver now emits diffs through the validator
-> (`patch_to_diff` + `emit_deadlock_diff`); the in-game `plan_queue` transient-injection path is REMOVED —
-> accepted deadlock nogoods take effect next episode (MACRO §10).
-> Live result: mid-tier `gemma-4-26b-a4b-it` (Google AI Studio) authored accepted revision v2 — 2 combat
-> tactic rules grounded in melee-death telemetry; baseline quick batch 493.0, certification suite green,
-> candidate quick batch passed. Mock dry-run: 10 gated revisions, 8 accept / 2 ERR_BOUNDS reject, 0 leaks.
-> 257 tests green (64 new). Author-acceptance rate is now ledger-tracked per model (R9 Fig 4 data).
-> Original acceptance criteria:
->
-Refactor steps 6–8. Dual author (frontier API primary + llama.cpp GBNF repro path); **tiered authorship**:
-frontier for cold-start programs and stalled loops, mid-tier (Gemma-class ~30B via OpenRouter, or local) for
-routine tuning — acceptance rate per author model is tracked in the ledger and becomes its own ablation ("how
-smart must the policy author be?"). `defmacro` machinery with closure checker; full validator gate pipeline;
-unattended `run_revision_loop.py`; deliberative unification (step 9). RAG: NetHack slices from
-`data/wiki_index.db`; transfer-domain corpora arrive in R5 (before their author prompts go live).
-**Accept**: ≥10 gated revisions unattended (dry-run first with MockProvider); ≥1 accepted revision with measured improvement on the next batch; 0 rejected-revision leaks.
-
-### R4 — Tactic Rules + Profiles + Ablation Harness — **[2026-09-18 DONE — 1 day]**
-> Shipped: `policy/tactics.py` (TacticRuleEngine: first-match-wins over program-ordered rules; canonical
-> name sets moved here — TACTIC_LETHAL_POISON_NAMES / TACTIC_HEAVY_HITTER_NAMES — with drift-guard parity
-> tests vs combat_manager), combat_manager wired: the two hardcoded name-set branches (lethal poison,
-> heavy-hitter kiting) are now ENGINE-DRIVEN with verbatim-identical responses (`_defensive_kite_response`,
-> `_ranged_attack_response`, `_verb_response`); grid-bug + critical-HP retreat stay hardcoded interlocks;
-> new verbs ranged_only/never_melee/avoid never fall through to melee. INSTAKILL_NAMES deliberately remain
-> scan_monsters threat data (their lockouts are NogoodStore interlocks, not tactic decisions — deviation
-> from §8's letter, documented). Validator invariant #9b: interlock-flagged rules cannot be removed by any
-> diff. `policy/profiles.py` (role/domain overlays, precedence defaults ← domain ← role ← params;
-> protected paths: prayer model + corpse freshness). Live program migrated v3→v4: interlock rules appended
-> alongside LLM rules (26 rules). `scripts/run_ablation.py` (frozen | random-gated | llm arms; bootstrap
-> 95% CI, Mann-Whitney U, Cliff's δ; unattended smoke: 3 arms × 2ep green). 286 tests green (29 new).
-> 10-ep v4 live batch: median depth 2.5 / mean 344.9 (within historical batch σ; rules executed cleanly).
-> Original acceptance criteria:
-**Operational spec: §8 (normative contract).**
-Refactor steps 13 + profiles. Three-arm harness (`run_ablation.py`): LLM-revision | frozen | random-perturbation-with-identical-gates — **this control arm is what makes every later claim falsifiable**.
-**Accept**: harness runs unattended; tactic-rule parity on default program; all-role reports.
-
-### R5 — Domain Suite + Tuning Campaign — **[2026-09-18: CORE DONE — 1 day; craftax port + 100-ep curves pending]**
-> Shipped: `executor/interface.py` (DomainAdapter ABC + DomainSpec/PredicateBinding/ParamLeaf/GoalHandler/
-> CertCase + registry with lazy loading; adapter.machine-generated `manifest(version)` closes the drift
-> guard), `executor/nethack_adapter.py` (thin facade over the incumbent flow), `executor/minihack_adapter.py`
-> (**first transfer domain, fully working**): MiniHack-ExploreMaze family (plan's Explore-HardFixed/
-> Maze-HardReach task names don't exist in minihack 1.0.2 — noted in spec), 12-action compass space,
-> MiniHackAgent (A* to stairs when known / frontier-BFS exploration otherwise, hostile combat with
-> retreat gate), 7 domain param leaves (explore/nav/combat) diff-tunable, 2 certified goals
-> (explore_floor/reach_stairs), 2 certification cases (mapped-Easy A* reaches stairs in 10 steps;
-> unmapped-Hard frontier progress) — both green. `policy/corpus.py` + `scripts/build_corpus.py`-equivalent:
-> FTS5 corpora built for nethack (40 docs / 472 chunks from wiki_index.db) and minihack (17 docs / 91
-> chunks = task docs + targeted wiki articles); coverage checks green; RAG slices wired into the reviser.
-> Revision loop is domain-aware (`--domain minihack`: adapter manifest, seeded episode batches as the
-> run report, cold-start program auto-seeded to data/policy_program_minihack.json); mock + LIVE gemma
-> revision accepted on minihack (v4: generalized the mock's monster-specific retreat rule from telemetry).
-> `scripts/run_domain_eval.py` (seeded batch evaluator) + `scripts/run_campaign.py` (nightly loop +
-> engineering batch + 3-dry-night plateau detection → data/plateau_report.json).
-> HONEST findings: (1) ExploreMaze reward saturates at 100% success — mean_reward cannot distinguish
-> revisions; step-efficiency must join the domain report metric before the tuning campaign claims gains
-> (v4 measured: same success, 44 vs 35 mean steps on 6 seeds — within noise but the metric gap is real).
-> (2) Craftax NOT ported yet — corpus builder raises until `craftax` is installed (JAX dependency);
-> adapter is the next work item. (3) 100-ep three-arm transfer curves not yet run — that is the R5
-> acceptance remainder.
-**Operational spec: §8 (normative contract).** — **transfer becomes a main result**
-Refactor steps 10–12 + 14. Port `DomainAdapter` to MiniHack, then Craftax/Crafter. Per-domain: **RAG corpus
-build first** (`policy/corpus.py` + `scripts/build_corpus.py` → `data/corpus/<domain>/`; NetHack reuses
-`data/wiki_index.db`; MiniHack = NetHack wiki + MiniHack task docs; Craftax = official docs + paper + source
-docstrings + achievement/symbol tables — no community wiki exists, the corpus is self-built and load-bearing
-there since author models have thin parametric knowledge of it) → certification set → cold-start program →
-100-ep three-arm batches. NetHack tuning campaign continues nightly in parallel (100-ep batches driving
-revisions until plateau: target median depth ≥ 5, mean score ≥ 1,500).
-**Accept**: improvement curves on ≥2 transfer domains from cold-start programs; NetHack batch improvement beyond R0 baseline σ; **workshop paper checkpoint**.
-
-### R6 — STRETCH: Ascension Knowledge Stack — **[2026-09-19: MILESTONE STRUCTURE LANDED — 13-goal plan v5 + certs; loop-tuning gated on ablation evidence]**
-> Shipped: `goal_state.py` extended with 10 milestone flags (mr/light/wishing/amulet/candelabrum/bell/book/
-> castle/vlad/invocation) + 7 new AscensionPhase members; `DEFAULT_STRATEGY_PLAN` → **13 goals** in the
-> mortality-driven order (early_survival_stack → equip_upgrade → survival_intrinsics → enter_gehennom →
-> castle_wishing → vlad_invocation → ascension_run) interleaved with the R2 goals; milestone when/until
-> thresholds are **policy params** (`strategy.{survival,equip,intrinsics}_*`, depth gates `{gehennom,castle,
-> vlad}_min_depth`) honored by the interpreter via `_r6_when/_r6_until` — set_threshold goal ops tune them
-> through owned_params (the plan's literal until strings mirror defaults for inspection only); 8 new
-> predicates (has_mr/has_light/has_wishing_wand/has_amulet/has_candelabrum/castle_done/vlad_done/
-> invocation_done); NethackAdapter manifest + CERTIFIED_GOALS extended (drift-guard verified);
-> `tests/test_r6_milestones.py` (18 certification cases: no-skip-to gating, completion semantics, directive
-> wiring, manifest closure, param tunability); cert suite gains the R6 Early Survival Gauntlet (4/4 suites
-> CERTIFIED). Live program v4→v5 (26 tactic rules preserved). v5 live smoke green. 312 tests.
-> **HONEST GATE OUTCOME (2026-09-19)**: the R6 evidence gate is NOT met — (a) scaled minihack three-arm
-> ablation (frozen 30 / random 31 / llm 31 median steps, ~500 eps/arm × 5 seed bases): llm vs frozen
-> p=0.19, δ=0.048 (positive, not significant), random≈frozen (control behaves); (b) NetHack 100-ep post-R4
-> baseline (v4 program, `data/postR4_baseline_100ep.json`): median depth 2.0 / mean score 267.2 — BELOW the
-> R0 frozen reference (401.7 / 3.0, run `oPoU2l`). The v4 llm-authored combat rules did not hold the
-> NetHack baseline. Per Trade 4: milestone CODE (human-approved goals + gates + certs) is landed above,
-> but loop re-prioritization/tuning around R6 milestones is gated on fixing the loop first (llm > frozen
-> on transfer + NetHack baseline ≥ R0). Milestone behaviors 4–7 (gehennom/castle/vlad/ascension deep
-> gameplay) remain goal-gated hold patterns until the executor reaches those depths reliably.
-**Operational spec: §8 (normative contract).**
-The NetHack-community headline, demoted per Trade 4. Ordered by mortality impact: survival intrinsics/MR (DL 8–12), armor/weapon upgrade loop (alone should push median depth 6–8), Gehennom survival, Castle/wishing, Vlad → Candelabrum → Invocation → Ascension run, role quest branches.
-**Accept**: ascension rate ≥ AutoAscend's 4.8% on Valkyrie (100-ep batches); each milestone certified before the LLM may re-prioritize around it.
-
-### R7 — Cross-Role Generalization (2–4 weeks, overlaps R6)
-**Operational spec: §8 (normative contract).**
-`role_profiles` refinement by the loop (parameters generalize; capabilities need building): armor/weapon tiers generalize across fighters first. Spellcasting infrastructure (wizard/priest/healer) is **scope-gated**: required only if the paper claims all-role parity — otherwise report role-coverage honestly.
-**Accept**: fighter roles median depth ≥ 8 on 50-ep batches; ≥2 roles ascending (if R6 pursued); honest role-coverage table otherwise.
-
-### R8 — Track A: LLM-Authored Goal Handlers (research stretch)
-**Operational spec: §8 (normative contract).**
-The full self-extension: the LLM proposes new *goal handlers* (declarative sub-programs + action schemas) against domain RAG; verified in shadow/certification harness before entering production. Only after the closed-vocabulary loop has a long, clean acceptance ledger.
-**Accept**: ≥3 LLM-proposed goal handlers certified and shipped with measured contribution; 0 unverified handlers in production.
-
-### R9 — Paper
-**Operational spec: §8 (normative contract).**
-- **R5 checkpoint (workshop)**: "Agent-as-Developer" — trajectory figure, ledger, DSL artifact
-- **Main-track**: *"Grammar-constrained policy-diff synthesis: offline LLMs as optimizers of declarative agent policies across domains"* — requires (a) three-arm ablations with seeds, (b) ≥2-domain improvement curves, (c) NetHack ≥ AutoAscend at mid-game (ascension parity if R6 pursued), (d) cross-role evidence. If Track B domains stall, fall back to AAAI/IJCAI/CoG
-- **Nogood learning** framed as online constraint accumulation (ablated)
+`data/prompts/<version>.md` — the system prompt is a first-class, versioned artifact. `run_prompt_ab.py`
+evaluates prompt candidates by (a) author-acceptance rate, (b) validator-reject taxonomy, (c) downstream
+program performance on fixed eval batches. The prompt iterates under the same gated discipline as the
+program. Expected: many iterations; the prompt is where the author's *judgment* lives (e.g., "descend before
+detours", "never propose catch-all combat rules", "prefer wiki-cited rationales").
 
 ---
 
-### R6 EXECUTION PLAN (drafted 2026-09-18 — pending ablation evidence before coding starts)
+## 2. Phases (S0–S6), each with entry/exit gates and kill criteria
 
-**Evidence gate (before any R6 code)**: the minihack three-arm ablation (running) + a post-R4
-NetHack 100-ep baseline. R6 is gated on the core claim (loop > frozen) per Trade 4; if the
-ablation shows llm ≯ frozen, fix the loop first — R6 would only add human knowledge to a
-loop that can't tune it.
+### S0 — Evidence + Prompt Harness (≈1 wk) — NEXT UP
+- [ ] Author agent with tool loop (`run_author_session.py`): query_duckdb, wiki_search, read_trajectory,
+      read_env_schema, read_manifest, read_program_tree → one validated diff per session.
+- [ ] Wire goal-failure counters (goal_events → condition vocabulary) + trajectory slices in bundles.
+- [ ] `run_prompt_ab.py` + first prompt-iteration campaign (≥5 prompt versions evaluated).
+- [ ] Re-run the 3-arm minihack ablation with the agentic author (post-1a/1b/1c gates).
+- **Exit**: agentic author measurably outperforms the bundle-only author (accept-rate + downstream batch).
+- **Kill**: no improvement → the bottleneck is expression, jump S1 authoring-tree work early.
 
-**Milestone reordering — driven by the mortality data, not the §8 list order.** Current death
-taxonomy (post-R4): melee bites (giant rat / jackal / kitten / giant bat) at DL 1–3 dominate,
-then gnome wand-of-striking (DL 3–9), starvation. Median depth 2.5–3 means Gehennom/Castle
-milestones are premature — the wall is EARLY-MID survival, so the order becomes:
+### S1 — Policy ISA + Compiler (2–3 wk)
+- [ ] `corp/policy/compiler.py` + authoring tree migration (v6 → tree; compiled artifact byte-equivalent).
+- [ ] Behavior-primitive manifest (preconditions/effects for every dispatcher Task).
+- [ ] Re-express the hardcoded cascade as the default program (decision-trace equivalence, per-manager).
+- **Exit**: default program equivalent to today's agent; all 321 tests green; the LLM can express every
+  strategy decision the cascade used to hardcode.
+- **Kill**: any cascade behavior that cannot be expressed without weakening an interlock → that behavior
+  stays in code (guardrail), ISA narrows honestly.
 
-1. `early_survival_stack` (NEW — highest mortality impact at current depth):
-   armor AC ladder acquisition/upgrade (leather→ring mail→...), poison-res farming
-   reliability, wand-wielder counterplay (break LOS / cover step priority), food
-   security (rat/lemur farming, prayer cadence). Cert: survive DL 1–6 gauntlet fixtures;
-   target median depth ≥ 5 on 10-ep batches.
-2. `equip_upgrade` (§8 #2, folded forward): weapon enchantment, twoweapon decisions.
-   Cert: AC ≤ −10 by DL 8 (revised from §8's −15@DL10 — honest target for where we are).
-3. `survival_intrinsics` (§8 #1, moved down): MR acquisition, level-drain counters —
-   only becomes relevant at DL 8–12, which we must first REACH reliably.
-4. `gehennom_survival` → 5. `castle_wishing` → 6. `vlad_invocation` → 7. `ascension_run`
-   (unchanged from §8; each gated on the previous milestone's certification).
+### S2 — Evolution Engine (2 wk)
+- [ ] `run_evolution.py`: population, per-candidate evidence, gated tiered evaluation, selection, lineage.
+- [ ] Counterfactual probe tooling (seeded replay on transfer domains; paired batches on NetHack).
+- **Exit**: evolution beats the single-program loop on minihack (seeded, p<0.05 on steps-on-success) and
+  does not regress NetHack vs the frozen v6 control (329–396 band, 100-ep batches).
+- **Kill**: population search ≤ single-program after 3 generations → author/prompt iteration first.
 
-Landing pattern per milestone (unchanged from §8): new goal handlers (CODE, human-approved)
-+ default-program entries + certification cases → THEN the loop may tune them. R6 overlaps
-R7 (armor/weapon tiers generalize across fighter roles) — build profiles alongside.
+### S3 — Handler Ladder (2–4 wk)
+- [ ] Parameterized macros (validator substitution semantics already specified in MACRO.md).
+- [ ] Handler-plan schema + shadow harness (sandboxed episodes, side-effect telemetry, ≥50 shadow eps,
+      0 invariant breaks, measured contribution vs frozen).
+- [ ] ≥3 LLM-authored handlers promoted with measured contribution; 0 unverified handlers in production.
+- **Exit**: at least one handler the handwritten layer lacked, with a measured win.
+- **Kill**: promoted handlers never beat handwritten equivalents → widen the primitive set; re-examine
+  whether plans need iteration constructs (bounded loops) — still no general code.
 
-**First three-arm transfer ablation result (2026-09-18, 102 eps × 3 arms, seeded):**
-random ≈ frozen (δ=-0.011, p=0.89 — control arm behaves: gates alone don't move the metric);
-llm accepted 5/5 revisions but DRIFTED SLOWER (34.5 vs 31.0 median steps) — the in-loop
-acceptance gate for transfer domains was the dry-run set. FIX LANDED: transfer domains now
-ALWAYS gate live in-loop (cheap seeded episodes): reject on success_rate drop OR
-median_steps_on_success > 1.2× baseline. First live gate catch: ERR_CERT_FAIL
-"median_steps_on_success 39 > 1.2× baseline 32" → author revised and recovered. Relaunching
-the gated ablation (data/ablation_minihack_r5_gated.json).
+### S4 — NetHack Push (ongoing, mortality-driven)
+- [ ] Survival floor: eliminate DL1 deaths (128/~330 episodes died at depth 1, median 4.4k turns wasted) →
+      median depth ≥ 5, mean score ≥ 1,500 on 100-ep batches.
+- [ ] Mid-game: AC/MR/weapon curves, branch routing reliability → median depth ≥ 8.
+- [ ] Endgame (R6 milestones 4–7 as certified handlers): Gehennom → Castle → Invocation → Ascension.
+- [ ] **Ascension rate ≥ 4.8% (parity)** then **≥ 15% (dominance)** and mean score ≥ 10,713 (parity) then
+      ≥ 2× (dominance), on 100-ep batches with CIs.
+- **Kill**: 3 consecutive stalled generations at any stage → escalate ISA expressiveness or curriculum
+  coverage before more compute.
 
-**Craftax adapter plan (R5 remainder, parallel with R6 #1):**
-1. `uv add craftax` (JAX CPU) — verify install feasibility first; defer if the dependency
-   tree fights the CPU-only constraint.
-2. Env: `Craftax-Classic-Symbolic-v0` first (simpler obs; Full adds achievements).
-3. Observation bridge: symbolic char grid + flat inventory/stats → blstats-compatible
-   vector (hp, floor level → depth, xp level → xl) + glyph-like grid, so the SAME
-   GridAStar/FrontierExplorer nav stack runs (this is the whole point of the adapter
-   boundary — the loop must not change).
-4. Goals: explore_floor, gather_resources, descend, craft_upgrade (4 certified);
-   6–8 predicates (achievement-driven: has_tool, has_food, block_known, ...).
-5. Corpus: `build_craftax_corpus` (docs + paper + docstrings + achievement table) —
-   load-bearing, no community wiki exists.
-6. Certification: seeded episodes — survival progress (hp stability + block breakage),
-   not stair-reach (craftax has no stairs; reward = achievements).
-7. Metric note: craftax rewards do NOT saturate like ExploreMaze — mean_reward is a
-   valid comparison metric there.
+### S5 — Transfer Dominance (parallel with S4)
+- [ ] Craftax cold-start (corpus is self-built — the baseline-free bet): beat published Craftax baselines
+      (R2D2-class; CALM as the direct LLM-agent comparison) on achievement curves.
+- [ ] MiniHack: dominance on steps-on-success + extension beyond ExploreMaze (combat/procgen task families).
+- **Exit**: ≥2 domains where the *same synthesis machinery* beats env-specific published agents.
 
-## 6. Honest Diff from AutoAscend
-
-| Dimension | AutoAscend | CORP-Ω |
-|---|---|---|
-| Control architecture | Priority-ordered expert strategies (human-authored, frozen) | Same genre, compiled from a declarative policy program |
-| Strategy authorship | ~2 person-years expert labor | Offline LLM policy diffs + macros + human plan sketches, gated revision loop |
-| Learning across episodes | None (tabula rasa) | CDCL nogoods + gated policy revisions (failures become permanent knowledge) |
-| Knowledge | Hardcoded ID tables | Named predicate vocabulary + RAG-grounded authorship + Bayesian epistemic gates (BUC, Shannon) |
-| Scope | NetHack-specific | DomainAdapter boundary — same loop demonstrated on multiple environments |
-| Must cite / ablate | — | FunSearch/AlphaEvolve (propose-verify loops), Voyager (skill code — we forbid), DSPy/TextGrad (prompt-space); lineage of ported tables; random-gated control |
-
-**Not claimed as novel**: the priority-cascade executor, HTN decomposition, A* exploration, NetHack tactics.
+### S6 — Paper (checkpoint at S2 for a workshop; main track after S4/S5)
+- Main-track claim: *"Evidence-conditioned policy synthesis: a safety-gated LLM grows an agent program that
+  surpasses years of human expert engineering"* — requires NetHack dominance + ≥2-domain transfer + the
+  full ablation matrix (llm/frozen/random + author tiers + evolution-vs-single + nogoods + RAG on/off).
 
 ---
 
-## 7. Verification Discipline
+## 3. Novelty ledger (what is and is not ours)
 
-```bash
-uv run pytest                                        # 183+ tests, never skip
-./scripts/run_skill_certifications.sh                # NetHack per-skill cases
-uv run python scripts/run_benchmark.py --domain nethack --episodes 10 --max-steps 20000 --role valkyrie --clean-parquet
-uv run python scripts/run_baseline_suite.py --episodes 100 --step-limit 50000 --role val
-uv run python scripts/run_revision_loop.py --max-revisions 10 --author api --repro local
-uv run python scripts/run_ablation.py --arms llm,frozen,random --episodes 100 --domain all
-```
+**Not novel (must cite, must ablate)**: FunSearch/AlphaEvolve (evolution + evaluators — ours differs:
+declarative safety-bounded policy language, agentic evidence-conditioned author, whole-agent evaluation);
+Voyager (LLM writes skill *code* — we forbid code entirely); DSPy/TextGrad (prompt-space optimization — we
+optimize a policy artifact); grammar-constrained decoding (standard); NetHack LLM benchmarks (Balrog et al. —
+they *play*, they don't grow a program); CALM (LLM agent on Craftax with reflection — no persistent
+synthesized program, no cross-episode artifact); AutoAscend (static expert system — our foil).
 
-- Refactor steps marked "none" require decision-trace equivalence on certification episodes
-- Every accept/reject committed to the ledger; every program version in git
-- Claims: seeded domains at 100-ep batches with seeds; NetHack at 100-ep batches (σ acknowledged); 10-ep = engineering signal only
-- RAG corpus coverage check per domain before author prompts go live (task/achievement lists present, slices non-empty, index freshness vs source commit)
+**Novel (the contribution)**:
+1. A **declarative policy program as a synthesis substrate for embodied agents** — typed bounded params +
+   ordered rules + goals + handlers, compiled to an executor contract (vs functions, prompts, or code).
+2. **Safety-preserving bounded self-extension**: the policy language itself grows via machine-verified
+   definitional extension (closure, interlock invariants, certification) — provable boundedness enabling
+   unattended operation; the LLM can never express mechanism-level action.
+3. **Evidence-conditioned population synthesis** over executable environments at CPU scale, with per-candidate
+   provenance (the ledger is the paper's audit artifact).
+4. **Cross-episode nonmonotonic learning inside the artifact** (CDCL nogoods + gated revisions) — knowledge
+   that survives death, which none of the cited systems have.
+5. **Domain-portable synthesis**: identical machinery from cold-start on docs-only corpora (Craftax) — the
+   "no expert baseline to copy" condition, which is precisely the point.
+
+**Significance**: if S4/S5 land, this is the first demonstration that a safety-gated LLM synthesis loop
+outgrows person-decades of expert engineering on a hard POMDP *and* transfers — with every accepted and
+rejected step auditable. The negative results (v6 combat-rule revert, food-chase dose-response) are part of
+the safety story, not noise.
 
 ---
 
-
----
-
-## 8. R4–R9 OPERATIONAL SPECIFICATIONS (per-phase contracts — nothing left to invent)
-
-### R4 — Tactic Rules, Profiles, Ablation Harness
-
-**Tactic-rule semantics** (`corp/policy/tactics.py`, new):
-```json
-{"match": {"monster": "coyote"}, "when": "(hp_frac <= 0.50)", "do": "retreat",
- "unless": "(has_healing)", "note": "..."}
-```
-- Rules evaluate in program order at the TOP of `evaluate_combat_turn`, first match wins; a matched
-  rule's verb overrides the default melee/ranged branch for that target.
-- `match` keys: `monster` (substring, case-insensitive), `item` (tile glyph name: throne/water/...),
-  `depth_between`. Conditions use the same predicate evaluator as strategy_plan (§ policy/predicates).
-- **Branch classification (critical design decision)** — these combat branches stay HARD-CODED
-  interlocks and are NOT expressible as rules: floating-eye melee lockout, grid-bug diagonal tactics,
-  cockatrice no-touch, lethal-poison ranged-first, gas-spore no-melee, critical-HP universal retreat.
-  Rules may only choose among: `ranged_only, ranged_then_kill, retreat, retreat_when_wounded, avoid,
-  kite, elbereth_first, never_melee` — i.e., the LLM re-prioritizes *responses*, it can never disable a
-  safety interlock. The seven heavy-hitter/lethal-poison name sets (`HEAVY_HITTERS`, `LETHAL_POISON_NAMES`,
-  `INSTAKILL_NAMES`) become DEFAULT RULES shipped in the default program (same behavior, now visible
-  and editable).
-- `rule remove` by index; removed interlock-default rules are re-addable but the seven interlock
-  branches above can never be removed by a diff (enforced in validator invariant #9b).
-
-**Profiles** (`corp/policy/profiles.py`):
-- Overlay precedence: `PolicyConfig defaults ← domain_profile ← role_profile ← program.params (global)`.
-- Roles may tune: weapon-tier preferences, combat aggression fracs, food radii, search caps, shop
-  behavior. Roles may NOT touch: prayer cooldown model, corpse freshness, interlock branches.
-- Per-role certification: run_skill_certifications extended with role-parameterized fixtures
-  (at minimum: valkyrie/barbarian/samurai fighters + wizard keep-distance case).
-
-**Ablation harness** (`scripts/run_ablation.py`):
-- Arms: `llm` (revision loop live) | `frozen` (default program, no loop) | `random` (random
-  perturbation of the SAME param leaves within bounds, gated identically — the control).
-- Protocol: per arm, per domain: 100-ep batches. Seeded domains (minihack/craftax): 3 seeds × 34 eps.
-  NetHack: 100-ep batch (unseedable — σ acknowledged in the paper).
-- Statistics: report median depth, mean score with **bootstrap 95% CI** (10k resamples);
-  significance = arm-vs-frozen Mann-Whitney U, p < 0.05, plus effect size (Cliff's delta).
-- Acceptance for the paper: `llm` > `frozen` significant on ≥2 domains AND `llm` > `random`
-  significant on ≥1 domain (proves it's not the gate doing the work).
-- Cost ledger: tokens + USD per arm, reported.
-
-### R5 — Domain Suite
-
-- **MiniHack adapter** (first): `uv pip install minihack`; MiniHack is built ON NLE — observation dict
-  (glyphs/chars/blstats/message) is identical, so the adapter is a thin wrapper: map `blstats` (27-el),
-  restrict action space, expose 3–5 certified goals (`explore_floor`, `descend`→`reach_stairs`,
-  `hunt_poison_res`, `pickup_boost`) and ~8 predicates. Task choice: `MiniHack-Explore-HardFixed-v0`
-  + `MiniHack-Maze-HardReach-v0` (closest to the descent/showcase loop). Seeded: `env.seed()` honored.
-- **Craftax adapter** (second): JAX-based, runs CPU; obs = symbolic grid + flat inventory/stats.
-  Adapter must build a blstats-compatible state vector (hp/depth→floor level/xl→xp level mapping) and
-  a glyph-like char grid. Corpus: official docs + paper + source docstrings + achievement table
-  (`scripts/build_corpus.py` → FTS5 at `data/corpus/craftax/`). Goals: `explore_floor`, `gather_resources`,
-  `descend` (dungeon levels), `craft_upgrade`. 6–8 predicates.
-- **NetHack tuning campaign** (nightly, parallel): `run_revision_loop.py` cadence = 1 batch/night;
-  plateau detection = 3 consecutive batches with no accepted revision beyond 1σ → loop pauses and
-  writes a plateau report (the human decides: new capabilities vs accept plateau).
-- **Workshop paper checkpoint**: deadline-driven; needs R5's first two domain curves + trajectory figure.
-
-### R6 — STRETCH Ascension Stack (each milestone = goals + rules + code, human-approved)
-
-Ordered by mortality impact; each lands as: new goal handler(s) (code) + default-program entries +
-certification cases, THEN the loop may tune them. No milestone may be skipped-to.
-1. `survival_intrinsics`: MR acquisition goals (gray dragon/CR rings), level-drain counters
-   (avoid-wraith/draining tactics), lycanthropy, invisibility counterplay. Cert: survive DL 10–12
-   gauntlet fixtures.
-2. `equip_upgrade`: full armor AC ladder + weapon enchantment + twoweapon decisions. Cert: AC ≤ -15
-   by DL 10 on certification episodes.
-3. `gehennom_survival`: light logistics, maze mapping without walls, undead/demon tactics, curse
-   discipline. Cert: DL 14–20 traverse fixtures.
-4. `castle_wishing`: drawbridge (exists) + wand-of-wishing priority protocol. Cert: BoH/DSM acquired.
-5. `vlad_invocation`: Vlad's Tower, Candelabrum, Invocation protocol, Sanctum/High Altar.
-6. `ascension_run`: Wizard-hall discipline, Rider handling, Planes handling, Sanctum → ascension.
-**Accept (whole R6)**: Valkyrie ascension ≥ 4.8% on 100-ep batches; each milestone certified before
-the loop may re-prioritize around it.
-
-### R7 — Cross-Role Generalization
-- `role_profiles` for all 13 roles; fighter roles first (val/bar/sam/monk?), then ranged, then casters.
-- **Spellcasting infrastructure** (scope-gated): spell memory, success-rate-gated casting, power
-  management — build ONLY if the all-role-parity claim is chosen; otherwise report the honest
-  role-coverage table (which roles the method covers and why).
-- **Accept**: fighter roles median depth ≥ 8 (50-ep batches); casters ≥ 6 IF spell infra built;
-  ≥2 roles ascending if R6 pursued; per-role revision-acceptance rates reported.
-
-### R8 — Track A: LLM-Authored Goal Handlers
-- Proposal schema (same S-expr DSL + a declarative action sub-program):
-  ```lisp
-  (goal-handler propose collect_mine_gems
-    (when (and (in_mines) (depth_between 3 6)))
-    (plan (goto_feature "gem_tiles") (repeat_pickup gems) (until (inv_contains "gem"))))
-  ```
-  `plan` steps may only reference EXISTING primitives (`goto_*`, `pickup`, `use`, `until`) — a handler
-  is a declarative sub-program, still no code.
-- **Shadow harness**: proposed handlers run in a sandboxed episode set (not production); success/failure
-  + side-effect telemetry compared against the frozen program. Gate: ≥ X% episode improvement, 0
-  invariant breaks, 0 crashes across 50 shadow episodes.
-- **Promotion**: gate-passed handlers enter the program's vocabulary manifest with provenance; the
-  manifest diff is the paper artifact.
-- **Accept**: ≥3 handlers certified & shipped with measured contribution; 0 unverified handlers ever
-  in a production run; ledger shows the full proposal→shadow→promote trail.
-
-### R9 — Paper Package
-- **Section outline**: 1 Intro · 2 Related (FunSearch/AlphaEvolve, Voyager, DSPy/TextGrad, expert
-  systems AutoAscend) · 3 Policy program + diff DSL (MACRO.md condensation) · 4 Revision loop &
-  gates · 5 NetHack showcase · 6 Multi-domain transfer (R5) · 7 Ablations (three-arm + nogoods +
-  epistemic gates + RAG on/off + author-model tiers) · 8 Safety analysis (boundedness proof §MACRO
-  5.4, interlock invariants) · 9 Discussion/limits.
-- **Figures**: trajectory (Fig 1) · three-arm curves per domain (Fig 2–3) · author-model tier
-  comparison (Fig 4) · macro/vocabulary growth vs capability (Fig 5) · architecture diagram.
-- **Tables**: main results (3 domains × arms, 100-ep CIs) · role coverage · ablation matrix ·
-  cost-per-accepted-revision by author tier.
-- **Venue decision tree**: main track (NeurIPS/ICLR) iff (a) ≥2-domain significant curves AND
-  (b) NetHack ≥ AutoAscend mid-game AND (c) Track A or R6 ascension evidence. Otherwise
-  AAAI/IJCAI/CoG. Workshop at R5 regardless.
-- **Reproducibility package**: code + default program + full ledger + corpus indices + grammar +
-  Docker CPU-only + all batch JSONs. Open-source under MIT.
-
-### Post-R9 (beyond the paper)
-- More domains (the adapter list IS the generalization evidence curve)
-- Community DSL governance: vocabulary proposals from other users go through the same gate pipeline
-- Human-facing dashboard: ledger + goal_events → live view of what the LLM changed and why
-
-## 9. Known Risks & Mitigations
+## 4. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
-| LLM overfits lucky episodes (NetHack unseedable) | Gated acceptance on 100-ep batches; seeded transfer domains carry the statistical claims; random-gated control arm |
-| Refactor regressions (steps 2–5 touch everything) | Decision-trace equivalence + certification suite before any behavior change; one step per commit |
-| Transfer domains stall (adapters costlier than projected) | MiniHack first (shares NetHack's glyph interface — cheapest port); NetHack-only evidence still carries the workshop paper |
-| Frontier-API author drifts / unsafe proposals | Grammar + closure validation + certification gate; macros are definitional sugar only; no code path exists |
-| Loop plateaus (accepts nothing) | Report bundle includes gate-rejection reasons; oscillation detector freezes param subtrees; author-model switch |
-| Ascension stack slips (R6 demoted by design) | Paper's core claims (transfer + self-extension + learning) are R4/R5-complete; R6 only upgrades the showcase |
-| Cost tracking | Ledger records provider-reported tokens + wall-clock from R0; labor claims scoped to wall-clock |
+| Author regresses the program (v6 lesson: −45% missed by a 3-ep gate) | Tiered gates (10ep×10k for rule/handler adds), target-conditionality invariant, evolution selection is *relative* — a regression loses, it doesn't ship |
+| NetHack σ masks real effects | 100-ep batches minimum, CIs, dose-response arms (3-arm + population arms) on seeded domains carry the statistics |
+| ISA too weak → author stalls | S1 kill-criterion forces honest narrowing; curricula localize skill deficits fast |
+| ISA too strong → unsound strategies evolve | Interlocks are inviolable; certification gates handlers; shadow harness before promotion |
+| Compute ceiling | 30-worker pools ≈ 6k NetHack eps/hr; curricula ~100× cheaper per skill iteration; scale-out is linear (process-safe) |
+| Prompt drift/overfitting to eval batches | Prompt versions evaluated on held-out batches; the eval set rotates |
+| "Copied AutoAscend" accusation | Hard: no AutoAscend code or tables are read or ported (verified by review); wiki RAG is public game documentation, the same source the experts used |
+
+---
+
+## 5. Session protocol (any fresh session)
+
+1. Read `AGENTS.md` → this file → `MACRO.md` (DSL spec).
+2. `uv run pytest -q` → expect **321 passed**; fix flaky isolation, never skip.
+3. Check campaign state: `data/revision_ledger.jsonl` tail, `data/programs/archive/`, running campaigns
+   (`ps aux | grep run_`), unconsolidated parquet (`scripts/clean_telemetry.py`).
+4. Current phase: **S0** (evidence + prompt harness). Phase gates/kill criteria in §2 — do not skip ahead.
+5. Compute discipline: 30-worker pools; consolidate DuckDB at campaign boundaries.

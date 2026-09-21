@@ -1,377 +1,236 @@
-# AGENTS.md: Autonomous Agent Onboarding & Master Knowledge Base
+# AGENTS.md: Autonomous Agent Onboarding & Master Knowledge Base (Gen-2)
 
-> **Welcome, Agent.** This file is the single source of truth for the **CORP (Cognitive Operating System for Roguelike Play)** codebase. It contains all architectural contracts, NetHack 3.6.6 ground-truth domain rules, empirical telemetry findings, verified test suites, and the prioritized roadmap. Read this file completely before making changes.
+> **Welcome, Agent.** This file is the single source of truth for **CORP-Ω (Cognitive OS for Roguelike Play)**.
+> It contains the architectural contracts, NetHack 3.6.6 ground-truth domain rules, verified test suites, and
+> the phased roadmap. Read this file completely before making changes.
 
 ---
 
-## 1. Project Mission & Non-Negotiable Operational Constraints
+## 1. Mission & Non-Negotiable Constraints
 
-### The Core Objective — CORP-Ω
-Outperform **AutoAscend** on NetHack (NLE 3.6.6 / `NetHackChallenge-v0`) and demonstrate the broader method: an **offline LLM authoring S-expression policy diffs** against a declarative **policy program**, executed by a **CPU-only symbolic HTN executor** — validated not just on NetHack (hard showcase) but on **2–3 seeded transfer domains** (MiniHack/Craftax-class) where the statistical claims live.
+### The Core Objective
 
-**The research contribution** (full contract: `AGENT_PLAN.md`, phases R0–R9):
-- **Policy program** (`data/policy_program.json`): strategy_plan + policy_params + tactic_rules + macros + role/domain profiles + nogoods. The symbolic core reads *only* this program's compiled `PolicyConfig` — no strategy constants in code.
-- **Offline LLM revision loop**: frontier API model as primary author, llama.cpp (GBNF-constrained) as reproducible path. Diffs are depth-limited S-expressions; **code emission is forbidden**. Every diff passes grammar → schema → bounds → macro-expansion closure → certification → quick-batch gates before acceptance, with a full provenance ledger.
-- **Bounded self-extension**: `defmacro` lets the LLM compose new predicates/goals from verified primitives (definitional expansion — closure preserved). Full goal-handler authorship is the post-core research stretch (AGENT_PLAN §5 R8 / §8 spec).
-- **Generalization**: the `DomainAdapter` boundary (predicates + goal handlers + env + certification set) is the transfer contract; porting a domain = one adapter + one certification set, loop untouched.
-- **Diff from AutoAscend**: their strategies are frozen human constants (~2 person-years); ours are a self-revising program with cross-episode CDCL nogood learning and gated, attributed revisions. Must cite FunSearch/AlphaEvolve/Voyager and ablate against random-perturbation-with-identical-gates.
-- **Ascension parity is a stretch goal** (AGENT_PLAN §5 R6 / §8 spec), not the core claim: transfer + self-extension + learning are.
+Build a **policy synthesis engine**: a safety-gated loop in which an LLM author **grows a declarative policy
+program** (macros, rules, goals, handlers) from trial data, environment telemetry, and RAG corpora — until the
+resulting agent **decisively beats AutoAscend on NetHack (NLE 3.6.6 / `NetHackChallenge-v0`)** and the
+strongest published equivalents on transfer domains (MiniHack curricula, Craftax).
 
-> [!CAUTION]
-> **HONEST BASELINE (corrected after empirical measurement)**: Prior versions of this file claimed AutoAscend was "~650 mean turns, ~450 mean score, Depth 3–6". That was **wrong by 10–24x**. AutoAscend was empirically measured on 2026-09-18 (5 episodes @ 20k steps, Valkyrie) and reaches **Median Depth 10.0, Mean Score 10,713.6, Mean Turns 10,680**. All earlier "CORP crushed AutoAscend" claims were fabricated relative to reality and have been removed.
+The human role is deliberately narrow: **primitives, interlocks (guardrails), certification gates.**
+Everything strategic — priorities, thresholds, tactics, compositions, and eventually whole goal handlers —
+is authored by the LLM through a grammar-constrained diff language, validated by machine-checkable gates,
+and measured by parallel episode evaluation.
 
-- **AutoAscend Baseline (Empirical, 5ep @ 20k steps, Valkyrie)**:
-  - Median Depth: **10.0** | Mean Score: **10,713.6** | Mean Turns: **10,680.0**
-  - NeurIPS 2021 Official: Median Score **5,336** | Mean Score **3,820**
-  - Full ground truth: 100 episodes @ 50k steps pending (run `scripts/run_baseline_suite.py`)
-- **CORP Current State (post-Phase-1/3/4 overhaul + stall/attrition fixes)**: Median Depth: **2–4** | Mean Score: **280–850 (batch-dependent)** | Peak Score: **1,523** | Mean Turns: **2,500–7,600**
-  - NOTE: `NetHackChallenge-v0` forbids seeding (`doesn't allow seed changes`), so episode variance is intrinsic — batch-to-batch σ is high; 10+ episode batches required for signal.
-- **Gap**: CORP is approximately **3–15x behind AutoAscend** on depth and score — improved from 5–24x behind at session start. Closing this gap is the sole mission (see `AGENT_PLAN.md` 5-phase roadmap; Phases 1–3 implemented, Phase 4 partially, Phase 5 pending).
+**We do not copy expert HTNs (e.g., AutoAscend).** The contribution is that grown knowledge beats engineered
+knowledge. Porting an expert HTN would falsify the claim.
 
 ### STRICT Operational Constraints
+
 1. **PURE CPU SYMBOLIC EXECUTION ONLY**:
-   - **ZERO GPU VRAM / ZERO GPU Overhead**.
-   - The user is training a novel Multi-Agent Reinforcement Learning (MARL) environment on the local GPU. Never initialize PyTorch CUDA contexts, never load heavy GPU models, and never touch CUDA devices.
-   - All spatial navigation (A*), HTN decomposition, Bayesian epistemic tracking, and telemetry must run in sub-millisecond CPU time.
-2. **ENVIRONMENT INVOCATION**:
-   - **ALWAYS** prefix Python and Pytest commands with `uv run`.
-   - Examples: `uv run python scripts/run_benchmark.py ...`, `uv run pytest`.
-3. **100% REGRESSION-FREE TEST SUITE**:
-   - The test suite (`uv run pytest`) currently has **312 passing tests** taking ~5s.
-   - Every single pull request, edit, or commit MUST maintain 312/312 passing tests. Never disable or skip tests to mask errors.
-4. **CLEAN TELEMETRY & ZERO DISK BACKLOG**:
-   - Streaming telemetry generates columnar Snappy-compressed Parquet files in `logs/parquet/`.
-   - These files MUST be consolidated into DuckDB (`data/corp_telemetry.duckdb`) and automatically purged using the `--clean-parquet` flag on `run_benchmark.py` or via `scripts/clean_telemetry.py`.
-   - Never leave raw parquet files accumulating on disk.
+   - ZERO GPU / zero CUDA contexts. The user trains a MARL environment on the local GPU. All execution
+     (A\*, HTN, epistemics, telemetry, evolution) is CPU-only. The LLM author runs via **API** (primary) or
+     llama.cpp (repro path, run on demand — it is the only permitted CPU-heavy non-executor process).
+2. **ENVIRONMENT INVOCATION**: always `uv run` for python/pytest.
+3. **100% REGRESSION-FREE TEST SUITE**: `uv run pytest` — currently **321 passing tests (~5s)**. Every
+   commit maintains the full count. Never disable or skip tests to mask errors.
+4. **CLEAN TELEMETRY**: parquet (`logs/parquet/`) must be consolidated into
+   `data/corp_telemetry.duckdb` (6.6M+ ticks) via `scripts/clean_telemetry.py` — never let raw parquet
+   accumulate. During evolution campaigns, consolidate at campaign boundaries, not per batch.
+5. **EVERY PROGRAM VERSION IS HOLY**: the LLM may only change the world through validated diffs; the
+   validator (`corp/policy/validator.py`) is the only writer of accepted programs. A rejected diff must
+   never leak into a live program. All accept/reject events go to `data/revision_ledger.jsonl`.
 
 ---
 
-## 2. Codebase Architecture & Subsystem Manifest
+## 2. Architecture (Gen-2)
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ AUTHOR AGENT (LLM, agentic — tool-calling loop)                            │
+│   tools: query_duckdb(sql) · wiki_search(q) · read_trajectory(ep, turns)   │
+│          read_env_schema() · read_manifest() · read_program_tree()         │
+│   input: full run telemetry (6.6M ticks, episodes, goal_events, deaths,    │
+│          stalls, failure counters) + wiki FTS + trajectory autopsies       │
+│   output: S-EXPRESSION POLICY DIFF (grammar-constrained, depth ≤ 3)        │
+└──────────────┬─────────────────────────────────────────────────────────────┘
+               ▼ VALIDATOR GATES (machine-checkable, no human in the loop)
+   grammar → schema → bounds → target-conditionality → macro closure/expansion
+   → interlock invariants → handler-plan schema → certification → tiered batch
+┌────────────────────────────────────────────────────────────────────────────┐
+│ POLICY PROGRAM — per-file authoring tree (the LLM's workspace)             │
+│   data/program/<domain>/                                                   │
+│     params.json            # typed bounded tunables                        │
+│     macros/*.sexpr         # named, parameterized condition sugar          │
+│     rules/*.sexpr          # tactic rules (target-conditional)             │
+│     goals/*.sexpr          # strategy_plan entries (ordered)               │
+│     handlers/*.sexpr       # declarative goal-handler sub-programs         │
+│     nogoods.jsonl          # cross-episode CDCL negatives                  │
+│   compiled by corp/policy/compiler.py → data/compiled/<domain>.json        │
+│   (the executor consumes ONLY the compiled artifact — contract unchanged)  │
+└──────────────┬─────────────────────────────────────────────────────────────┘
+               ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ EVOLUTION ENGINE (scripts/run_evolution.py)                                │
+│   population of K candidate programs → parallel gated evaluation           │
+│   (scripts/run_parallel_batch.py, 30+ workers) → gated selection, lineage  │
+│   tracked in the ledger; losers archived, winners become the new base      │
+└──────────────┬─────────────────────────────────────────────────────────────┘
+               ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ SYMBOLIC EXECUTOR CORE (CPU-only, stable, env-agnostic via DomainAdapter)  │
+│   GoalInterpreter → HTN planner ← Domain Managers ← A*/epistemics          │
+│   adapters: nethack · minihack · craftax                                   │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Division of authority (the safety + novelty claim)
+
+- The LLM expresses **what to value and when**: goals, priorities, thresholds, tactics, compositions, and
+  (via the handler ladder) declarative sub-programs over certified primitives. It can **never** express *how
+  to act at the mechanism level*: no code emission, no new mechanisms, no interlock removal. Every extension
+  is definitional over verified primitives — a property the validator *proves*, enabling unattended operation.
+- Humans (and human-written executor code) own the mechanisms: pathfinding, combat mechanics, prompt/menu
+  handling, and the interlock set (§4).
+- The LLM sees **everything**: full environment schema (every action, every observation channel), full run
+  telemetry via SQL, trajectories, and the wiki. Access is read-only; the diff channel is the only write path.
+
+### Component map
 
 ```
 corp/
-├── agent/
-│   ├── corp_agent.py          # Core agent loop + priority cascade (composes the mixins below)
-│   ├── htn_methods.py         # HTNMethodsMixin: method registry + emergency/triage/combat HTN methods
-│   ├── episode_runner.py      # EpisodeRunnerMixin: env step plumbing, deadlock diff emission, run_episode
-│   ├── episode.py             # LockedIntent + EpisodeResult dataclasses
-│   └── competence.py          # Turn-0 competence evaluator for archetype selection
-├── deliberative/              # Slow Core LLM reasoning (autopsies, deadlock resolution → unified onto diff contract)
-├── policy/                    # [R1-R3 DONE] The entire LLM-facing surface:
-│                              #   config.py (PolicyConfig) · program.py · predicates.py · goal_interpreter.py
-│                              #   dsl.py (S-expr diff reader) · macros.py (defmacro) · manifest.py (vocab)
-│                              #   validator.py (gate pipeline) · reviser.py · ledger.py · report.py
-│                              #   tactics.py (R4 rule engine) · profiles.py (role/domain overlays)
-│                              #   grammar/ (GBNF for the llama.cpp repro path)
-├── executor/                  # [R5 CORE DONE] DomainAdapter ABC + registry; nethack facade
-│   ├── interface.py           # DomainAdapter ABC, DomainSpec, registries (the transfer contract)
-│   ├── nethack_adapter.py     # thin facade over the incumbent NetHack flow
-│   ├── minihack_adapter.py    # MiniHack transfer domain: agent + goals + certs (seeded)
-│   ├── autopsy_engine.py      # Translates flight recorder crash logs into persistent CDCL Nogoods
-│   ├── deadlock_resolver.py   # R3: emits policy diffs through the validator (next-episode effect)
-│   ├── autopsy_engine.py      # Translates flight recorder crash logs into persistent CDCL Nogoods
-│   ├── deadlock_resolver.py   # R3: emits policy diffs through the validator (next-episode effect)
-│   ├── providers/             # Provider abstractions (Mock, LlamaCpp, OpenRouter, Gemini)
-│   └── schemas.py             # Pydantic structured output models
-├── domain/                    # Tactical Domain Managers (<0.5ms execution)
-│   ├── combat_manager.py      # TacticalCombatManager core (composes combat/ mixins: threat scan + verb responses)
-│   ├── combat/                # threat_scan.py (MonsterTrack, scan_monsters) · responses.py (kite/ranged/elbereth)
-│   ├── inventory_manager.py   # Nutrition clock, 9-tier weapons, armor, missiles, prayer timing, fresh corpses
-│   ├── navigation_manager.py  # NavigationManager core (composes navigation/ mixins)
-│   ├── navigation/            # level_map.py (LevelMap/LevelStore) · stepping.py (doors/stairs) · exploration.py
-│   ├── shop_manager.py        # Economy engine, price-inversion ID, temple donations, shop protection
-│   ├── dungeon_graph.py       # Cross-level macro branch graph, Mines/Sokoban policy routing
-│   ├── skill_worker.py        # #enhance weapon skill promotions
-│   └── epistemic_worker.py    # Co-aligned altar BUC tests, shop pricing, pet hesitation, wand scratching
-├── env/                       # Sensory Boundary & NLE Interface
-│   ├── anomaly_sentry.py      # 60Hz invariant sentry (burst damage, hunger, stalls)
-│   ├── auto_more.py           # AutoMoreWrapper: flushes --More--, menus, prompts synchronously (rotten/attack guards)
-│   ├── blstats.py             # 27-element NLE bottom-line stats & bitmask condition flags
-│   ├── flight_recorder.py     # 100-turn circular buffer exporting markdown autopsies
-│   └── inventory_tracker.py   # Bipartite Hungarian matching for volatile inventory letters, BUC parser
-├── epistemic/                 # Epistemic POMDP Engine
-│   ├── belief_state.py        # ItemBeliefState: tracks P(BUC) & identity candidate distributions
-│   ├── entropy_gates.py       # ShannonSafeGate: Shannon entropy-gated wear/quaff/read vetoes
-│   └── listeners/             # AltarListener, PetListener, PriceIDListener, EngraveListener
-├── navigation/                # Spatial Pathfinding Core
-│   ├── astar.py               # GridAStar: 80x21 grid, 8-way Octile metric, corner-clip enforcement
-│   └── frontier.py            # FrontierExplorer: BFS nearest unvisited tile & dead-end detection
-├── planner/                   # Fast Core Hierarchical Task Network (HTN)
-│   ├── guards.py              # Precondition guards: safe_to_eat, can_pray, can_descend, should_descend
-│   ├── htn.py                 # HTNPlanner: recursive decomposition, persona utility sorting
-│   ├── nogood.py              # NogoodStore: 64-bit CDCL bitmask negative constraints
-│   ├── persona.py             # PersonaProfiler: Turn-0 continuous 5D trait vector θ ∈ [0, 1]^5
-│   └── predicates.py          # 64-bit state predicate bitmask compiler (<100ns)
-├── telemetry/                 # Telemetry & Storage Engine
-│   ├── duckdb_consolidator.py # Zero-copy Parquet ingestion, automated cleanup, SQL views
-│   └── parquet_logger.py      # Columnar logger for ticks.parquet & episodes.parquet
-└── workers/
-    └── dispatcher.py          # ActionDispatcher: maps abstract primitives to physical keystrokes
-```
-
-### Supporting Directories & Tools
-- `data/wiki_index.db`: 181.9 MB SQLite FTS5 database containing the complete NetHack 3.6.6 MediaWiki dump. Query via:
-  ```bash
-  uv run python scripts/wiki_search.py "<query>"
-  ```
-- `data/corp_telemetry.duckdb`: Canonical embedded database storing all consolidated evaluation ticks and episodes (470+ episodes, 830,000+ ticks).
-- `scripts/run_benchmark.py`: Primary evaluation CLI harness supporting `--role` pioneer flags.
-- `scripts/query_duckdb.py`: Interactive CLI to run SQL against DuckDB.
-- `scripts/clean_telemetry.py`: Consolidated pipeline to ingest logs and vacuum DuckDB.
-
----
-
-## 3. NetHack 3.6.6 Ground-Truth Domain Rules & Hardcoded Interlocks
-
-When modifying or expanding agent behavior, you MUST adhere to the verified NetHack 3.6.6 mechanics extracted from `data/wiki_index.db`:
-
-### 1. Corpse Freshness, Lichen Permanence, & Nutrition Priorities
-- **NetHack Reality**:
-  - **Lichen corpses never rot**. They provide 200 nutrition safely even 50,000 turns after generation.
-  - **Mortal corpses rot quickly**: Safe consumption limit is strictly **$\le 25$ turns** from a witnessed kill. Pre-existing corpses generated with the dungeon level are tainted/rotten and cause instant fainting and death (`"Blecch! Rotten food! The world spins and goes dark"`).
-  - **Non-corpse food never rots**: Food rations, cram rations, lembas wafers, pancakes, and fruits (`%` with non-body glyphs) are 100% safe indefinitely.
-- **Interlocks**:
-  - `NavigationManager` distinguishes body glyphs (`nethack.glyph_is_body(g)`) from non-corpse food. Pre-existing unmapped corpses are excluded from `floor_corpses`.
-  - `InventoryManager` prioritizes carried rations over floor corpses.
-  - Floor corpses are only eaten if `(py, px)` is registered as spawned $\le 25$ turns ago, or if it is a lichen.
-  - **Active Combat Lockout**: Never eat a floor corpse when adjacent hostiles are attacking (`has_adjacent_hostiles`). Corpse consumption takes `(weight / 64) + 3` turns (5–15 turns), during which adjacent monsters get free fatal attacks.
-  - `AutoMoreWrapper._resolve_yn_action` intercepts `"eat it?"` and strictly returns `ACTION_N` if the prompt mentions `"rotten"`, `"tainted"`, or stoning keywords.
-
-### 2. Domestic Animals, Pets, & Peaceful Monster Navigation Lockout
-- **NetHack Reality**: Stepping into an adjacent tile occupied by a monster executes a melee bump-attack. Bumping into neutral domestic animals (ponies, horses, dogs) provokes retaliation (`"You miss the pony. The pony kicks! The pony kicks!"`), while bumping into peaceful shopkeepers or priests incurs instant death.
-- **Interlock**:
-  - In `NavigationManager._step_or_open`: Stepping into any tile occupied by a non-pet monster (`nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g)`) is **STRICTLY FORBIDDEN**.
-  - If `TacticalCombatManager` did not issue an intentional attack, `NavigationManager` returns `Task("WAIT")` to let the entity move away.
-  - In `_compute_hazard_costs`: All monster tiles receive a $+1000$ penalty so A* routes around entities instead of trying to walk through them.
-
-### 3. Shop Door Protection & Locked Door Avoidance
-- **NetHack Reality**: Kicking a locked door to a shop shatters the door and angers the shopkeeper, who zaps wands of striking/lightning/death (`"How dare you break my door?" Maesteg zaps a crystal wand!`).
-- **Interlock**:
-  - `NavigationManager._step_or_open` applies unlocking tools (keys, lock picks, credit cards) on attempt 1.
-  - On Depth $\ge 2$ (where shops spawn), if a door remains locked and alternative paths or stairs down exist, kicking is **STRICTLY FORBIDDEN**. The door is marked unwalkable, and the agent routes to other frontiers.
-
-### 4. Multi-Stairs Branch Steering & Gnomish Mines Retreat
-- **NetHack Reality**: On Dlvl 2–4, branch levels generate two downstairs (`>`): one to the Dungeons of Doom, and one to the pitch-dark Gnomish Mines. Entering the Mines under-leveled ($XL < 5$) without a light source or poison resistance leads to instant death from wand-wielding gnomes and poisonous spiders.
-- **Interlock**:
-  - `LevelMap` tracks `all_stairs_down`.
-  - `DungeonGraph` tracks stair-to-branch connections.
-  - If under-leveled, `update_map` steers `lvl.stairs_down` to the Main Dungeon staircase, avoiding the Mines staircase. If trapped in the Mines under-leveled, the agent prioritizes `ASCEND` back to the Dungeons of Doom.
-
-### 5. Fast Exploration & Corridor Search Stall Elimination
-- **NetHack Reality**: Corridors (`#`) are bordered by stone on both sides. Treating corridor walls as secret door candidates causes an agent to stop and search 20 times on every single tile of a corridor, wasting 2,000+ turns on Level 1.
-- **Interlock**:
-  - `_find_unsearched_wall_tile` strictly excludes corridors (`chars == ord("#")`) and requires room floor tiles (`chars == ord(".")`).
-  - Search burst limits are optimized: Dead ends are capped at **6 searches**; room perimeter walls are capped at **5 searches**.
-  - Message-based stair detection intercepts obscured stairs when items sit on top of `>`.
-
-### 6. Emergency Health Interventions (Priority 0.5)
-- Evaluated in `corp/agent/corp_agent.py` BEFORE any combat melee attacks when HP $\le 55\%$ (or $\le 60\%$ with adjacent hostiles):
-  1. **Quaff Healing Potion**: `potion of full healing` (highest priority), `potion of extra healing`, `potion of healing`. MUST be uncursed/blessed.
-  2. **Read Escape Scroll**: `scroll of teleportation` when HP $\le 30\%$ and surrounded.
-  3. **Divine Prayer**: `#pray` when HP $\le 25\%$ and `inv_mgr.can_safely_pray(blstats)` is True.
-
-### 7. Floating Eyes (`e`) Melee Lockout
-- Attacking a floating eye in melee without a blindfold or reflection triggers passive paralysis for $0\text{d}70$ turns, causing guaranteed death.
-- **Interlock**: MELEE ATTACKS AGAINST FLOATING EYES ARE STRICTLY FORBIDDEN by CDCL Nogoods. Attack ONLY via ranged missiles (`f`), thrown items (`t`), or wands (`z`).
-
-### 8. Grid Bug (`x`) Diagonal Tactical Exploit
-- Grid bugs can ONLY move and attack orthogonally.
-- When diagonal ($|\Delta y| = 1$ and $|\Delta x| = 1$): Free melee attack with 0% risk of counterattack. When orthogonal: Step to adjacent walkable tile that establishes diagonal alignment.
-
-### 9. Mid-to-Late Game Ascension Milestones
-- **Excalibur Fountain Dipping**: Lawful character (Samurai, Valkyrie, Knight, or alignment 1) with XL $\ge 5$ dips uncursed long sword into fountains until Excalibur is forged or fountain dries up (`lvl.fountains.discard`).
-- **Active Shop Purchasing & Debt Relief**: When holding unpaid items, if hero has gold, issues `Task("PAY")` (`'p'`) to complete purchase. If broke (0 gold), drops the unpaid item safely before leaving the shop to prevent enraged shopkeeper zapping.
-- **Sokoban Branch Progression & Guaranteed Reflection**: Detects Sokoban entry (`dnum == 3`). A* routes through pushable boulders into empty floor/pit tiles (`chars[nr, nc] == ord("0")` cardinally pushes forward). Navigates upwards `<` on floors 1–3 to retrieve floor 4 guaranteed prizes (`amulet of reflection` / `bag of holding`), auto-equipping reflection.
-- **Castle Drawbridge & Wand of Wishing**: At DL 25+ in the main dungeon, detects closed drawbridge and blasts it open via `wand of striking` (`Task("ZAP")`). Automatically zaps `wand of wishing` and types `"blessed +2 silver dragon scale mail"` (or `"gray dragon scale mail"` if reflection is already extrinsic).
-
-### 10. Action Fiber Menu Pager Dismissal & Terminal Protection
-- Paginated NetHack menus (e.g. `#enhance` skills, inventory) display `(1 of 2)`, `(2 of 2)`, or `(end)`. Sending Enter (`\r`, action 19) only scrolls down the menu and fails to dismiss it, trapping the agent in 0-turn menu loops.
-- `AutoMoreWrapper` intercepts `(X of Y)` and `(end)`, sending `ACTION_SPACE` (107) to page and dismiss, or `ACTION_ESC` (38) if lingering $\ge 5$ steps.
-- `ActionDispatcher` terminates `#enhance` fibers with `ESC` (38), immediately restoring the dungeon map.
-- `AutoMoreWrapper.step` and `_flush_dialogs` guard against `RuntimeError: Called step on finished NetHack` when death dialogs complete.
-
-### 11. Experience Level (XL) vs Experience Points (EXP) Index Alignment
-- **NetHack Reality**: In NLE `blstats`, index 18 (`NLE_BL_XP`) is the player's experience level (XL 1–30), while index 19 (`NLE_BL_EXP`) is the cumulative score/experience points (0–100,000+).
-- **Interlock**: `BottomLineStats.from_blstats` strictly reads `raw[18]` (or `raw[NLE_BL_XP]`) into `experience` / `experience_level`. Reading index 19 caused 1 dead vermin to inflate experience to XL 5, triggering premature Mines dives, premature fountain dipping, and excessive temple donations.
-
-### 12. Strict Shop Door Kicking Protection on Depth $\ge 2$ & Upstairs Arrival Anchor
-- **NetHack Reality**: Kicking a shop door shatters it and angers the shopkeeper, who zaps lethal attack wands. On DL $\ge 2$, shops spawn frequently. Furthermore, on floor arrival, the player glyph `@` sits directly on `<` (upward stairs), blinding character-based detection.
-- **Interlock**:
-  - `evaluate_navigation_turn` and `_step_or_open`: On Depth $\ge 2$, locked doors are strictly marked unwalkable and NEVER kicked when alternative unexplored frontiers or staircases exist.
-  - On level transition arrival, `lvl.stairs_up` is immediately initialized to `(py, px)` so emergency retreats (e.g. out of Gnomish Mines when under-leveled) are always available.
-
-### 13. Heavy Hitter Kiting & Obstacle Walkability Pruning
-- **NetHack Reality**: Heavy hitters (`ogre`, `soldier ant`, `gnome lord`, `dwarf lord`, `giant`, `rothe`) deal 10–30 damage per turn, which can one-shot early-game characters.
-- **Interlock**:
-  - `TacticalCombatManager` identifies heavy hitters. When HP $\le 65\%$ or HP $\le 16$, the agent refrains from melee, prioritizing corridor retreat or Elbereth engraving.
-  - If a `STEP` action fails repeatedly against an impassable tile (boulder, wall, locked door), `CORPAgent` increments `failed_step_counts` and prunes `lvl_map.walkable[target_pos] = False` after 2 failures, preventing cyclic motion stalls.
-
-### 14. Starvation Divine Prayer & Descent Unblocking
-- **NetHack Reality**: Praying (`#pray`) while starving (`hunger_state >= WEAK`) resets player nutrition to 900 points (`NORMAL`), instantly curing starvation. Furthermore, remaining trapped on an empty cleared floor without food guarantees death by starvation; descending to deeper floors is essential to discover new food rations, corpses, and shops.
-- **Interlock**:
-  - In `InventoryManager` and `CORPAgent`: If `hunger_state >= WEAK` and hero carries no edible food, evaluates `can_safely_pray(blstats)`. If safe (turn $\ge 301$ on initial prayer, delta $\ge 850$ turns), immediately issues `Task("PRAY")`.
-  - In `HTNGuards.can_descend`: Removed the condition that blocked descent when `hunger_state >= WEAK`. The hero is permitted and encouraged to dive deeper when hungry.
-
-### 15. Diagonal Closed Door Alignment Interlock & Obstacle Loop Elimination
-- **NetHack Reality**: When a door is locked or identified as a shop door on Depth $\ge 2$, it is permanently marked unwalkable and blocked in `lvl.blocked_tiles`. However, its character glyph remains `+`. If diagonal door alignment checks do not exclude blocked tiles, the agent constantly tries to step orthogonally to align with the blocked door, creating an infinite 3-tile cyclic motion loop.
-- **Interlock**:
-  - In `NavigationManager.evaluate_navigation_turn`: Both cardinal door checks and diagonal door checks strictly verify `(nr, nc) not in lvl.blocked_tiles and (nr, nc) not in lvl.shop_doors and lvl.door_attempts.get((nr, nc), 0) < 30`.
-  - Candidate orthogonal alignment steps also verify `cand_pos not in lvl.blocked_tiles`.
-
-### 16. Search Burst Damage Abort & Hallucination Map Shield
-- **NetHack Reality**: When executing a search burst, unseen monsters can strike repeatedly. Continuing to search while taking damage leads to guaranteed death. In addition, hallucination (`condition_bits & 512`) completely randomizes monster, wall, and item glyphs, tricking agents into believing stone walls are walkable items like `$` or `!`.
-- **Interlock**:
-  - In `NavigationManager.evaluate_navigation_turn`: If `self._prev_hp > 0 and blstats.hp < self._prev_hp` or attack keywords (`hits!`, `bites!`, `stings!`) are observed, the agent immediately aborts its search burst (`self._current_search_spot = None`, `self._current_search_burst = 0`).
-  - In `NavigationManager.update_map`: Vectorized map updates (`lvl.walkable |= WALKABLE_LUT[chars]`, `lvl.mapped`, `lvl.walls`) are strictly suppressed when `blstats.is_hallucinating` is True, preserving topological map integrity.
-
-
----
-
-## 4. HTN Action Dispatch Architecture & Priority Hierarchy
-
-**Planned seam (R2)**: a Policy-Program Goal Interpreter evaluates `strategy_plan` each turn and emits macro
-directives (`DESCEND`, `ENTER_SOKOBAN`, `ASCEND_FROM_MINES`, …) through `get_navigation_directive()` — sitting
-*above* this priority hierarchy, never replacing it. Emergencies (P0.0–P2.0) always preempt macro directives.
-
-Every turn, `CORPAgent.select_action(obs)` evaluates goals in strict hierarchical priority:
-
-```mermaid
-flowchart TD
-    Obs["Observation (blstats, glyphs, inv)"] --> P0["Priority 0.0: Emergency Nutrition (Weak/Fainting)"]
-    P0 -->|Not Triggered| P05["Priority 0.5: Emergency Health Triage (HP <= 55%)"]
-    P05 -->|Not Triggered| P1["Priority 1.0: Tactical Corridor Funneling / Elbereth Ward"]
-    P1 -->|Not Triggered| P2["Priority 2.0: Tactical Combat (Grid bugs, Ranged, Melee)"]
-    P2 -->|Not Triggered| P25["Priority 2.5: #enhance Skill Worker Promotion"]
-    P25 -->|Not Triggered| P3["Priority 3.0: Shop Actions & Temple Priest Donations"]
-    P3 -->|Not Triggered| P35["Priority 3.5: Epistemic Worker (Altar BUC / Price ID)"]
-    P35 -->|Not Triggered| P4["Priority 4.0: Inventory & Equipment Optimization"]
-    P4 -->|Not Triggered| P5["Priority 5.0: Spatial Exploration & Aggressive Stair Descent"]
+├── policy/                      # the LLM-facing surface
+│   ├── compiler.py              # NEW(S1): authoring tree → compiled program (the only writer)
+│   ├── author_agent.py          # NEW(S0): agentic tool-calling author (SQL/wiki/trajectory tools)
+│   ├── prompts/                 # NEW(S0): versioned system-prompt templates (data/prompts/)
+│   ├── config.py                # typed bounded tunables (the ISA's numeric surface)
+│   ├── program.py               # compiled-program container + overlay logic
+│   ├── dsl.py / macros.py       # S-expr diff reader · defmacro (parameterized in S3)
+│   ├── manifest.py              # machine-generated vocabulary: predicates/verbs/goals/actions
+│   ├── validator.py             # full gate pipeline (the only program writer)
+│   ├── tactics.py / predicates.py / profiles.py / goal_interpreter.py / goal_state.py
+│   ├── corpus.py                # per-domain FTS5 RAG corpora (data/corpus/<domain>/)
+│   ├── ledger.py / report.py    # provenance ledger · run-report bundles
+│   └── grammar/nethack.sexpr.gbnf
+├── evolution/                   # NEW(S2): population manager, selection, lineage
+├── executor/                    # DomainAdapter ABC + nethack/minihack/craftax adapters
+├── agent/                       # corp_agent core + htn_methods + episode_runner + episode
+├── domain/                      # managers: combat(±mixins) · navigation(±mixins) · inventory · shop …
+│   ├── combat/{threat_scan,responses}.py · navigation/{level_map,stepping,exploration}.py
+├── deliberative/                # providers (gemini/openrouter/llama_cpp/mock) · deadlock resolver
+├── env/ · navigation/ · planner/ · epistemic/ · telemetry/ · workers/
+scripts/
+├── run_parallel_batch.py        # multiprocessing batch runner (30 workers; 100 eps ≈ 3 min)
+├── run_evolution.py             # NEW(S2): the population/selection campaign driver
+├── run_curriculum.py            # NEW(S4): per-skill training-gauntlet driver
+├── run_prompt_ab.py             # NEW(S0): system-prompt A/B harness
+├── run_author_session.py        # NEW(S0): one agentic author session (tools → diff → gates)
+├── run_benchmark.py · run_ablation.py · run_revision_loop.py · run_skill_certifications.py …
+data/
+├── program/<domain>/            # authoring tree (above) — the LLM's workspace
+├── compiled/<domain>.json       # canonical compiled artifact (executor contract)
+├── programs/archive/            # every version, forever (provenance)
+├── prompts/                     # versioned prompt templates + A/B results
+├── corpus/<domain>/             # FTS5 RAG corpora (nethack wiki · minihack · craftax self-built)
+├── corp_telemetry.duckdb        # 6.6M+ ticks, episodes, goal_events (read-only to the author)
+└── revision_ledger.jsonl        # append-only accept/reject/cost/lineage record
 ```
 
 ---
 
-## 5. Telemetry Schema & Empirical Benchmark Findings
+## 3. Scaling: Episode Throughput (the engine's fuel)
 
-### Database Location: `data/corp_telemetry.duckdb`
-DuckDB is populated by `corp/telemetry/duckdb_consolidator.py`. Key tables and views:
-- `episodes`: Macro episode stats (`run_id`, `role`, `total_turns`, `max_depth`, `final_score`, `death_message`, `death_category`, `mean_sps`).
-- `ticks`: Microsecond per-step metrics (`run_id`, `step`, `hp`, `max_hp`, `ac`, `hunger_state`, `decision_latency_us`, `action_name`, `predicate_mask`).
-- `v_eval_summary`: Aggregates mean turns, median depth, mean score, and SPS grouped by eval mode and run ID.
-- `v_lethal_taxonomy`: Frequency analysis of death messages and root causes.
-
-### Empirical Telemetry Progression
-| Run ID | Commit / Changes | Episodes | Median Depth | Max Depth | Mean Score | Max Score | Mean Turns | Mean SPS |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **AutoAscend Baseline** | Upstream Reference | 1,000 | 3.0 | 3–6 | 450.0 | ~1,000 | 650.0 | ~250.0 |
-| **`K5iM16`** | Priority 0.5 Triage, Grid Bug Tactics, BUC Fix | 10 | 2.0 | 2 | 77.0 | 233 | 1,357.5 | 1,240.9 |
-| **`VmcZFT`** | Aggressive Descent, Gold Pickup, Twoweapon | 10 | 2.5 | 6 | 166.7 | 396 | 930.9 | 1,193.8 |
-| **`bVwsQ0`** | Specialized Samurai Pioneer, Temple Donation | 10 | 2.0 | 7 | 151.1 | 664 | 506.2 | 909.3 |
-| **`Qp8qid`** | Nogood Fix, Corpse Freshness, Pony Avoidance | 10 | 2.5 | 5 | 182.3 | 336 | 803.3 (9/10 survived) | 971.7 |
-| **`0a1BVb`** | Fast Exploration, Door Guard, Obscured Stairs | 10 | 4.0 | 9 | 566.2 | 1,315 | 996.1 | 970.7 |
-| **`m9Os8C`** | 20k Step Expansion, Excalibur Dipping, Shop Buy, Sokoban | 5 | 4.0 | 7 | 309.2 | 790 | 1,493.6 (Peak 4,227) | 1,067.2 |
-| **`spWM8a`** | Active Item Normalizer & Blacklist Rejections | 5 | 2.0 | 7 | 305.2 | 593 | 2,312.0 (Peak 9,358) | 994.5 |
-| **`6oJsxI`** | Complete Menu Dismissal (ESC) & Terminal Guard | 5 | 3.0 | 4 | 368.0 | 1,263 | 733.8 (Peak 2,948) | 887.5 |
-| **`4GF260`** | XP Index Fix, Structured Descent, Failed Step Pruning | 5 | 2.0 | 3 | 114.6 | 179 | 1,500.0 (100% survived) | 772.7 |
-| **`zYIryE`** | Macro Director, Heavy Hitter Kiting, Mines Upstairs | 5 | 4.0 | 5 | 172.6 | 233 | 706.6 (Peak 1,387) | 857.5 |
-| **`3nuUj6`** | Reachability BFS, Search Patrol Expansion | 5 | 1.0 | 2 | 344.2 | 788 | 8,333.6 (Peak 10,059) | 746.1 |
-| **`vPSOoY`** | Active Combat Priority, Burst Searcher | 5 | 2.0 | 3 | 325.2 | 547 | 5,616.4 (3/5 survived) | 918.0 |
-| **`yojVVk`** | **Starvation Prayer, Diagonal Door Fix, Search Damage Abort** | 5 | **2.0** | **3** | **451.6** | **647** | **6,190.4 (Peak 10,023, 80% survived)** | **736.8** |
-| **`JMRMbJ`** | **Phase 1-4 Overhaul: MacroDirector wiring, aggressive descent, mines/sokoban routing, HP resting, poison-res farming, door siege, gas-spore/leprechaun fixes, Medusa handler** | 5 | **2.0–4.0 (σ high)** | **4–6** | **293–750** | **1,033** | **3,100–7,000** | **350–530** |
-| **`JMRMbJ`+** | **Zero-turn storm fixes (THROW/EAT stale slots), critical-HP universal retreat, gas-spore cornered-kill, escape-max separation, door siege, throne-sit disable, starvation food-bridge** | 3×10 | **2.0** | **4–6** | **281–349** | **969** | **3,600–4,500** | **170–660** |
-| **`JMRMbJ`++** | **5-ep batches with same fixes (high variance)** | 5 | **2.0–4.0** | **4–6** | **239–848** | **1,523** | **1,900–7,600** | **200–1,200** |
-| **`postR4-100ep`** | **v4 live program, 100 eps @ 20k, valkyrie (parallel runner)** | 100 | **2.0** | **4** | **267.2** | **655** | **2,715.2** | **~750 (1,790 wall-equiv)** |
-
-### Critical Telemetry Takeaways:
-1. **HONEST ASSESSMENT vs AutoAscend**: AutoAscend (empirical, 5ep @ 20k steps) reaches Median Depth 10.0 / Mean Score 10,713.6 / Mean Turns 10,680. CORP's best runs (5–10ep @ 20k steps) reach Median Depth 2–4 / Mean Score ~172–566 / Mean Turns ~700–6,190. **CORP is 5–24x behind on depth and score.** High turn counts on shallow floors are *stalling*, not progress: the agent spends thousands of turns wandering Depth 1–3 instead of descending. The prior claim that CORP "beat AutoAscend on every front" was based on an understated baseline and is retracted.
-1b. **v4 combat rules regressed the NetHack baseline** (2026-09-19, 100-ep batch): median depth 2.0 / mean score 267.2 vs the R0 frozen reference 401.7 / 3.0 — the llm-authored tactic rules did not hold. Death taxonomy shows starvation faints and a prayer-prompt death re-emerging. Diagnose before any further rule authoring on nethack.
-1c. **Scaled minihack three-arm ablation (~500 eps/arm)**: frozen 30 / random 31 / llm 31 median steps; llm vs frozen p=0.19 (δ=0.048, positive direction, not significant); random≈frozen (control behaves). The R6 loop-gate (llm > frozen, p<0.05) is NOT met — fix the loop before the LLM tunes R6 milestones.
-2. **Deep Dungeon Progression**: Best observed Depth 9 / Score 1,315 — still far below AutoAscend's Depth 10–12 / Score 10,000+ on identical budgets.
-3. **Lethal Root Cause Evolution**:
-   - Level 1-3 traps eliminated: 0 rotten food deaths, 0 shopkeeper deaths, 0 domestic kick deaths.
-   - Fixed Item Stall: `AutoMoreWrapper` dialog interference and Hungarian matcher stale items resolved.
-   - Fixed Menu Stall: Paginated `#enhance` menus now cleanly dismissed via `ESC`/`SPACE`.
-   - Fixed EXP vs XP index misalignment: Level progression and XP farming now strictly grounded.
-   - Fixed Starvation Death: Emergency divine prayer (`#pray`) triggers when carried food is exhausted, instantly resetting hunger to 900 (`NORMAL`), and descent guard unblocked.
-   - Fixed Infinite Door Loop: Diagonal closed door alignment strictly filters out blocked tiles and shop doors.
-   - Deep Dungeon hazards identified on Depth 7–9: Giant spider lethal poison, killer bees, rolling boulder traps, and gnome lord wands of striking.
+- Hardware: **36 cores / 31 GB RAM**. NLE is process-safe, single-threaded per env → workers scale linearly.
+- `scripts/run_parallel_batch.py --jobs 30` is the default for campaigns (~3× the 10-worker baseline):
+  **NetHack ≈ 5–6k eps/hr** at 20k-step caps; MiniHack/Craftax curricula (short episodes) **10–50k eps/hr**.
+- Campaign discipline: consolidate DuckDB at campaign boundaries; keep per-worker parquet partitions.
+- Leave 4–6 cores headroom (OS, consolidation, on-demand llama.cpp).
+- Curriculum episodes use per-phase step budgets (most deaths occur < 6k turns; survivors of the budget
+  continue in a follow-up batch — do not burn 20k steps on every curriculum episode).
 
 ---
 
-## 6. Verification & Test Suite
+## 4. NetHack 3.6.6 Ground-Truth Domain Rules & Hardcoded Interlocks (GUARDRAILS — keep intact)
 
-The test suite is fast, comprehensive, and regression-free:
-```bash
-uv run pytest
+These are the **human-owned guardrails** the LLM can never disable. They exist because each one corresponds
+to a measured fatality mode. When adding behavior, obey them; when the data proves one wrong, change it via
+a human-reviewed commit — never via an LLM diff.
+
+1. **Corpse freshness**: mortal corpses safe ≤ 25 turns from witnessed kill; pre-existing level corpses are
+   rotten (instant death); lichen corpses never rot (200 nutrition forever); non-corpse food never rots.
+   Never eat floor corpses with adjacent hostiles (eating takes 5–15 turns = free hits). `AutoMoreWrapper`
+   intercepts rotten/stoning eat prompts → `N`.
+2. **Non-pet monster tiles are unwalkable** (bump = melee; domestic/peaceful retaliation). A* penalizes
+   monster tiles (+1000). No intentional attack unless the combat manager issued it.
+3. **Shop doors on Depth ≥ 2 are NEVER kicked** (shopkeeper wand death). Unlock tools first, then route
+   around; the door is marked unwalkable.
+4. **Multi-stairs steering**: DL 2–4 has two downstairs (Mines vs Dungeons). Under-leveled (XL < 5/6) agents
+   route to the Main Dungeons staircase; trapped in the Mines under-leveled → ASCEND out.
+5. **Corridor search stall elimination**: no secret-door search on corridor tiles; dead ends ≤ 6 searches,
+   perimeter walls ≤ 5; message-based stair detection for obscured stairs.
+6. **Emergency health triage (P0.5)**: quaff full/extra/healing (uncursed+) at HP ≤ 55% (60% with hostiles);
+   teleport scroll ≤ 30% if cornered; `#pray` ≤ 25% when `can_safely_pray`.
+7. **Floating eye melee lockout** (paralysis 0–70 turns) unless blind/reflection; missiles/wands only.
+8. **Grid bug diagonal exploit**: free hits from diagonals; orthogonal → step to diagonal alignment.
+9. **Mid-game stack**: Excalibur dipping (lawful, XL ≥ 5, uncursed long sword + fountain); unpaid-item
+   debt relief (PAY or drop before leaving); Sokoban progression (boulder pushes, reflection prize, ascend
+   floors 1–3 → floor 4 prize); Castle drawbridge via wand of striking, wand-of-wishing protocol.
+10. **Menu/pager dismissal**: `(X of Y)`/`(end)` menus → SPACE/ESC via `AutoMoreWrapper`; `#enhance` fibers
+    terminate with ESC. Guards against `step on finished NetHack`.
+11. **XP index alignment**: `blstats[18]` = XL, `blstats[19]` = EXP. Never read 19 as level.
+12. **Locked doors DL ≥ 2**: unwalkable + never kicked when alternatives exist; `stairs_up` anchored to
+    arrival tile.
+13. **Heavy hitters** (ogre/soldier ant/rothe/…): no melee trading when wounded (kite/retreat/elbereth).
+    Failed steps (2×) prune `walkable` to kill motion loops.
+14. **Starvation**: `#pray` at WEAK+ (no food) when safe — resets nutrition to 900. Descent is never blocked
+    by hunger. **A/B-proven negative result (2026-09-19)**: food-chasing at ANY radius is a net negative
+    (none=396 > tight=275 > wide=250 mean score; faints RISE with chase capability) — the chase stays
+    disabled; hunger is solved by descent-to-fresh-kills + carried food + prayer. The loop may never
+    re-enable it (locked policy, `tests/test_food_security.py`).
+15. **Diagonal door alignment** excludes blocked/shop-door tiles (kills 3-tile oscillation loops).
+16. **Search-burst damage abort**: HP drop or attack keywords abort the burst; hallucination (condition 512)
+    freezes vectorized map updates.
+
+---
+
+## 5. Priority Hierarchy (executor runtime)
+
 ```
-Output: **312 passed in ~5s** (286 post-R4 + 11 R5 + 18 R6 milestone certifications).
+P0.0 Emergency nutrition (weak/fainting) → P0.5 Health triage → P1.0 Corridor funnel/Elbereth
+→ P2.0 Tactical combat → P2.5 Skill enhance → P3.0 Shop/temple → P3.5 Epistemic (BUC/price-ID)
+→ P4.0 Inventory/equipment → P5.0 Exploration & descent   [goal-interpreter directives sit ABOVE]
+```
 
-Key test modules:
-- `tests/test_r6_milestones.py`: R6 ascension-stack milestone certification — no-skip-to gating, param completion semantics, directive wiring, manifest closure.
-- `tests/test_shop_and_dungeon_graph.py`: Shop price deduction, temple donation, active shop purchasing (`Task("PAY")`), unpaid item drop debt relief, door unlocking, corpse freshness, domestic animal avoidance, and multi-stair steering.
-- `tests/test_domain_and_workers.py`: Grid bug diagonal tactics, heavy hitter kiting, Elbereth coordinate invalidation, corridor funneling, weapon ranking, prayer safety, Sokoban boulder pushing, reflection auto-equipping, and Castle drawbridge blasting.
-- `tests/test_env.py`: AutoMoreWrapper wish interception, payment prompt confirmation, multi-page menu dismissal (`(X of Y)`, `(end)`), Hungarian inventory tracker letter shifts, anomaly sentry burst damage detection.
-- `tests/test_agent_loop.py`: Agent execution loop, Priority 0.5 emergency triage, cycle perturbation.
-- `tests/test_all_actions_htn.py`: 121-action taxonomy mappings and action dispatcher coverage.
-- `tests/test_epistemic.py` & `tests/test_epistemic_worker.py`: Altar BUC light flashes, pet hesitation, price deduction, wand scratch testing.
-- `tests/test_planner_and_nav.py`: A* corner clipping, frontier exploration, HTN decomposition, CDCL Nogood cuts.
-- `tests/test_role_specialization.py`: Role-specific starting equipment, skills, and persona profiling.
-- `tests/test_telemetry.py`: Parquet streaming, DuckDB consolidation, automatic file cleanup.
-- `tests/test_r6_milestones.py`: R6 ascension-stack milestone certification — no-skip-to gating, policy-param completion semantics, directive wiring, manifest closure, owned-param tunability.
+The Gen-2 program (S1) re-expresses the *strategy* content of this cascade as the default policy program;
+the mechanical guardrails (§4) stay in code.
 
 ---
 
-## 7. Roadmap: R0–R9 (full contract with acceptance criteria: `AGENT_PLAN.md`)
+## 6. Telemetry & Verification
 
-**Scope decisions (the four impact trades, all accepted)**: multi-domain suite (MiniHack/Craftax-class as the
-ablation core, NetHack as hard showcase) · frontier API LLM as primary policy author (llama.cpp repro path;
-executor stays CPU-only) · `defmacro` bounded self-extension in the core DSL · ascension parity demoted to
-stretch goal (R6).
-
-- **R0 (NOW)**: commit all work; NetHack 100-ep CORP + AutoAscend baselines frozen; trajectory figure from
-  DuckDB (106 runs, 678 episodes on disk); revision ledger starts (`data/revision_ledger.jsonl` — provider,
-  tokens, cost, wall-clock, accept/reject, delta).
-- **R1**: `policy/config.py` — extract ~80–100 tunables from managers into typed `PolicyConfig` (zero behavior
-  change; decision-trace equivalence required).
-- **R2**: policy program + goal interpreter (replaces `MacroAscensionDirector` phases via the
-  `get_navigation_directive()` seam); named predicate registry; `goal_events` DuckDB table.
-- **R3**: LLM goes live — S-expression diff reader (depth ≤ 3), GBNF grammar, `defmacro` expansion + closure
-  checker, validator gate pipeline, unattended `run_revision_loop.py`, deliberative layer unified onto the diff
-  contract. Dual author: frontier API primary + llama.cpp repro path.
-- **R4**: tactic-rules evaluator (replaces hardcoded monster sets) + role/domain profiles + three-arm ablation
-  harness (`run_ablation.py`: LLM-revision | frozen | random-perturbation-gated) — the control arm that makes
-  every claim falsifiable.
-- **R5**: Domain Suite — `DomainAdapter` port to MiniHack, then Craftax/Crafter; per-domain certification →
-  cold-start program → 100-ep three-arm batches. NetHack tuning campaign nightly in parallel (targets: median
-  depth ≥ 5, mean score ≥ 1,500). **Workshop paper checkpoint.**
-- **R6 (STRETCH)**: NetHack ascension knowledge stack — survival intrinsics/MR, armor/weapon upgrade loop,
-  Gehennom, Castle/wishing, Vlad → Invocation → ascension run, quest branches. Only if R5 evidence secured.
-- **R7**: cross-role generalization — fighter roles via `role_profiles` + loop refinement; spellcasting
-  infrastructure scope-gated to the all-role-parity claim (report role coverage honestly otherwise).
-- **R8**: Track A — LLM-authored goal handlers (self-extending vocabulary; shadow/certification verified
-  before production). Only after a long, clean acceptance ledger.
-- **R9**: paper — workshop at R5; main-track framing "Grammar-constrained policy-diff synthesis: offline LLMs
-  as optimizers of declarative agent policies" requires ≥2-domain curves + NetHack mid-game ≥ AutoAscend +
-  ablations (+ ascension parity if R6 pursued). Fall back to AAAI/IJCAI/CoG if transfer stalls.
+- `data/corp_telemetry.duckdb`: `episodes`, `ticks` (6.6M+), `goal_events`, views `v_eval_summary`,
+  `v_lethal_taxonomy`. The author's `query_duckdb` tool reads this read-only.
+- Test suite: `uv run pytest` → **321 passed (~5s)**. Includes: R6 milestone certifications (18),
+  target-conditionality invariant tests, food-security policy locks (6), validator gates, combat/navigation
+  mixins, loop tests, epistemic, telemetry, adapters.
+- Certifications: `scripts/run_skill_certifications.py` (4 suites, incl. the R6 Early Survival Gauntlet) —
+  all CERTIFIED. Per-domain adapter certification suites gate handler promotion.
+- Every campaign appends to `data/revision_ledger.jsonl` (author, tokens, cost, latency, accept/reject,
+  measured deltas, lineage parent). Losers are archived, never deleted.
 
 ---
 
-## 8. Essential Developer Commands Cheat Sheet
+## 7. Developer Command Cheat Sheet
 
 | Task | Command |
 | :--- | :--- |
-| **Run Unit Tests** | `uv run pytest` |
-| **Run Parallel Batch (10 workers)** | `uv run python scripts/run_parallel_batch.py --role valkyrie --episodes 100 --max-steps 20000 --jobs 10 --output data/batch.json` |
-| **Run Fast Benchmark (Random)** | `uv run python scripts/run_benchmark.py --episodes 5 --max-steps 1500 --clean-parquet` |
-| **Run Standard Benchmark (Samurai)** | `uv run python scripts/run_benchmark.py --role samurai --episodes 10 --max-steps 3000 --seed 42 --clean-parquet` |
-| **Run Standard Benchmark (Valkyrie)** | `uv run python scripts/run_benchmark.py --role valkyrie --episodes 10 --max-steps 3000 --seed 42 --clean-parquet` |
-| **Run Standard Benchmark (Barbarian)** | `uv run python scripts/run_benchmark.py --role barbarian --episodes 10 --max-steps 3000 --seed 42 --clean-parquet` |
-| **Query Episode Telemetry** | `uv run python scripts/query_duckdb.py "SELECT run_id, role, total_turns, max_depth, final_score, death_message FROM episodes ORDER BY rowid DESC LIMIT 10;"` |
-| **Query Evaluation Summary** | `uv run python scripts/query_duckdb.py "SELECT * FROM v_eval_summary;"` |
-| **Clean Parquet Backlog** | `uv run python scripts/clean_telemetry.py` |
-| **Search NetHack 3.6.6 Wiki** | `uv run python scripts/wiki_search.py "<search query>"` |
-| **Run Transfer-Domain Batch** | `uv run python scripts/run_domain_eval.py --domain minihack --episodes 10` |
-| **Run Tuning Campaign** | `uv run python scripts/run_campaign.py --nights 7 --provider gemini --model gemma-4-26b-a4b-it` |
-| **Run Baseline Comparison Suite** | `uv run python scripts/run_baseline_suite.py --episodes 100 --step-limit 50000 --role val`
-| **Run LLM Revision Loop** | `uv run python scripts/run_revision_loop.py --max-revisions 10 --author api --repro local`
-| **Run Ablation Harness** | `uv run python scripts/run_ablation.py --arms llm,frozen,random --episodes 100 --domain all`
-| **Run Skill Certification** | `./scripts/run_skill_certifications.sh` |
+| **Unit tests** | `uv run pytest` |
+| **Parallel batch (30 workers)** | `uv run python scripts/run_parallel_batch.py --role valkyrie --episodes 100 --max-steps 20000 --jobs 30 --output data/batch.json` |
+| **One agentic author session** | `uv run python scripts/run_author_session.py --domain nethack --author gemini` |
+| **Evolution campaign** | `uv run python scripts/run_evolution.py --population 4 --episodes 100 --hours 8` |
+| **Prompt A/B** | `uv run python scripts/run_prompt_ab.py --candidates data/prompts/v3.md,v4.md --batches 3` |
+| **Curriculum eval** | `uv run python scripts/run_curriculum.py --skill retreat_discipline --episodes 200` |
+| **Benchmark** | `uv run python scripts/run_benchmark.py --role valkyrie --episodes 10 --max-steps 20000 --clean-parquet` |
+| **Query telemetry** | `uv run python scripts/query_duckdb.py "SELECT …"` |
+| **Wiki search** | `uv run python scripts/wiki_search.py "<query>"` |
+| **Clean parquet** | `uv run python scripts/clean_telemetry.py` |
+| **Ablation (3-arm)** | `uv run python scripts/run_ablation.py --arms llm,frozen,random --episodes 100 --domain all` |
+| **Baseline suite** | `uv run python scripts/run_baseline_suite.py --episodes 100 --step-limit 50000 --role val` |
