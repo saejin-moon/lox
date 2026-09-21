@@ -1,10 +1,10 @@
 {
-  "version": 3,
+  "version": 4,
   "domain": "minihack",
   "params": {
-    "explore.frontier_bias": 2.2,
-    "nav.unknown_penalty": 1.1,
-    "explore.revisit_cap": 4
+    "explore.frontier_bias": 2.4,
+    "nav.unknown_penalty": 1.0,
+    "explore.revisit_cap": 3
   },
   "macros": [],
   "tactic_rules": [
@@ -31,9 +31,9 @@
     }
   ],
   "provenance": {
-    "author": "strategy-tuning",
+    "author": "strategy-tuning-agent",
     "note": "minihack cold-start: reach stairs when known, else explore",
-    "parent_version": 2,
-    "reason": "increase exploration intensity and minimize backtracking to reduce median steps"
+    "parent_version": 3,
+    "reason": "maximizing exploration aggression by pushing frontier bias to limit and minimizing unknown penalty and revisit cap to find stairs in fewer steps"
   }
 }

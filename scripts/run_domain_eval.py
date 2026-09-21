@@ -55,6 +55,7 @@ def main() -> int:
               f"success={r['success']} coverage={r.get('coverage', '-')}")
 
     rewards = [r["reward"] for r in results]
+    success_steps = sorted(r["steps"] for r in results if r["success"])
     summary = {
         "domain": args.domain,
         "program_version": program.version,
@@ -63,12 +64,16 @@ def main() -> int:
         "mean_reward": statistics.mean(rewards) if rewards else 0.0,
         "success_rate": sum(1 for r in results if r["success"]) / max(1, len(results)),
         "mean_steps": statistics.mean(r["steps"] for r in results),
+        # R5 metric-gap fix: saturated rewards need step-efficiency to compare revisions
+        "median_steps_on_success": statistics.median(success_steps) if success_steps else None,
+        "mean_steps_on_success": statistics.mean(success_steps) if success_steps else None,
         "detailed_episodes": results,
     }
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"[domain-eval] mean_reward={summary['mean_reward']:.3f} "
-          f"success_rate={summary['success_rate']:.2f} -> {args.output}")
+          f"success_rate={summary['success_rate']:.2f} "
+          f"median_steps_on_success={summary['median_steps_on_success']} -> {args.output}")
     return 0
 
 

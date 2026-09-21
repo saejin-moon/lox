@@ -98,15 +98,19 @@ def prepare_random_arm(workdir: str, n_revisions: int = 5, ops_per_rev: int = 3,
 def prepare_llm_arm(workdir: str, args) -> str:
     """Arm 1: run the gated revision loop (mock or live author), then benchmark the
     resulting program."""
-    program_path = os.path.join(workdir, "program_llm.json")
-    PolicyProgram.from_dict(DEFAULT_PROGRAM).save(program_path)
+    program_path = os.path.join(workdir, f"program_llm_{args.domain}.json")
+    PolicyProgram.from_dict(
+        DEFAULT_PROGRAM if args.domain == "nethack"
+        else __import__("corp.executor", fromlist=["get_adapter"]).get_adapter(args.domain).default_program()
+    ).save(program_path)
     from run_revision_loop import run_loop  # scripts/ is on sys.path
     from argparse import Namespace
     loop_args = Namespace(
         max_revisions=args.llm_revisions, provider=args.llm_provider, model=args.llm_model,
         program_path=program_path, ledger_path=os.path.join(workdir, "ledger_llm.jsonl"),
-        db_path=args.db_path, live_gates=False,   # gates inside the loop are the dry-run set;
-        fixture_shadow=True,                      # the ablation batch itself is the gate
+        db_path=args.db_path, domain=args.domain, report_episodes=args.report_episodes,
+        live_gates=False,   # gates inside the loop are the dry-run set;
+        fixture_shadow=True,  # the ablation batch itself is the gate
         quick_batch_episodes=3, quick_batch_steps=5000, no_git=True,
     )
     asyncio.run(run_loop(loop_args))
@@ -116,6 +120,34 @@ def prepare_llm_arm(workdir: str, args) -> str:
 # ---------------------------------------------------------------------------
 # Benchmark + statistics
 # ---------------------------------------------------------------------------
+
+def run_domain_batch(program_path: str, out_path: str, args) -> dict:
+    """Transfer-domain batch (R5): in-process seeded episodes via the adapter.
+    Seeds: 3 bases × episodes (§8: 3 seeds × 34 eps on seeded domains)."""
+    from corp.executor import get_adapter  # noqa: PLC0415
+    adapter = get_adapter(args.domain)
+    program = PolicyProgram.load(program_path)
+    max_steps = adapter.spec.step_limit_default
+    seed_bases = [int(s) for s in args.seed_bases.split(",")]
+    results = []
+    t0 = time.perf_counter()
+    for base in seed_bases:
+        for i in range(args.episodes):
+            seed = base + i
+            env = adapter.make_env(seed=seed, task=args.task)
+            r = adapter.run_episode(env, program, seed=seed, max_steps=max_steps)
+            env.close()
+            r["seed"] = seed
+            results.append(r)
+    wall = time.perf_counter() - t0
+    summary = adapter.report_bundle(results)
+    summary["detailed_episodes"] = results
+    summary["wall_sec"] = wall
+    summary["program_version"] = program.version
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    return summary
+
 
 def run_benchmark(program_path: str, out_path: str, args) -> dict:
     """Runs the benchmark subprocess against the given program (swapped onto the live
@@ -182,14 +214,20 @@ def main() -> int:
     p = argparse.ArgumentParser(description="CORP R4 three-arm ablation harness")
     p.add_argument("--arms", type=str, default="frozen,random,llm",
                    help="comma-separated subset of frozen,random,llm")
+    p.add_argument("--domain", type=str, default="nethack",
+                   help="nethack (subprocess benchmark) or a transfer domain (adapter episodes)")
+    p.add_argument("--task", type=str, default=None, help="transfer-domain task override")
+    p.add_argument("--seed-bases", type=str, default="0,100,200",
+                   help="transfer domains: 3 seed bases × --episodes each (§8)")
     p.add_argument("--episodes", type=int, default=100)
     p.add_argument("--max-steps", type=int, default=20000)
     p.add_argument("--role", type=str, default="valkyrie")
-    p.add_argument("--domain", type=str, default="nethack")
     p.add_argument("--db-path", type=str, default="data/corp_telemetry.duckdb")
     p.add_argument("--llm-provider", type=str, default="mock")
     p.add_argument("--llm-model", type=str, default=None)
     p.add_argument("--llm-revisions", type=int, default=5)
+    p.add_argument("--report-episodes", type=int, default=3,
+                   help="transfer domains: seeded episodes per revision for the author report")
     p.add_argument("--benchmark-timeout", type=int, default=14400)
     p.add_argument("--workdir", type=str, default="data/ablation_work")
     p.add_argument("--out", type=str, default=None)
@@ -220,26 +258,44 @@ def main() -> int:
     for arm in arms:
         out_path = os.path.join("logs", f"ablation_{arm}_{int(time.time())}.json")
         print(f"[ablation] benchmarking arm={arm} ...")
-        stats = run_benchmark(programs[arm], out_path, args)
-        episodes = stats.get("detailed_episodes", [])
-        scores = [e.get("score", 0) for e in episodes]
-        depths = [e.get("depth", 0) for e in episodes]
-        results["arms"][arm] = {
-            "mean_score": stats.get("mean_score"),
-            "median_depth": stats.get("median_depth"),
-            "scores": scores, "depths": depths,
-            "wall_sec": stats.get("wall_sec"),
-            "program_version": PolicyProgram.load(programs[arm]).version,
-        }
-        print(f"  [{arm}] mean_score={stats.get('mean_score')} "
-              f"median_depth={stats.get('median_depth')}")
+        if args.domain == "nethack":
+            stats = run_benchmark(programs[arm], out_path, args)
+            episodes = stats.get("detailed_episodes", [])
+            scores = [e.get("score", 0) for e in episodes]
+            depths = [e.get("depth", 0) for e in episodes]
+            results["arms"][arm] = {
+                "mean_score": stats.get("mean_score"),
+                "median_depth": stats.get("median_depth"),
+                "scores": scores, "depths": depths,
+                "wall_sec": stats.get("wall_sec"),
+                "program_version": PolicyProgram.load(programs[arm]).version,
+            }
+            print(f"  [{arm}] mean_score={stats.get('mean_score')} "
+                  f"median_depth={stats.get('median_depth')}")
+        else:
+            stats = run_domain_batch(programs[arm], out_path, args)
+            episodes = stats.get("detailed_episodes", [])
+            success_steps = sorted(e["steps"] for e in episodes if e.get("success"))
+            results["arms"][arm] = {
+                "success_rate": stats.get("success_rate"),
+                "mean_reward": stats.get("mean_reward"),
+                "steps_on_success": success_steps,
+                "median_steps_on_success": stats.get("median_steps_on_success"),
+                "wall_sec": stats.get("wall_sec"),
+                "program_version": stats.get("program_version"),
+            }
+            print(f"  [{arm}] success_rate={stats.get('success_rate')} "
+                  f"median_steps_on_success={stats.get('median_steps_on_success')}")
 
     if "frozen" in results["arms"]:
-        frozen_scores = results["arms"]["frozen"]["scores"]
+        frozen = results["arms"]["frozen"]
+        frozen_metric = frozen.get("scores") or frozen.get("steps_on_success") or []
         for arm in arms:
             if arm == "frozen":
                 continue
-            results["comparisons"][arm] = compare(results["arms"][arm]["scores"], frozen_scores)
+            arm_metric = results["arms"][arm].get("scores") or \
+                results["arms"][arm].get("steps_on_success") or []
+            results["comparisons"][arm] = compare(arm_metric, frozen_metric)
             c = results["comparisons"][arm]
             print(f"  [{arm} vs frozen] p={c['mannwhitney_p']} "
                   f"cliffs_delta={c['cliffs_delta']:.3f} ci95={c['bootstrap_ci_95']}")

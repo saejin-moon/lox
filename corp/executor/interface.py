@@ -104,17 +104,27 @@ class DomainAdapter(ABC):
         config. Returns {reward, steps, success, coverage, goal_events: [...], ...}."""
 
     def report_bundle(self, results: list[dict]) -> dict:
-        """Run-report for the reviser (batch stats + goal stats). Override for richer
-        telemetry; default aggregates the run_episode result dicts."""
+        """Run-report for the reviser. R5 metric-gap fix: ExploreMaze reward saturates
+        at 100% success — the batch report therefore carries STEP-EFFICIENCY metrics
+        (median steps on successes + coverage) so revisions are distinguishable."""
         n = len(results) or 1
+        successes = [r for r in results if r.get("success")]
+        steps_success = sorted(r.get("steps", 0) for r in successes)
+        median_steps_success = (steps_success[len(steps_success) // 2]
+                                if steps_success else None)
         return {
             "domain": self.spec.name,
             "batch": {
                 "episodes": len(results),
                 "mean_reward": sum(r.get("reward", 0.0) for r in results) / n,
-                "success_rate": sum(1 for r in results if r.get("success")) / n,
+                "success_rate": len(successes) / n,
                 "mean_steps": sum(r.get("steps", 0) for r in results) / n,
+                "median_steps_on_success": median_steps_success,
+                "mean_coverage": sum(r.get("coverage", 0) for r in results) / n,
             },
+            "metric_note": ("reward saturates at 100% success on ExploreMaze; "
+                            "optimize median_steps_on_success (lower is better) "
+                            "without dropping success_rate"),
             "goal_stats": {},
             "variance_note": "seeded domain" if self.spec.seeded else "unseeded",
         }

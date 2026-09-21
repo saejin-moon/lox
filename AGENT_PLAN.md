@@ -443,6 +443,51 @@ The full self-extension: the LLM proposes new *goal handlers* (declarative sub-p
 
 ---
 
+### R6 EXECUTION PLAN (drafted 2026-09-18 — pending ablation evidence before coding starts)
+
+**Evidence gate (before any R6 code)**: the minihack three-arm ablation (running) + a post-R4
+NetHack 100-ep baseline. R6 is gated on the core claim (loop > frozen) per Trade 4; if the
+ablation shows llm ≯ frozen, fix the loop first — R6 would only add human knowledge to a
+loop that can't tune it.
+
+**Milestone reordering — driven by the mortality data, not the §8 list order.** Current death
+taxonomy (post-R4): melee bites (giant rat / jackal / kitten / giant bat) at DL 1–3 dominate,
+then gnome wand-of-striking (DL 3–9), starvation. Median depth 2.5–3 means Gehennom/Castle
+milestones are premature — the wall is EARLY-MID survival, so the order becomes:
+
+1. `early_survival_stack` (NEW — highest mortality impact at current depth):
+   armor AC ladder acquisition/upgrade (leather→ring mail→...), poison-res farming
+   reliability, wand-wielder counterplay (break LOS / cover step priority), food
+   security (rat/lemur farming, prayer cadence). Cert: survive DL 1–6 gauntlet fixtures;
+   target median depth ≥ 5 on 10-ep batches.
+2. `equip_upgrade` (§8 #2, folded forward): weapon enchantment, twoweapon decisions.
+   Cert: AC ≤ −10 by DL 8 (revised from §8's −15@DL10 — honest target for where we are).
+3. `survival_intrinsics` (§8 #1, moved down): MR acquisition, level-drain counters —
+   only becomes relevant at DL 8–12, which we must first REACH reliably.
+4. `gehennom_survival` → 5. `castle_wishing` → 6. `vlad_invocation` → 7. `ascension_run`
+   (unchanged from §8; each gated on the previous milestone's certification).
+
+Landing pattern per milestone (unchanged from §8): new goal handlers (CODE, human-approved)
++ default-program entries + certification cases → THEN the loop may tune them. R6 overlaps
+R7 (armor/weapon tiers generalize across fighter roles) — build profiles alongside.
+
+**Craftax adapter plan (R5 remainder, parallel with R6 #1):**
+1. `uv add craftax` (JAX CPU) — verify install feasibility first; defer if the dependency
+   tree fights the CPU-only constraint.
+2. Env: `Craftax-Classic-Symbolic-v0` first (simpler obs; Full adds achievements).
+3. Observation bridge: symbolic char grid + flat inventory/stats → blstats-compatible
+   vector (hp, floor level → depth, xp level → xl) + glyph-like grid, so the SAME
+   GridAStar/FrontierExplorer nav stack runs (this is the whole point of the adapter
+   boundary — the loop must not change).
+4. Goals: explore_floor, gather_resources, descend, craft_upgrade (4 certified);
+   6–8 predicates (achievement-driven: has_tool, has_food, block_known, ...).
+5. Corpus: `build_craftax_corpus` (docs + paper + docstrings + achievement table) —
+   load-bearing, no community wiki exists.
+6. Certification: seeded episodes — survival progress (hp stability + block breakage),
+   not stair-reach (craftax has no stairs; reward = achievements).
+7. Metric note: craftax rewards do NOT saturate like ExploreMaze — mean_reward is a
+   valid comparison metric there.
+
 ## 6. Honest Diff from AutoAscend
 
 | Dimension | AutoAscend | CORP-Ω |
