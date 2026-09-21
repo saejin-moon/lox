@@ -51,7 +51,10 @@ Outperform **AutoAscend** on NetHack (NLE 3.6.6 / `NetHackChallenge-v0`) and dem
 ```
 corp/
 ├── agent/
-│   ├── corp_agent.py          # Master agent loop, LockedIntent multi-turn commitment, role-prefixed IDs
+│   ├── corp_agent.py          # Core agent loop + priority cascade (composes the mixins below)
+│   ├── htn_methods.py         # HTNMethodsMixin: method registry + emergency/triage/combat HTN methods
+│   ├── episode_runner.py      # EpisodeRunnerMixin: env step plumbing, deadlock diff emission, run_episode
+│   ├── episode.py             # LockedIntent + EpisodeResult dataclasses
 │   └── competence.py          # Turn-0 competence evaluator for archetype selection
 ├── deliberative/              # Slow Core LLM reasoning (autopsies, deadlock resolution → unified onto diff contract)
 ├── policy/                    # [R1-R3 DONE] The entire LLM-facing surface:
@@ -71,10 +74,11 @@ corp/
 │   ├── providers/             # Provider abstractions (Mock, LlamaCpp, OpenRouter, Gemini)
 │   └── schemas.py             # Pydantic structured output models
 ├── domain/                    # Tactical Domain Managers (<0.5ms execution)
-│   ├── macro_director.py      # Strategic macro ascension progression & milestone phase tracking
-│   ├── combat_manager.py      # Threat math, corridor funneling, Elbereth coord tracking, grid bugs
+│   ├── combat_manager.py      # TacticalCombatManager core (composes combat/ mixins: threat scan + verb responses)
+│   ├── combat/                # threat_scan.py (MonsterTrack, scan_monsters) · responses.py (kite/ranged/elbereth)
 │   ├── inventory_manager.py   # Nutrition clock, 9-tier weapons, armor, missiles, prayer timing, fresh corpses
-│   ├── navigation_manager.py  # A* hazard nav, multi-stairs branch steering, fast corridor exploration
+│   ├── navigation_manager.py  # NavigationManager core (composes navigation/ mixins)
+│   ├── navigation/            # level_map.py (LevelMap/LevelStore) · stepping.py (doors/stairs) · exploration.py
 │   ├── shop_manager.py        # Economy engine, price-inversion ID, temple donations, shop protection
 │   ├── dungeon_graph.py       # Cross-level macro branch graph, Mines/Sokoban policy routing
 │   ├── skill_worker.py        # #enhance weapon skill promotions
@@ -299,10 +303,10 @@ The test suite is fast, comprehensive, and regression-free:
 ```bash
 uv run pytest
 ```
-Output: **297 passed in ~4s** (286 post-R4 + 11 new R5 tests).
+Output: **312 passed in ~5s** (286 post-R4 + 11 R5 + 18 R6 milestone certifications).
 
 Key test modules:
-- `tests/test_macro_director.py`: Macro ascension progression phase transitions, Excalibur readiness, and farming deferral.
+- `tests/test_r6_milestones.py`: R6 ascension-stack milestone certification — no-skip-to gating, param completion semantics, directive wiring, manifest closure.
 - `tests/test_shop_and_dungeon_graph.py`: Shop price deduction, temple donation, active shop purchasing (`Task("PAY")`), unpaid item drop debt relief, door unlocking, corpse freshness, domestic animal avoidance, and multi-stair steering.
 - `tests/test_domain_and_workers.py`: Grid bug diagonal tactics, heavy hitter kiting, Elbereth coordinate invalidation, corridor funneling, weapon ranking, prayer safety, Sokoban boulder pushing, reflection auto-equipping, and Castle drawbridge blasting.
 - `tests/test_env.py`: AutoMoreWrapper wish interception, payment prompt confirmation, multi-page menu dismissal (`(X of Y)`, `(end)`), Hungarian inventory tracker letter shifts, anomaly sentry burst damage detection.

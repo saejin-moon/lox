@@ -43,6 +43,7 @@ from corp.domain.inventory_manager import InventoryManager
 from corp.domain.skill_worker import SkillWorker
 from corp.domain.medusa_handler import MedusaHandler
 from corp.policy.config import PolicyConfig, default_config
+from corp.policy.program import DEFAULT_PROGRAM_PATH
 from corp.workers.dispatcher import ActionDispatcher
 from corp.epistemic.epistemic_manager import EpistemicManager
 from corp.epistemic.entropy_gates import ShannonSafeGate
@@ -82,6 +83,7 @@ class CORPAgent(HTNMethodsMixin, EpisodeRunnerMixin):
         role: str = "unknown",
         throttler_config: ThrottlerConfig | None = None,
         policy_config: PolicyConfig | None = None,
+        program_path: str | None = None,
     ):
         self.env = env
         self.nogood_store = nogood_store or NogoodStore()
@@ -114,7 +116,10 @@ class CORPAgent(HTNMethodsMixin, EpisodeRunnerMixin):
         self.medusa_handler = MedusaHandler()
         self.dungeon_graph = DungeonGraph()
         self.shop_mgr = ShopManager()
-        self.goals = GoalInterpreter(self.policy_config)
+        self.goals = GoalInterpreter(
+            self.policy_config,
+            program_path=program_path or DEFAULT_PROGRAM_PATH,
+        )
         # R4: the combat manager's tactic engine runs the LIVE program's rules
         # (program v4+ carries the interlock rules alongside LLM-authored ones)
         self.combat_mgr.tactic_engine = TacticalCombatManager.tactic_engine_from(

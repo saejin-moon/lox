@@ -1,33 +1,4 @@
 ================================================================================
-CORP Parallel Batch Runner | Run 19Cjix
+CORP Parallel Batch Runner | Run 1ymBvZ
 Episodes: 100 @ 20000 steps | Jobs: 10 | Role: valkyrie
 ================================================================================
-multiprocessing.pool.RemoteTraceback: 
-"""
-Traceback (most recent call last):
-  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/pool.py", line 125, in worker
-    result = (True, func(*args, **kwds))
-                    ^^^^^^^^^^^^^^^^^^^
-  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/pool.py", line 48, in mapstar
-    return list(map(*args))
-           ^^^^^^^^^^^^^^^^
-  File "/home/bae/corp/scripts/run_parallel_batch.py", line 70, in _worker_main
-    agent = CORPAgent(
-            ^^^^^^^^^^
-TypeError: CORPAgent.__init__() got an unexpected keyword argument 'program_path'
-"""
-
-The above exception was the direct cause of the following exception:
-
-Traceback (most recent call last):
-  File "/home/bae/corp/scripts/run_parallel_batch.py", line 260, in <module>
-    main()
-  File "/home/bae/corp/scripts/run_parallel_batch.py", line 185, in main
-    payloads = pool.map(_worker_main, worker_cfgs)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/pool.py", line 367, in map
-    return self._map_async(func, iterable, mapstar, chunksize).get()
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/bae/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/pool.py", line 774, in get
-    raise self._value
-TypeError: CORPAgent.__init__() got an unexpected keyword argument 'program_path'
