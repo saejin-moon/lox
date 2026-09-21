@@ -121,6 +121,14 @@ class DomainAdapter(ABC):
                 "mean_steps": sum(r.get("steps", 0) for r in results) / n,
                 "median_steps_on_success": median_steps_success,
                 "mean_coverage": sum(r.get("coverage", 0) for r in results) / n,
+                # per-seed spread: the author must see variance so it stops
+                # chasing noise (ledger shows oscillating monster_cost revisions)
+                "steps_on_success_min_max": ([steps_success[0], steps_success[-1]]
+                                              if steps_success else None),
+                "per_episode": [
+                    {"seed": r.get("seed"), "steps": r.get("steps"),
+                     "success": r.get("success")} for r in results
+                ],
             },
             "metric_note": ("reward saturates at 100% success on ExploreMaze; "
                             "optimize median_steps_on_success (lower is better) "

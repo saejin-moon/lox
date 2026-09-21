@@ -235,7 +235,7 @@ def main() -> int:
     p.add_argument("--llm-provider", type=str, default="mock")
     p.add_argument("--llm-model", type=str, default=None)
     p.add_argument("--llm-revisions", type=int, default=5)
-    p.add_argument("--report-episodes", type=int, default=3,
+    p.add_argument("--report-episodes", type=int, default=10,
                    help="transfer domains: seeded episodes per revision for the author report")
     p.add_argument("--benchmark-timeout", type=int, default=14400)
     p.add_argument("--workdir", type=str, default="data/ablation_work")

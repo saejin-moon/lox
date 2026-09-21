@@ -20,6 +20,7 @@ from corp.policy.dsl import (
 )
 from corp.policy import macros as macro_mod
 from corp.policy.manifest import VocabularyManifest, build_manifest
+from corp.policy.manifest import VERBS as COMBAT_RESPONSE_VERBS
 from corp.policy.program import PolicyProgram, GoalSpec
 
 # MACRO.md §2.3 size budgets (per accepted revision)
@@ -394,7 +395,20 @@ def _mount(diff: PolicyDiff, program: PolicyProgram, expanded: dict,
                     return GateResult.reject("ERR_UNKNOWN_SYMBOL", "mount",
                                              "rule remove: matching rule not found", diff)
         else:
-            cand.tactic_rules.append(_render_rule(op.rule, expanded))
+            rendered = _render_rule(op.rule, expanded)
+            # R6 regression lesson (2026-09-19, ledger v6): the bare catch-all
+            # `(when (adjacent_hostiles)) -> ranged_then_kill` mis-fired across the
+            # whole early game and cost 45% mean score. Combat-verb rules MUST be
+            # target-conditional — the author prompt states this; enforce here.
+            if (rendered.get("do") in COMBAT_RESPONSE_VERBS
+                    and "(monster " not in rendered.get("when", "")
+                    and "(item " not in rendered.get("when", "")):
+                return GateResult.reject(
+                    "ERR_INVARIANT", "invariants",
+                    "combat-verb rules must be target-conditional: the 'when' expression "
+                    "must contain a (monster \"...\") or (item \"...\") match — global "
+                    "catch-alls are rejected (v6 A/B: catch-all cost 45% mean score)", diff)
+            cand.tactic_rules.append(rendered)
 
     # goal ops
     plan = list(cand.strategy_plan)

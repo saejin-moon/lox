@@ -7,7 +7,7 @@
   "macros": [
     {
       "name": "when_endangered",
-      "body": "(and (adjacent_hostiles) (hp_frac <= 0.4) (not has_healing))"
+      "body": "(and (hp_frac <= 0.4) (not has_healing))"
     }
   ],
   "tactic_rules": [
@@ -150,25 +150,25 @@
       "interlock": true
     },
     {
-      "when": "(and (in_mines) (hp_frac <= 0.4))",
+      "when": "(and (in_mines) (monster jackal) (hp_frac <= 0.4))",
       "do": "retreat",
       "unless": null,
       "note": "mines attrition fix"
     },
     {
-      "when": "(and (in_dungeons) (and (adjacent_hostiles) (hp_frac <= 0.4) (not has_healing)))",
+      "when": "(and (in_dungeons) (monster goblin) (and (hp_frac <= 0.4) (not has_healing)))",
       "do": "retreat",
       "unless": null,
       "note": null
     },
     {
-      "when": "(and (in_mines) (hp_frac <= 0.4))",
+      "when": "(and (in_mines) (monster jackal) (hp_frac <= 0.4))",
       "do": "retreat",
       "unless": null,
       "note": "mines attrition fix"
     },
     {
-      "when": "(and (in_dungeons) (and (adjacent_hostiles) (hp_frac <= 0.4) (not has_healing)))",
+      "when": "(and (in_dungeons) (monster goblin) (and (hp_frac <= 0.4) (not has_healing)))",
       "do": "retreat",
       "unless": null,
       "note": null

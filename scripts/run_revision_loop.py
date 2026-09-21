@@ -69,11 +69,17 @@ def get_provider(provider_type: str, model: str | None = None):
 # Heavy gates (§6 steps 11–12) — subprocess-based, run only with --live-gates
 # ---------------------------------------------------------------------------
 
-def make_quick_batch_gate(args) -> callable:
+def make_quick_batch_gate(args, parent_program: "PolicyProgram | None" = None) -> callable:
     def quick_batch(candidate: PolicyProgram) -> dict:
-        """3 episodes × 5k steps on the CANDIDATE program (R3 addendum thresholds).
-        Swaps the candidate onto the live program path for the batch, then restores
-        whatever was there (commit_program re-saves the candidate on acceptance)."""
+        """Quick-batch gate on the CANDIDATE program. TIERED (v6 A/B lesson): a
+        candidate that ADDS tactic rules gates on 10ep×10k — 3ep×5k is too noisy to
+        catch a −45% combat regression; param-only candidates keep the cheap
+        3ep×5k thresholds. Swaps the candidate onto the live program path for the
+        batch, then restores whatever was there (commit_program re-saves the
+        candidate on acceptance)."""
+        ep, steps = args.quick_batch_episodes, args.quick_batch_steps
+        if parent_program is not None and len(candidate.tactic_rules) > len(parent_program.tactic_rules):
+            ep, steps = max(ep, 10), max(steps, 10000)
         program_path = args.program_path
         backup_path = program_path + ".pre_quick_batch"
         had_backup = os.path.exists(program_path)
@@ -84,8 +90,8 @@ def make_quick_batch_gate(args) -> callable:
             out_path = os.path.join("logs", f"quick_batch_rev{candidate.version}.json")
             cmd = [
                 "uv", "run", "python", "scripts/run_benchmark.py",
-                "--episodes", str(args.quick_batch_episodes),
-                "--max-steps", str(args.quick_batch_steps),
+                "--episodes", str(ep),
+                "--max-steps", str(steps),
                 "--role", "valkyrie",
                 "--output", out_path,
             ]
@@ -159,9 +165,9 @@ async def run_loop(args) -> int:
     hooks_kwargs: dict = {}
     if args.live_gates and args.domain == "nethack":
         hooks_kwargs["certification"] = make_certification_gate(args)
-        hooks_kwargs["quick_batch"] = make_quick_batch_gate(args)
-        # §6 step 12 baseline: the current program's own quick-batch mean. A revision
-        # is rejected if the candidate drops > 50% below this.
+        hooks_kwargs["quick_batch"] = make_quick_batch_gate(args, parent_program=program)
+        # §6 step 12 baseline: the current program's own quick-batch mean (cheap tier —
+        # the baseline is params-identical to the candidate's parent by construction).
         baseline_stats = make_quick_batch_gate(args)(program)
         # (the gate restores the pre-batch program file, so v{program.version} is intact)
         hooks_kwargs["baseline_score"] = baseline_stats.get("mean_score")
@@ -297,7 +303,7 @@ def parse_args() -> argparse.Namespace:
                    help="defaults to data/policy_program.json (nethack) or data/policy_program_<domain>.json")
     p.add_argument("--domain", type=str, default="nethack",
                    help="adapter domain: nethack | minihack")
-    p.add_argument("--report-episodes", type=int, default=5,
+    p.add_argument("--report-episodes", type=int, default=10,
                    help="transfer domains: seeded episodes run per revision for the batch report")
     p.add_argument("--ledger-path", type=str, default=DEFAULT_LEDGER_PATH)
     p.add_argument("--db-path", type=str, default=DEFAULT_DB_PATH)

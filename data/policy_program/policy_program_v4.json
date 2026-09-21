@@ -145,7 +145,7 @@
       "interlock": true
     },
     {
-      "when": "(and (in_mines) (hp_frac <= 0.4))",
+      "when": "(and (in_mines) (monster jackal) (hp_frac <= 0.4))",
       "do": "retreat",
       "unless": null,
       "note": "mines attrition fix"

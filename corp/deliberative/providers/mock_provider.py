@@ -25,7 +25,9 @@ class MockProvider(LLMProvider):
         # 1. valid set op (accepted)
         '(revision {revision} (parent {parent}) (author "mock") (domain {domain}) (reason "mock: widen resting gate — stall telemetry shows HP-resting too timid"))\n'
         '(set policy_params.{rest_param} {rest_value})',
-        # 2. valid rule add (accepted) — minihack gets a domain-legal verb/predicate
+        # 2. valid rule add (accepted) — combat rules are target-conditional
+        # (1a invariant; macro bodies are parameterless, so the target match
+        # lives in the rule's own when)
         '(revision {revision} (parent {parent}) (author "mock") (domain {domain}) (reason "mock: mines attrition — retreat when wounded underground"))\n'
         '{rule_op}',
         # 3. out-of-vocab param (rejected: ERR_BOUNDS)
@@ -33,20 +35,20 @@ class MockProvider(LLMProvider):
         '(set policy_params.survival.no_such_param 0.5)',
         # 4. valid defmacro + use (accepted)
         '(revision {revision} (parent {parent}) (author "mock") (domain {domain}) (reason "mock: compose when_endangered macro"))\n'
-        '(defmacro when_endangered (and (adjacent_hostiles) (hp_frac <= 0.40) (not has_healing)))\n'
+        '(defmacro when_endangered (and (hp_frac <= 0.40) (not has_healing)))\n'
         '{macro_rule_op}',
     ]
 
     DOMAIN_TEMPLATES: dict[str, dict] = {
         "nethack": {
             "rest_param": "survival.rest_below_frac", "rest_value": "0.65",
-            "rule_op": '(rule add tactic_rules (when (and (in_mines) (hp_frac <= 0.40))) (do retreat) (note "mines attrition fix"))',
-            "macro_rule_op": '(rule add tactic_rules (when (and (in_dungeons) (when_endangered))) (do retreat))',
+            "rule_op": '(rule add tactic_rules (when (and (in_mines) (monster "jackal") (hp_frac <= 0.40))) (do retreat) (note "mines attrition fix"))',
+            "macro_rule_op": '(rule add tactic_rules (when (and (in_dungeons) (monster "goblin") (when_endangered))) (do retreat))',
         },
         "minihack": {
             "rest_param": "explore.stuck_patience", "rest_value": "40",
             "rule_op": '(rule add tactic_rules (when (and (monster "j") (hp_frac <= 0.30))) (do retreat) (note "wounded: avoid monsters"))',
-            "macro_rule_op": '(rule add tactic_rules (when (and (stairs_known) (when_endangered))) (do retreat))',
+            "macro_rule_op": '(rule add tactic_rules (when (and (monster "j") (when_endangered))) (do retreat))',
         },
     }
 

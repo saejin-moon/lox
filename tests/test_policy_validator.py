@@ -98,19 +98,23 @@ class TestGates:
         assert not r.ok and r.error_code == "ERR_MACRO_SHADOW"
 
     def test_macro_accepted_and_stored(self):
-        r = validate(diff('(defmacro when_endangered (and (adjacent_hostiles) (hp_frac <= 0.40)))\n'
-                          '(rule add tactic_rules (when (and (in_mines) (when_endangered))) (do retreat))'))
+        # 1a invariant: combat rules must be target-conditional. Macro bodies are
+        # parameterless sugar (no string atoms), so the target match lives in the
+        # RULE's when — the macro composes the state conditions around it.
+        r = validate(diff('(defmacro when_endangered (and (hp_frac <= 0.40) (not has_healing)))\n'
+                          '(rule add tactic_rules (when (and (in_mines) (monster "jackal") (when_endangered))) (do retreat))'))
         assert r.ok, r.detail
         assert r.candidate.macros[0]["name"] == "when_endangered"
         # rules store the EXPANDED condition (executor never sees macros — MACRO.md §7);
         # the appended LLM rule lands after the default interlock rules (R4)
         assert r.candidate.tactic_rules[-1]["when"] == \
-            "(and (in_mines) (and (adjacent_hostiles) (hp_frac <= 0.4)))"
+            '(and (in_mines) (monster jackal) (and (hp_frac <= 0.4) (not has_healing)))'
+        assert "(monster " in r.candidate.tactic_rules[-1]["when"]  # 1a invariant satisfied
 
     def test_macro_redefinition_allowed(self):
         prog = make_program(macros=[{"name": "when_endangered", "body": "(lawful)"}])
         r = validate(diff("(defmacro when_endangered (and (lawful) (hp_frac <= 0.2)))\n"
-                          "(rule add tactic_rules (when (when_endangered)) (do retreat))"), prog)
+                          "(rule add tactic_rules (when (and (monster \"kobold\") (when_endangered))) (do retreat))"), prog)
         assert r.ok, r.detail
         assert r.candidate.macros[0]["body"] == "(and (lawful) (hp_frac <= 0.2))"
 
@@ -200,3 +204,27 @@ class TestLeafPath:
     def test_prefix_stripping(self):
         assert _leaf_path("policy_params.survival.rest_below_frac") == "survival.rest_below_frac"
         assert _leaf_path("descent.min_hp_frac") == "descent.min_hp_frac"
+
+class TestTargetConditionalInvariant:
+    """1a invariant (v6 A/B lesson): combat-verb rules must be target-conditional."""
+
+    def _validate(self, ops):
+        return validate(
+            '(revision 2 (parent 1) (author "t") (domain nethack) (reason "t"))\n' + ops)
+
+    def test_catchall_combat_rule_rejected(self):
+        r = self._validate('(rule add tactic_rules (when (adjacent_hostiles)) (do ranged_then_kill))')
+        assert not r.ok and r.error_code == "ERR_INVARIANT"
+        assert "target-conditional" in r.detail
+
+    def test_monster_conditional_combat_rule_accepted(self):
+        r = self._validate('(rule add tactic_rules (when (monster "jackal")) (do ranged_then_kill))')
+        assert r.ok, r.detail
+
+    def test_item_conditional_combat_rule_accepted(self):
+        r = self._validate('(rule add tactic_rules (when (item "throne")) (do avoid))')
+        assert r.ok, r.detail
+
+    def test_noncombat_rule_unaffected(self):
+        r = self._validate('(set policy_params.survival.rest_below_frac 0.62)')
+        assert r.ok, r.detail

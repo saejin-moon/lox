@@ -43,6 +43,10 @@ Rules:
   (hp_frac <= 0.40); combinators and/or/not take call expressions only.
 - condition depth <= 3.
 - keep diffs surgical: tune params, add/retire tactic rules, reprioritize goals.
+- combat tactic rules MUST be target-conditional: the (when ...) of a combat-verb rule
+  must contain a (monster "...") or (item "...") match. Global catch-alls such as
+  (when (adjacent_hostiles)) are REJECTED by the validator — they mis-fire across the
+  whole early game (measured: a catch-all cost 45% mean score).
 - do NOT restate unchanged parts of the program; do NOT remove certified goals.
 - emit the diff forms flat, one per line, no leading indentation needed.
 """
