@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: revision ledger (R3, MACRO.md §6 step 13).
+LOX-ψ Policy Layer (CORP): revision ledger (R3, MACRO.md §6 step 13).
 
 Append-only JSONL at data/revision_ledger.jsonl. Every author-LLM call appends exactly
 one entry — accepted AND rejected (rejection is first-class: rejected diffs are training

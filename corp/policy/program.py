@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: the versioned PolicyProgram container (R2).
+LOX-ψ Policy Layer (CORP): the versioned PolicyProgram container (R2).
 
 The policy program is the single source of truth the executor compiles:
   strategy_plan (ordered goals) + params overlay + macros (R3) + profiles (R4) + nogoods.

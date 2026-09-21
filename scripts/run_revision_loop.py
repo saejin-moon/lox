@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CORP-Ω R3: unattended gated revision loop (AGENT_PLAN refactor steps 6–8).
+LOX-ψ: unattended gated revision loop (AGENT_PLAN refactor steps 6–8).
 
 Cycle: load program → build run-report bundle → author LLM proposes ONE policy diff →
 validator gate pipeline (parse→header→vocab→bounds→budgets→macros→expansion→mount→

@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: role/domain profile overlays (R4, AGENT_PLAN §8).
+LOX-ψ Policy Layer (CORP): role/domain profile overlays (R4, AGENT_PLAN §8).
 
 Overlay precedence (normative):
     PolicyConfig defaults ← domain_profile ← role_profile ← program.params (global)

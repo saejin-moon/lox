@@ -1,5 +1,5 @@
 """
-CORP: Neuro-Symbolic Cognitive Operating System for the NetHack Learning Environment.
+CORP: the LOX-ψ reference instantiation — LLM-Oriented Creation of Symbolic policies for NLE.
 """
 
 __version__ = "0.1.0"

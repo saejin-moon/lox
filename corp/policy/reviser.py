@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: the reviser — author prompt builder + diff proposal (R3, §4.5).
+LOX-ψ Policy Layer (CORP): the reviser — author prompt builder + diff proposal (R3, §4.5).
 
 System prompt = role definition + output contract (ONE diff, closed vocabulary, grounded
 reasons). User prompt = vocabulary manifest + run-report bundle + last 5 ledger entries

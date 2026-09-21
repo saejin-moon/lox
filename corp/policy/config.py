@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: PolicyConfig — the typed surface the offline LLM tunes (R1).
+LOX-ψ Policy Layer (CORP): PolicyConfig — the typed surface the offline LLM tunes (R1).
 
 Every strategy constant that used to live as a literal in the domain managers now lives here.
 `PolicyConfig.defaults()` reproduces the pre-R1 behavior byte-for-byte; later phases (R2+) load

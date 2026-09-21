@@ -1,4 +1,4 @@
-# CORP-Ω Gen-2: Policy Synthesis Engine
+# LOX-ψ Gen-2: Policy Synthesis Engine (LLM-Oriented Creation of Symbolic policies)
 ## Roadmap from a gated revision loop to a knowledge-growing agent that beats AutoAscend — and its equivalents everywhere else
 
 > **Mission**: an LLM author — given *everything* (full environment schema, every action, all run telemetry,

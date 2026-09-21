@@ -162,7 +162,7 @@ async def run_benchmark(args: argparse.Namespace):
     model_name = getattr(llm_provider, "model", None) or "N/A"
 
     print("=" * 80)
-    print(f"CORP Neuro-Symbolic Cognitive OS: Benchmark & Training Runner")
+    print(f"LOX-ψ / CORP: Benchmark & Training Runner")
     print(f"Run ID: {run_id} | Type: {args.eval_type} | Mode: {'MODE_RANDOM_GENERALIST' if args.mode == 'random' else 'MODE_COMPETENCE_SELECTION'}")
     print(f"Episodes: {args.episodes} | Step Budget: {args.max_steps} | Provider: {args.provider} (Model: {model_name})")
     print(f"Autopsy Engine: {'ENABLED' if args.enable_autopsy else 'DISABLED'}")

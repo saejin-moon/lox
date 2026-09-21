@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: defmacro definitional expansion + closure checker (R3, MACRO.md §5).
+LOX-ψ Policy Layer (CORP): defmacro definitional expansion + closure checker (R3, MACRO.md §5).
 
 A macro is a named expression abbreviation over already-live primitives and already-live
 macros. Expansion is purely definitional (§5.1): every (m ...) call is replaced by its

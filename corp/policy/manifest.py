@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: Vocabulary Manifest (R3, MACRO.md §4).
+LOX-ψ Policy Layer (CORP): Vocabulary Manifest (R3, MACRO.md §4).
 
 Machine-generated from code — never hand-written (drift-guard rule §9). The manifest is
 both the validator's symbol table and the author prompt's vocabulary section: the LLM can

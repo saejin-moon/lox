@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: S-expression policy-diff reader (R3, MACRO.md §2–3).
+LOX-ψ Policy Layer (CORP): S-expression policy-diff reader (R3, MACRO.md §2–3).
 
 Parses a full diff document (revision header + top-level forms) into typed diff objects.
 The LLM emits diffs as text; the GBNF grammar guarantees validity on the local decode path

@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: run-report bundle builder (R3, AGENT_PLAN §4.5).
+LOX-ψ Policy Layer (CORP): run-report bundle builder (R3, AGENT_PLAN §4.5).
 
 Builds the reviser's input from DuckDB: batch summary, death taxonomy, stall census,
 goal stats — plus prev_revisions from the ledger. Missing tables/DBs degrade to an

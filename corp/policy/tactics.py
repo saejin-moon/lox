@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: tactic-rule evaluator (R4, AGENT_PLAN §8).
+LOX-ψ Policy Layer (CORP): tactic-rule evaluator (R4, AGENT_PLAN §8).
 
 Tactic rules replace the hardcoded monster-name-set decisions (LETHAL_POISON_NAMES /
 HEAVY_HITTERS branches) in the combat manager. Rules evaluate in program order, first

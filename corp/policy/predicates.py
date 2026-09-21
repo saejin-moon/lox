@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: named predicate registry + S-expression condition evaluator (R2).
+LOX-ψ Policy Layer (CORP): named predicate registry + S-expression condition evaluator (R2).
 
 Conditions in the policy program are S-expression strings over a **closed vocabulary** of
 named predicates bound per-episode by the GoalInterpreter, e.g.:

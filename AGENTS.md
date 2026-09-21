@@ -1,6 +1,6 @@
 # AGENTS.md: Autonomous Agent Onboarding & Master Knowledge Base (Gen-2)
 
-> **Welcome, Agent.** This file is the single source of truth for **CORP-Ω (Cognitive OS for Roguelike Play)**.
+> **Welcome, Agent.** This file is the single source of truth for **LOX-ψ (LLM-Oriented Creation of Symbolic policies), instantiated in the CORP system**.
 > It contains the architectural contracts, NetHack 3.6.6 ground-truth domain rules, verified test suites, and
 > the phased roadmap. Read this file completely before making changes.
 

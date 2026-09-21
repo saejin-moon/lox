@@ -1,5 +1,5 @@
 """
-CORP-Ω NetHack DomainAdapter facade (R5, refactor step 10).
+LOX-ψ NetHack DomainAdapter facade (R5, refactor step 10).
 
 Thin facade over the existing subsystems — the NetHack flow is the incumbent path
 (corp_agent priority cascade + benchmark harness); this adapter exposes it through the

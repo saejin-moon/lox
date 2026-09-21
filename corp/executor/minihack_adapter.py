@@ -1,5 +1,5 @@
 """
-CORP-Ω MiniHack DomainAdapter (R5, refactor step 11 — first transfer domain).
+LOX-ψ MiniHack DomainAdapter (R5, refactor step 11 — first transfer domain).
 
 MiniHack is built ON NLE: same observation dict (glyphs/chars/blstats/message), same
 21×79 grid — the adapter is a thin wrapper around a compact goal-driven navigator.

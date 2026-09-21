@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: GoalInterpreter (R2) — evaluates the policy program's strategy_plan
+LOX-ψ Policy Layer (CORP): GoalInterpreter (R2) — evaluates the policy program's strategy_plan
 and emits navigation directives. Drop-in replacement for MacroAscensionDirector's phase
 machine: same public surface (update_state / get_navigation_directive /
 should_defer_stairs_for_farming / state / reset), same default behavior.

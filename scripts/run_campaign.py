@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CORP-Ω R5: NetHack tuning campaign runner (AGENT_PLAN §8).
+LOX-ψ: NetHack tuning campaign runner (AGENT_PLAN §8).
 
 Nightly cadence: one gated revision batch per night (run_revision_loop), then a
 10-ep engineering batch to measure the accepted program. Plateau detection: three

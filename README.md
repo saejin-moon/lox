@@ -1,4 +1,12 @@
-# Neuro-Symbolic Cognitive Operating System for NetHack
+# LOX-ψ: LLM-Oriented Creation of Symbolic policies
+
+**LOX-ψ** is a policy synthesis engine: a safety-gated loop in which an LLM author grows a declarative
+policy program (macros, rules, goals, handlers) from full run telemetry, the game wiki, and self-built
+documentation corpora — until the resulting agent surpasses expert-engineered baselines. **CORP** is its
+reference instantiation for NetHack (NLE 3.6.6), with transfer adapters for MiniHack and Craftax.
+
+Humans provide primitives, interlocks, and certification gates. The LLM provides the strategy — through a
+grammar-constrained diff language that provably cannot express mechanism-level action.
 
 An event-driven, bicameral cognitive architecture engineered to solve the NetHack Learning Environment (NLE) and systematically outperform existing rule-based benchmarks (AutoAscend) across both forced random personas and self-selected optimal playstyles.
 

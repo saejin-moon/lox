@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: validator gate pipeline (R3, MACRO.md §6).
+LOX-ψ Policy Layer (CORP): validator gate pipeline (R3, MACRO.md §6).
 
 Order is NORMATIVE:
   1 PARSE → 2 HEADER → 3 VOCAB → 4 BOUNDS → 5 BUDGETS → 6 MACRO CHECK → 7 EXPANSION

@@ -1,5 +1,5 @@
 """
-CORP-Ω Executor Boundary: the DomainAdapter ABC (R5, AGENT_PLAN §4.3).
+LOX-ψ Executor Boundary: the DomainAdapter ABC (R5, AGENT_PLAN §4.3).
 
 The generalization contract: the policy diff DSL references ONLY what an adapter's
 `predicates()` and `goal_handlers()` expose — the same grammar, different bindings.

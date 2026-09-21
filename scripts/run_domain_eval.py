@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CORP-Ω R5: transfer-domain batch evaluator (adapter-aware benchmark).
+LOX-ψ: transfer-domain batch evaluator (adapter-aware benchmark).
 
 Runs N seeded episodes of a transfer domain (minihack today; craftax when its adapter
 lands) against a policy program, writing benchmark-compatible JSON. This is the

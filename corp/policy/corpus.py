@@ -1,5 +1,5 @@
 """
-CORP-Ω Policy Layer: per-domain RAG corpus (R5, AGENT_PLAN step 14).
+LOX-ψ Policy Layer (CORP): per-domain RAG corpus (R5, AGENT_PLAN step 14).
 
 Each domain gets an FTS5 corpus at data/corpus/<domain>/corpus.db built from its docs
 (NetHack: the wiki_index.db article set; Craftax: official docs + paper + docstrings).

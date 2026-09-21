@@ -64,7 +64,7 @@ from corp.agent.episode_runner import EpisodeRunnerMixin
 
 class CORPAgent(HTNMethodsMixin, EpisodeRunnerMixin):
     """
-    Cognitive Operating System for NetHack (CORP).
+    LOX-ψ policy synthesis engine, reference instantiation CORP.
     Integrates sub-millisecond symbolic decision spine with an asynchronous,
     strictly gated deliberative reasoning engine for deadlocks and autopsies.
     """

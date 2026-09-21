@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CORP-Ω R4: three-arm ablation harness (AGENT_PLAN §8 — the falsifiability control).
+LOX-ψ: three-arm ablation harness (AGENT_PLAN §8 — the falsifiability control).
 
 Arms:
   llm    — the revision loop runs live (author LLM gated revisions), then the resulting
