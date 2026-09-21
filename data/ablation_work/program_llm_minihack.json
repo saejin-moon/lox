@@ -1,21 +1,20 @@
 {
-  "version": 6,
+  "version": 3,
   "domain": "minihack",
   "params": {
     "explore.frontier_bias": 2.4,
     "nav.unknown_penalty": 1.0,
-    "explore.revisit_cap": 3,
     "nav.monster_cost": 100.0,
-    "combat.retreat_hp_frac": 0.175,
+    "explore.revisit_cap": 6,
     "explore.stuck_patience": 15
   },
   "macros": [],
   "tactic_rules": [
     {
-      "when": "(adjacent_hostiles)",
+      "when": "(and (hp_frac <= 0.4) (adjacent_hostiles))",
       "do": "retreat",
-      "unless": "(hp_frac > 0.2)",
-      "note": "retreat to avoid combat-induced step increases"
+      "unless": null,
+      "note": "Minimize combat duration"
     }
   ],
   "nogoods": [],
@@ -34,9 +33,9 @@
     }
   ],
   "provenance": {
-    "author": "CORP",
+    "author": "strategy-tuning author",
     "note": "minihack cold-start: reach stairs when known, else explore",
-    "parent_version": 5,
-    "reason": "The agent is already operating at the bounds of exploration intensity (max frontier_bias, min unknown_penalty, min monster_cost, min revisit_cap). To further reduce median_steps_on_success, I am lowering the retreat_hp_frac to its minimum bound to minimize the frequency of retreat maneuvers that increase path length."
+    "parent_version": 2,
+    "reason": "Increasing revisit_cap to 6 to permit more direct pathing and adding a retreat tactic during low HP to minimize step inflation from combat."
   }
 }
