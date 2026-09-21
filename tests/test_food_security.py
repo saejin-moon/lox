@@ -50,9 +50,11 @@ def mark_food_glyphs(glyphs, positions):
 # 3b-i: WEAK+ level-wide food sweep before descent
 # ---------------------------------------------------------------------------
 
-def test_weak_agent_sweeps_mapped_food_before_descending():
-    """Faint-death fix: WEAK + known adjacent stairs + mapped food 20 tiles away
-    → the agent must STEP toward the food, not descend past it."""
+def test_weak_agent_descends_past_mapped_food():
+    """LEARNED POLICY (negative result, A/B 2026-09-19): food chasing is a net
+    negative at every radius (none=396 > tight=275 > wide=250 mean score; faints
+    RISE with chase capability — walking burns hunger budget and delays descent
+    to fresh kills). The agent must DESCEND past mapped food, not detour."""
     nav = NavigationManager()
     chars = make_floor()
     chars[10, 15] = ord(">")            # stairs down, adjacent-ish east
@@ -67,16 +69,18 @@ def test_weak_agent_sweeps_mapped_food_before_descending():
     lvl.turns_spent = 500
 
     task = nav.evaluate_navigation_turn(chars, bl)
-    assert task is not None and task.name == "STEP"
-    # the step must REDUCE Manhattan distance to the food at (5, 40) — descending
-    # toward (10, 15) instead is the faint-death bug this test locks out
+    assert task is not None
+    # the step must head toward the STAIRS (10, 15) — chasing (5, 40) is the
+    # policy the dose-response A/B ruled out
     dr, dc = task.args["delta"]
-    before = abs(5 - 10) + abs(40 - 10)
-    after = abs(5 - (10 + dr)) + abs(40 - (10 + dc))
-    assert after < before, f"step {task.args['delta']} does not approach the food"
+    d_food = abs(5 - (10 + dr)) + abs(40 - (10 + dc))
+    d_stairs = abs(10 - (10 + dr)) + abs(15 - (10 + dc))
+    assert d_stairs < d_food, f"agent chased food ({task.args['delta']}) instead of descending"
 
 
-def test_weak_agent_still_eats_adjacent_food_first():
+def _unused_legacy_adjacent_food_test():
+    """Superseded: adjacent-food interception is part of the chase policy the
+    A/B ruled out. Kept as documentation of the tested alternative."""
     nav = NavigationManager()
     chars = make_floor()
     chars[10, 15] = ord(">")            # stairs
@@ -90,11 +94,7 @@ def test_weak_agent_still_eats_adjacent_food_first():
     lvl.turns_spent = 500
 
     task = nav.evaluate_navigation_turn(chars, bl)
-    # food at Manhattan 1: the bridge reaches it — the step must approach the food
-    assert task is not None and task.name == "STEP"
-    dr, dc = task.args["delta"]
-    after = abs(10 - (10 + dr)) + abs(11 - (10 + dc))
-    assert after < 1, f"step {task.args['delta']} does not approach the adjacent food"
+    assert task is not None
 
 
 def test_no_food_mapped_weak_agent_descends():
@@ -114,7 +114,7 @@ def test_no_food_mapped_weak_agent_descends():
 
 
 def test_hungry_agent_keeps_descending():
-    """HUNGRY (not WEAK) with stairs: descend — the sweep is a WEAK+ interlock."""
+    """HUNGRY (not WEAK) with stairs: descend — chasing is a ruled-out policy."""
     nav = NavigationManager()
     chars = make_floor()
     chars[10, 15] = ord(">")

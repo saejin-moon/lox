@@ -345,13 +345,17 @@ the loop, validator, DSL, and program machinery are untouched.
   combat rules to be monster-conditional (the `(adjacent_hostiles)` catch-all was the killer), and the
   nethack quick-batch gate (3ep×5k) is too noisy to catch a −45% regression — gate on ≥10 eps for combat
   rules.
-- **STARVATION ROOT-CAUSED (2026-09-19, 3a/3b-i landed)**: the food-chase machinery was silently dead —
-  `%` (food/corpse) is not in WALKABLE_CHARS, so `lvl.walkable[food]` was False and every `astar.find_path`
-  to a food tile returned None (both the 4.3 explore-chase AND the 2.95 starvation bridge). Additionally the
-  2.95 bridge only reached 10 tiles. Fixes: (1) sweep sites path WITH the target tile opened; (2) at WEAK+
-  the pre-descent sweep is level-wide (`food_radius_hungry`, reuse — no new knobs). Carried-food eating was
-  already proactive at HUNGRY (3a premise already true — no knob added). Certification:
-  `tests/test_food_security.py` (6 cases).
+- **STARVATION / FOOD-CHASE: NEGATIVE RESULT, fully mapped (2026-09-19, 4-arm dose-response A/B)**: the
+  food-chase machinery was dead code — `%` (food/corpse) is not in WALKABLE_CHARS, so every
+  `astar.find_path` to a food tile silently returned None. Enabling it at increasing radii made EVERYTHING
+  worse, monotonically (100 eps/arm, v6 rules): **no chase = 396.4 mean / 18 faints; tight ≤8 = 275.4 / 26;
+  design radii (8/99) = 310.8 / 29; level-wide = 250.0 / 28.** Chasing mapped food burns the hunger budget
+  on walking and delays descent to fresh kills (kills = new corpses = the actual food supply). REVERTED to
+  the no-chase behavior (`git show 177ef25` state); `tests/test_food_security.py` locks the learned policy
+  (WEAK+ agents descend past mapped food). CARRIED-food eating is proactive at HUNGRY (3a premise already
+  true — no knob added). **Loop consequence: the author must never re-enable the chase** — treat
+  `nutrition.food_radius*` as inert-until-redesigned; a future fix must change the MECHANISM (e.g. eat-at-
+  kill discipline), not the radius.
 - R6 milestone structure LANDED (program v6, 13 goals, 18 cert tests, gauntlet suite CERTIFIED) — but the
   R6 loop-gate is NOT met: scaled minihack ablation llm vs frozen p=0.19 (δ=0.048, direction positive),
   and the NetHack 100-ep post-R4 baseline (v4) REGRESSED vs R0 reference (267.2 vs 401.7 mean score).

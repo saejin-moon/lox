@@ -960,12 +960,9 @@ class NavigationManager(ExplorationMixin, SteppingMixin):
                 )
             )
         )
-        # 2.95 Starvation bridge: when WEAK or worse with a fresh corpse/food on the
-        # mapped level, eat it BEFORE descending — one corpse buys ~600 nutrition
-        # (survival bridge across the ~850-turn prayer cooldown window). Radius is
-        # LEVEL-WIDE at WEAK+ (food_radius_hungry): descending to the next floor
-        # with mapped food ignored was the dominant faint-death mechanism (18/100
-        # episodes died of starvation at median ~3.2k turns — A/B 2026-09-19).
+        # 2.95 Starvation bridge: when WEAK or worse with a fresh corpse/food within
+        # reach, eat it BEFORE descending — one corpse buys ~600 nutrition (survival
+        # bridge across the ~850-turn prayer cooldown window).
         if blstats.hunger_state >= HungerState.WEAK and should_descend and lvl.stairs_down:
             food_targets = [
                 pos for pos in lvl.floor_food
@@ -978,26 +975,16 @@ class NavigationManager(ExplorationMixin, SteppingMixin):
             if food_targets:
                 food_targets.sort(key=lambda f: abs(f[0] - py) + abs(f[1] - px))
                 closest_food = food_targets[0]
-                weak_sweep_radius = max(self.cfg.nutrition.food_bridge_radius,
-                                        self.cfg.nutrition.food_radius_hungry)
-                if abs(closest_food[0] - py) + abs(closest_food[1] - px) <= weak_sweep_radius:
-                    # '%' (food/corpse) is not a WALKABLE_CHAR — the tile itself is
-                    # marked unwalkable, so path WITH the target opened (this silent
-                    # None made the whole food chase dead code until 2026-09-19).
-                    if closest_food not in lvl.blocked_tiles:
-                        walk_grid = lvl.walkable
-                        if not walk_grid[closest_food]:
-                            walk_grid = walk_grid.copy()
-                            walk_grid[closest_food] = True
-                        path = self.astar.find_path(
-                            (py, px),
-                            closest_food,
-                            walk_grid,
-                            hazard_costs=hazard_costs,
-                            doorway_mask=doorway_mask,
-                        )
-                        if path:
-                            return self._step_or_open(py, px, path[0], chars, lvl, message=message, glyphs=glyphs)
+                if abs(closest_food[0] - py) + abs(closest_food[1] - px) <= self.cfg.nutrition.food_bridge_radius:
+                    path = self.astar.find_path(
+                        (py, px),
+                        closest_food,
+                        lvl.walkable,
+                        hazard_costs=hazard_costs,
+                        doorway_mask=doorway_mask,
+                    )
+                    if path:
+                        return self._step_or_open(py, px, path[0], chars, lvl, message=message, glyphs=glyphs)
 
         if should_descend and lvl.stairs_down:
             stairs_task = self.step_towards_stairs(
@@ -1090,21 +1077,15 @@ class NavigationManager(ExplorationMixin, SteppingMixin):
                 # whole mapped level — kills leave edible corpses exactly when needed
                 max_food_dist = self.cfg.nutrition.food_radius_hungry if blstats.hunger_state >= HungerState.HUNGRY else self.cfg.nutrition.food_radius
                 if abs(closest_target[0] - py) + abs(closest_target[1] - px) <= max_food_dist:
-                    # Same '%' unwalkable-target fix as the 2.95 starvation bridge.
-                    if closest_target not in lvl.blocked_tiles:
-                        walk_grid = lvl.walkable
-                        if not walk_grid[closest_target]:
-                            walk_grid = walk_grid.copy()
-                            walk_grid[closest_target] = True
-                        path = self.astar.find_path(
-                            (py, px),
-                            closest_target,
-                            walk_grid,
-                            hazard_costs=hazard_costs,
-                            doorway_mask=doorway_mask,
-                        )
-                        if path:
-                            return self._step_or_open(py, px, path[0], chars, lvl, message=message, glyphs=glyphs)
+                    path = self.astar.find_path(
+                        (py, px),
+                        closest_target,
+                        lvl.walkable,
+                        hazard_costs=hazard_costs,
+                        doorway_mask=doorway_mask,
+                    )
+                    if path:
+                        return self._step_or_open(py, px, path[0], chars, lvl, message=message, glyphs=glyphs)
 
         # 4.5 Target nearest unvisited reachable tile (rooms, corridors, doors)
         unvisited_target = self.find_nearest_unvisited(py, px, lvl)

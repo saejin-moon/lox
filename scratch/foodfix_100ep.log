@@ -2,3 +2,107 @@
 CORP Parallel Batch Runner | Run fhU0Ek
 Episodes: 100 @ 20000 steps | Jobs: 10 | Role: valkyrie
 ================================================================================
+Ep   1 [w1] [val-hum-law-fem] Turns: 14382 | Depth:  1 | Score:   272 | SPS:   665.3 | Death: Are you sure you want to pray?
+Ep   2 [w2] [val-hum-law-fem] Turns: 20340 | Depth:  1 | Score:   276 | SPS:   653.1 | Death: You faint from lack of food.
+Ep   3 [w3] [val-hum-law-fem] Turns:  3119 | Depth:  5 | Score:   462 | SPS:   385.1 | Death: The pony kicks!  The pony bite
+Ep   4 [w4] [val-hum-law-fem] Turns:   325 | Depth:  3 | Score:   159 | SPS:   440.4 | Death: The dwarf swings her dwarvish 
+Ep   5 [w5] [val-hum-law-fem] Turns:   725 | Depth:  4 | Score:   349 | SPS:   520.2 | Death: Survived
+Ep   6 [w6] [val-hum-law-fem] Turns:  1968 | Depth:  3 | Score:   291 | SPS:   473.1 | Death: The little dog bites!  The lit
+Ep   7 [w7] [val-hum-law-fem] Turns:  1150 | Depth:  5 | Score:   345 | SPS:   539.7 | Death: Survived
+Ep   8 [w8] [val-hum-law-fem] Turns:  2784 | Depth:  5 | Score:   485 | SPS:   433.2 | Death: The newt bites!
+Ep   9 [w9] [val-hum-law-fem] Turns:  4516 | Depth:  1 | Score:    32 | SPS:   678.0 | Death: The newt bites!
+Ep  10 [w0] [val-hum-law-fem] Turns:  7316 | Depth:  1 | Score:    44 | SPS:   682.4 | Death: The fox bites!  The fox bites!
+Ep  11 [w1] [val-hum-law-fem] Turns: 10701 | Depth:  1 | Score:   677 | SPS:   511.0 | Death: The giant bat bites!  You can 
+Ep  12 [w2] [val-hum-law-fem] Turns:  8842 | Depth:  1 | Score:   321 | SPS:   429.0 | Death: The sewer rat bites!
+Ep  13 [w3] [val-hum-law-fem] Turns:   153 | Depth:  2 | Score:    52 | SPS:   589.3 | Death: An arrow shoots out at you!  Y
+Ep  14 [w4] [val-hum-law-fem] Turns:  1491 | Depth:  2 | Score:   195 | SPS:   607.4 | Death: The giant rat bites!  The gian
+Ep  15 [w5] [val-hum-law-fem] Turns:  3668 | Depth:  1 | Score:    80 | SPS:   659.2 | Death: You faint from lack of food.  
+Ep  16 [w6] [val-hum-law-fem] Turns:  1878 | Depth:  1 | Score:    95 | SPS:   622.6 | Death: You miss the jackal.  The jack
+Ep  17 [w7] [val-hum-law-fem] Turns:  3427 | Depth:  3 | Score:   275 | SPS:  1440.8 | Death: The giant rat bites!
+Ep  18 [w8] [val-hum-law-fem] Turns:  5748 | Depth:  1 | Score:    62 | SPS:   240.9 | Death: You faint from lack of food.
+Ep  19 [w9] [val-hum-law-fem] Turns:    92 | Depth:  6 | Score:   265 | SPS:   547.4 | Death: The garter snake bites!
+Ep  20 [w0] [val-hum-law-fem] Turns:  2868 | Depth:  1 | Score:    24 | SPS:   669.2 | Death: You faint from lack of food.  
+Ep  21 [w1] [val-hum-law-fem] Turns:  6628 | Depth:  1 | Score:   154 | SPS:   637.5 | Death: You faint from lack of food.  
+Ep  22 [w2] [val-hum-law-fem] Turns: 12345 | Depth:  2 | Score:   474 | SPS:   870.2 | Death: Survived
+Ep  23 [w3] [val-hum-law-fem] Turns:  6980 | Depth:  1 | Score:   812 | SPS:   585.8 | Death: The giant bat bites!  The gian
+Ep  24 [w4] [val-hum-law-fem] Turns:  2054 | Depth:  2 | Score:   378 | SPS:   565.8 | Death: The garter snake bites!
+Ep  25 [w5] [val-hum-law-fem] Turns:  3633 | Depth:  2 | Score:   371 | SPS:   570.8 | Death: The jackal bites!
+Ep  26 [w6] [val-hum-law-fem] Turns:  3971 | Depth:  2 | Score:   226 | SPS:   565.2 | Death: You miss the lichen.
+Ep  27 [w7] [val-hum-law-fem] Turns:  1262 | Depth:  3 | Score:   178 | SPS:   664.3 | Death: The grid bug bites!  You get z
+Ep  28 [w8] [val-hum-law-fem] Turns:  3501 | Depth:  2 | Score:   358 | SPS:   571.6 | Death: The sewer rat bites!
+Ep  29 [w9] [val-hum-law-fem] Turns:  2713 | Depth:  3 | Score:   385 | SPS:  1252.1 | Death: The giant bat bites!
+Ep  30 [w0] [val-hum-law-fem] Turns: 10974 | Depth:  1 | Score:    37 | SPS:   681.1 | Death: Survived
+Ep  31 [w1] [val-hum-law-fem] Turns:   269 | Depth:  1 | Score:    47 | SPS:   622.5 | Death: Survived
+Ep  32 [w2] [val-hum-law-fem] Turns:  4147 | Depth:  3 | Score:   311 | SPS:   557.1 | Death: You faint from lack of food.  
+Ep  33 [w3] [val-hum-law-fem] Turns:  7306 | Depth:  1 | Score:    55 | SPS:   590.7 | Death: You miss the grid bug.  The gr
+Ep  34 [w4] [val-hum-law-fem] Turns:  1307 | Depth:  2 | Score:   126 | SPS:   666.9 | Death: The fox bites!
+Ep  35 [w5] [val-hum-law-fem] Turns:  4005 | Depth:  2 | Score:    58 | SPS:   715.8 | Death: You can hear again.  You faint
+Ep  36 [w6] [val-hum-law-fem] Turns: 10338 | Depth:  1 | Score:   684 | SPS:   602.6 | Death: The water demon hits!  The wat
+Ep  37 [w7] [val-hum-law-fem] Turns:  1888 | Depth:  1 | Score:    45 | SPS:   653.2 | Death: You miss the fox.  The fox bit
+Ep  38 [w8] [val-hum-law-fem] Turns:  2225 | Depth:  3 | Score:   289 | SPS:   578.8 | Death: The goblin hits!
+Ep  39 [w9] [val-hum-law-fem] Turns:  1192 | Depth:  3 | Score:   345 | SPS:   439.8 | Death: The little dog bites!  The lit
+Ep  40 [w0] [val-hum-law-fem] Turns:  5990 | Depth:  2 | Score:   201 | SPS:   407.4 | Death: The grid bug bites!  You get z
+Ep  41 [w1] [val-hum-law-fem] Turns:  5217 | Depth:  1 | Score:    72 | SPS:   641.7 | Death: You faint from lack of food.  
+Ep  42 [w2] [val-hum-law-fem] Turns: 14404 | Depth:  1 | Score:   268 | SPS:   665.3 | Death: Survived
+Ep  43 [w3] [val-hum-law-fem] Turns: 18015 | Depth:  3 | Score:   238 | SPS:   657.2 | Death: You can hear again.
+Ep  44 [w4] [val-hum-law-fem] Turns:  1411 | Depth:  2 | Score:   299 | SPS:   453.9 | Death: The bat misses!  The bat bites
+Ep  45 [w5] [val-hum-law-fem] Turns:  4648 | Depth:  1 | Score:   203 | SPS:   614.3 | Death: Survived
+Ep  46 [w6] [val-hum-law-fem] Turns:  2706 | Depth:  2 | Score:   422 | SPS:   257.0 | Death: The garter snake bites!
+Ep  47 [w7] [val-hum-law-fem] Turns:  6342 | Depth:  1 | Score:    80 | SPS:   549.3 | Death: You see here a lichen corpse. 
+Ep  48 [w8] [val-hum-law-fem] Turns:  4463 | Depth:  3 | Score:   362 | SPS:   664.2 | Death: The hobbit thrusts her elven d
+Ep  49 [w9] [val-hum-law-fem] Turns: 14028 | Depth:  1 | Score:   245 | SPS:   684.1 | Death: You faint from lack of food.
+Ep  50 [w0] [val-hum-law-fem] Turns:  7321 | Depth:  1 | Score:   824 | SPS:   370.3 | Death: The kitten bites!  The kitten 
+Ep  51 [w1] [val-hum-law-fem] Turns:  9339 | Depth:  2 | Score:   457 | SPS:   511.0 | Death: Really attack the hobbit? [yn]
+Ep  52 [w2] [val-hum-law-fem] Turns:  5265 | Depth:  1 | Score:   475 | SPS:   484.6 | Death: You miss the jackal.  The jack
+Ep  53 [w3] [val-hum-law-fem] Turns:   749 | Depth:  3 | Score:   149 | SPS:   670.0 | Death: The giant rat bites!
+Ep  54 [w4] [val-hum-law-fem] Turns:  8491 | Depth:  2 | Score:   214 | SPS:   710.6 | Death: Survived
+Ep  55 [w5] [val-hum-law-fem] Turns:  5051 | Depth:  1 | Score:   103 | SPS:   638.4 | Death: Survived
+Ep  56 [w6] [val-hum-law-fem] Turns:  1796 | Depth:  1 | Score:     4 | SPS:   704.0 | Death: The little dog bites!
+Ep  57 [w7] [val-hum-law-fem] Turns:  2627 | Depth:  4 | Score:   322 | SPS:  1276.0 | Death: The goblin thrusts her orcish 
+Ep  58 [w8] [val-hum-law-fem] Turns:  3650 | Depth:  3 | Score:   394 | SPS:   321.4 | Death: The garter snake bites!
+Ep  59 [w9] [val-hum-law-fem] Turns:  5518 | Depth:  4 | Score:  1016 | SPS:   425.1 | Death: You faint from lack of food.  
+Ep  60 [w0] [val-hum-law-fem] Turns:  9151 | Depth:  2 | Score:   270 | SPS:   678.9 | Death: You can hear again.
+Ep  61 [w1] [val-hum-law-fem] Turns:  2664 | Depth:  1 | Score:     0 | SPS:   742.9 | Death: You faint from lack of food.  
+Ep  62 [w2] [val-hum-law-fem] Turns:   102 | Depth:  1 | Score:     7 | SPS:   577.8 | Death: The fox bites!
+Ep  63 [w3] [val-hum-law-fem] Turns:  2576 | Depth:  1 | Score:     3 | SPS:   729.7 | Death: You faint from lack of food.  
+Ep  64 [w4] [val-hum-law-fem] Turns:  5903 | Depth:  4 | Score:   305 | SPS:   568.3 | Death: The giant bat bites!
+Ep  65 [w5] [val-hum-law-fem] Turns:  1706 | Depth:  2 | Score:   241 | SPS:   495.8 | Death: The grid bug bites!  You get z
+Ep  66 [w6] [val-hum-law-fem] Turns:  1644 | Depth:  4 | Score:   293 | SPS:   527.7 | Death: You hit the gecko!  You faint 
+Ep  67 [w7] [val-hum-law-fem] Turns:  8747 | Depth:  2 | Score:   165 | SPS:   605.2 | Death: Survived
+Ep  68 [w8] [val-hum-law-fem] Turns:   314 | Depth:  3 | Score:   134 | SPS:   890.6 | Death: The giant rat bites!
+Ep  69 [w9] [val-hum-law-fem] Turns:  6322 | Depth:  4 | Score:   396 | SPS:   562.5 | Death: The little dog bites!
+Ep  70 [w0] [val-hum-law-fem] Turns:  8281 | Depth:  1 | Score:   184 | SPS:   375.0 | Death: Survived
+Ep  71 [w1] [val-hum-law-fem] Turns:  1508 | Depth:  1 | Score:     0 | SPS:   732.9 | Death: You faint from lack of food.  
+Ep  72 [w2] [val-hum-law-fem] Turns:  1083 | Depth:  5 | Score:   470 | SPS:   622.8 | Death: Survived
+Ep  73 [w3] [val-hum-law-fem] Turns:   417 | Depth:  3 | Score:   140 | SPS:   709.1 | Death: The giant rat bites!
+Ep  74 [w4] [val-hum-law-fem] Turns:  8639 | Depth:  1 | Score:   471 | SPS:   343.3 | Death: Survived
+Ep  75 [w5] [val-hum-law-fem] Turns: 19580 | Depth:  1 | Score:   117 | SPS:   623.2 | Death: The large cat picks up a liche
+Ep  76 [w6] [val-hum-law-fem] Turns:  7540 | Depth:  2 | Score:    85 | SPS:   659.6 | Death: Survived
+Ep  77 [w7] [val-hum-law-fem] Turns:  6122 | Depth:  1 | Score:     0 | SPS:   718.4 | Death: You faint from lack of food.  
+Ep  78 [w8] [val-hum-law-fem] Turns:  8842 | Depth:  1 | Score:    87 | SPS:   597.3 | Death: You faint from lack of food.  
+Ep  79 [w9] [val-hum-law-fem] Turns:   773 | Depth:  5 | Score:   262 | SPS:   685.7 | Death: The giant rat bites!
+Ep  80 [w0] [val-hum-law-fem] Turns:  8435 | Depth:  1 | Score:   193 | SPS:   386.3 | Death: Survived
+Ep  81 [w1] [val-hum-law-fem] Turns:  1671 | Depth:  3 | Score:   259 | SPS:  1285.8 | Death: The giant rat bites!
+Ep  82 [w2] [val-hum-law-fem] Turns:  2929 | Depth:  4 | Score:   232 | SPS:   750.4 | Death: The giant rat bites!
+Ep  83 [w3] [val-hum-law-fem] Turns:  2555 | Depth:  1 | Score:   186 | SPS:   526.5 | Death: The bat misses!  The bat bites
+Ep  84 [w4] [val-hum-law-fem] Turns:  5315 | Depth:  1 | Score:   395 | SPS:   236.1 | Death: The gecko bites!  You hear som
+Ep  85 [w5] [val-hum-law-fem] Turns: 11322 | Depth:  5 | Score:   302 | SPS:   677.4 | Death: You faint from lack of food.
+Ep  86 [w6] [val-hum-law-fem] Turns:  1490 | Depth:  6 | Score:   479 | SPS:   525.9 | Death: You miss the hill orc.  The gr
+Ep  87 [w7] [val-hum-law-fem] Turns:   100 | Depth:  1 | Score:     4 | SPS:   542.1 | Death: A trap door in the ceiling ope
+Ep  88 [w8] [val-hum-law-fem] Turns:  3232 | Depth:  1 | Score:    20 | SPS:   810.6 | Death: You can hear again.  You faint
+Ep  89 [w9] [val-hum-law-fem] Turns:  6437 | Depth:  1 | Score:    71 | SPS:   707.2 | Death: You faint from lack of food.  
+Ep  90 [w0] [val-hum-law-fem] Turns:  2003 | Depth:  3 | Score:   337 | SPS:   336.3 | Death: Are you sure you want to pray?
+Ep  91 [w1] [val-hum-law-fem] Turns:  2259 | Depth:  1 | Score:   283 | SPS:   542.3 | Death: Survived
+Ep  92 [w2] [val-hum-law-fem] Turns: 14106 | Depth:  1 | Score:   295 | SPS:   606.3 | Death: The coyote bites!  You can hea
+Ep  93 [w3] [val-hum-law-fem] Turns:  8277 | Depth:  2 | Score:   176 | SPS:   724.9 | Death: Survived
+Ep  94 [w4] [val-hum-law-fem] Turns:  5143 | Depth:  1 | Score:    60 | SPS:   782.1 | Death: The kobold zombie hits!
+Ep  95 [w5] [val-hum-law-fem] Turns:  1695 | Depth:  5 | Score:   457 | SPS:   399.2 | Death: The giant ant bites!
+Ep  96 [w6] [val-hum-law-fem] Turns:  8259 | Depth:  1 | Score:    98 | SPS:   628.5 | Death: You faint from lack of food.
+Ep  97 [w7] [val-hum-law-fem] Turns: 20033 | Depth:  2 | Score:   196 | SPS:   688.2 | Death: Survived
+Ep  98 [w8] [val-hum-law-fem] Turns:  1948 | Depth:  3 | Score:   332 | SPS:   591.3 | Death: The garter snake bites!  The g
+Ep  99 [w9] [val-hum-law-fem] Turns:   648 | Depth:  2 | Score:   131 | SPS:   656.0 | Death: You fall into a pit!
+Ep 100 [w0] [val-hum-law-fem] Turns:  8372 | Depth:  2 | Score:   418 | SPS:   652.3 | Death: The kitten bites!
+================================================================================
+Median Depth: 2.0 | Mean Score: 250.0 | Mean Turns: 5274.1 | Wall SPS-equiv: 2375.7
+Nogoods merged: 5 entries | Errors: 0
+Results written to data/foodfix_100ep.json (222.0s wall)
