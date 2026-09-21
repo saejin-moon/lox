@@ -58,6 +58,20 @@ class NethackAdapter(DomainAdapter):
                                          "descent.minetown_donations_done"]},
             "descend": {"params": ["descent.min_hp_frac", "descent.deep_min_hp_frac",
                                    "descent.deep_min_depth"]},
+            # R6 Ascension Knowledge Stack milestones (mortality-driven order)
+            "early_survival_stack": {"params": ["strategy.survival_ac_target",
+                                                  "strategy.survival_timeout_steps",
+                                                  "strategy.survival_exit_depth"]},
+            "equip_upgrade": {"params": ["strategy.equip_ac_target",
+                                          "strategy.equip_timeout_steps",
+                                          "strategy.equip_exit_depth"]},
+            "survival_intrinsics": {"params": ["strategy.intrinsics_min_depth",
+                                                "strategy.intrinsics_exit_depth",
+                                                "strategy.intrinsics_timeout_steps"]},
+            "enter_gehennom": {"params": ["strategy.gehennom_min_depth"]},
+            "castle_wishing": {"params": ["strategy.castle_min_depth"]},
+            "vlad_invocation": {"params": ["strategy.vlad_min_depth"]},
+            "ascension_run": {"params": []},
         }
         return {name: GoalHandler(name=name, owned_params=spec["params"])
                 for name, spec in specs.items()}

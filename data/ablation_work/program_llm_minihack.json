@@ -1,12 +1,20 @@
 {
-  "version": 3,
+  "version": 5,
   "domain": "minihack",
   "params": {
-    "explore.frontier_bias": 2.0,
-    "nav.unknown_penalty": 1.4
+    "explore.frontier_bias": 2.4,
+    "nav.unknown_penalty": 1.0,
+    "explore.revisit_cap": 3
   },
   "macros": [],
-  "tactic_rules": [],
+  "tactic_rules": [
+    {
+      "when": "(hp_frac <= 0.3)",
+      "do": "retreat",
+      "unless": null,
+      "note": "emergency retreat"
+    }
+  ],
   "nogoods": [],
   "role_profiles": {},
   "domain_profiles": {},
@@ -25,7 +33,7 @@
   "provenance": {
     "author": "strategy-tuning-author",
     "note": "minihack cold-start: reach stairs when known, else explore",
-    "parent_version": 2,
-    "reason": "slightly increase frontier bias and decrease unknown penalty to encourage more direct exploration and reduce median steps"
+    "parent_version": 4,
+    "reason": "Minimize median steps by maximizing exploration speed and reducing pathing caution (minimizing unknown penalty and revisit cap), while adding a safety retreat tactic to maintain success rate."
   }
 }

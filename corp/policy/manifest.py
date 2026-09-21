@@ -57,6 +57,15 @@ PREDICATE_SIGNATURES: dict[str, dict] = {
     # R4 tactic-rule match predicates
     "monster":        {"args": [("str",)], "desc": "primary target monster name contains substring (case-insensitive)"},
     "item":           {"args": [("str",)], "desc": "target/hero tile item name contains substring (water/trap/altar/fountain/throne/sink)"},
+    # R6 Ascension Knowledge Stack milestone predicates
+    "has_mr":         {"args": [], "desc": "magic resistance (gray dragon gear / ring of magic resistance)"},
+    "has_light":      {"args": [], "desc": "carries a light source (lamp/lantern/candles)"},
+    "has_wishing_wand": {"args": [], "desc": "carries an identified wand of wishing"},
+    "has_amulet":     {"args": [], "desc": "carries the Amulet of Yendor"},
+    "has_candelabrum": {"args": [], "desc": "carries the Candelabrum of Invocation (implies Vlad defeated)"},
+    "castle_done":    {"args": [], "desc": "Castle prize acquired (bag of holding / dragon scale mail)"},
+    "vlad_done":      {"args": [], "desc": "Vlad defeated (Candelabrum obtained)"},
+    "invocation_done": {"args": [], "desc": "Invocation performed at the Vibrating Square"},
 }
 
 VERBS: dict[str, str] = {
@@ -82,6 +91,21 @@ CERTIFIED_GOALS: dict[str, dict] = {
                                      "descent.minetown_donations_done"]},
     "descend":          {"params": ["descent.min_hp_frac", "descent.deep_min_hp_frac",
                                      "descent.deep_min_depth"]},
+    # R6 Ascension Knowledge Stack (mortality-driven order; each certified before
+    # the loop may re-prioritize around it — AGENT_PLAN R6 execution plan)
+    "early_survival_stack": {"params": ["strategy.survival_ac_target",
+                                          "strategy.survival_timeout_steps",
+                                          "strategy.survival_exit_depth"]},
+    "equip_upgrade":    {"params": ["strategy.equip_ac_target",
+                                      "strategy.equip_timeout_steps",
+                                      "strategy.equip_exit_depth"]},
+    "survival_intrinsics": {"params": ["strategy.intrinsics_min_depth",
+                                         "strategy.intrinsics_exit_depth",
+                                         "strategy.intrinsics_timeout_steps"]},
+    "enter_gehennom":   {"params": ["strategy.gehennom_min_depth"]},
+    "castle_wishing":    {"params": ["strategy.castle_min_depth"]},
+    "vlad_invocation":   {"params": ["strategy.vlad_min_depth"]},
+    "ascension_run":     {"params": []},
 }
 
 # Param-leaf bounds overrides (asymmetric useful ranges; otherwise ±50% of default)

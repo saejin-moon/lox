@@ -102,6 +102,31 @@ class GoalInterpreter:
         if getattr(blstats, "dungeon_number", 0) == 3 and st.reflection_obtained:
             st.sokoban_prize_collected = True
 
+        # --- R6 milestone flag detection (inventory scan + message hooks) ---
+        if inv_tracker is not None:
+            for it in active:
+                desc = it.raw_str.lower()
+                if "gray dragon scale" in desc or "ring of magic resistance" in desc:
+                    st.mr_obtained = True
+                if any(k in desc for k in ("lamp", "lantern", "candle", "torch")):
+                    st.light_source_carried = True
+                if "wand of wishing" in desc:
+                    st.wand_of_wishing_carried = True
+                if "amulet of yendor" in desc:
+                    st.amulet_obtained = True
+                if "candelabrum" in desc:
+                    st.candelabrum_obtained = True
+                    st.vlad_defeated = True  # the Candelabrum drops from Vlad
+                if "bell of opening" in desc or "silver bell" in desc:
+                    st.bell_of_opening_obtained = True
+                if "book of the dead" in desc:
+                    st.book_of_the_dead_obtained = True
+                if "bag of holding" in desc or "dragon scale mail" in desc:
+                    # Castle prize acquired — the wishing protocol worked
+                    st.castle_wishing_done = True
+        if "vibrating square" in msg_lower:
+            st.invocation_done = True
+
         self._advance_goals(blstats, role)
         return self.state.current_phase
 
@@ -124,6 +149,15 @@ class GoalInterpreter:
             "ac": blstats.ac,
             "steps_in_goal": self._goal_steps,
             "turn": blstats.turn,
+            # R6 milestone context
+            "has_mr": st.mr_obtained,
+            "has_light": st.light_source_carried,
+            "has_wishing_wand": st.wand_of_wishing_carried,
+            "has_amulet": st.amulet_obtained,
+            "has_candelabrum": st.candelabrum_obtained,
+            "castle_wishing_done": st.castle_wishing_done,
+            "vlad_defeated": st.vlad_defeated,
+            "invocation_done": st.invocation_done,
         }
 
     def _advance_goals(self, blstats: BottomLineStats, role: str) -> None:
@@ -136,12 +170,15 @@ class GoalInterpreter:
         self._goal_steps += 1
         ctx = self._ctx(blstats, role)
 
-        # `until` completion → advance (cascading over skipped/completed successors)
+        # `until` completion → advance (cascading over skipped/completed successors).
+        # R6 milestone goals additionally honor policy-param thresholds (the
+        # set_threshold goal op tunes the config leaves → apply_overlay → here).
         try:
             done = eval_condition(goal.until, nethack_bindings(ctx))
         except ValueError as e:
             print(f"[policy] goal {goal.goal!r} until-condition error: {e}")
             done = False
+        done = done or self._r6_until(goal, blstats)
         over_budget = goal.max_steps is not None and self._goal_steps > goal.max_steps
 
         if done or over_budget:
@@ -163,7 +200,7 @@ class GoalInterpreter:
                 idx += 1
                 continue
             try:
-                when_ok = eval_condition(goal.when, nethack_bindings(ctx))
+                when_ok = eval_condition(goal.when, nethack_bindings(ctx)) and self._r6_when(goal, blstats)
             except ValueError as e:
                 print(f"[policy] goal {goal.goal!r} when-condition error: {e}")
                 when_ok = False
@@ -184,13 +221,57 @@ class GoalInterpreter:
     def _set_phase_for_goal(self, goal) -> None:
         phase_map = {
             "explore_floor": AscensionPhase.EARLY_EXPLORATION,
+            "early_survival_stack": AscensionPhase.SURVIVAL_STACK,
             "forge_excalibur": AscensionPhase.EXCALIBUR_FORGE,
             "hunt_poison_res": AscensionPhase.POISON_RES_HUNT,
             "enter_sokoban": AscensionPhase.SOKOBAN_PROGRESSION,
+            "equip_upgrade": AscensionPhase.EQUIP_UPGRADE,
             "goto_minetown": AscensionPhase.MINETOWN_PROTECTION,
+            "survival_intrinsics": AscensionPhase.INTRINSICS,
             "descend": AscensionPhase.DEEP_DESCENT,
+            "enter_gehennom": AscensionPhase.GEHENNOM,
+            "castle_wishing": AscensionPhase.CASTLE,
+            "vlad_invocation": AscensionPhase.VLAD_INVOCATION,
+            "ascension_run": AscensionPhase.ASCENSION_RUN,
         }
         self._set_phase(phase_map.get(goal.goal, self.state.current_phase))
+
+    # ------------------------------------------------------------------
+    # R6 milestone gating: policy-param-driven when/until for the ascension
+    # stack goals. Thresholds live in PolicyConfig.strategy (tunable via the
+    # set_threshold goal op through owned_params); the plan's literal until
+    # strings mirror the defaults for report/inspection readability only.
+    # ------------------------------------------------------------------
+    def _r6_until(self, goal, blstats: BottomLineStats) -> bool:
+        g = goal.goal
+        s = self.cfg.strategy
+        if g == "early_survival_stack":
+            return (blstats.ac <= s.survival_ac_target
+                    or blstats.depth >= s.survival_exit_depth
+                    or self._goal_steps >= s.survival_timeout_steps)
+        if g == "equip_upgrade":
+            return (blstats.ac <= s.equip_ac_target
+                    or blstats.depth >= s.equip_exit_depth
+                    or self._goal_steps >= s.equip_timeout_steps)
+        if g == "survival_intrinsics":
+            return (self.state.mr_obtained
+                    or blstats.depth >= s.intrinsics_exit_depth
+                    or self._goal_steps >= s.intrinsics_timeout_steps)
+        return False
+
+    def _r6_when(self, goal, blstats: BottomLineStats) -> bool:
+        """Milestone activation gates: no milestone may be skipped-to."""
+        g = goal.goal
+        s = self.cfg.strategy
+        if g == "survival_intrinsics":
+            return blstats.depth >= s.intrinsics_min_depth
+        if g == "enter_gehennom":
+            return blstats.depth >= s.gehennom_min_depth
+        if g == "castle_wishing":
+            return blstats.depth >= s.castle_min_depth
+        if g == "vlad_invocation":
+            return blstats.depth >= s.vlad_min_depth
+        return True
 
     def _set_phase(self, phase: AscensionPhase) -> None:
         if phase != self.state.current_phase:
@@ -229,6 +310,8 @@ class GoalInterpreter:
 
         if goal.goal == "descend":
             return "DESCEND" if dnum == 0 else None
+        if goal.goal == "enter_gehennom":
+            return "DESCEND" if dnum == 0 else None
         if goal.goal == "enter_sokoban":
             return "ENTER_SOKOBAN" if dnum == 0 else None
         if goal.goal == "goto_minetown":
@@ -239,6 +322,12 @@ class GoalInterpreter:
             ):
                 return "GOTO_MINETOWN"
             return None
+        if goal.goal == "ascension_run":
+            # Amulet carried: climb the Planes back up; before the Invocation,
+            # keep pushing down toward the Vibrating Square.
+            if dnum == 0:
+                return "ASCEND" if self.state.amulet_obtained else "DESCEND"
+            return "ASCEND" if self.state.amulet_obtained else None
         return None
 
     def activate_goal(self, goal_name: str) -> bool:

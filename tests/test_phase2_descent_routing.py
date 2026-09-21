@@ -76,10 +76,12 @@ def test_directive_sokoban_entry_and_exit():
     blstats_dl6 = create_stats(depth=6, level_number=6, exp=6)
     assert md.get_navigation_directive(blstats_dl6) == "ENTER_SOKOBAN"
 
-    # Too deep (>= 9): phase auto-transitions to MINETOWN_PROTECTION, so no Sokoban hunt
+    # Too deep (>= 9): sokoban's until (depth_ge 9) completes and the next
+    # certified R6 milestone (equip_upgrade, when-gated on reflection-or-depth-6)
+    # activates — no more Sokoban hunt.
     blstats_dl9 = create_stats(depth=9, level_number=9, exp=6)
     md.update_state(blstats_dl9, role="valkyrie")
-    assert md.state.current_phase == AscensionPhase.MINETOWN_PROTECTION
+    assert md.state.current_phase == AscensionPhase.EQUIP_UPGRADE
 
     # In Sokoban with prize collected: exit directive
     blstats_soko = create_stats(depth=8, level_number=3, dungeon_number=3, exp=6)

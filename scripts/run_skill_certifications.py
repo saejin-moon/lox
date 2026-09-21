@@ -36,6 +36,15 @@ CERTIFICATION_SUITES = [
         "trials": 3,
         "success_condition": "survived_engagement",
     },
+    {
+        # R6 milestone 1 (early_survival_stack) gauntlet: sustained engagement
+        # survival under the mortality-driven AC-ladder/food-security stack.
+        "name": "R6 Early Survival Gauntlet",
+        "env_id": "MiniHack-CorridorBattle-v0",
+        "max_steps": 300,
+        "trials": 5,
+        "success_condition": "survived_engagement",
+    },
 ]
 
 

@@ -159,6 +159,24 @@ class StrategyPolicy:
     zero_turn_limit: int = 4
     # Excalibur fountain dipping
     dip_attempt_cap: int = 10
+    # --- R6 Ascension Knowledge Stack milestone gates (mortality-driven order) ---
+    # early_survival_stack: hold pattern until AC ladder + sustain secured at DL <= 6
+    survival_ac_target: int = 4            # until-AC: leather/ring mail + shield achievable DL 1-6
+    survival_timeout_steps: int = 1500
+    survival_exit_depth: int = 7
+    # equip_upgrade: enchant/equip until AC <= -10 by DL 8 (revised honest target)
+    equip_ac_target: int = -10
+    equip_timeout_steps: int = 2500
+    equip_exit_depth: int = 8
+    # survival_intrinsics: MR acquisition window (DL 8-12 — must first REACH reliably)
+    intrinsics_min_depth: int = 8
+    intrinsics_exit_depth: int = 13
+    intrinsics_timeout_steps: int = 3000
+    # Deep-stack activation gates (each milestone certified before the next; the
+    # when-conditions enforce "no milestone may be skipped-to")
+    gehennom_min_depth: int = 14
+    castle_min_depth: int = 22
+    vlad_min_depth: int = 30
 
 
 @dataclass

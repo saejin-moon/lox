@@ -184,6 +184,12 @@
       "until": "(or (xl_ge 4) (depth_ge 4))"
     },
     {
+      "goal": "early_survival_stack",
+      "when": "(true)",
+      "until": "(or (ac_le 4) (depth_ge 7) (steps_in_goal_ge 1500))",
+      "max_steps": 1500
+    },
+    {
       "goal": "forge_excalibur",
       "when": "(and (lawful) (xl_ge 5) (not has_excalibur))",
       "until": "(has_excalibur)",
@@ -201,21 +207,57 @@
       "directive": "ENTER_SOKOBAN"
     },
     {
+      "goal": "equip_upgrade",
+      "when": "(or (has_reflection) (depth_ge 6))",
+      "until": "(or (ac_le -10) (depth_ge 8) (steps_in_goal_ge 2500))",
+      "max_steps": 2500
+    },
+    {
       "goal": "goto_minetown",
       "when": "(true)",
       "until": "(or (ac_le 0) (steps_in_goal_ge 3000) (depth_ge 10))",
       "directive": "GOTO_MINETOWN"
     },
     {
+      "goal": "survival_intrinsics",
+      "when": "(depth_ge 8)",
+      "until": "(or (has_mr) (depth_ge 13) (steps_in_goal_ge 3000))",
+      "max_steps": 3000
+    },
+    {
       "goal": "descend",
       "when": "(true)",
-      "until": "(false)",
+      "until": "(depth_ge 14)",
       "directive": "DESCEND"
+    },
+    {
+      "goal": "enter_gehennom",
+      "when": "(and (in_dungeons) (depth_ge 14))",
+      "until": "(or (depth_ge 22) (steps_in_goal_ge 5000))",
+      "max_steps": 5000,
+      "directive": "DESCEND"
+    },
+    {
+      "goal": "castle_wishing",
+      "when": "(depth_ge 22)",
+      "until": "(or (castle_done) (depth_ge 30) (steps_in_goal_ge 6000))",
+      "max_steps": 6000
+    },
+    {
+      "goal": "vlad_invocation",
+      "when": "(depth_ge 30)",
+      "until": "(or (has_candelabrum) (depth_ge 38) (steps_in_goal_ge 6000))",
+      "max_steps": 6000
+    },
+    {
+      "goal": "ascension_run",
+      "when": "(has_amulet)",
+      "until": "(false)"
     }
   ],
   "provenance": {
     "author": "mock",
-    "note": "equivalent to pre-R2 MacroAscensionDirector phase machine",
+    "note": "R2 default + R6 ascension stack (13 goals, mortality-driven order)",
     "parent_version": 6,
     "reason": "mock: compose when_endangered macro"
   }

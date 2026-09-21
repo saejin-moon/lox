@@ -17,3 +17,23 @@ Direct use of automatic function calling (AFC) in Models.generate_content is not
   ops: 2 set, 0 rule, 0 goal, 0 macro, 0 nogood
 
 === revision 4/5 | program v3 ===
+  ACCEPT v4: increase exploration aggressiveness by maximizing frontier bias and reducing unknown penal
+  ops: 2 set, 0 rule, 0 goal, 0 macro, 0 nogood
+
+=== revision 5/5 | program v4 ===
+  ACCEPT v5: Minimize median steps by maximizing exploration speed and reducing pathing caution (minimi
+  ops: 2 set, 1 rule, 0 goal, 0 macro, 0 nogood
+
+[loop] done: 4/5 accepted | acceptance rate: 0.80
+  [llm] program v5 (1 rules, 3 tuned params)
+[ablation] benchmarking arm=frozen ...
+  [frozen] success_rate=1.0 median_steps_on_success=30
+[ablation] benchmarking arm=random ...
+  [random] success_rate=1.0 median_steps_on_success=31
+[ablation] benchmarking arm=llm ...
+  [llm] success_rate=1.0 median_steps_on_success=31
+  [random vs frozen] p=0.49472670722673895 cliffs_delta=0.025 ci95=(34.124, 36.83205)
+  [llm vs frozen] p=0.1889686345528604 cliffs_delta=0.048 ci95=(34.616, 37.342)
+[ablation] results written to data/ablation_minihack_scaled.json
+  [random] significant vs frozen: False (δ=0.025) — requires 100-ep batches for the paper
+  [llm] significant vs frozen: False (δ=0.048) — requires 100-ep batches for the paper

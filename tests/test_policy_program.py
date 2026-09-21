@@ -58,11 +58,14 @@ def test_tokenizer_strips_comments():
 # Policy program container
 # ---------------------------------------------------------------------------
 
-def test_default_program_loads_and_has_six_goals():
+def test_default_program_loads_and_has_thirteen_goals():
+    """R6: the ascension stack is a 13-goal mortality-driven plan."""
     prog = PolicyProgram.load("data/policy_program.json")
     assert [g.goal for g in prog.strategy_plan] == [
-        "explore_floor", "forge_excalibur", "hunt_poison_res",
-        "enter_sokoban", "goto_minetown", "descend",
+        "explore_floor", "early_survival_stack", "forge_excalibur",
+        "hunt_poison_res", "enter_sokoban", "equip_upgrade", "goto_minetown",
+        "survival_intrinsics", "descend", "enter_gehennom", "castle_wishing",
+        "vlad_invocation", "ascension_run",
     ]
 
 
@@ -120,31 +123,41 @@ def test_goal_sequence_transitions():
     d, p = drive(gi, make_bl())
     assert (d, p) == (None, AscensionPhase.EARLY_EXPLORATION)
 
-    # 2. XL 5 lawful: forge_excalibur activates
+    # 2. XL 5 lawful: early_survival_stack activates first (R6 #1 holds until
+    #    the AC ladder / exit depth / timeout threshold is met)
     d, p = drive(gi, make_bl(xl=5, depth=3))
+    assert p == AscensionPhase.SURVIVAL_STACK
+
+    # 3. AC <= survival target: survival stack completes → forge_excalibur
+    d, p = drive(gi, make_bl(xl=5, depth=3, ac=0))
     assert p == AscensionPhase.EXCALIBUR_FORGE
 
-    # 3. Excalibur obtained: forge completes → hunt_poison_res
+    # 4. Excalibur obtained: forge completes → hunt_poison_res
     inv = InventoryNormalizer()
     excal = NormalizedItem(current_letter="a", raw_str="the blessed Excalibur", buc_state="BLESSED")
     inv.active_items[excal.uid] = excal
-    d, p = drive(gi, make_bl(xl=5, depth=3), inv_tracker=inv)
+    d, p = drive(gi, make_bl(xl=5, depth=3, ac=0), inv_tracker=inv)
     assert p == AscensionPhase.POISON_RES_HUNT
 
-    # 4. Poison resistance message: hunt completes → enter_sokoban, directive ENTER_SOKOBAN
-    d, p = drive(gi, make_bl(xl=5, depth=4), message="You feel healthy.")
+    # 5. Poison resistance message: hunt completes → enter_sokoban, directive ENTER_SOKOBAN
+    d, p = drive(gi, make_bl(xl=5, depth=4, ac=0), message="You feel healthy.")
     assert p == AscensionPhase.SOKOBAN_PROGRESSION
     assert d == "ENTER_SOKOBAN"
 
-    # 5. Reflection obtained: sokoban completes → goto_minetown, directive GOTO_MINETOWN on DL 2-4 dnum 0
+    # 6. Reflection obtained: sokoban completes → equip_upgrade activates (R6 #2)
     refl = NormalizedItem(current_letter="b", raw_str="an uncursed amulet of reflection", buc_state="UNCURSED")
     inv.active_items[refl.uid] = refl
-    d, p = drive(gi, make_bl(xl=6, depth=3), inv_tracker=inv)
+    d, p = drive(gi, make_bl(xl=6, depth=3, ac=0), inv_tracker=inv)
+    assert p == AscensionPhase.EQUIP_UPGRADE
+
+    # 7. AC <= -10: equip completes → goto_minetown, directive GOTO_MINETOWN on DL 2-4 dnum 0
+    d, p = drive(gi, make_bl(xl=6, depth=3, ac=-10), inv_tracker=inv)
     assert p == AscensionPhase.MINETOWN_PROTECTION
     assert d == "GOTO_MINETOWN"
 
-    # 6. AC <= 0: minetown completes → descend, directive DESCEND
-    d, p = drive(gi, make_bl(xl=8, depth=6, ac=-3))
+    # 8. AC <= 0: minetown completes → survival_intrinsics skipped (DL 3 < 8)
+    #    → descend, directive DESCEND
+    d, p = drive(gi, make_bl(xl=8, depth=6, ac=-10), inv_tracker=inv)
     assert p == AscensionPhase.DEEP_DESCENT
     assert d == "DESCEND"
 
@@ -166,13 +179,14 @@ def test_mines_and_sokoban_directives():
 
 
 def test_forge_budget_skips_after_max_steps():
-    """forge_excalibur with max_steps 2000 auto-advances to hunt_poison_res."""
+    """forge_excalibur with max_steps 2000 auto-advances to hunt_poison_res.
+    (R6: early_survival_stack consumes its own 1500-step budget first, so the
+    drive must outlast both budgets.)"""
     gi = GoalInterpreter(PolicyConfig.defaults(), program_path="")
-    bl = make_bl(xl=5, depth=3)
+    bl = make_bl(xl=5, depth=3, alignment=0)  # neutral: forge's when-lawful skips it
 
-    # Drive 2003 steps without Excalibur (budget: steps_in_goal > 2000 → advance on 2002)
-    for _ in range(2003):
-        drive(gi, bl, role="monk")  # monk: not lawful-mapped → forge skipped outright
+    for _ in range(3600):
+        drive(gi, bl)
     assert gi.state.current_phase == AscensionPhase.POISON_RES_HUNT
 
 
@@ -204,5 +218,5 @@ def test_goal_events_flush(tmp_path):
     con = duckdb.connect(db, read_only=True)
     rows = con.execute("SELECT goal, event FROM goal_events ORDER BY ts").fetchall()
     con.close()
-    assert ("forge_excalibur", "activated") in rows
     assert ("explore_floor", "completed") in rows
+    assert ("early_survival_stack", "activated") in rows  # R6: next certified milestone

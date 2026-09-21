@@ -34,6 +34,16 @@ DEFAULT_STRATEGY_PLAN: list[dict] = [
         "until": "(or (xl_ge 4) (depth_ge 4))",
     },
     {
+        # R6 #1 (NEW, highest mortality impact): AC ladder + food security +
+        # wand-wielder counterplay hold pattern at DL <= 6. Thresholds are
+        # policy params (strategy.survival_*) — the literal string below mirrors
+        # the defaults for inspection; the interpreter honors the params.
+        "goal": "early_survival_stack",
+        "when": "(true)",
+        "until": "(or (ac_le 4) (depth_ge 7) (steps_in_goal_ge 1500))",
+        "max_steps": 1500,
+    },
+    {
         "goal": "forge_excalibur",
         "when": "(and (lawful) (xl_ge 5) (not has_excalibur))",
         "until": "(has_excalibur)",
@@ -51,16 +61,59 @@ DEFAULT_STRATEGY_PLAN: list[dict] = [
         "directive": "ENTER_SOKOBAN",
     },
     {
+        # R6 #2: weapon enchantment + armor ladder to AC <= -10 by DL 8.
+        "goal": "equip_upgrade",
+        "when": "(or (has_reflection) (depth_ge 6))",
+        "until": "(or (ac_le -10) (depth_ge 8) (steps_in_goal_ge 2500))",
+        "max_steps": 2500,
+    },
+    {
         "goal": "goto_minetown",
         "when": "(true)",
         "until": "(or (ac_le 0) (steps_in_goal_ge 3000) (depth_ge 10))",
         "directive": "GOTO_MINETOWN",
     },
     {
+        # R6 #3: MR acquisition + drain counters — only relevant at DL 8-12,
+        # which we must first reach reliably (activation gated by policy param).
+        "goal": "survival_intrinsics",
+        "when": "(depth_ge 8)",
+        "until": "(or (has_mr) (depth_ge 13) (steps_in_goal_ge 3000))",
+        "max_steps": 3000,
+    },
+    {
         "goal": "descend",
         "when": "(true)",
-        "until": "(false)",
+        "until": "(depth_ge 14)",
         "directive": "DESCEND",
+    },
+    {
+        # R6 #4: gehennom survival (light logistics, maze mapping, undead tactics).
+        "goal": "enter_gehennom",
+        "when": "(and (in_dungeons) (depth_ge 14))",
+        "until": "(or (depth_ge 22) (steps_in_goal_ge 5000))",
+        "max_steps": 5000,
+        "directive": "DESCEND",
+    },
+    {
+        # R6 #5: Castle drawbridge + wand-of-wishing priority protocol.
+        "goal": "castle_wishing",
+        "when": "(depth_ge 22)",
+        "until": "(or (castle_done) (depth_ge 30) (steps_in_goal_ge 6000))",
+        "max_steps": 6000,
+    },
+    {
+        # R6 #6: Vlad's Tower -> Candelabrum -> Invocation protocol.
+        "goal": "vlad_invocation",
+        "when": "(depth_ge 30)",
+        "until": "(or (has_candelabrum) (depth_ge 38) (steps_in_goal_ge 6000))",
+        "max_steps": 6000,
+    },
+    {
+        # R6 #7: Wizard-hall discipline, Rider/Planes handling -> ascension.
+        "goal": "ascension_run",
+        "when": "(has_amulet)",
+        "until": "(false)",
     },
 ]
 
@@ -72,7 +125,7 @@ DEFAULT_PROGRAM: dict = {
     "tactic_rules": DEFAULT_TACTIC_RULES,
     "nogoods": [],
     "strategy_plan": DEFAULT_STRATEGY_PLAN,
-    "provenance": {"author": "r2-default", "note": "equivalent to pre-R2 MacroAscensionDirector phase machine"},
+    "provenance": {"author": "r6-milestones", "note": "R2 default + R6 ascension stack (13 goals, mortality-driven order)"},
 }
 
 

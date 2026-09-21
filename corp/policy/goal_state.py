@@ -17,6 +17,14 @@ class AscensionPhase(IntEnum):
     SOKOBAN_PROGRESSION = 4  # DL 6-9 upward branch: retrieve guaranteed Reflection from Sokoban floor 4
     MINETOWN_PROTECTION = 5  # Gnomish Mines: visit Minetown temple, donate 400*XL gold for divine AC <= -5
     DEEP_DESCENT = 6         # DL 10 to DL 20+: push down through Dungeons of Doom with artifact & divine armor
+    # --- R6 Ascension Knowledge Stack milestones (mortality-driven order) ---
+    SURVIVAL_STACK = 7       # early_survival_stack: AC ladder + food security + wand counterplay (DL 1-6)
+    EQUIP_UPGRADE = 8        # equip_upgrade: weapon enchantment + armor AC <= -10 by DL 8
+    INTRINSICS = 9           # survival_intrinsics: MR acquisition + drain counters (DL 8-12)
+    GEHENNOM = 10            # gehennom_survival: light logistics + maze mapping (DL 14+)
+    CASTLE = 11              # castle_wishing: drawbridge + wand-of-wishing protocol (DL 22+)
+    VLAD_INVOCATION = 12     # vlad_invocation: Vlad's Tower -> Candelabrum -> Invocation (DL 30+)
+    ASCENSION_RUN = 13       # ascension_run: Planes handling -> Astral -> ascend
 
 
 @dataclass
@@ -31,3 +39,14 @@ class MacroDirectorState:
     sokoban_prize_collected: bool = False
     max_dlevel_reached: int = 1
     total_steps_in_phase: int = 0
+    # --- R6 milestone flags (inventory/message-derived each turn) ---
+    mr_obtained: bool = False                    # magic resistance (gray dragon gear / MR ring)
+    light_source_carried: bool = False           # lamp / lantern / candles (gehennom logistics)
+    wand_of_wishing_carried: bool = False        # identified wand of wishing
+    amulet_obtained: bool = False                # the Amulet of Yendor
+    candelabrum_obtained: bool = False           # Candelabrum of Invocation (implies Vlad defeated)
+    bell_of_opening_obtained: bool = False       # Bell of Opening
+    book_of_the_dead_obtained: bool = False      # Book of the Dead
+    castle_wishing_done: bool = False            # BoH / dragon scale mail acquired past the Castle
+    vlad_defeated: bool = False
+    invocation_done: bool = False                # performed at the Vibrating Square
