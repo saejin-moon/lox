@@ -2,11 +2,8 @@
   "version": 2,
   "domain": "minihack",
   "params": {
-    "explore.frontier_bias": 2.4,
-    "nav.unknown_penalty": 1.0,
-    "nav.monster_cost": 100.0,
-    "explore.revisit_cap": 3,
-    "explore.stuck_patience": 15
+    "explore.frontier_bias": 1.8,
+    "nav.unknown_penalty": 1.5
   },
   "macros": [],
   "tactic_rules": [],
@@ -29,6 +26,6 @@
     "author": "strategy-tuning author",
     "note": "minihack cold-start: reach stairs when known, else explore",
     "parent_version": 1,
-    "reason": "Current median steps (34) exceeds the target (32.4). Applying maximal aggression to exploration and navigation parameters to reduce redundant movement and pathing detours."
+    "reason": "reduce median_steps_on_success by increasing exploration speed through higher frontier bias and lower unknown penalty"
   }
 }

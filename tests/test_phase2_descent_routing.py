@@ -7,7 +7,8 @@ mines retreat policy, Sokoban prize-exit (anti-oscillation), and rest-on-stairs 
 import numpy as np
 import pytest
 
-from corp.domain.macro_director import MacroAscensionDirector, AscensionPhase
+from corp.policy.goal_interpreter import GoalInterpreter
+from corp.policy.goal_state import AscensionPhase
 from corp.domain.navigation_manager import NavigationManager
 from corp.env.blstats import BottomLineStats, HungerState
 from corp.planner.guards import HTNGuards
@@ -39,6 +40,13 @@ def create_stats(
     return BottomLineStats.from_blstats(raw)
 
 
+def make_director() -> GoalInterpreter:
+    """Default-program GoalInterpreter (program_path='' -> embedded default).
+    Replaces the deleted legacy MacroAscensionDirector phase machine; decision-trace
+    equivalence was proven in R2 and the machine was removed (R5->R6 item 6)."""
+    return GoalInterpreter(program_path="")
+
+
 def make_floor():
     """21x79 room floor grid."""
     chars = np.full((21, 79), ord("."), dtype=np.uint8)
@@ -50,19 +58,19 @@ def make_floor():
 # ---------------------------------------------------------------------------
 
 def test_directive_deep_descent():
-    md = MacroAscensionDirector()
-    md.state.current_phase = AscensionPhase.DEEP_DESCENT
+    md = make_director()
+    md.activate_goal("descend")
     blstats = create_stats(depth=10, exp=8)
     assert md.get_navigation_directive(blstats) == "DESCEND"
 
     # Non-descent phases: no directive
-    md2 = MacroAscensionDirector()
+    md2 = make_director()
     assert md2.get_navigation_directive(blstats) is None
 
 
 def test_directive_sokoban_entry_and_exit():
-    md = MacroAscensionDirector()
-    md.state.current_phase = AscensionPhase.SOKOBAN_PROGRESSION
+    md = make_director()
+    md.activate_goal("enter_sokoban")
 
     # DL 5-9 in Dungeons of Doom during Sokoban phase: hunt the branch entry
     blstats_dl6 = create_stats(depth=6, level_number=6, exp=6)
@@ -81,7 +89,7 @@ def test_directive_sokoban_entry_and_exit():
 
 
 def test_directive_mines_retreat():
-    md = MacroAscensionDirector()
+    md = make_director()
 
     # Mine's End (dlevel 10 in dnum 2): ascend, there are no downstairs below
     blstats_mine_end = create_stats(depth=12, dungeon_number=2, level_number=10, exp=7)
@@ -102,7 +110,7 @@ def test_directive_mines_retreat():
 def test_mines_retreat_navigation_ascends():
     """Fully explored Mines level with no downstairs must ascend (Phase 2: black-hole fix)."""
     nav_mgr = NavigationManager()
-    md = MacroAscensionDirector()
+    md = make_director()
     chars = make_floor()
 
     stats = create_stats(x=10, y=10, hp=40, max_hp=40, exp=8, dungeon_number=2, level_number=4, depth=6)
@@ -122,7 +130,7 @@ def test_mines_retreat_navigation_ascends():
 def test_sokoban_prize_exit_descends():
     """After collecting the Sokoban prize, the agent must descend out of Sokoban, not oscillate."""
     nav_mgr = NavigationManager()
-    md = MacroAscensionDirector()
+    md = make_director()
     md.state.sokoban_prize_collected = True
     chars = make_floor()
     chars[10, 15] = ord(">")  # stairs down (exit chain)
@@ -145,8 +153,8 @@ def test_sokoban_prize_exit_descends():
 def test_sokoban_entry_hunt_ascends():
     """Macro directive ENTER_SOKOBAN routes to '<' upstairs instead of wandering."""
     nav_mgr = NavigationManager()
-    md = MacroAscensionDirector()
-    md.state.current_phase = AscensionPhase.SOKOBAN_PROGRESSION
+    md = make_director()
+    md.activate_goal("enter_sokoban")
     chars = make_floor()
     chars[10, 15] = ord("<")  # stairs up -> potential Sokoban branch entry
 
@@ -166,7 +174,7 @@ def test_sokoban_entry_hunt_ascends():
 def test_aggressive_descent_before_container_looting():
     """Descent must be evaluated BEFORE container looting (Phase 2 reorder)."""
     nav_mgr = NavigationManager()
-    md = MacroAscensionDirector()
+    md = make_director()
     chars = make_floor()
     chars[10, 9] = ord("(")  # unlooted container adjacent (west)
     chars[10, 15] = ord(">")  # stairs down (east)
@@ -186,8 +194,8 @@ def test_aggressive_descent_before_container_looting():
 def test_directive_descend_overrides_farming_deferral():
     """DEEP_DESCENT directive must bypass MacroDirector stair-farming deferral."""
     nav_mgr = NavigationManager()
-    md = MacroAscensionDirector()
-    md.state.current_phase = AscensionPhase.DEEP_DESCENT
+    md = make_director()
+    md.activate_goal("descend")
     chars = make_floor()
     chars[10, 15] = ord(">")
 

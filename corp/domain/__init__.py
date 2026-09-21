@@ -6,7 +6,7 @@ from corp.domain.inventory_manager import InventoryManager
 from corp.domain.skill_worker import SkillWorker
 from corp.domain.dungeon_graph import DungeonGraph
 from corp.domain.shop_manager import ShopManager
-from corp.domain.macro_director import MacroAscensionDirector, AscensionPhase
+from corp.policy.goal_state import AscensionPhase
 
 __all__ = [
     "TacticalCombatManager",
@@ -15,7 +15,6 @@ __all__ = [
     "SkillWorker",
     "DungeonGraph",
     "ShopManager",
-    "MacroAscensionDirector",
     "AscensionPhase",
 ]
 

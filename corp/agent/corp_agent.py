@@ -46,7 +46,6 @@ from corp.epistemic.entropy_gates import ShannonSafeGate
 from corp.domain.epistemic_worker import EpistemicWorker
 from corp.domain.dungeon_graph import DungeonGraph
 from corp.domain.shop_manager import ShopManager
-from corp.domain.macro_director import MacroAscensionDirector, AscensionPhase
 from corp.policy.goal_interpreter import GoalInterpreter
 from corp.deliberative.autopsy_engine import AutopsyEngine
 from corp.deliberative.deadlock_resolver import DeadlockResolver, emit_deadlock_diff

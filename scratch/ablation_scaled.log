@@ -1,0 +1,19 @@
+[ablation] arms=['frozen', 'random', 'llm'] episodes=100 role=valkyrie
+  [frozen] program v1 (23 rules, 0 tuned params)
+  [random] program v1 (0 rules, 0 tuned params)
+[loop] program v1 from data/ablation_work/program_llm_minihack.json | provider=gemini
+[loop] transfer baseline (v1): {'episodes': 3, 'mean_reward': 1.0, 'success_rate': 1.0, 'mean_steps': 49.333333333333336, 'median_steps_on_success': 45, 'mean_coverage': 46.666666666666664}
+
+=== revision 1/5 | program v1 ===
+Direct use of automatic function calling (AFC) in Models.generate_content is not recommended. Instead, we recommend to use AFC in Chat.send_message. Similarly, direct use of AFC in Models.generate_content_stream is not recommended. Instead, we recommend to use AFC in Chat.send_message_stream.
+  ACCEPT v2: reduce median_steps_on_success by increasing exploration speed through higher frontier bia
+  ops: 2 set, 0 rule, 0 goal, 0 macro, 0 nogood
+
+=== revision 2/5 | program v2 ===
+  REJECT ERR_CERT_FAIL @ certification: median_steps_on_success 56 > 1.2× baseline 45
+
+=== revision 3/5 | program v2 ===
+  ACCEPT v3: slightly increase frontier bias and decrease unknown penalty to encourage more direct expl
+  ops: 2 set, 0 rule, 0 goal, 0 macro, 0 nogood
+
+=== revision 4/5 | program v3 ===

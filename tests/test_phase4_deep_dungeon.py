@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 from nle import nethack
 
-from corp.domain.macro_director import MacroAscensionDirector, AscensionPhase
+from corp.policy.goal_interpreter import GoalInterpreter
+from corp.policy.goal_state import AscensionPhase
 from corp.domain.medusa_handler import MedusaHandler
 from corp.domain.navigation_manager import NavigationManager
 from corp.domain.dungeon_graph import DungeonGraph
@@ -44,6 +45,13 @@ def create_stats(
     return BottomLineStats.from_blstats(raw)
 
 
+def make_director() -> GoalInterpreter:
+    """Default-program GoalInterpreter (program_path='' -> embedded default).
+    Replaces the deleted legacy MacroAscensionDirector phase machine; decision-trace
+    equivalence was proven in R2 and the machine was removed (R5->R6 item 6)."""
+    return GoalInterpreter(program_path="")
+
+
 def make_floor():
     return np.full((21, 79), ord("."), dtype=np.uint8)
 
@@ -53,8 +61,8 @@ def make_floor():
 # ---------------------------------------------------------------------------
 
 def test_minetown_directive():
-    md = MacroAscensionDirector()
-    md.state.current_phase = AscensionPhase.MINETOWN_PROTECTION
+    md = make_director()
+    md.activate_goal("goto_minetown")
 
     # DL 3 in Dungeons of Doom, Minetown not yet visited: route into the Mines branch
     blstats = create_stats(depth=3, level_number=3, exp=6)
@@ -77,8 +85,8 @@ def test_minetown_directive():
 def test_minetown_navigation_descends_known_mines_stairs():
     """GOTO_MINETOWN routes to the recorded Mines-branch stairs and descends."""
     nav_mgr = NavigationManager()
-    md = MacroAscensionDirector()
-    md.state.current_phase = AscensionPhase.MINETOWN_PROTECTION
+    md = make_director()
+    md.activate_goal("goto_minetown")
     chars = make_floor()
     chars[10, 12] = ord(">")  # Mines branch stairs east
 

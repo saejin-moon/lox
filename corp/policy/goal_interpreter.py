@@ -14,7 +14,7 @@ import os
 import time
 from typing import Any
 
-from corp.domain.macro_director import AscensionPhase, MacroDirectorState
+from corp.policy.goal_state import AscensionPhase, MacroDirectorState
 from corp.env.blstats import BottomLineStats
 from corp.policy.config import PolicyConfig, default_config
 from corp.policy.predicates import eval_condition, nethack_bindings
@@ -240,6 +240,24 @@ class GoalInterpreter:
                 return "GOTO_MINETOWN"
             return None
         return None
+
+    def activate_goal(self, goal_name: str) -> bool:
+        """Programmatically activates a strategy_plan goal by name (fixture/\
+        tooling seam: tests, certifications, and the deadlock resolver's restart
+        path). Returns False if the goal is not in the live program's plan."""
+        plan = self.program.strategy_plan
+        for i, g in enumerate(plan):
+            if g.goal == goal_name:
+                self._goal_index = i
+                self._goal_steps = 0
+                self._set_phase_for_goal(g)
+                return True
+        return False
+
+    def get_minetown_donation_target(self, blstats: BottomLineStats) -> int:
+        """Full divine protection requires ~5 donations of 400 * XL gold each
+        (2-4 AC points per donation, targeting AC <= -5)."""
+        return 400 * max(1, blstats.experience_level) * 5
 
     # ------------------------------------------------------------------
     # Public surface 3: stair-farming deferral (phase-independent, as pre-R2)

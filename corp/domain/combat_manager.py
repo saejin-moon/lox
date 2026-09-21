@@ -197,7 +197,10 @@ class TacticalCombatManager:
         from corp.policy.tactics import TacticRuleEngine  # noqa: PLC0415
         if rules is None:
             from corp.policy.program import DEFAULT_TACTIC_RULES  # noqa: PLC0415
-            rules = DEFAULT_TACTIC_RULES
+            # Snapshot: the module list must never be shared with a live engine —
+            # a later in-place mutation (validator/reviser bookkeeping) would
+            # silently change combat behavior of already-constructed managers.
+            rules = list(DEFAULT_TACTIC_RULES)
         return TacticRuleEngine(rules)
 
     @property

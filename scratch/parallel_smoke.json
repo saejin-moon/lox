@@ -1,0 +1,44 @@
+{
+  "run_id": "Ax7luS",
+  "episodes": 2,
+  "jobs": 2,
+  "total_elapsed_sec": 3.4937814339937177,
+  "worker_sps_equivalent": 417.02665937362696,
+  "median_depth": 2.5,
+  "mean_score": 161.0,
+  "mean_turns": 728.5,
+  "mean_sps": 454.08483430996046,
+  "ascension_rate": 0.0,
+  "error_count": 0,
+  "errors": [],
+  "detailed_episodes": [
+    {
+      "episode": 1,
+      "worker": 1,
+      "character": "val-hum-law-fem",
+      "turns": 782,
+      "max_depth": 2,
+      "score": 114,
+      "hp": 16,
+      "ascended": false,
+      "death_message": "",
+      "active_nogoods": 5,
+      "sps": 531.6617070529632,
+      "duration_sec": 1.5172942179779056
+    },
+    {
+      "episode": 2,
+      "worker": 0,
+      "character": "val-hum-law-fem",
+      "turns": 675,
+      "max_depth": 3,
+      "score": 208,
+      "hp": 27,
+      "ascended": false,
+      "death_message": "",
+      "active_nogoods": 5,
+      "sps": 376.5079615669578,
+      "duration_sec": 2.134204834990669
+    }
+  ]
+}
