@@ -324,16 +324,23 @@ the loop, validator, DSL, and program machinery are untouched.
    profiles,corpus}.py`, `corp/executor/{interface,nethack_adapter,minihack_adapter}.py`,
    `scripts/{run_revision_loop,run_ablation,run_domain_eval,run_campaign}.py`.
 
-#### WHERE WE LEFT OFF (exact state)
-- R3+R4+R5-core DONE; live NetHack program v4 (3 llm-authored combat rules + 23 interlock rules); the
-  combat manager EXECUTES tactic rules (first-match-wins) — llm rules are no longer inert.
-- First GATED three-arm transfer ablation complete (`data/ablation_minihack_r5_gated.json`):
-  frozen 31.0 / random 32.0 / llm-v3 **29.0** median steps (all 102/102 success). random ≈ frozen
-  (control behaves). llm direction POSITIVE but NOT significant (p=0.37, δ=-0.072 @ 102 eps).
-- The live in-loop transfer gate now catches drift: it rejected 3/5 revisions with
-  `ERR_CERT_FAIL: median_steps_on_success X > 1.2× baseline` and the author recovered after each.
-- R6 coding is GATED (see R6 EXECUTION PLAN) on: (a) significance on minihack, (b) NetHack 100-ep
-  post-R4 baseline ≥ R0 reference (401.7 mean / 3.0 median, run `oPoU2l`).
+#### WHERE WE LEFT OFF (exact state — updated 2026-09-19, R5→R6 checklist + R6 milestone structure DONE)
+- R3+R4+R5-core DONE; live NetHack program **v5** (13-goal R6 ascension plan + 26 tactic rules: 3 llm-authored
+  + 23 interlock); the combat manager EXECUTES tactic rules (first-match-wins).
+- R5→R6 checklist COMPLETE: flaky-test hardening (tests/conftest.py autouse epoch reset + tactic-engine
+  snapshot); `scripts/run_parallel_batch.py` (multiprocessing batch runner — 100 eps @ 20k in 152s wall,
+  ~1790 wall SPS-equiv, 0 errors; USE THIS for all future batches); goal_state extraction + legacy
+  MacroAscensionDirector DELETED (tests migrated to GoalInterpreter seam, `activate_goal`/
+  `get_minetown_donation_target` added); craftax feasibility probe PASS (JAX 0.11.2 CPU, Craftax-Classic-
+  Symbolic-v1: 1345-dim obs, 17 actions, 67 achievements, fast) — adapter port is the next R5 remainder.
+- **NLE MiniHack resets are NOT seed-deterministic** (same seed → different episode steps across runs —
+  measured). Transfer gates on small samples (3 eps) wobble around the 1.2× threshold; the mock-revision
+  loop test now accepts both gate-consistent outcomes.
+- R6 milestone structure LANDED (program v5, 13 goals, 18 cert tests, gauntlet suite CERTIFIED) — but the
+  R6 loop-gate is NOT met: scaled minihack ablation llm vs frozen p=0.19 (δ=0.048, direction positive),
+  and the NetHack 100-ep post-R4 baseline (v4) REGRESSED vs R0 reference (267.2 vs 401.7 mean score).
+  NEXT: diagnose the v4 combat-rule regression (death taxonomy in postR4_baseline_100ep.json: starvation
+  faints ×2, a prayer-prompt death, melee bites still dominant) before re-running the gate.
 
 #### NEXT-TASK CHECKLIST (exact commands; do in this order)
 1. **Fix the 2 flaky tests** (`tests/test_domain_and_workers.py::test_combat_manager_standard_melee`,
@@ -550,7 +557,28 @@ there since author models have thin parametric knowledge of it) → certificatio
 revisions until plateau: target median depth ≥ 5, mean score ≥ 1,500).
 **Accept**: improvement curves on ≥2 transfer domains from cold-start programs; NetHack batch improvement beyond R0 baseline σ; **workshop paper checkpoint**.
 
-### R6 — STRETCH: Ascension Knowledge Stack (4–8 weeks, only if R5 secured)
+### R6 — STRETCH: Ascension Knowledge Stack — **[2026-09-19: MILESTONE STRUCTURE LANDED — 13-goal plan v5 + certs; loop-tuning gated on ablation evidence]**
+> Shipped: `goal_state.py` extended with 10 milestone flags (mr/light/wishing/amulet/candelabrum/bell/book/
+> castle/vlad/invocation) + 7 new AscensionPhase members; `DEFAULT_STRATEGY_PLAN` → **13 goals** in the
+> mortality-driven order (early_survival_stack → equip_upgrade → survival_intrinsics → enter_gehennom →
+> castle_wishing → vlad_invocation → ascension_run) interleaved with the R2 goals; milestone when/until
+> thresholds are **policy params** (`strategy.{survival,equip,intrinsics}_*`, depth gates `{gehennom,castle,
+> vlad}_min_depth`) honored by the interpreter via `_r6_when/_r6_until` — set_threshold goal ops tune them
+> through owned_params (the plan's literal until strings mirror defaults for inspection only); 8 new
+> predicates (has_mr/has_light/has_wishing_wand/has_amulet/has_candelabrum/castle_done/vlad_done/
+> invocation_done); NethackAdapter manifest + CERTIFIED_GOALS extended (drift-guard verified);
+> `tests/test_r6_milestones.py` (18 certification cases: no-skip-to gating, completion semantics, directive
+> wiring, manifest closure, param tunability); cert suite gains the R6 Early Survival Gauntlet (4/4 suites
+> CERTIFIED). Live program v4→v5 (26 tactic rules preserved). v5 live smoke green. 312 tests.
+> **HONEST GATE OUTCOME (2026-09-19)**: the R6 evidence gate is NOT met — (a) scaled minihack three-arm
+> ablation (frozen 30 / random 31 / llm 31 median steps, ~500 eps/arm × 5 seed bases): llm vs frozen
+> p=0.19, δ=0.048 (positive, not significant), random≈frozen (control behaves); (b) NetHack 100-ep post-R4
+> baseline (v4 program, `data/postR4_baseline_100ep.json`): median depth 2.0 / mean score 267.2 — BELOW the
+> R0 frozen reference (401.7 / 3.0, run `oPoU2l`). The v4 llm-authored combat rules did not hold the
+> NetHack baseline. Per Trade 4: milestone CODE (human-approved goals + gates + certs) is landed above,
+> but loop re-prioritization/tuning around R6 milestones is gated on fixing the loop first (llm > frozen
+> on transfer + NetHack baseline ≥ R0). Milestone behaviors 4–7 (gehennom/castle/vlad/ascension deep
+> gameplay) remain goal-gated hold patterns until the executor reaches those depths reliably.
 **Operational spec: §8 (normative contract).**
 The NetHack-community headline, demoted per Trade 4. Ordered by mortality impact: survival intrinsics/MR (DL 8–12), armor/weapon upgrade loop (alone should push median depth 6–8), Gehennom survival, Castle/wishing, Vlad → Candelabrum → Invocation → Ascension run, role quest branches.
 **Accept**: ascension rate ≥ AutoAscend's 4.8% on Valkyrie (100-ep batches); each milestone certified before the LLM may re-prioritize around it.

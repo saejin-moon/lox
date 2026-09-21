@@ -37,8 +37,8 @@ Outperform **AutoAscend** on NetHack (NLE 3.6.6 / `NetHackChallenge-v0`) and dem
    - **ALWAYS** prefix Python and Pytest commands with `uv run`.
    - Examples: `uv run python scripts/run_benchmark.py ...`, `uv run pytest`.
 3. **100% REGRESSION-FREE TEST SUITE**:
-   - The test suite (`uv run pytest`) currently has **297 passing tests** taking ~4s.
-   - Every single pull request, edit, or commit MUST maintain 297/297 passing tests. Never disable or skip tests to mask errors.
+   - The test suite (`uv run pytest`) currently has **312 passing tests** taking ~5s.
+   - Every single pull request, edit, or commit MUST maintain 312/312 passing tests. Never disable or skip tests to mask errors.
 4. **CLEAN TELEMETRY & ZERO DISK BACKLOG**:
    - Streaming telemetry generates columnar Snappy-compressed Parquet files in `logs/parquet/`.
    - These files MUST be consolidated into DuckDB (`data/corp_telemetry.duckdb`) and automatically purged using the `--clean-parquet` flag on `run_benchmark.py` or via `scripts/clean_telemetry.py`.
@@ -275,9 +275,12 @@ DuckDB is populated by `corp/telemetry/duckdb_consolidator.py`. Key tables and v
 | **`JMRMbJ`** | **Phase 1-4 Overhaul: MacroDirector wiring, aggressive descent, mines/sokoban routing, HP resting, poison-res farming, door siege, gas-spore/leprechaun fixes, Medusa handler** | 5 | **2.0–4.0 (σ high)** | **4–6** | **293–750** | **1,033** | **3,100–7,000** | **350–530** |
 | **`JMRMbJ`+** | **Zero-turn storm fixes (THROW/EAT stale slots), critical-HP universal retreat, gas-spore cornered-kill, escape-max separation, door siege, throne-sit disable, starvation food-bridge** | 3×10 | **2.0** | **4–6** | **281–349** | **969** | **3,600–4,500** | **170–660** |
 | **`JMRMbJ`++** | **5-ep batches with same fixes (high variance)** | 5 | **2.0–4.0** | **4–6** | **239–848** | **1,523** | **1,900–7,600** | **200–1,200** |
+| **`postR4-100ep`** | **v4 live program, 100 eps @ 20k, valkyrie (parallel runner)** | 100 | **2.0** | **4** | **267.2** | **655** | **2,715.2** | **~750 (1,790 wall-equiv)** |
 
 ### Critical Telemetry Takeaways:
 1. **HONEST ASSESSMENT vs AutoAscend**: AutoAscend (empirical, 5ep @ 20k steps) reaches Median Depth 10.0 / Mean Score 10,713.6 / Mean Turns 10,680. CORP's best runs (5–10ep @ 20k steps) reach Median Depth 2–4 / Mean Score ~172–566 / Mean Turns ~700–6,190. **CORP is 5–24x behind on depth and score.** High turn counts on shallow floors are *stalling*, not progress: the agent spends thousands of turns wandering Depth 1–3 instead of descending. The prior claim that CORP "beat AutoAscend on every front" was based on an understated baseline and is retracted.
+1b. **v4 combat rules regressed the NetHack baseline** (2026-09-19, 100-ep batch): median depth 2.0 / mean score 267.2 vs the R0 frozen reference 401.7 / 3.0 — the llm-authored tactic rules did not hold. Death taxonomy shows starvation faints and a prayer-prompt death re-emerging. Diagnose before any further rule authoring on nethack.
+1c. **Scaled minihack three-arm ablation (~500 eps/arm)**: frozen 30 / random 31 / llm 31 median steps; llm vs frozen p=0.19 (δ=0.048, positive direction, not significant); random≈frozen (control behaves). The R6 loop-gate (llm > frozen, p<0.05) is NOT met — fix the loop before the LLM tunes R6 milestones.
 2. **Deep Dungeon Progression**: Best observed Depth 9 / Score 1,315 — still far below AutoAscend's Depth 10–12 / Score 10,000+ on identical budgets.
 3. **Lethal Root Cause Evolution**:
    - Level 1-3 traps eliminated: 0 rotten food deaths, 0 shopkeeper deaths, 0 domestic kick deaths.
@@ -309,6 +312,7 @@ Key test modules:
 - `tests/test_planner_and_nav.py`: A* corner clipping, frontier exploration, HTN decomposition, CDCL Nogood cuts.
 - `tests/test_role_specialization.py`: Role-specific starting equipment, skills, and persona profiling.
 - `tests/test_telemetry.py`: Parquet streaming, DuckDB consolidation, automatic file cleanup.
+- `tests/test_r6_milestones.py`: R6 ascension-stack milestone certification — no-skip-to gating, policy-param completion semantics, directive wiring, manifest closure, owned-param tunability.
 
 ---
 
@@ -352,6 +356,7 @@ stretch goal (R6).
 | Task | Command |
 | :--- | :--- |
 | **Run Unit Tests** | `uv run pytest` |
+| **Run Parallel Batch (10 workers)** | `uv run python scripts/run_parallel_batch.py --role valkyrie --episodes 100 --max-steps 20000 --jobs 10 --output data/batch.json` |
 | **Run Fast Benchmark (Random)** | `uv run python scripts/run_benchmark.py --episodes 5 --max-steps 1500 --clean-parquet` |
 | **Run Standard Benchmark (Samurai)** | `uv run python scripts/run_benchmark.py --role samurai --episodes 10 --max-steps 3000 --seed 42 --clean-parquet` |
 | **Run Standard Benchmark (Valkyrie)** | `uv run python scripts/run_benchmark.py --role valkyrie --episodes 10 --max-steps 3000 --seed 42 --clean-parquet` |
