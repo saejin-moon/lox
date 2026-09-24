@@ -10,13 +10,13 @@ Unit tests for EpistemicWorker:
 import numpy as np
 import pytest
 
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
-from corp.epistemic.epistemic_manager import EpistemicManager
-from corp.domain.epistemic_worker import EpistemicWorker
-from corp.domain.navigation_manager import NavigationManager
-from corp.workers.dispatcher import ActionDispatcher
-from corp.planner.htn import Task
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.epistemic.epistemic_manager import EpistemicManager
+from lox.domain.epistemic_worker import EpistemicWorker
+from lox.domain.navigation_manager import NavigationManager
+from lox.workers.dispatcher import ActionDispatcher
+from lox.planner.htn import Task
 
 
 def make_dummy_blstats(y=10, x=10, hp=20, max_hp=20, turn=100, depth=1, encumbrance=0):

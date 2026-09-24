@@ -1,7 +1,7 @@
-"""R3 tests: S-expression diff reader (corp/policy/dsl.py, MACRO.md §2–3)."""
+"""R3 tests: S-expression diff reader (lox/policy/dsl.py, MACRO.md §2–3)."""
 import pytest
 
-from corp.policy.dsl import (
+from lox.policy.dsl import (
     parse_diff, extract_diff_text, render_node, DiffParseError, parse_forms,
 )
 

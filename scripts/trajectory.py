@@ -1,4 +1,4 @@
-"""R0: Reconstruct the CORP capability trajectory from DuckDB telemetry.
+"""R0: Reconstruct the LOX-ψ capability trajectory from DuckDB telemetry.
 
 Produces data/trajectory.csv (per-run aggregates ordered by first-timestamp) and
 data/trajectory.png (Figure 1: mean score + max depth vs calendar time).
@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import duckdb
 
-DB = "data/corp_telemetry.duckdb"
+DB = "data/lox_telemetry.duckdb"
 OUT_CSV = "data/trajectory.csv"
 OUT_PNG = "data/trajectory.png"
 
@@ -92,7 +92,7 @@ def main():
         ax1.scatter(xs, [r[5] for r in rows], s=sizes, alpha=0.6, label="best score", color="tab:orange", marker="^")
         ax1.set_ylabel("score")
         ax1.legend()
-        ax1.set_title("CORP capability trajectory (each point = one benchmark run; size = episode count)")
+        ax1.set_title("LOX-ψ capability trajectory (each point = one benchmark run; size = episode count)")
         ax2.scatter(xs, [r[7] for r in rows], s=sizes, alpha=0.6, label="median depth", color="tab:green")
         ax2.plot(xs, [r[7] for r in rows], alpha=0.25, color="tab:green")
         ax2.scatter(xs, [r[8] for r in rows], s=12, alpha=0.6, label="best depth", color="tab:red", marker="x")

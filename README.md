@@ -2,8 +2,7 @@
 
 **LOX-ψ** is a policy synthesis engine: a safety-gated loop in which an LLM author grows a declarative
 policy program (macros, rules, goals, handlers) from full run telemetry, the game wiki, and self-built
-documentation corpora — until the resulting agent surpasses expert-engineered baselines. **CORP** is its
-reference instantiation for NetHack (NLE 3.6.6), with transfer adapters for MiniHack and Craftax.
+documentation corpora — until the resulting agent surpasses expert-engineered baselines for NetHack (NLE 3.6.6), with transfer adapters for MiniHack and Craftax.
 
 Humans provide primitives, interlocks, and certification gates. The LLM provides the strategy — through a
 grammar-constrained diff language that provably cannot express mechanism-level action.
@@ -53,7 +52,7 @@ The complete specification is detailed across nine modular documents in `docs/ar
 
 ## 3. Technology Highlights
 
-* **Language**: Hybrid Python 3.11/3.12 + **Rust 2021** native extension (`corp_core` compiled via `maturin` and managed by `uv`).
+* **Language**: Hybrid Python 3.11/3.12 + **Rust 2021** native extension (`lox_core` compiled via `maturin` and managed by `uv`).
 * **Environment**: `nle` (NetHack Learning Environment 0.9.x) + `minihack` for unit-level tactical regressions.
 * **Lexical & Vector Retrieval**: `SQLite FTS5` (C-based column-weighted BM25) + `LanceDB` (Apache Arrow embedded) + `bm25s`.
 * **Embeddings & Reranker**: `FastEmbed` (`BAAI/bge-small-en-v1.5`) + `FlashRank` (`ms-marco-TinyBERT`) running 100% on CPU ONNX runtime (0 MB VRAM).

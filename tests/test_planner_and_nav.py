@@ -6,11 +6,11 @@ and Spatial Navigation (Grid A* and Frontier Exploration).
 import numpy as np
 import pytest
 
-from corp.planner.predicates import PredicateBit, compile_predicate_mask
-from corp.planner.persona import PersonaProfiler, PersonaTraitVector
-from corp.planner.nogood import NogoodStore, NogoodEntry
-from corp.planner.guards import HTNGuards
-from corp.planner.htn import (
+from lox.planner.predicates import PredicateBit, compile_predicate_mask
+from lox.planner.persona import PersonaProfiler, PersonaTraitVector
+from lox.planner.nogood import NogoodStore, NogoodEntry
+from lox.planner.guards import HTNGuards
+from lox.planner.htn import (
     HTNPlanner,
     Task,
     PrimitiveTask,
@@ -20,11 +20,11 @@ from corp.planner.htn import (
     CycleDetector,
     HTNDeadlockException,
 )
-from corp.navigation.astar import GridAStar, PathNode
-from corp.navigation.frontier import FrontierExplorer
-from corp.domain.navigation_manager import NavigationManager
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.navigation.astar import GridAStar, PathNode
+from lox.navigation.frontier import FrontierExplorer
+from lox.domain.navigation_manager import NavigationManager
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
 
 
 def create_stats(
@@ -257,7 +257,7 @@ def test_nogood_store_inverted_action_index():
 
 
 def test_enriched_predicate_mask_compilation():
-    from corp.domain.combat_manager import MonsterTrack
+    from lox.domain.combat_manager import MonsterTrack
 
     stats = create_stats(hp=18, max_hp=20, depth=1)
     chars = np.full((21, 79), ord("."), dtype=np.uint8)
@@ -281,7 +281,7 @@ def test_enriched_predicate_mask_compilation():
 
 
 def test_htn_guards_should_descend():
-    from corp.planner.guards import HTNGuards
+    from lox.planner.guards import HTNGuards
 
     stats_healthy = create_stats(hp=18, max_hp=20, exp=2)
     # Healthy XL 2 with stairs known -> should descend
@@ -343,8 +343,8 @@ def test_navigation_gold_and_container_looting():
 
 
 def test_inventory_manager_twoweapon():
-    from corp.domain.inventory_manager import InventoryManager
-    from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+    from lox.domain.inventory_manager import InventoryManager
+    from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
 
     inv_mgr = InventoryManager()
     tracker = InventoryNormalizer()

@@ -1,0 +1,1 @@
+(rule add tactic_rules (when (and (monster "giant spider") (not has_poison_res))) (do elbereth_first) (note "interlock: lethal poison biter 'giant spider' — engrave/ward, never melee") (interlock true))

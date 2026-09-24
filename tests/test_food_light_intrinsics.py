@@ -7,12 +7,12 @@ import pytest
 import numpy as np
 import nle
 
-from corp.env.blstats import BottomLineStats, HungerState, ConditionFlag
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
-from corp.domain.inventory_manager import InventoryManager
-from corp.domain.navigation_manager import NavigationManager, LevelMap
-from corp.domain.combat_manager import TacticalCombatManager, MonsterTrack
-from corp.planner.htn import Task
+from lox.env.blstats import BottomLineStats, HungerState, ConditionFlag
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.domain.inventory_manager import InventoryManager
+from lox.domain.navigation_manager import NavigationManager, LevelMap
+from lox.domain.combat_manager import TacticalCombatManager, MonsterTrack
+from lox.planner.htn import Task
 
 
 def make_test_blstats(
@@ -187,14 +187,14 @@ def test_fragile_role_elbereth_threshold():
     assert task_wiz.name == "ENGRAVE_DUST"
 
 
-def test_corp_agent_intrinsic_tracking():
-    """Verify that CORPAgent dynamically updates intrinsics from message history."""
-    from corp.env.nle_wrapper import make_env
-    from corp.agent.corp_agent import CORPAgent
-    from corp.deliberative.providers.mock_provider import MockProvider
+def test_lox_agent_intrinsic_tracking():
+    """Verify that LoxAgent dynamically updates intrinsics from message history."""
+    from lox.env.nle_wrapper import make_env
+    from lox.agent.lox_agent import LoxAgent
+    from lox.deliberative.providers.mock_provider import MockProvider
 
     env = make_env()
-    agent = CORPAgent(env=env, llm_provider=MockProvider())
+    agent = LoxAgent(env=env, llm_provider=MockProvider())
     agent.reset()
 
     # Initially empty or starting role intrinsic

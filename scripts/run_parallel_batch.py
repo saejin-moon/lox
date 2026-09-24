@@ -25,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from corp.telemetry import DuckDBConsolidator, generate_base62_id  # noqa: E402
+from lox.telemetry import DuckDBConsolidator, generate_base62_id  # noqa: E402
 
 ROLE_CHARACTER_MAP = {
     "valkyrie": "val-hum-law-fem",
@@ -41,10 +41,10 @@ ROLE_CHARACTER_MAP = {
 def _worker_main(worker_cfg: dict[str, Any]) -> dict[str, Any]:
     """Runs this worker's slice of episodes in a fresh process (own env+agent)."""
     # Deferred imports: every worker process builds its own NLE/env/agent state.
-    from corp.agent.corp_agent import CORPAgent  # noqa: PLC0415
-    from corp.env.nle_wrapper import make_env  # noqa: PLC0415
-    from corp.planner.nogood import NogoodStore  # noqa: PLC0415
-    from corp.telemetry import ParquetLogger  # noqa: PLC0415
+    from lox.agent.lox_agent import LoxAgent  # noqa: PLC0415
+    from lox.env.nle_wrapper import make_env  # noqa: PLC0415
+    from lox.planner.nogood import NogoodStore  # noqa: PLC0415
+    from lox.telemetry import ParquetLogger  # noqa: PLC0415
 
     wid = worker_cfg["worker_id"]
     episode_ids = worker_cfg["episode_ids"]
@@ -67,7 +67,7 @@ def _worker_main(worker_cfg: dict[str, Any]) -> dict[str, Any]:
             else "*"
         )
         env = make_env(character=character)
-        agent = CORPAgent(
+        agent = LoxAgent(
             env=env,
             nogood_store=nogood_store,
             llm_provider=None,  # parallel batches run without deliberative LLM calls
@@ -133,7 +133,7 @@ def _merge_nogoods(worker_payloads: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CORP Parallel Multiprocessing Batch Runner")
+    parser = argparse.ArgumentParser(description="LOX-ψ Parallel Multiprocessing Batch Runner")
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=20000)
     parser.add_argument("--role", type=str, default="valkyrie")
@@ -145,16 +145,37 @@ def main() -> None:
                         default="research_grade")
     parser.add_argument("--nogood-path", type=str, default="data/nogoods.json")
     parser.add_argument("--parquet-dir", type=str, default="logs/parquet")
-    parser.add_argument("--duckdb-path", type=str, default="data/corp_telemetry.duckdb")
+    parser.add_argument("--duckdb-path", type=str, default="data/lox_telemetry.duckdb")
     parser.add_argument("--clean-parquet", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--no-consolidate", action="store_true",
                         help="Skip DuckDB consolidation (parquet stays on disk)")
     parser.add_argument("--program-path", type=str, default=None,
                         help="Policy program override (A/B arms, ablations; default: live program)")
+    parser.add_argument("--candidate-id", type=str, default=None,
+                        help="S2: population candidate this batch evaluates (lineage tagging)")
+    parser.add_argument("--population-id", type=str, default=None,
+                        help="S2: population/campaign this batch belongs to")
+    parser.add_argument("--generation", type=int, default=None,
+                        help="S2: evolution generation index")
+    parser.add_argument("--parent-id", type=str, default=None,
+                        help="S2: lineage parent candidate id")
+    parser.add_argument("--program-version", type=int, default=None,
+                        help="S2: program version under evaluation (lineage tagging)")
     parser.add_argument("--output", type=str, default="data/parallel_batch_results.json")
     args = parser.parse_args()
 
     run_id = args.run_id or generate_base62_id()
+    # S2: tag this batch's telemetry with its candidate lineage so the author can be
+    # conditioned on the evidence of a SPECIFIC candidate (per-candidate evidence).
+    if args.candidate_id or args.population_id:
+        from lox.evolution import RunLineage  # noqa: PLC0415
+        RunLineage(args.duckdb_path).register(
+            run_id=run_id, domain="nethack", program_version=args.program_version,
+            population_id=args.population_id, candidate_id=args.candidate_id,
+            generation=args.generation, parent_id=args.parent_id,
+            notes=f"role={args.role} episodes={args.episodes}")
+        print(f"Lineage: candidate={args.candidate_id} population={args.population_id} "
+              f"generation={args.generation}")
     # Round-robin episode assignment: workers finish roughly together (episode
     # durations vary, but assignment cost is trivial either way).
     assignments: list[list[int]] = [[] for _ in range(args.jobs)]
@@ -175,7 +196,7 @@ def main() -> None:
     } for w in range(args.jobs) if assignments[w]]
 
     print("=" * 80)
-    print(f"CORP Parallel Batch Runner | Run {run_id}")
+    print(f"LOX-ψ Parallel Batch Runner | Run {run_id}")
     print(f"Episodes: {args.episodes} @ {args.max_steps} steps | Jobs: {len(worker_cfgs)} | Role: {args.role}")
     print("=" * 80)
 
@@ -195,7 +216,7 @@ def main() -> None:
     if not os.path.exists(args.nogood_path):
         os.makedirs(os.path.dirname(args.nogood_path) or ".", exist_ok=True)
         json.dump([], open(args.nogood_path, "w"))
-    from corp.planner.nogood import NogoodEntry, NogoodStore  # noqa: PLC0415
+    from lox.planner.nogood import NogoodEntry, NogoodStore  # noqa: PLC0415
     from dataclasses import asdict  # noqa: PLC0415
     store = NogoodStore()
     if os.path.exists(args.nogood_path):

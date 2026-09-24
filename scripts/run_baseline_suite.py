@@ -1,5 +1,5 @@
 """
-Unified AutoAscend vs CORP Baseline Comparison Suite.
+Unified AutoAscend vs LOX-ψ Baseline Comparison Suite.
 
 Runs both agents on identical seeds and step budgets for apples-to-apples comparison,
 producing a unified comparison table and saving results to data/baseline_comparison.json.
@@ -50,13 +50,13 @@ def run_autoascend(episodes: int, role: str, seed: int, step_limit: int, duckdb_
     }
 
 
-def run_corp(episodes: int, role: str, seed: int, step_limit: int, duckdb_path: str) -> dict:
-    """Run CORP episodes via run_benchmark's episode runner and return aggregate stats."""
-    from corp.env.nle_wrapper import make_env
-    from corp.agent.corp_agent import CORPAgent
-    from corp.planner.nogood import NogoodStore
-    from corp.deliberative.providers.mock_provider import MockProvider
-    from corp.telemetry import ParquetLogger
+def run_lox(episodes: int, role: str, seed: int, step_limit: int, duckdb_path: str) -> dict:
+    """Run LOX-ψ episodes via run_benchmark's episode runner and return aggregate stats."""
+    from lox.env.nle_wrapper import make_env
+    from lox.agent.lox_agent import LoxAgent
+    from lox.planner.nogood import NogoodStore
+    from lox.deliberative.providers.mock_provider import MockProvider
+    from lox.telemetry import ParquetLogger
 
     ROLE_CHARACTER_MAP = {
         "val": "val-hum-law-fem",
@@ -72,9 +72,9 @@ def run_corp(episodes: int, role: str, seed: int, step_limit: int, duckdb_path: 
     parquet_logger = ParquetLogger(base_dir="logs/parquet", run_id=f"cmp_{int(time.time())}")
     results = []
     for i in range(episodes):
-        print(f"[CORP] Episode {i + 1}/{episodes} (seed={seed + i}) ...", flush=True)
+        print(f"[LOX-ψ] Episode {i + 1}/{episodes} (seed={seed + i}) ...", flush=True)
         env = make_env(character=character)
-        agent = CORPAgent(
+        agent = LoxAgent(
             env=env,
             nogood_store=nogood_store,
             llm_provider=MockProvider(),
@@ -95,7 +95,7 @@ def run_corp(episodes: int, role: str, seed: int, step_limit: int, duckdb_path: 
 
     depths = [r.max_depth for r in results]
     return {
-        "agent": "corp",
+        "agent": "lox",
         "role": role,
         "episodes": episodes,
         "step_limit": step_limit,
@@ -119,50 +119,50 @@ def run_corp(episodes: int, role: str, seed: int, step_limit: int, duckdb_path: 
     }
 
 
-def print_comparison(autoascend: dict, corp: dict) -> None:
+def print_comparison(autoascend: dict, lox_stats: dict) -> None:
     print("\n" + "=" * 84)
-    print("UNIFIED BASELINE COMPARISON: AutoAscend vs CORP (identical seeds & step budget)")
+    print("UNIFIED BASELINE COMPARISON: AutoAscend vs LOX-ψ (identical seeds & step budget)")
     print("=" * 84)
-    print(f"{'Metric':<28} | {'AutoAscend':>26} | {'CORP':>26}")
+    print(f"{'Metric':<28} | {'AutoAscend':>26} | {'LOX-ψ':>26}")
     print("-" * 84)
     rows = [
-        ("Episodes", f"{autoascend['episodes']} @ {autoascend['step_limit']} steps", f"{corp['episodes']} @ {corp['step_limit']} steps"),
-        ("Median Dungeon Depth", f"{autoascend['median_depth']:.1f}", f"{corp['median_depth']:.1f}"),
-        ("Max Dungeon Depth", f"{autoascend['max_depth']}", f"{corp['max_depth']}"),
-        ("Mean Score", f"{autoascend['mean_score']:.1f}", f"{corp['mean_score']:.1f}"),
-        ("Mean Turns", f"{autoascend['mean_turns']:.1f}", f"{corp['mean_turns']:.1f}"),
-        ("Ascension Rate", f"{autoascend['ascension_rate']*100:.1f}%", f"{corp['ascension_rate']*100:.1f}%"),
+        ("Episodes", f"{autoascend['episodes']} @ {autoascend['step_limit']} steps", f"{lox_stats['episodes']} @ {lox_stats['step_limit']} steps"),
+        ("Median Dungeon Depth", f"{autoascend['median_depth']:.1f}", f"{lox_stats['median_depth']:.1f}"),
+        ("Max Dungeon Depth", f"{autoascend['max_depth']}", f"{lox_stats['max_depth']}"),
+        ("Mean Score", f"{autoascend['mean_score']:.1f}", f"{lox_stats['mean_score']:.1f}"),
+        ("Mean Turns", f"{autoascend['mean_turns']:.1f}", f"{lox_stats['mean_turns']:.1f}"),
+        ("Ascension Rate", f"{autoascend['ascension_rate']*100:.1f}%", f"{lox_stats['ascension_rate']*100:.1f}%"),
     ]
-    if "mean_sps" in corp:
-        rows.append(("Mean Throughput (SPS)", "N/A", f"{corp['mean_sps']:.1f}"))
+    if "mean_sps" in lox_stats:
+        rows.append(("Mean Throughput (SPS)", "N/A", f"{lox_stats['mean_sps']:.1f}"))
     for name, a, c in rows:
         print(f"{name:<28} | {a:>26} | {c:>26}")
     print("=" * 84)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Unified AutoAscend vs CORP baseline comparison")
+    parser = argparse.ArgumentParser(description="Unified AutoAscend vs LOX-ψ baseline comparison")
     parser.add_argument("--episodes", type=int, default=10, help="Episodes per agent")
     parser.add_argument("--step-limit", type=int, default=20000, help="Step budget per episode (AutoAscend default: 50000)")
     parser.add_argument("--role", type=str, default="val", help="Role for both agents (val, bar, sam, pri, mon)")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
-    parser.add_argument("--agents", choices=["both", "autoascend", "corp"], default="both", help="Which agent(s) to run")
+    parser.add_argument("--agents", choices=["both", "autoascend", "lox"], default="both", help="Which agent(s) to run")
     parser.add_argument("--output", type=str, default="data/baseline_comparison.json", help="Path for the comparison JSON")
     args = parser.parse_args()
 
     started = time.time()
-    autoascend = corp = None
+    autoascend = lox_stats = None
     if args.agents in ("both", "autoascend"):
         autoascend = run_autoascend(args.episodes, args.role, args.seed, args.step_limit, args.output)
-    if args.agents in ("both", "corp"):
-        corp = run_corp(args.episodes, args.role, args.seed, args.step_limit, args.output)
+    if args.agents in ("both", "lox"):
+        lox_stats = run_lox(args.episodes, args.role, args.seed, args.step_limit, args.output)
 
-    if autoascend and corp:
-        print_comparison(autoascend, corp)
+    if autoascend and lox_stats:
+        print_comparison(autoascend, lox_stats)
     elif autoascend:
         print_comparison(autoascend, {"episodes": 0, "step_limit": args.step_limit, "median_depth": 0, "max_depth": 0, "mean_score": 0, "mean_turns": 0, "ascension_rate": 0})
-    elif corp:
-        print_comparison({"episodes": 0, "step_limit": args.step_limit, "median_depth": 0, "max_depth": 0, "mean_score": 0, "mean_turns": 0, "ascension_rate": 0}, corp)
+    elif lox_stats:
+        print_comparison({"episodes": 0, "step_limit": args.step_limit, "median_depth": 0, "max_depth": 0, "mean_score": 0, "mean_turns": 0, "ascension_rate": 0}, lox_stats)
 
     payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -171,7 +171,7 @@ def main():
         "role": args.role,
         "base_seed": args.seed,
         "autoascend": autoascend,
-        "corp": corp,
+        "lox": lox_stats,
     }
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:

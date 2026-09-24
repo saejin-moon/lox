@@ -17,7 +17,7 @@ To achieve the execution speed required to run thousands of cross-generational g
                                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                            RUST NATIVE ENGINE (The "Spine")                                 │
-│                                (corp_core via PyO3 & maturin)                               │
+│                                (lox_core via PyO3 & maturin)                               │
 ├──────────────────────────────────────────────┬──────────────────────────────────────────────┤
 │ 1. SPATIAL NAVIGATION ACCELERATOR            │ 2. FAST HTN SEARCH ACCELERATOR               │
 │ • 80x21 Bitmask Grid A* (<5 microseconds)    │ • Zero-allocation task decomposition         │
@@ -32,7 +32,7 @@ To achieve the execution speed required to run thousands of cross-generational g
 
 In a 50,000-turn full NetHack game, the high-frequency inner loops (pathfinding and HTN decomposition) are executed up to 50,000 times:
 
-| Subsystem Component | Pure Python Implementation | Rust Native (`corp_core`) | Acceleration Factor | Total Game Clock Delta |
+| Subsystem Component | Pure Python Implementation | Rust Native (`lox_core`) | Acceleration Factor | Total Game Clock Delta |
 | :--- | :--- | :--- | :--- | :--- |
 | **80x21 Grid A* Pathfinding** | $\approx 0.35\text{ ms}$ / step | **$< 0.005\text{ ms}$** ($5\ \mu\text{s}$) | **70x faster** | 17.5s $\to$ **0.25s** per game |
 | **Dijkstra Field Gradient Follow**| $\approx 0.08\text{ ms}$ / step | **$< 0.0005\text{ ms}$** ($0.5\ \mu\text{s}$) | **160x faster** | 4.0s $\to$ **0.02s** per game |
@@ -179,18 +179,18 @@ build-backend = "maturin"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-source = "src"
-manifest-path = "crates/corp_core/Cargo.toml"
+manifest-path = "crates/lox_core/Cargo.toml"
 ```
 
-### `crates/corp_core/Cargo.toml`
+### `crates/lox_core/Cargo.toml`
 ```toml
 [package]
-name = "corp_core"
+name = "lox_core"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "corp_core"
+name = "lox_core"
 crate-type = ["cdylib"]
 
 [dependencies]

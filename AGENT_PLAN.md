@@ -30,8 +30,9 @@ Parity is the crossover; the design goal is that our loop's improvement rate **c
 
 ---
 
-## 0.5 WHERE WE ARE (state of record, 2026-09-19) — read before working
+## 0.5 WHERE WE ARE (state of record, 2026-09-24) — read before working
 
+**Suite**: **549 passing tests (~15s)** (`uv run pytest -q`). Telemetry: **7.2M+ ticks in DuckDB**.
 **Program**: live NetHack program = **v6** (`data/policy_program.json`; interlock-only tactic rules — the 3
 llm-authored combat rules were reverted after an A/B showed they cost 45% mean score). MiniHack program v4.
 **Current NetHack baseline band (100-ep batches, valkyrie, v6 rules)**: mean score **330–396**, median depth
@@ -51,8 +52,8 @@ AutoAscend empirical foil: median depth 10.0 / mean score 10,713.6 / 4.8% ascens
   (`make_quick_batch_gate(args, parent_program=…)` in run_revision_loop.py).
 - **1c**: transfer report bundles carry per-seed spread; report-episodes defaults 10.
 - **Storage**: per-file `.sexpr` authoring tree (`data/program/<domain>/`) + compiled JSON artifact
-  (`corp/policy/compiler.py` → `data/compiled/<domain>.json`). Executor contract unchanged.
-- **Naming**: architecture = **LOX-ψ** (LLM-Oriented Creation of Symbolic policies); **CORP** = the system.
+  (`lox/policy/compiler.py` → `data/compiled/<domain>.json`). Executor contract unchanged.
+- **Naming**: **LOX-ψ** (LLM-Oriented Creation of Symbolic policies).
 - **Food chase stays disabled** (dose-response A/B, 4×100 eps: none 396.4 > tight 275.4 > design 310.8 >
   wide 250.0; faints RISE with chase capability). Locked by `tests/test_food_security.py`.
 
@@ -93,7 +94,7 @@ CURRICULA  data/curricula/<skill>/ — short targeted episodes for fast per-skil
 The LLM authors into **individual `.sexpr` files** under `data/program/<domain>/`
 (`macros/*.sexpr`, `rules/*.sexpr`, `goals/*.sexpr`, `handlers/*.sexpr`, `params.json`, `nogoods.jsonl`).
 Rationale: per-unit git diffs, per-file provenance, natural review units for humans, no monolithic merge
-conflicts for the evolution engine, and file identity = rule identity. `corp/policy/compiler.py` assembles +
+conflicts for the evolution engine, and file identity = rule identity. `lox/policy/compiler.py` assembles +
 validates the tree into `data/compiled/<domain>.json` — the executor's contract is unchanged (zero executor
 rewrites). The validator remains the ONLY writer of accepted trees; every compiled artifact is archived under
 `data/programs/archive/`.
@@ -163,33 +164,45 @@ detours", "never propose catch-all combat rules", "prefer wiki-cited rationales"
 
 ## 2. Phases (S0–S6), each with entry/exit gates and kill criteria
 
-### S0 — Evidence + Prompt Harness (≈1 wk) — NEXT UP
+### S0 — Evidence + Prompt Harness & High-Performance Spine (≈1 wk) — NEXT UP
 - [ ] Author agent with tool loop (`run_author_session.py`): query_duckdb, wiki_search, read_trajectory,
       read_env_schema, read_manifest, read_program_tree → one validated diff per session.
 - [ ] Wire goal-failure counters (goal_events → condition vocabulary) + trajectory slices in bundles.
 - [ ] `run_prompt_ab.py` + first prompt-iteration campaign (≥5 prompt versions evaluated).
+- [ ] **Spine Acceleration**:
+      - `@njit` accelerate `GridAStar.find_path` (`astar.py`) and `FrontierExplorer` BFS (`frontier.py`) — target <20 µs.
+      - Static 512-entry NumPy LUT in `threat_scan.py` (eliminate `glyphs.tobytes()` and `permonst` C-API allocations).
+      - Profile decision latency: drop from 1,444 µs to <250 µs/turn, pushing throughput to >8k eps/hr on 30 cores.
 - [ ] Re-run the 3-arm minihack ablation with the agentic author (post-1a/1b/1c gates).
-- **Exit**: agentic author measurably outperforms the bundle-only author (accept-rate + downstream batch).
+- **Exit**: agentic author measurably outperforms the bundle-only author; decision latency <300 µs; test suite 100% green.
 - **Kill**: no improvement → the bottleneck is expression, jump S1 authoring-tree work early.
 
-### S1 — Policy ISA + Compiler (2–3 wk)
-- [ ] `corp/policy/compiler.py` + authoring tree migration (v6 → tree; compiled artifact byte-equivalent).
+### S1 — Policy ISA, Monolith Modularization & Core Primitives (2–3 wk)
+- [ ] `lox/policy/compiler.py` + authoring tree migration (v6 → tree; compiled artifact byte-equivalent).
+- [ ] **Modularize `NavigationManager`**: Split 1,212-line monolith into `stair_routing.py`, `search_policy.py`,
+      and `feature_navigation.py` to eliminate 4,400-turn perimeter wall search loops causing DL1 stalls.
+- [ ] **Mechanical Primitive Scaffolding (The AutoAscend prerequisites)**:
+      - `safe_fountain_dip`: uncursed long sword dipping for Excalibur at XL ≥ 5 with water demon abort.
+      - `corridor_funnel`: strict retreat-to-doorway behavior against fast/poison biters.
+      - `price_id`: shopkeeper buy/sell price testing for scroll/wand/potion identification.
 - [ ] Behavior-primitive manifest (preconditions/effects for every dispatcher Task).
 - [ ] Re-express the hardcoded cascade as the default program (decision-trace equivalence, per-manager).
-- **Exit**: default program equivalent to today's agent; all 321 tests green; the LLM can express every
-  strategy decision the cascade used to hardcode.
+- **Exit**: default program equivalent to today's agent; all 544 tests green; perimeter search stalls eliminated;
+  the LLM can express every strategy decision the cascade used to hardcode.
 - **Kill**: any cascade behavior that cannot be expressed without weakening an interlock → that behavior
   stays in code (guardrail), ISA narrows honestly.
 
 ### S2 — Evolution Engine (2 wk)
-- [ ] `run_evolution.py`: population, per-candidate evidence, gated tiered evaluation, selection, lineage.
+- [ ] `run_evolution.py`: population of K candidates, per-candidate evidence, gated tiered evaluation, selection, lineage.
 - [ ] Counterfactual probe tooling (seeded replay on transfer domains; paired batches on NetHack).
 - **Exit**: evolution beats the single-program loop on minihack (seeded, p<0.05 on steps-on-success) and
   does not regress NetHack vs the frozen v6 control (329–396 band, 100-ep batches).
 - **Kill**: population search ≤ single-program after 3 generations → author/prompt iteration first.
 
-### S3 — Handler Ladder (2–4 wk)
+### S3 — Handler Ladder & Deterministic Sokoban Solver (2–4 wk)
 - [ ] Parameterized macros (validator substitution semantics already specified in MACRO.md).
+- [ ] **Deterministic Sokoban Solver Primitive**: implement boulder-push A* solver as a certified handler
+      (guaranteeing Sokoban completion and bag/reflection prize without human heuristic creep).
 - [ ] Handler-plan schema + shadow harness (sandboxed episodes, side-effect telemetry, ≥50 shadow eps,
       0 invariant breaks, measured contribution vs frozen).
 - [ ] ≥3 LLM-authored handlers promoted with measured contribution; 0 unverified handlers in production.
@@ -197,26 +210,39 @@ detours", "never propose catch-all combat rules", "prefer wiki-cited rationales"
 - **Kill**: promoted handlers never beat handwritten equivalents → widen the primitive set; re-examine
   whether plans need iteration constructs (bounded loops) — still no general code.
 
-### S4 — NetHack Push (ongoing, mortality-driven)
-- [ ] Survival floor: eliminate DL1 deaths (128/~330 episodes died at depth 1, median 4.4k turns wasted) →
+### S4 — NetHack AutoAscend Push (ongoing, mortality-driven)
+- [ ] **Survival floor**: eliminate DL1 deaths (128/~330 episodes died at depth 1, median 4.4k turns wasted) →
       median depth ≥ 5, mean score ≥ 1,500 on 100-ep batches.
-- [ ] Mid-game: AC/MR/weapon curves, branch routing reliability → median depth ≥ 8.
-- [ ] Endgame (R6 milestones 4–7 as certified handlers): Gehennom → Castle → Invocation → Ascension.
+- [ ] **Mid-game**: AC/MR/weapon curves (Excalibur + Minetown divine protection + Sokoban prize) → median depth ≥ 8.
+- [ ] **Endgame** (R6 milestones 4–7 as certified handlers): Medusa mirror → Castle drawbridge striking →
+      Wand of Wishing protocol → Gehennom → Vlad → Invocation → Ascension.
 - [ ] **Ascension rate ≥ 4.8% (parity)** then **≥ 15% (dominance)** and mean score ≥ 10,713 (parity) then
-      ≥ 2× (dominance), on 100-ep batches with CIs.
+      ≥ 2× (dominance), on 100-ep batches with bootstrap CIs.
 - **Kill**: 3 consecutive stalled generations at any stage → escalate ISA expressiveness or curriculum
   coverage before more compute.
 
-### S5 — Transfer Dominance (parallel with S4)
-- [ ] Craftax cold-start (corpus is self-built — the baseline-free bet): beat published Craftax baselines
-      (R2D2-class; CALM as the direct LLM-agent comparison) on achievement curves.
+### S5 — Transfer Dominance: Craftax & MiniHack (parallel with S4)
+- [ ] **`CraftaxAdapter` Implementation**:
+      - Observation decoder: decode 8268-float array into player status, inventory DAG, and 63x63 local grid.
+      - **JAX Vectorized Batching**: Implement `CraftaxBatchWrapper` using `jax.vmap` to eliminate single-step
+        CPU dispatch overhead (17.2 ms/step → <0.3 ms/step in batches).
+      - Primitives: `mine(block)`, `craft(recipe)`, `drink()`, `eat()`, `attack(mob)`, `sleep()`, `place_torch()`.
+      - Goal handlers: `gather_wood`, `craft_pickaxe`, `mine_stone`, `craft_sword`, `survive_night`, `dungeon_crawl`.
+- [ ] **Craftax cold-start** (corpus self-built from source docstrings): beat published Craftax baselines:
+      - Craftax-Classic: beat PPO (~15%) and CALM (~35%) on achievement curve.
+      - Full Craftax: surpass published RL (<5%) across the 67-achievement progression tree.
 - [ ] MiniHack: dominance on steps-on-success + extension beyond ExploreMaze (combat/procgen task families).
 - **Exit**: ≥2 domains where the *same synthesis machinery* beats env-specific published agents.
 
-### S6 — Paper (checkpoint at S2 for a workshop; main track after S4/S5)
+### S6 — The Breakthrough Paper (Solo-Author Oral Target)
+- Target Venues: **NeurIPS / ICML / ICLR Oral** or **Nature Machine Intelligence**.
 - Main-track claim: *"Evidence-conditioned policy synthesis: a safety-gated LLM grows an agent program that
-  surpasses years of human expert engineering"* — requires NetHack dominance + ≥2-domain transfer + the
-  full ablation matrix (llm/frozen/random + author tiers + evolution-vs-single + nogoods + RAG on/off).
+  surpasses years of human expert engineering"* — requires NetHack dominance over AutoAscend + Craftax transfer.
+- Airtight Evidence Package:
+  1. **Clean-room guarantee**: Zero AutoAscend code/tables imported; full audit trail.
+  2. **Mandatory 3-arm ablation**: `LLM-Grown Policy > Frozen Initial Policy > Random Mutation Policy`.
+  3. **Multi-domain transfer**: Same synthesis loop dominates on NetHack (ancient C), MiniHack, and Craftax (modern JAX).
+  4. **Open-source audit artifact**: Append-only `data/revision_ledger.jsonl` with every prompt, diff, and evaluation trace.
 
 ---
 

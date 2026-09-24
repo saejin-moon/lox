@@ -1,13 +1,13 @@
 """R3 tests: validator gate pipeline + manifest (MACRO.md §4, §6)."""
 import pytest
 
-from corp.policy.manifest import build_manifest, param_leaves_from_config
-from corp.policy.predicates import eval_condition, nethack_bindings, default_ctx
-from corp.policy.program import PolicyProgram, DEFAULT_PROGRAM
-from corp.policy.validator import (
+from lox.policy.manifest import build_manifest, param_leaves_from_config
+from lox.policy.predicates import eval_condition, nethack_bindings, default_ctx
+from lox.policy.program import PolicyProgram, DEFAULT_PROGRAM
+from lox.policy.validator import (
     validate_diff, ValidatorHooks, check_signature, GateResult, _leaf_path,
 )
-from corp.policy import dsl
+from lox.policy import dsl
 
 
 def make_program(**overrides):
@@ -106,9 +106,10 @@ class TestGates:
         assert r.ok, r.detail
         assert r.candidate.macros[0]["name"] == "when_endangered"
         # rules store the EXPANDED condition (executor never sees macros — MACRO.md §7);
-        # the appended LLM rule lands after the default interlock rules (R4)
+        # the appended LLM rule lands after the default interlock rules (R4). String
+        # literals keep their quotes (S1 round-trip fidelity: quotedness is preserved).
         assert r.candidate.tactic_rules[-1]["when"] == \
-            '(and (in_mines) (monster jackal) (and (hp_frac <= 0.4) (not has_healing)))'
+            '(and (in_mines) (monster "jackal") (and (hp_frac <= 0.4) (not has_healing)))'
         assert "(monster " in r.candidate.tactic_rules[-1]["when"]  # 1a invariant satisfied
 
     def test_macro_redefinition_allowed(self):
@@ -166,7 +167,7 @@ class TestGates:
     def test_mounted_program_loads_and_applies(self):
         r = validate(diff("(set policy_params.survival.rest_below_frac 0.65)"))
         assert r.ok
-        from corp.policy.config import PolicyConfig
+        from lox.policy.config import PolicyConfig
         cfg = PolicyConfig.defaults()
         applied = r.candidate.apply_overlay(cfg)
         assert applied == ["survival.rest_below_frac"]
@@ -181,7 +182,7 @@ class TestNogoods:
         assert r.candidate.nogoods[-1]["forbid"] == "SIT"
 
     def test_nogood_program_path_loading(self):
-        from corp.planner.nogood import NogoodStore
+        from lox.planner.nogood import NogoodStore
         import json, tempfile, os
         prog = {"version": 2, "strategy_plan": [], "nogoods": [
             {"mask": 123, "target_val": 64, "forbidden_action": "SIT",

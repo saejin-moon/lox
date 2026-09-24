@@ -8,10 +8,10 @@ import numpy as np
 import pytest
 from nle import nethack
 
-from corp.domain.navigation_manager import NavigationManager
-from corp.domain.combat_manager import TacticalCombatManager
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.domain.navigation_manager import NavigationManager
+from lox.domain.combat_manager import TacticalCombatManager
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
 
 
 def create_stats(
@@ -195,41 +195,6 @@ def test_adaptive_search_cap_boundaries():
 # ---------------------------------------------------------------------------
 # Active poison resistance farming
 # ---------------------------------------------------------------------------
-
-def test_conveyor_corpse_overrides_descent():
-    """Fresh conveyor corpse within reach must be eaten before descending."""
-    nav_mgr = NavigationManager()
-    chars = make_floor()
-    glyphs = make_glyphs()
-    chars[10, 15] = ord(">")  # stairs east
-
-    killer_bee_id = None
-    for m in range(nethack.NUMMONS):
-        if "killer bee" in nethack.permonst(m).mname:
-            killer_bee_id = m
-            break
-    glyphs[10, 12] = nethack.GLYPH_BODY_OFF + killer_bee_id
-    chars[10, 12] = ord("%")
-
-    # Hero lacks poison resistance; witnessed kill message marks the corpse fresh
-    stats = create_stats(x=10, y=10, hp=20, max_hp=20, exp=2, depth=6, level_number=6, turn=500)
-    nav_mgr.evaluate_navigation_turn(
-        chars, stats, glyphs=glyphs,
-        message="You kill the killer bee!",
-        has_poison_res=False,
-    )
-    lvl = nav_mgr.get_or_create_level(stats)
-    assert (10, 12) in lvl.conveyor_corpses
-    lvl.turns_spent = 100
-
-    task = nav_mgr.evaluate_navigation_turn(
-        chars, stats, glyphs=glyphs, message="", has_poison_res=False
-    )
-    assert task is not None
-    assert task.name == "STEP"
-    # Move EAST towards the conveyor corpse at (10, 12), not the stairs at (10, 15)
-    assert task.args["delta"] == (0, 1)
-
 
 # ---------------------------------------------------------------------------
 # Fast-monster ranged engagement

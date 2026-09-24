@@ -1,0 +1,1 @@
+(goal explore_floor (when (true)) (until (false)))

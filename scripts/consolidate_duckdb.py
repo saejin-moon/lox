@@ -7,17 +7,17 @@ import os
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from corp.telemetry import DuckDBConsolidator
+from lox.telemetry import DuckDBConsolidator
 
 
 def main():
     parser = argparse.ArgumentParser(description="DuckDB Telemetry Consolidator")
-    parser.add_argument("--db-path", default="data/corp_telemetry.duckdb", help="Path to DuckDB database")
+    parser.add_argument("--db-path", default="data/lox_telemetry.duckdb", help="Path to DuckDB database")
     parser.add_argument("--parquet-dir", default="logs/parquet", help="Parquet partition directory")
     args = parser.parse_args()
 
     print("=" * 80)
-    print("CORP DuckDB Telemetry Consolidator")
+    print("LOX-ψ DuckDB Telemetry Consolidator")
     print(f"Database: {args.db_path} | Source: {args.parquet_dir}")
     print("=" * 80)
 

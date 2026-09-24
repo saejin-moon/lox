@@ -1,5 +1,5 @@
 """
-Interactive or CLI DuckDB SQL Query Runner for CORP Telemetry.
+Interactive or CLI DuckDB SQL Query Runner for LOX-ψ Telemetry.
 """
 
 import argparse
@@ -7,13 +7,13 @@ import os
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from corp.telemetry import DuckDBConsolidator
+from lox.telemetry import DuckDBConsolidator
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Query CORP DuckDB Telemetry")
+    parser = argparse.ArgumentParser(description="Query LOX-ψ DuckDB Telemetry")
     parser.add_argument("query", nargs="?", default=None, help="SQL query to execute")
-    parser.add_argument("--db-path", default="data/corp_telemetry.duckdb", help="Path to DuckDB database")
+    parser.add_argument("--db-path", default="data/lox_telemetry.duckdb", help="Path to DuckDB database")
     args = parser.parse_args()
 
     consolidator = DuckDBConsolidator(db_path=args.db_path)
@@ -28,7 +28,7 @@ def main():
         print("Interactive DuckDB Query Mode (type 'exit' or 'quit' to exit):")
         while True:
             try:
-                sql = input("corp-duckdb> ").strip()
+                sql = input("lox-duckdb> ").strip()
                 if not sql:
                     continue
                 if sql.lower() in ("exit", "quit", "q"):

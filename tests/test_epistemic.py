@@ -6,15 +6,15 @@ Shannon Entropy Safe-Gates, and EpistemicManager.
 import numpy as np
 import pytest
 
-from corp.epistemic.belief_state import ItemBeliefState
-from corp.epistemic.listeners.altar_listener import AltarListener
-from corp.epistemic.listeners.pet_listener import PetListener
-from corp.epistemic.listeners.price_listener import PriceIDListener
-from corp.epistemic.listeners.engrave_listener import EngraveTestListener, CursedWandExplosionRiskError
-from corp.epistemic.entropy_gates import ShannonSafeGate
-from corp.epistemic.epistemic_manager import EpistemicManager
-from corp.env.blstats import BottomLineStats, ConditionFlag
-from corp.env.inventory_tracker import NormalizedItem
+from lox.epistemic.belief_state import ItemBeliefState
+from lox.epistemic.listeners.altar_listener import AltarListener
+from lox.epistemic.listeners.pet_listener import PetListener
+from lox.epistemic.listeners.price_listener import PriceIDListener
+from lox.epistemic.listeners.engrave_listener import EngraveTestListener, CursedWandExplosionRiskError
+from lox.epistemic.entropy_gates import ShannonSafeGate
+from lox.epistemic.epistemic_manager import EpistemicManager
+from lox.env.blstats import BottomLineStats, ConditionFlag
+from lox.env.inventory_tracker import NormalizedItem
 
 
 def create_dummy_blstats(blind: bool = False, hallucinating: bool = False) -> BottomLineStats:

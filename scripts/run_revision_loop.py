@@ -41,18 +41,16 @@ except ImportError:
                     k, v = line.split("=", 1)
                     os.environ.setdefault(k.strip(), v.strip())
 
-from corp.deliberative.providers.gemini import GeminiProvider
-from corp.deliberative.providers.llama_cpp import LlamaCppProvider
-from corp.deliberative.providers.mock_provider import MockProvider
-from corp.deliberative.providers.openrouter import OpenRouterProvider
-from corp.policy.ledger import RevisionLedger, DEFAULT_LEDGER_PATH
-from corp.policy.manifest import build_manifest
-from corp.policy.program import PolicyProgram, DEFAULT_PROGRAM_PATH
-from corp.policy.report import build_report_bundle, DEFAULT_DB_PATH
-from corp.policy.reviser import Reviser
-from corp.policy.validator import validate_diff, ValidatorHooks
-
-PROGRAM_ARCHIVE_DIR = "data/policy_program"
+from lox.deliberative.providers.gemini import GeminiProvider
+from lox.deliberative.providers.llama_cpp import LlamaCppProvider
+from lox.deliberative.providers.mock_provider import MockProvider
+from lox.deliberative.providers.openrouter import OpenRouterProvider
+from lox.policy.ledger import RevisionLedger, DEFAULT_LEDGER_PATH
+from lox.policy.manifest import build_manifest
+from lox.policy.program import PolicyProgram, DEFAULT_PROGRAM_PATH
+from lox.policy.report import build_report_bundle, DEFAULT_DB_PATH
+from lox.policy.reviser import Reviser
+from lox.policy.validator import validate_diff, ValidatorHooks
 
 
 def get_provider(provider_type: str, model: str | None = None):
@@ -121,16 +119,16 @@ def make_certification_gate(args) -> callable:
 
 
 def commit_program(program: PolicyProgram, program_path: str, no_git: bool) -> None:
-    """§6 step 13: archive previous, save new, git commit."""
-    os.makedirs(PROGRAM_ARCHIVE_DIR, exist_ok=True)
-    if os.path.exists(program_path):
-        shutil.copy2(program_path, os.path.join(
-            PROGRAM_ARCHIVE_DIR, f"policy_program_v{program.version}.json"))
-    program.save(program_path)
+    """§6 step 13 + S1: archive previous, save the canonical compiled artifact,
+    write the per-file authoring tree, git commit. `compile_and_commit` enforces
+    byte-equivalence between the tree and the accepted candidate and fails loud."""
+    from lox.policy import compiler  # noqa: PLC0415
+    compiler.compile_and_commit(program, compiler.tree_dir_for(program.domain), program_path)
     if not no_git:
         try:
-            subprocess.run(["git", "add", program_path, PROGRAM_ARCHIVE_DIR,
-                            DEFAULT_LEDGER_PATH], check=False, capture_output=True)
+            subprocess.run(["git", "add", program_path, "data/program", "data/compiled",
+                            "data/programs/archive", DEFAULT_LEDGER_PATH],
+                           check=False, capture_output=True)
             subprocess.run(
                 ["git", "commit", "-m",
                  f"policy: program v{program.version} via revision loop ({program.provenance.get('author', 'unknown')})"],
@@ -148,19 +146,27 @@ async def run_loop(args) -> int:
     program = PolicyProgram.load(program_path)
     if args.domain != "nethack" and program.domain != args.domain:
         # cold-start: seed the file with the adapter's default program on first run
-        from corp.executor import get_adapter  # noqa: PLC0415
+        from lox.executor import get_adapter  # noqa: PLC0415
         PolicyProgram.from_dict(get_adapter(args.domain).default_program()).save(program_path)
         program = PolicyProgram.load(program_path)
     print(f"[loop] program v{program.version} from {program_path} | provider={args.provider}")
 
     adapter = None
     if args.domain != "nethack":
-        from corp.executor import get_adapter  # noqa: PLC0415
+        from lox.executor import get_adapter  # noqa: PLC0415
         adapter = get_adapter(args.domain)
 
     provider = get_provider(args.provider, args.model)
     model_name = args.model or getattr(provider, "model", args.provider)
-    reviser = Reviser(provider, ledger)
+    if getattr(args, "author_mode", "bundle") == "agentic":
+        from lox.policy.author_agent import AgenticAuthor
+        author = AgenticAuthor(provider, ledger, prompt_version=args.prompt_version,
+                               max_turns=getattr(args, "max_turns", 6))
+    else:
+        from lox.policy.prompts import load_prompt_text
+        author = Reviser(provider, ledger,
+                         system_prompt=(load_prompt_text(args.prompt_version)
+                                        if getattr(args, "prompt_version", None) else None))
 
     hooks_kwargs: dict = {}
     if args.live_gates and args.domain == "nethack":
@@ -205,7 +211,7 @@ async def run_loop(args) -> int:
         }
         print(f"[loop] transfer baseline (v{program.version}): {baseline_stats}")
     if args.fixture_shadow:
-        from corp.policy.predicates import default_ctx  # noqa: PLC0415
+        from lox.policy.predicates import default_ctx  # noqa: PLC0415
         if adapter is not None:
             # domain shadow fixtures: the domain ctx over the shared vocabulary
             hooks_kwargs["fixture_states"] = [
@@ -238,7 +244,7 @@ async def run_loop(args) -> int:
 
         t0 = time.perf_counter()
         try:
-            diff_text = await reviser.propose_diff(program, manifest, bundle)
+            diff_text = await author.propose_diff(program, manifest, bundle)
         except Exception as e:  # noqa: BLE001 — author path failure = parse-level rejection
             ledger.append(ledger.revision_entry(
                 revision=program.version + 1, parent_version=program.version,
@@ -247,7 +253,7 @@ async def run_loop(args) -> int:
                 gate="parse", wall_sec=time.perf_counter() - t0))
             print(f"  REJECT ERR_PARSE: author output unusable: {e}")
             continue
-        meta = dict(reviser.last_meta)
+        meta = dict(author.last_meta)
 
         result = validate_diff(diff_text, program, manifest,
                                hooks=ValidatorHooks(**hooks_kwargs))
@@ -294,7 +300,7 @@ async def run_loop(args) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="CORP R3 unattended gated revision loop")
+    p = argparse.ArgumentParser(description="LOX-ψ R3 unattended gated revision loop")
     p.add_argument("--max-revisions", type=int, default=10)
     p.add_argument("--provider", choices=["mock", "gemini", "openrouter", "llama_cpp"], default="mock")
     p.add_argument("--model", type=str, default=None,
@@ -313,6 +319,11 @@ def parse_args() -> argparse.Namespace:
                    help="run shadow tests on synthetic fixture states (default: on)")
     p.add_argument("--quick-batch-episodes", type=int, default=3)
     p.add_argument("--quick-batch-steps", type=int, default=5000)
+    p.add_argument("--author-mode", choices=["bundle", "agentic"], default="bundle",
+                   help="bundle = single-shot Reviser; agentic = S0 tool-loop author")
+    p.add_argument("--prompt-version", type=str, default=None,
+                   help="prompt version id (data/prompts/<v>.md) or path")
+    p.add_argument("--max-turns", type=int, default=6, help="agentic author tool-loop budget")
     p.add_argument("--no-git", action="store_true", help="skip git commit of program bumps")
     return p.parse_args()
 

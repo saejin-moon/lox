@@ -1,0 +1,1 @@
+(rule add tactic_rules (when (monster "leocrotta")) (do retreat_when_wounded) (note "interlock: heavy hitter 'leocrotta' — never trade blows when wounded") (interlock true))

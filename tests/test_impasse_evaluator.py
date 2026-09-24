@@ -5,10 +5,10 @@ Unit tests for Holistic Cognitive Impasse Evaluator (System 2 trigger heuristic)
 import pytest
 import numpy as np
 
-from corp.deliberative.impasse_evaluator import HolisticImpasseEvaluator, ImpasseEvaluation
-from corp.domain.navigation_manager import LevelMap
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.env.inventory_tracker import NormalizedItem
+from lox.deliberative.impasse_evaluator import HolisticImpasseEvaluator, ImpasseEvaluation
+from lox.domain.navigation_manager import LevelMap
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.env.inventory_tracker import NormalizedItem
 from tests.test_domain_and_workers import make_test_blstats
 
 

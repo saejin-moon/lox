@@ -1,0 +1,1 @@
+(goal enter_gehennom (when (and (in_dungeons) (depth_ge 14))) (until (or (depth_ge 22) (steps_in_goal_ge 5000))) (directive "DESCEND") (max_steps 5000))

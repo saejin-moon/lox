@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import duckdb
-from corp.telemetry.duckdb_consolidator import DuckDBConsolidator
+from lox.telemetry.duckdb_consolidator import DuckDBConsolidator
 
 
 def main():

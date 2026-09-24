@@ -1,0 +1,9 @@
+{
+  "params": {
+    "explore.frontier_bias": 2.4,
+    "explore.revisit_cap": 3,
+    "nav.unknown_penalty": 1.0,
+    "nav.monster_cost": 400.0,
+    "combat.retreat_hp_frac": 0.5
+  }
+}

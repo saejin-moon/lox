@@ -1,0 +1,1 @@
+(goal vlad_invocation (when (depth_ge 30)) (until (or (has_candelabrum) (depth_ge 38) (steps_in_goal_ge 6000))) (max_steps 6000))

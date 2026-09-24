@@ -8,8 +8,8 @@ import time
 import pytest
 import duckdb
 
-from corp.telemetry.parquet_logger import ParquetLogger, TickRecord, EpisodeRecord
-from corp.telemetry.duckdb_consolidator import DuckDBConsolidator
+from lox.telemetry.parquet_logger import ParquetLogger, TickRecord, EpisodeRecord
+from lox.telemetry.duckdb_consolidator import DuckDBConsolidator
 
 
 def test_parquet_logger_and_duckdb_consolidation():
@@ -127,7 +127,7 @@ def test_parquet_logger_and_duckdb_consolidation():
 
 
 def test_base62_run_id_generation():
-    from corp.telemetry.run_id import generate_base62_id, generate_run_id, BASE62_ALPHABET
+    from lox.telemetry.run_id import generate_base62_id, generate_run_id, BASE62_ALPHABET
     from datetime import datetime, timezone
 
     # Generate standalone IDs

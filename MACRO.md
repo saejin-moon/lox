@@ -1,4 +1,4 @@
-# MACRO.md — The CORP Policy Diff & Macro Expansion Specification (v1.0)
+# MACRO.md — The LOX-ψ Policy Diff & Macro Expansion Specification (v1.0)
 
 Complete specification for the S-expression policy-diff language, the `defmacro` system, the exposed vocabulary,
 and the validation machinery. This is the implementation contract for `corp/policy/dsl.py`, `corp/policy/macros.py`,

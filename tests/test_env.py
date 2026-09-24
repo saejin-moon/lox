@@ -7,11 +7,11 @@ import numpy as np
 import pytest
 from nle import nethack
 
-from corp.env.blstats import BottomLineStats, ConditionFlag, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
-from corp.env.anomaly_sentry import AnomalySentry, AnomalySeverity
-from corp.env.flight_recorder import FlightRecorderRingBuffer
-from corp.env.nle_wrapper import make_env
+from lox.env.blstats import BottomLineStats, ConditionFlag, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.env.anomaly_sentry import AnomalySentry, AnomalySeverity
+from lox.env.flight_recorder import FlightRecorderRingBuffer
+from lox.env.nle_wrapper import make_env
 
 
 def test_make_env_reset():
@@ -161,7 +161,7 @@ def test_anomaly_sentry_burst_and_lethal():
 
 
 def test_auto_more_wishing_and_payment_interception():
-    from corp.env.auto_more import AutoMoreWrapper
+    from lox.env.auto_more import AutoMoreWrapper
     import gymnasium as gym
 
     class MockInnerEnv(gym.Env):
@@ -183,7 +183,7 @@ def test_auto_more_wishing_and_payment_interception():
 
 
 def test_auto_more_menu_dismissal():
-    from corp.env.auto_more import AutoMoreWrapper
+    from lox.env.auto_more import AutoMoreWrapper
     import gymnasium as gym
 
     # Verify menu patterns (X of Y) and (end) are recognized as needing pagination/dismissal

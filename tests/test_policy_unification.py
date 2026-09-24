@@ -5,9 +5,9 @@ import tempfile
 
 import pytest
 
-from corp.deliberative.deadlock_resolver import DeadlockResolver, emit_deadlock_diff
-from corp.deliberative.schemas import HTNGraphPatch, SubTaskSpec
-from corp.policy.program import PolicyProgram, DEFAULT_PROGRAM
+from lox.deliberative.deadlock_resolver import DeadlockResolver, emit_deadlock_diff
+from lox.deliberative.schemas import HTNGraphPatch, SubTaskSpec
+from lox.policy.program import PolicyProgram, DEFAULT_PROGRAM
 
 
 def make_patch(**kw):
@@ -63,12 +63,12 @@ class TestEmitDeadlockDiff:
 class TestAgentDiffPath:
     def test_agent_has_emit_deadlock_diff(self):
         """The agent's in-game deliberation path must route through diff emission."""
-        from corp.agent.corp_agent import CORPAgent
-        assert hasattr(CORPAgent, "_emit_deadlock_diff")
+        from lox.agent.lox_agent import LoxAgent
+        assert hasattr(LoxAgent, "_emit_deadlock_diff")
         import inspect
         # source check spans the MRO (behavior-preserving split moved the runner
-        # into corp/agent/episode_runner.py)
-        src = "\n".join(inspect.getsource(c) for c in CORPAgent.__mro__ if c is not object)
+        # into lox/agent/episode_runner.py)
+        src = "\n".join(inspect.getsource(c) for c in LoxAgent.__mro__ if c is not object)
         # plan_queue injection removed; diff emission wired
         assert "plan_queue.extend" not in src
         assert "_emit_deadlock_diff" in src

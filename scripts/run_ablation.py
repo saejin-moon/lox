@@ -47,9 +47,9 @@ except ImportError:
                     k, v = line.split("=", 1)
                     os.environ.setdefault(k.strip(), v.strip())
 
-from corp.policy.manifest import build_manifest, param_leaves_from_config
-from corp.policy.program import PolicyProgram, DEFAULT_PROGRAM, DEFAULT_PROGRAM_PATH
-from corp.policy.validator import validate_diff, ValidatorHooks
+from lox.policy.manifest import build_manifest, param_leaves_from_config
+from lox.policy.program import PolicyProgram, DEFAULT_PROGRAM, DEFAULT_PROGRAM_PATH
+from lox.policy.validator import validate_diff, ValidatorHooks
 
 
 # ---------------------------------------------------------------------------
@@ -71,14 +71,14 @@ def prepare_random_arm(workdir: str, n_revisions: int = 5, ops_per_rev: int = 3,
     'the LLM adds value beyond gated search' falsifiable)."""
     program = PolicyProgram.from_dict(
         DEFAULT_PROGRAM if domain == "nethack"
-        else __import__("corp.executor", fromlist=["get_adapter"]).get_adapter(domain).default_program()
+        else __import__("lox.executor", fromlist=["get_adapter"]).get_adapter(domain).default_program()
     )
     rng = random.Random(seed)
     if domain == "nethack":
         numeric = {p: s for p, s in param_leaves_from_config().items()
                    if s["type"] in ("int", "float")}
     else:
-        from corp.executor import get_adapter  # noqa: PLC0415
+        from lox.executor import get_adapter  # noqa: PLC0415
         numeric = {p: {"type": s.type, "min": s.min, "max": s.max}
                    for p, s in get_adapter(domain).param_leaves().items()
                    if s.type in ("int", "float")}
@@ -110,19 +110,27 @@ def prepare_llm_arm(workdir: str, args) -> str:
     program_path = os.path.join(workdir, f"program_llm_{args.domain}.json")
     PolicyProgram.from_dict(
         DEFAULT_PROGRAM if args.domain == "nethack"
-        else __import__("corp.executor", fromlist=["get_adapter"]).get_adapter(args.domain).default_program()
+        else __import__("lox.executor", fromlist=["get_adapter"]).get_adapter(args.domain).default_program()
     ).save(program_path)
     from run_revision_loop import run_loop  # scripts/ is on sys.path
     from argparse import Namespace
+    from lox.policy import compiler  # noqa: PLC0415
     loop_args = Namespace(
         max_revisions=args.llm_revisions, provider=args.llm_provider, model=args.llm_model,
+        author_mode=args.author_mode, prompt_version=args.prompt_version,
+        max_turns=args.max_turns,
         program_path=program_path, ledger_path=os.path.join(workdir, "ledger_llm.jsonl"),
         db_path=args.db_path, domain=args.domain, report_episodes=args.report_episodes,
         live_gates=False,   # gates inside the loop are the dry-run set;
         fixture_shadow=True,  # the ablation batch itself is the gate
         quick_batch_episodes=3, quick_batch_steps=5000, no_git=True,
     )
-    asyncio.run(run_loop(loop_args))
+    # experiment harnesses must never overwrite the live authoring tree/compiled/archive
+    with compiler.output_dirs(
+            program_dir=os.path.join(workdir, "tree"),
+            compiled_dir=os.path.join(workdir, "compiled"),
+            archive_dir=os.path.join(workdir, "archive")):
+        asyncio.run(run_loop(loop_args))
     return program_path
 
 
@@ -133,7 +141,7 @@ def prepare_llm_arm(workdir: str, args) -> str:
 def run_domain_batch(program_path: str, out_path: str, args) -> dict:
     """Transfer-domain batch (R5): in-process seeded episodes via the adapter.
     Seeds: 3 bases × episodes (§8: 3 seeds × 34 eps on seeded domains)."""
-    from corp.executor import get_adapter  # noqa: PLC0415
+    from lox.executor import get_adapter  # noqa: PLC0415
     adapter = get_adapter(args.domain)
     program = PolicyProgram.load(program_path)
     max_steps = adapter.spec.step_limit_default
@@ -220,7 +228,7 @@ def compare(arm_scores, frozen_scores):
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="CORP R4 three-arm ablation harness")
+    p = argparse.ArgumentParser(description="LOX-ψ R4 three-arm ablation harness")
     p.add_argument("--arms", type=str, default="frozen,random,llm",
                    help="comma-separated subset of frozen,random,llm")
     p.add_argument("--domain", type=str, default="nethack",
@@ -231,10 +239,16 @@ def main() -> int:
     p.add_argument("--episodes", type=int, default=100)
     p.add_argument("--max-steps", type=int, default=20000)
     p.add_argument("--role", type=str, default="valkyrie")
-    p.add_argument("--db-path", type=str, default="data/corp_telemetry.duckdb")
+    p.add_argument("--db-path", type=str, default="data/lox_telemetry.duckdb")
     p.add_argument("--llm-provider", type=str, default="mock")
     p.add_argument("--llm-model", type=str, default=None)
     p.add_argument("--llm-revisions", type=int, default=5)
+    p.add_argument("--author-mode", choices=["bundle", "agentic"], default="agentic",
+                   help="llm-arm author: agentic tool-loop (S0) vs bundle-only Reviser — "
+                        "the S0 exit-criterion comparison")
+    p.add_argument("--prompt-version", type=str, default=None,
+                   help="prompt version (data/prompts/<v>.md) for the llm arm")
+    p.add_argument("--max-turns", type=int, default=6, help="agentic author tool-loop budget")
     p.add_argument("--report-episodes", type=int, default=10,
                    help="transfer domains: seeded episodes per revision for the author report")
     p.add_argument("--benchmark-timeout", type=int, default=14400)

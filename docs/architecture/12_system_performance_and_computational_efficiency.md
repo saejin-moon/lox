@@ -4,7 +4,7 @@
 
 High-throughput empirical reinforcement learning and symbolic reasoning in NetHack require sustained simulation rates of $\ge 300\text{ Steps Per Second (SPS)}$. In pure Python implementations, per-tick overhead in sensory parsing, inventory Hungarian tracking, and spatial pathfinding can easily degrade throughput below $100\text{ SPS}$.
 
-This specification documents the algorithmic bottlenecks identified across the CORP agent codebase, details the vectorized NumPy and algorithmic caching replacements, and establishes rigorous empirical benchmarks proving substantial speedups while preserving **exact mathematical and semantic equivalence** (zero degradation of research validity).
+This specification documents the algorithmic bottlenecks identified across the LOX-ψ agent codebase, details the vectorized NumPy and algorithmic caching replacements, and establishes rigorous empirical benchmarks proving substantial speedups while preserving **exact mathematical and semantic equivalence** (zero degradation of research validity).
 
 ---
 

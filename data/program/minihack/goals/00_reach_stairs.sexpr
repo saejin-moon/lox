@@ -1,0 +1,1 @@
+(goal reach_stairs (when (stairs_known)) (until (false)))

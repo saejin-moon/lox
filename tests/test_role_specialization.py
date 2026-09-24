@@ -8,13 +8,13 @@ import numpy as np
 import gymnasium as gym
 import nle
 
-from corp.env.blstats import BottomLineStats, ConditionFlag, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
-from corp.planner.persona import parse_character_metadata
-from corp.domain.inventory_manager import InventoryManager
-from corp.domain.combat_manager import TacticalCombatManager, MonsterTrack
-from corp.workers.dispatcher import ActionDispatcher, build_action_tables
-from corp.planner.htn import Task
+from lox.env.blstats import BottomLineStats, ConditionFlag, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.planner.persona import parse_character_metadata
+from lox.domain.inventory_manager import InventoryManager
+from lox.domain.combat_manager import TacticalCombatManager, MonsterTrack
+from lox.workers.dispatcher import ActionDispatcher, build_action_tables
+from lox.planner.htn import Task
 
 
 def make_test_blstats(

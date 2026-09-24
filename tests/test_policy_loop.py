@@ -5,12 +5,12 @@ import tempfile
 
 import pytest
 
-from corp.deliberative.providers.mock_provider import MockProvider
-from corp.policy.ledger import RevisionLedger
-from corp.policy.manifest import build_manifest
-from corp.policy.program import PolicyProgram, DEFAULT_PROGRAM
-from corp.policy.report import build_report_bundle
-from corp.policy.reviser import Reviser, build_author_prompt
+from lox.deliberative.providers.mock_provider import MockProvider
+from lox.policy.ledger import RevisionLedger
+from lox.policy.manifest import build_manifest
+from lox.policy.program import PolicyProgram, DEFAULT_PROGRAM
+from lox.policy.report import build_report_bundle
+from lox.policy.reviser import Reviser, build_author_prompt
 
 
 class TestLedger:
@@ -85,7 +85,7 @@ class TestReviser:
         class GarbageThenValidProvider(MockProvider):
             async def generate_text(self, system_prompt, user_prompt, context=None):
                 self._text_call_count += 1
-                from corp.deliberative.providers.base import LLMResponse
+                from lox.deliberative.providers.base import LLMResponse
                 if self._text_call_count == 1:
                     raw = "I would propose... (revision 2 (parent 1) oops unbalanced"
                 else:
@@ -113,7 +113,7 @@ class TestReviser:
 
 class TestRevisionLoop:
     @pytest.mark.asyncio
-    async def test_ten_mock_revisions_unattended(self, tmp_path):
+    async def test_ten_mock_revisions_unattended(self, tmp_path, monkeypatch):
         """R3 acceptance criterion 1 (from AGENT_PLAN §4.5): 10 gated revisions
         unattended with MockProvider; ledger shows accept + reject mix; 0 rejected-diff
         leaks (program on disk always passes validation)."""

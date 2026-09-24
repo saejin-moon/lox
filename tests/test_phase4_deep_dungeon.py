@@ -8,13 +8,13 @@ import numpy as np
 import pytest
 from nle import nethack
 
-from corp.policy.goal_interpreter import GoalInterpreter
-from corp.policy.goal_state import AscensionPhase
-from corp.domain.medusa_handler import MedusaHandler
-from corp.domain.navigation_manager import NavigationManager
-from corp.domain.dungeon_graph import DungeonGraph
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.policy.goal_interpreter import GoalInterpreter
+from lox.policy.goal_state import AscensionPhase
+from lox.domain.medusa_handler import MedusaHandler
+from lox.domain.navigation_manager import NavigationManager
+from lox.domain.dungeon_graph import DungeonGraph
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
 
 
 def create_stats(

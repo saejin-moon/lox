@@ -8,17 +8,17 @@ import os
 import pytest
 import numpy as np
 
-from corp.deliberative.schemas import HTNGraphPatch, AutopsyReport, SubTaskSpec, NogoodClause
-from corp.deliberative.response_parser import ResponseParser, LLMParseError
-from corp.deliberative.providers.mock_provider import MockProvider
-from corp.deliberative.providers.openrouter import OpenRouterProvider
-from corp.deliberative.providers.gemini import GeminiProvider
-from corp.deliberative.autopsy_engine import AutopsyEngine
-from corp.deliberative.deadlock_resolver import DeadlockResolver
-from corp.env.flight_recorder import FlightRecorderRingBuffer
-from corp.env.blstats import BottomLineStats
-from corp.planner.nogood import NogoodStore
-from corp.planner.predicates import PredicateBit
+from lox.deliberative.schemas import HTNGraphPatch, AutopsyReport, SubTaskSpec, NogoodClause
+from lox.deliberative.response_parser import ResponseParser, LLMParseError
+from lox.deliberative.providers.mock_provider import MockProvider
+from lox.deliberative.providers.openrouter import OpenRouterProvider
+from lox.deliberative.providers.gemini import GeminiProvider
+from lox.deliberative.autopsy_engine import AutopsyEngine
+from lox.deliberative.deadlock_resolver import DeadlockResolver
+from lox.env.flight_recorder import FlightRecorderRingBuffer
+from lox.env.blstats import BottomLineStats
+from lox.planner.nogood import NogoodStore
+from lox.planner.predicates import PredicateBit
 
 
 def test_response_parser_dual_phase():
@@ -174,7 +174,7 @@ def test_provider_initialization():
 
 
 def test_throttler_hierarchical_escalation():
-    from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
+    from lox.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
     throttler = LLMRateThrottler(ThrottlerConfig(escalation_threshold=2, min_wall_seconds=0.0))
 
     # First stall attempt: Should reject LLM and enforce symbolic resolution
@@ -191,7 +191,7 @@ def test_throttler_hierarchical_escalation():
 
 
 def test_throttler_quotas_and_cooldown():
-    from corp.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
+    from lox.deliberative.throttler import LLMRateThrottler, ThrottlerConfig
     config = ThrottlerConfig(
         max_in_game_per_episode=2,
         min_wall_seconds=0.5,
@@ -238,8 +238,8 @@ def test_throttler_quotas_and_cooldown():
 
 
 def test_throttler_state_cache():
-    from corp.deliberative.throttler import LLMRateThrottler
-    from corp.deliberative.schemas import HTNGraphPatch
+    from lox.deliberative.throttler import LLMRateThrottler
+    from lox.deliberative.schemas import HTNGraphPatch
     throttler = LLMRateThrottler()
 
     dummy_patch = HTNGraphPatch(

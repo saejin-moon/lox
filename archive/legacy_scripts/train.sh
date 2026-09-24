@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -e
+
+# LOX-ψ Autonomous Training & CDCL Nogood Extraction Pipeline
+# Usage: ./scripts/train.sh [episodes] [steps] [model]
+
+EPISODES=${1:-20}
+STEPS=${2:-5000}
+MODEL=${3:-${MODEL:-}}
+
+# Generate 6-character Base-62 run ID from date + time
+RUN_ID=$(uv run python scripts/gen_run_id.py)
+
+echo "================================================================================"
+echo "Starting LOX-ψ Autonomous Training: $EPISODES Episodes (Max $STEPS Steps/Ep)"
+echo "Run ID: $RUN_ID"
+echo "================================================================================"
+
+# Provider auto-detection
+PROVIDER_ARGS="--provider mock"
+if [ -n "$OPENROUTER_API_KEY" ]; then
+    echo "[Info] OPENROUTER_API_KEY detected. Enabling live open-weight thinking autopsies."
+    PROVIDER_ARGS="--provider openrouter --enable-autopsy"
+elif [ -n "$GEMINI_API_KEY" ]; then
+    echo "[Info] GEMINI_API_KEY detected. Enabling live Gemini Flash autopsies."
+    PROVIDER_ARGS="--provider gemini --enable-autopsy"
+else
+    echo "[Notice] No API keys detected in environment. Running offline training with mock autopsies."
+    PROVIDER_ARGS="--provider mock --enable-autopsy"
+fi
+
+MODEL_ARGS=""
+if [ -n "$MODEL" ]; then
+    echo "[Info] Selected model override: $MODEL"
+    MODEL_ARGS="--model $MODEL"
+fi
+
+uv run python scripts/run_benchmark.py \
+    --mode random \
+    --eval-type training \
+    --run-id "$RUN_ID" \
+    --episodes "$EPISODES" \
+    --max-steps "$STEPS" \
+    $PROVIDER_ARGS \
+    $MODEL_ARGS
+
+echo ""
+echo "Training complete. Telemetry saved to data/lox_telemetry.duckdb"

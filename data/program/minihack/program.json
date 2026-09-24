@@ -1,0 +1,12 @@
+{
+  "version": 4,
+  "domain": "minihack",
+  "provenance": {
+    "author": "strategy-tuning author",
+    "note": "minihack cold-start: reach stairs when known, else explore",
+    "parent_version": 3,
+    "reason": "To minimize median_steps_on_success, increase monster_cost to encourage pathing away from hostiles and add a tactical retreat rule to prevent time-consuming combat engagement when health is low."
+  },
+  "role_profiles": {},
+  "domain_profiles": {}
+}

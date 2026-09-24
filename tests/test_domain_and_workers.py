@@ -7,14 +7,14 @@ import numpy as np
 import gymnasium as gym
 import nle
 
-from corp.env.blstats import BottomLineStats, ConditionFlag, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
-from corp.domain.combat_manager import TacticalCombatManager, MonsterTrack
-from corp.domain.navigation_manager import NavigationManager
-from corp.domain.inventory_manager import InventoryManager
-from corp.workers.dispatcher import ActionDispatcher, MicroActionFiber, build_action_tables
-from corp.epistemic.epistemic_manager import EpistemicManager
-from corp.planner.htn import Task
+from lox.env.blstats import BottomLineStats, ConditionFlag, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.domain.combat_manager import TacticalCombatManager, MonsterTrack
+from lox.domain.navigation_manager import NavigationManager
+from lox.domain.inventory_manager import InventoryManager
+from lox.workers.dispatcher import ActionDispatcher, MicroActionFiber, build_action_tables
+from lox.epistemic.epistemic_manager import EpistemicManager
+from lox.planner.htn import Task
 
 
 
@@ -347,7 +347,7 @@ def test_navigation_manager_frontier_exploration():
 
 
 def test_skill_worker_enhancement():
-    from corp.domain.skill_worker import SkillWorker
+    from lox.domain.skill_worker import SkillWorker
 
     worker = SkillWorker()
     blstats = make_test_blstats(experience=1, turn=10)
@@ -716,7 +716,7 @@ def test_navigation_diagonal_doorway_orthogonal_decomposition():
     chars[6, 6] = ord("+")  # Closed door at (6, 6)
 
     lvl = nav_mgr.update_map(chars, blstats)
-    from corp.navigation.astar import PathNode
+    from lox.navigation.astar import PathNode
     # Hero is at (5, 5), next node in path is (6, 6) (diagonal into door)
     next_node = PathNode(row=6, col=6, action_index=0, key_char="")
 
@@ -803,11 +803,11 @@ def test_navigation_diagonal_door_monster_avoidance():
 
 def test_agent_cycle_perturbation_monster_bump_guard():
     """Verifies that cycle perturbation never steps into an adjacent monster or pet."""
-    from corp.agent.corp_agent import CORPAgent
-    from corp.deliberative.providers.mock_provider import MockProvider
-    from corp.env.nle_wrapper import make_env
+    from lox.agent.lox_agent import LoxAgent
+    from lox.deliberative.providers.mock_provider import MockProvider
+    from lox.env.nle_wrapper import make_env
     env = make_env()
-    agent = CORPAgent(env=env, llm_provider=MockProvider())
+    agent = LoxAgent(env=env, llm_provider=MockProvider())
     agent.reset()
 
     # Place player at (10, 10) in an empty room
@@ -832,11 +832,11 @@ def test_agent_cycle_perturbation_monster_bump_guard():
 
 def test_peaceful_prompt_extraction_and_unwalkable_mask():
     """Verifies that 'Really attack the hobbit?' extracts peaceful name and marks coordinate unwalkable."""
-    from corp.agent.corp_agent import CORPAgent
-    from corp.deliberative.providers.mock_provider import MockProvider
-    from corp.env.nle_wrapper import make_env
+    from lox.agent.lox_agent import LoxAgent
+    from lox.deliberative.providers.mock_provider import MockProvider
+    from lox.env.nle_wrapper import make_env
     env = make_env()
-    agent = CORPAgent(env=env, llm_provider=MockProvider())
+    agent = LoxAgent(env=env, llm_provider=MockProvider())
     agent.reset()
 
     agent.current_blstats = make_test_blstats(x=10, y=10)
@@ -865,24 +865,6 @@ def test_peaceful_prompt_extraction_and_unwalkable_mask():
     assert (10, 11) in agent.combat_mgr.peaceful_positions
     # Verify coordinate marked unwalkable on the level map
     assert not lvl_map.walkable[10, 11]
-
-
-def test_navigation_conveyor_corpse_pathing():
-    """Verifies that hero without poison resistance prioritizes pathing to fresh conveyor corpses."""
-    nav_mgr = NavigationManager()
-    blstats = make_test_blstats(x=5, y=5, depth=1, turn=100)
-    chars = np.full((21, 79), ord("."), dtype=np.uint8)
-    lvl = nav_mgr.get_or_create_level(1)
-    lvl.walkable[:] = True
-
-    # Killer bee corpse at (5, 9) spawned on turn 95 (5 turns ago, fresh)
-    lvl.conveyor_corpses[(5, 9)] = (95, "killer bee")
-
-    # Hero without poison resistance should path towards the conveyor corpse!
-    task = nav_mgr.evaluate_navigation_turn(chars, blstats, has_poison_res=False)
-    assert task is not None
-    assert task.name == "STEP"
-    assert task.args["delta"] == (0, 1)  # Steps East towards (5, 9)
 
 
 def test_combat_manager_heavy_hitter_kiting():

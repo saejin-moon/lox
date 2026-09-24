@@ -6,14 +6,14 @@ Plan Locking (LockedIntent), and Specialized Pioneer Episode ID Formatting.
 import numpy as np
 import pytest
 
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.domain.shop_manager import ShopManager, SCROLL_PRICE_TIERS, POTION_PRICE_TIERS, WAND_PRICE_TIERS
-from corp.domain.dungeon_graph import DungeonGraph
-from corp.domain.navigation_manager import NavigationManager
-from corp.agent.corp_agent import CORPAgent, LockedIntent
-from corp.planner.htn import Task
-from corp.planner.guards import HTNGuards
-from corp.env.nle_wrapper import make_env
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.domain.shop_manager import ShopManager, SCROLL_PRICE_TIERS, POTION_PRICE_TIERS, WAND_PRICE_TIERS
+from lox.domain.dungeon_graph import DungeonGraph
+from lox.domain.navigation_manager import NavigationManager
+from lox.agent.lox_agent import LoxAgent, LockedIntent
+from lox.planner.htn import Task
+from lox.planner.guards import HTNGuards
+from lox.env.nle_wrapper import make_env
 
 
 def test_shop_manager_price_inversion():
@@ -152,7 +152,7 @@ def test_navigation_excalibur_fountain_dip():
 def test_locked_intent_door_kicking_and_emergency_break():
     """Verifies that LockedIntent executes door kicks committedly but breaks on emergency health drop."""
     env = make_env()
-    agent = CORPAgent(env=env)
+    agent = LoxAgent(env=env)
     obs, info = agent.reset()
 
     # Simulate locked door at (10, 11) with player at (10, 10)
@@ -193,19 +193,19 @@ def test_specialized_role_episode_id_prefix():
     env = make_env()
 
     # Valkyrie agent
-    agent_valk = CORPAgent(env=env, role="valkyrie")
+    agent_valk = LoxAgent(env=env, role="valkyrie")
     assert agent_valk.episode_id.startswith("ep_valk_")
 
     # Barbarian agent
-    agent_barb = CORPAgent(env=env, role="barbarian")
+    agent_barb = LoxAgent(env=env, role="barbarian")
     assert agent_barb.episode_id.startswith("ep_barb_")
 
     # Samurai agent
-    agent_samu = CORPAgent(env=env, role="samurai")
+    agent_samu = LoxAgent(env=env, role="samurai")
     assert agent_samu.episode_id.startswith("ep_samu_")
 
     # Generalist agent (default)
-    agent_gen = CORPAgent(env=env)
+    agent_gen = LoxAgent(env=env)
     assert agent_gen.episode_id.startswith("ep_gen_")
 
     env.close()
@@ -213,8 +213,8 @@ def test_specialized_role_episode_id_prefix():
 
 def test_shop_door_protection_and_unlock_tools():
     """Verifies that shop doors are never kicked and unlocking tools are applied first."""
-    from corp.domain.inventory_manager import InventoryManager
-    from corp.navigation.astar import PathNode
+    from lox.domain.inventory_manager import InventoryManager
+    from lox.navigation.astar import PathNode
 
     # 1. Test get_unlock_tool
     inv_mgr = InventoryManager()
@@ -266,8 +266,8 @@ def test_shop_door_protection_and_unlock_tools():
 
 def test_corpse_freshness_and_rotten_rejection():
     """Verifies that InventoryManager eats fresh corpses and lichens, but rejects rotten or combat-threatened corpses."""
-    from corp.domain.inventory_manager import InventoryManager
-    from corp.domain.navigation_manager import LevelMap
+    from lox.domain.inventory_manager import InventoryManager
+    from lox.domain.navigation_manager import LevelMap
     inv_mgr = InventoryManager()
 
     class DummyTracker:
@@ -311,7 +311,7 @@ def test_corpse_freshness_and_rotten_rejection():
 def test_navigation_domestic_animal_and_peaceful_avoidance():
     """Verifies that NavigationManager does not bump-attack non-pet monsters like ponies, but swaps with pets."""
     from nle import nethack
-    from corp.navigation.astar import PathNode
+    from lox.navigation.astar import PathNode
     nav = NavigationManager()
     lvl = nav.get_or_create_level(1)
     chars = np.full((21, 79), ord("."))
@@ -334,7 +334,7 @@ def test_navigation_domestic_animal_and_peaceful_avoidance():
 
 def test_multiple_stairs_down_branch_steering():
     """Verifies that update_map steers away from Gnomish Mines when under-leveled."""
-    from corp.domain.dungeon_graph import DungeonGraph
+    from lox.domain.dungeon_graph import DungeonGraph
     graph = DungeonGraph()
     # Record Dod level 2 node
     node = graph.get_or_create_node(0, 2)
@@ -358,7 +358,7 @@ def test_multiple_stairs_down_branch_steering():
 
 def test_active_shop_purchasing_and_unpaid_debt_drop():
     """Verifies that ShopManager issues PAY when gold > 0, and DROP when broke."""
-    from corp.domain.shop_manager import ShopManager
+    from lox.domain.shop_manager import ShopManager
     shop_mgr = ShopManager()
 
     class MockItem:
@@ -405,7 +405,7 @@ def test_sokoban_boulder_pathfinding():
     assert soko_c[10, 10] >= 30.0
 
     # Stepping into the boulder issues STEP delta
-    from corp.navigation.astar import PathNode
+    from lox.navigation.astar import PathNode
     next_node = PathNode(10, 10, 1, "l")
     task = nav._step_or_open(10, 9, next_node, chars, lvl)
     assert task.name == "STEP"
@@ -414,8 +414,8 @@ def test_sokoban_boulder_pathfinding():
 
 def test_amulet_of_reflection_and_wishing():
     """Verifies that amulet of reflection is equipped and wand of wishing is zapped."""
-    from corp.domain.inventory_manager import InventoryManager
-    from corp.env.inventory_tracker import NormalizedItem
+    from lox.domain.inventory_manager import InventoryManager
+    from lox.env.inventory_tracker import NormalizedItem
     inv_mgr = InventoryManager()
     blstats = make_blstats(x=5, y=5, experience=10)
 
@@ -445,8 +445,8 @@ def test_castle_drawbridge_wand_blasting():
     nav = NavigationManager()
     lvl = nav.get_or_create_level(0, 25, depth=25)  # Castle level
     chars = np.full((21, 79), ord("."))
-    from corp.navigation.astar import PathNode
-    from corp.env.inventory_tracker import NormalizedItem
+    from lox.navigation.astar import PathNode
+    from lox.env.inventory_tracker import NormalizedItem
     next_node = PathNode(10, 11, 1, "l")
 
     class MockInv:

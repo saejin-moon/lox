@@ -7,13 +7,13 @@ machine these tests were once run against for decision-trace equivalence was del
 """
 import pytest
 
-from corp.policy.goal_state import AscensionPhase
-from corp.env.blstats import HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
-from corp.policy.config import PolicyConfig
-from corp.policy.goal_interpreter import GoalInterpreter
-from corp.policy.predicates import parse, eval_condition, nethack_bindings, tokenize
-from corp.policy.program import PolicyProgram
+from lox.policy.goal_state import AscensionPhase
+from lox.env.blstats import HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.policy.config import PolicyConfig
+from lox.policy.goal_interpreter import GoalInterpreter
+from lox.policy.predicates import parse, eval_condition, nethack_bindings, tokenize
+from lox.policy.program import PolicyProgram
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ def test_overlay_applies_and_rejects_unknown(tmp_path):
 
 def make_bl(xl=1, depth=1, dnum=0, dlevel=1, ac=10, alignment=1, turn=100, hp=40, max_hp=40):
     import numpy as np
-    from corp.env.blstats import BottomLineStats
+    from lox.env.blstats import BottomLineStats
     raw = np.zeros(27, dtype=np.int64)
     raw[0], raw[1] = 10, 10
     raw[10], raw[11] = hp, max_hp

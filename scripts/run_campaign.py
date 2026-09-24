@@ -79,7 +79,7 @@ def _accepted_revisions_since(ts: float) -> list[dict]:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="CORP R5 tuning campaign")
+    p = argparse.ArgumentParser(description="LOX-ψ R5 tuning campaign")
     p.add_argument("--nights", type=int, default=7)
     p.add_argument("--provider", type=str, default="gemini")
     p.add_argument("--model", type=str, default=None)

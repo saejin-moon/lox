@@ -1,5 +1,5 @@
 [project]
-name = "corp-nethack"
+name = "lox-nethack"
 version = "0.1.0"
 description = "Neuro-Symbolic Cognitive Operating System for NetHack NLE"
 readme = "README.md"

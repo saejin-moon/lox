@@ -10,8 +10,8 @@ import gymnasium as gym
 import minihack
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from corp.env.auto_more import AutoMoreWrapper
-from corp.agent.corp_agent import CORPAgent
+from lox.env.auto_more import AutoMoreWrapper
+from lox.agent.lox_agent import LoxAgent
 
 
 CERTIFICATION_SUITES = [
@@ -56,7 +56,7 @@ def run_certification(task: dict) -> dict:
     for trial in range(1, task["trials"] + 1):
         base_env = gym.make(task["env_id"], actions=nle.nethack.ACTIONS)
         wrapped_env = AutoMoreWrapper(base_env)
-        agent = CORPAgent(env=wrapped_env)
+        agent = LoxAgent(env=wrapped_env)
 
         agent.reset()
         steps = 0
@@ -94,7 +94,7 @@ def run_certification(task: dict) -> dict:
 
 def main():
     print("=" * 80)
-    print("CORP Domain Worker Skill Certification Suite (MiniHack Regression Testbed)")
+    print("LOX-ψ Domain Worker Skill Certification Suite (MiniHack Regression Testbed)")
     print("=" * 80)
 
     results = []

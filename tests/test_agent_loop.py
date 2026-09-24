@@ -1,15 +1,15 @@
 """
-Integration and unit tests for CORPAgent autonomous game loop and CompetenceEngine.
+Integration and unit tests for LoxAgent autonomous game loop and CompetenceEngine.
 """
 
 import pytest
 import numpy as np
 
-from corp.env.nle_wrapper import make_env
-from corp.agent.corp_agent import CORPAgent, EpisodeResult
-from corp.agent.competence import CompetenceEngine
-from corp.planner.persona import PersonaTraitVector
-from corp.deliberative.providers.mock_provider import MockProvider
+from lox.env.nle_wrapper import make_env
+from lox.agent.lox_agent import LoxAgent, EpisodeResult
+from lox.agent.competence import CompetenceEngine
+from lox.planner.persona import PersonaTraitVector
+from lox.deliberative.providers.mock_provider import MockProvider
 
 
 def test_competence_engine():
@@ -32,9 +32,9 @@ def test_competence_engine():
     assert engine.select_optimal_persona() == "valkyrie"
 
 
-def test_corp_agent_reset_and_persona():
+def test_lox_agent_reset_and_persona():
     env = make_env()
-    agent = CORPAgent(env=env, llm_provider=MockProvider())
+    agent = LoxAgent(env=env, llm_provider=MockProvider())
 
     obs, info = agent.reset()
     assert agent.persona is not None
@@ -44,9 +44,9 @@ def test_corp_agent_reset_and_persona():
     assert agent.current_blstats.turn == 1
 
 
-def test_corp_agent_steps():
+def test_lox_agent_steps():
     env = make_env()
-    agent = CORPAgent(env=env, llm_provider=MockProvider())
+    agent = LoxAgent(env=env, llm_provider=MockProvider())
     agent.reset()
 
     initial_turn = agent.current_blstats.turn
@@ -61,9 +61,9 @@ def test_corp_agent_steps():
     assert agent.max_turn_reached >= initial_turn
 
 
-def test_corp_agent_bounded_episode():
+def test_lox_agent_bounded_episode():
     env = make_env()
-    agent = CORPAgent(
+    agent = LoxAgent(
         env=env,
         llm_provider=MockProvider(),
         enable_deliberative_autopsy=True,
@@ -75,10 +75,10 @@ def test_corp_agent_bounded_episode():
     assert result.steps_per_second > 100.0  # Verify sub-10ms latency per cognitive cycle
 
 
-def test_corp_agent_priority_emergency_healing():
+def test_lox_agent_priority_emergency_healing():
     import dataclasses
     env = make_env()
-    agent = CORPAgent(env=env, llm_provider=MockProvider())
+    agent = LoxAgent(env=env, llm_provider=MockProvider())
     agent.reset()
 
     # Artificially set agent state to low HP (4 / 16)
@@ -106,9 +106,9 @@ def test_corp_agent_priority_emergency_healing():
     assert chosen.args["slot"] == "x"
 
 
-def test_corp_agent_bicameral_htn_persona_modulation():
+def test_lox_agent_bicameral_htn_persona_modulation():
     env = make_env()
-    agent = CORPAgent(env=env, llm_provider=MockProvider())
+    agent = LoxAgent(env=env, llm_provider=MockProvider())
     agent.reset()
 
     # Verify HTN methods are registered for SURVIVE_AND_ASCEND
@@ -123,7 +123,7 @@ def test_corp_agent_bicameral_htn_persona_modulation():
 
 def test_anti_stall_guard_and_blocked_tiles():
     env = make_env()
-    agent = CORPAgent(env=env, llm_provider=MockProvider())
+    agent = LoxAgent(env=env, llm_provider=MockProvider())
     agent.reset()
 
     # 1. Verify Anti-Stall Guard triggers on 4+ zero-turn steps

@@ -2,7 +2,7 @@
 Harness to run and benchmark upstream AutoAscend against NetHackChallenge-v0 in modern gymnasium,
 providing an empirical baseline for score, depth, and survival turns.
 
-Results are consolidated into DuckDB alongside CORP telemetry so both agents can be
+Results are consolidated into DuckDB alongside LOX-ψ telemetry so both agents can be
 compared apples-to-apples, and optionally exported to structured JSON via --output.
 """
 
@@ -19,11 +19,11 @@ import numpy as np
 
 # Ensure autoascend is in sys.path
 sys.path.insert(0, "/home/bae/autoascend")
-sys.path.insert(0, "/home/bae/corp")
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from autoascend import agent as agent_lib
 from autoascend.env_wrapper import EnvWrapper
-from corp.telemetry import DuckDBConsolidator
+from lox.telemetry import DuckDBConsolidator
 
 
 class GymFromGymnasium(gym.Env):
@@ -171,8 +171,8 @@ def main():
     parser.add_argument(
         "--duckdb-path",
         type=str,
-        default="data/corp_telemetry.duckdb",
-        help="Path to consolidated DuckDB database for unified CORP/AutoAscend telemetry",
+        default="data/lox_telemetry.duckdb",
+        help="Path to consolidated DuckDB database for unified LOX-ψ/AutoAscend telemetry",
     )
     args = parser.parse_args()
 
@@ -207,7 +207,7 @@ def main():
     print(f"Mean Score: {mean_score:.1f} | Median Depth: {median_depth:.1f} | Mean Turns: {mean_turns:.1f} | Ascension: {ascension_rate*100:.1f}%")
     print("=" * 80)
 
-    # Persist to DuckDB for unified comparison with CORP runs
+    # Persist to DuckDB for unified comparison with LOX-ψ runs
     store_in_duckdb(results, args.duckdb_path, role=args.role, step_limit=args.step_limit)
 
     # Optionally export structured JSON

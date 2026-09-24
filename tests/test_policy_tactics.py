@@ -1,14 +1,14 @@
 """R4 tests: tactic-rule engine, interlock invariants (#9b), profiles, default-program parity."""
 import pytest
 
-from corp.domain.combat_manager import TacticalCombatManager
-from corp.policy import tactics as tactic_mod
-from corp.policy.manifest import build_manifest
-from corp.policy.predicates import eval_condition, nethack_bindings, default_ctx
-from corp.policy.program import PolicyProgram, DEFAULT_PROGRAM, DEFAULT_TACTIC_RULES
-from corp.policy.profiles import apply_profile_overlay, resolve_config, ProfileError
-from corp.policy.validator import validate_diff, ValidatorHooks
-from corp.policy.config import PolicyConfig
+from lox.domain.combat_manager import TacticalCombatManager
+from lox.policy import tactics as tactic_mod
+from lox.policy.manifest import build_manifest
+from lox.policy.predicates import eval_condition, nethack_bindings, default_ctx
+from lox.policy.program import PolicyProgram, DEFAULT_PROGRAM, DEFAULT_TACTIC_RULES
+from lox.policy.profiles import apply_profile_overlay, resolve_config, ProfileError
+from lox.policy.validator import validate_diff, ValidatorHooks
+from lox.policy.config import PolicyConfig
 
 FIXTURES = [default_ctx(), default_ctx(depth=6, hp=10, max_hp=50, hunger_state=3)]
 

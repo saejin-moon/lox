@@ -5,10 +5,10 @@ from argparse import Namespace
 
 import pytest
 
-from corp.executor import get_adapter, available_domains
-from corp.executor.interface import DomainSpec
-from corp.policy.corpus import build_corpus, rag_slices, corpus_coverage
-from corp.policy.manifest import build_manifest
+from lox.executor import get_adapter, available_domains
+from lox.executor.interface import DomainSpec
+from lox.policy.corpus import build_corpus, rag_slices, corpus_coverage
+from lox.policy.manifest import build_manifest
 
 
 class TestRegistry:
@@ -40,7 +40,7 @@ class TestMiniHackAdapter:
         assert set(m.goals) == {"explore_floor", "reach_stairs"}
         assert "explore.stuck_patience" in m.param_leaves
         # minihack verbs are a legal subset (retreat/avoid are real combat-manager verbs)
-        from corp.policy.tactics import TACTIC_VERBS
+        from lox.policy.tactics import TACTIC_VERBS
         assert set(m.verbs) <= TACTIC_VERBS
 
     def test_cold_start_program_valid(self):
@@ -48,7 +48,7 @@ class TestMiniHackAdapter:
         prog = ad.default_program()
         assert prog["domain"] == "minihack"
         assert prog["strategy_plan"][0]["goal"] == "reach_stairs"
-        from corp.policy.program import PolicyProgram
+        from lox.policy.program import PolicyProgram
         p = PolicyProgram.from_dict(prog)
         assert [g.goal for g in p.strategy_plan] == ["reach_stairs", "explore_floor"]
 
@@ -76,14 +76,14 @@ class TestMiniHackAdapter:
         ad = get_adapter("minihack")
         prog = ad.default_program()
         prog["params"] = {"explore.stuck_patience": 55}
-        from corp.executor.minihack_adapter import MiniHackAgent, MiniHackConfig
+        from lox.executor.minihack_adapter import MiniHackAgent, MiniHackConfig
         agent = MiniHackAgent(None, prog, max_steps=10)
         assert agent.cfg.explore.stuck_patience == 55
 
 
 class TestCorpus:
     def test_build_and_query(self, tmp_path):
-        import corp.policy.corpus as corpus_mod
+        import lox.policy.corpus as corpus_mod
         old_root = corpus_mod.CORPUS_ROOT
         corpus_mod.CORPUS_ROOT = str(tmp_path)
         try:
@@ -140,3 +140,25 @@ class TestTransferLoop:
             assert final["params"].get("explore.stuck_patience") == 40
         else:
             assert final["version"] == 1  # gate rejection: program untouched
+
+
+class TestCraftaxAdapter:
+    def test_registered_and_manifest(self):
+        from lox.executor import get_adapter
+        ad = get_adapter("craftax")
+        assert ad.spec.name == "craftax"
+        assert ad.spec.grid_shape == (63, 63)
+        assert ad.spec.n_actions == 43
+        assert len(ad.predicates()) >= 10
+        assert len(ad.goal_handlers()) >= 5
+        manifest = ad.manifest(version=1)
+        assert manifest.domain == "craftax"
+        assert "collect_wood" in manifest.goals
+        assert "has_wood" in manifest.predicates
+
+    def test_default_program(self):
+        from lox.executor import get_adapter
+        ad = get_adapter("craftax")
+        prog = ad.default_program()
+        assert prog["domain"] == "craftax"
+        assert any(g["goal"] == "collect_wood" for g in prog["strategy_plan"])

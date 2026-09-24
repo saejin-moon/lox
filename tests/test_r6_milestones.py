@@ -10,11 +10,11 @@ flags, vocabulary-manifest closure, and owned-param tunability.
 import numpy as np
 import pytest
 
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
-from corp.policy.config import PolicyConfig
-from corp.policy.goal_interpreter import GoalInterpreter
-from corp.policy.goal_state import AscensionPhase, MacroDirectorState
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.policy.config import PolicyConfig
+from lox.policy.goal_interpreter import GoalInterpreter
+from lox.policy.goal_state import AscensionPhase, MacroDirectorState
 
 
 def make_bl(
@@ -216,8 +216,8 @@ def test_m7_requires_amulet_and_ascends_with_it():
 # ---------------------------------------------------------------------------
 
 def test_all_r6_goals_certified_in_manifest_and_adapter():
-    from corp.policy.manifest import CERTIFIED_GOALS
-    from corp.executor.nethack_adapter import NethackAdapter
+    from lox.policy.manifest import CERTIFIED_GOALS
+    from lox.executor.nethack_adapter import NethackAdapter
 
     r6 = {"early_survival_stack", "equip_upgrade", "survival_intrinsics",
           "enter_gehennom", "castle_wishing", "vlad_invocation", "ascension_run"}
@@ -232,7 +232,7 @@ def test_all_r6_goals_certified_in_manifest_and_adapter():
 def test_all_plan_goals_evaluable_on_fixture_ctx():
     """Every plan goal's when/until must parse+evaluate on the default ctx
     (R6 predicates included) — the drift guard for the 13-goal plan."""
-    from corp.policy.predicates import eval_condition, nethack_bindings, default_ctx
+    from lox.policy.predicates import eval_condition, nethack_bindings, default_ctx
 
     gi = make_gi()
     for g in gi.program.strategy_plan:
@@ -243,12 +243,12 @@ def test_all_plan_goals_evaluable_on_fixture_ctx():
 
 def test_set_threshold_on_owned_param_tunes_milestone():
     """set_threshold → params overlay → interpreter honors the tuned threshold."""
-    from corp.policy.program import PolicyProgram
+    from lox.policy.program import PolicyProgram
 
     prog = PolicyProgram.load("data/policy_program.json")
     prog.params["strategy.survival_ac_target"] = 0
     gi = GoalInterpreter.__new__(GoalInterpreter)
-    from corp.policy.config import PolicyConfig as PC
+    from lox.policy.config import PolicyConfig as PC
     gi.cfg = PC.defaults()
     prog.apply_overlay(gi.cfg)
     assert gi.cfg.strategy.survival_ac_target == 0

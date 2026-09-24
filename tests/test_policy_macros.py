@@ -1,11 +1,11 @@
-"""R3 tests: defmacro expansion + closure checker (corp/policy/macros.py, MACRO.md §5)."""
+"""R3 tests: defmacro expansion + closure checker (lox/policy/macros.py, MACRO.md §5)."""
 import pytest
 
-from corp.policy import dsl
-from corp.policy.macros import (
+from lox.policy import dsl
+from lox.policy.macros import (
     MacroEnv, MacroError, expand, expand_all, check_closure, node_depth, free_symbols,
 )
-from corp.policy.manifest import build_manifest
+from lox.policy.manifest import build_manifest
 
 MANIFEST = build_manifest(1, "nethack")
 PREDS = set(MANIFEST.predicates)
@@ -77,8 +77,8 @@ class TestClosure:
     def test_shadowed_primitive_name_rejected_by_validator(self):
         # 'retreat' is a verb — check_closure passes it as a "known macro" name, but
         # the validator's shadow gate (MACRO.md §5.3 no-shadowing) must reject it.
-        from corp.policy.validator import validate_diff, ValidatorHooks
-        from corp.policy.program import PolicyProgram, DEFAULT_PROGRAM
+        from lox.policy.validator import validate_diff, ValidatorHooks
+        from lox.policy.program import PolicyProgram, DEFAULT_PROGRAM
         prog = PolicyProgram.from_dict(DEFAULT_PROGRAM)
         text = ('(revision 2 (parent 1) (author "t") (domain nethack) (reason "t"))\n'
                 '(defmacro retreat (and (lawful)))')

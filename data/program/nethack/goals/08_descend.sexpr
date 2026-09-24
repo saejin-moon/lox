@@ -1,0 +1,1 @@
+(goal descend (when (true)) (until (depth_ge 14)) (directive "DESCEND"))

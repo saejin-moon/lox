@@ -1,0 +1,1 @@
+(rule add tactic_rules (when (and (adjacent_hostiles) (hp_frac <= 0.5))) (do retreat) (unless null) (note "retreat to avoid combat delays"))

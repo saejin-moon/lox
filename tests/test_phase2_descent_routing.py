@@ -7,11 +7,11 @@ mines retreat policy, Sokoban prize-exit (anti-oscillation), and rest-on-stairs 
 import numpy as np
 import pytest
 
-from corp.policy.goal_interpreter import GoalInterpreter
-from corp.policy.goal_state import AscensionPhase
-from corp.domain.navigation_manager import NavigationManager
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.planner.guards import HTNGuards
+from lox.policy.goal_interpreter import GoalInterpreter
+from lox.policy.goal_state import AscensionPhase
+from lox.domain.navigation_manager import NavigationManager
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.planner.guards import HTNGuards
 
 
 def create_stats(

@@ -18,12 +18,12 @@ import time
 
 sys.path.insert(0, __file__.rsplit("/scripts/", 1)[0])
 
-from corp.executor import get_adapter, available_domains  # noqa: E402
-from corp.policy.program import PolicyProgram  # noqa: E402
+from lox.executor import get_adapter, available_domains  # noqa: E402
+from lox.policy.program import PolicyProgram  # noqa: E402
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="CORP R5 transfer-domain batch evaluator")
+    p = argparse.ArgumentParser(description="LOX-ψ R5 transfer-domain batch evaluator")
     p.add_argument("--domain", type=str, default="minihack", choices=available_domains() or ["minihack"])
     p.add_argument("--task", type=str, default=None, help="override the adapter's default task")
     p.add_argument("--episodes", type=int, default=10)

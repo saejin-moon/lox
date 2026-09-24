@@ -10,13 +10,13 @@ import numpy as np
 import pytest
 from nle import nethack
 
-from corp.domain.inventory_manager import InventoryManager
-from corp.domain.navigation_manager import NavigationManager
-from corp.domain.navigation.level_map import LevelMap
-from corp.env.blstats import BottomLineStats, HungerState
-from corp.env.inventory_tracker import InventoryNormalizer, NormalizedItem
-from corp.policy.config import PolicyConfig
-from corp.domain.combat_manager import TacticalCombatManager  # noqa: F401  (import guard)
+from lox.domain.inventory_manager import InventoryManager
+from lox.domain.navigation_manager import NavigationManager
+from lox.domain.navigation.level_map import LevelMap
+from lox.env.blstats import BottomLineStats, HungerState
+from lox.env.inventory_tracker import InventoryNormalizer, NormalizedItem
+from lox.policy.config import PolicyConfig
+from lox.domain.combat_manager import TacticalCombatManager  # noqa: F401  (import guard)
 
 
 def make_bl(hp=20, max_hp=20, depth=1, hunger=HungerState.HUNGRY, turn=500, x=10, y=10):

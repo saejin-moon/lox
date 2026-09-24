@@ -1,5 +1,5 @@
 """
-Benchmarking Suite: Evaluates CORP against published AutoAscend and learning baselines
+Benchmarking Suite: Evaluates LOX-ψ against published AutoAscend and learning baselines
 under MODE_RANDOM_GENERALIST and MODE_COMPETENCE_SELECTION.
 """
 
@@ -15,15 +15,15 @@ import numpy as np
 # Ensure repository root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from corp.env.nle_wrapper import make_env
-from corp.agent.corp_agent import CORPAgent, EpisodeResult
-from corp.agent.competence import CompetenceEngine
-from corp.planner.nogood import NogoodStore
-from corp.deliberative.providers.mock_provider import MockProvider
-from corp.deliberative.providers.llama_cpp import LlamaCppProvider
-from corp.deliberative.providers.openrouter import OpenRouterProvider
-from corp.deliberative.providers.gemini import GeminiProvider
-from corp.telemetry import ParquetLogger, DuckDBConsolidator, generate_base62_id
+from lox.env.nle_wrapper import make_env
+from lox.agent.lox_agent import LoxAgent, EpisodeResult
+from lox.agent.competence import CompetenceEngine
+from lox.planner.nogood import NogoodStore
+from lox.deliberative.providers.mock_provider import MockProvider
+from lox.deliberative.providers.llama_cpp import LlamaCppProvider
+from lox.deliberative.providers.openrouter import OpenRouterProvider
+from lox.deliberative.providers.gemini import GeminiProvider
+from lox.telemetry import ParquetLogger, DuckDBConsolidator, generate_base62_id
 
 
 AUTOASCEND_BASELINES = {
@@ -47,7 +47,7 @@ AUTOASCEND_BASELINES = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="CORP Autonomous Benchmarking & Training Runner")
+    parser = argparse.ArgumentParser(description="LOX-ψ Autonomous Benchmarking & Training Runner")
     parser.add_argument(
         "--mode",
         choices=["random", "competence"],
@@ -128,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--duckdb-path",
         type=str,
-        default="data/corp_telemetry.duckdb",
+        default="data/lox_telemetry.duckdb",
         help="Path to consolidated DuckDB database",
     )
     parser.add_argument(
@@ -162,7 +162,7 @@ async def run_benchmark(args: argparse.Namespace):
     model_name = getattr(llm_provider, "model", None) or "N/A"
 
     print("=" * 80)
-    print(f"LOX-ψ / CORP: Benchmark & Training Runner")
+    print(f"LOX-ψ: Benchmark & Training Runner")
     print(f"Run ID: {run_id} | Type: {args.eval_type} | Mode: {'MODE_RANDOM_GENERALIST' if args.mode == 'random' else 'MODE_COMPETENCE_SELECTION'}")
     print(f"Episodes: {args.episodes} | Step Budget: {args.max_steps} | Provider: {args.provider} (Model: {model_name})")
     print(f"Autopsy Engine: {'ENABLED' if args.enable_autopsy else 'DISABLED'}")
@@ -196,7 +196,7 @@ async def run_benchmark(args: argparse.Namespace):
         else:
             character = "*" if args.mode == "random" else competence_engine.select_optimal_persona()
         env = make_env(character=character)
-        agent = CORPAgent(
+        agent = LoxAgent(
             env=env,
             nogood_store=nogood_store,
             llm_provider=llm_provider,
@@ -280,7 +280,7 @@ async def run_benchmark(args: argparse.Namespace):
     print("\n" + "=" * 80)
     print("BENCHMARK AGGREGATE SUMMARY vs AUTOASCEND BASELINE")
     print("=" * 80)
-    print(f"{'Metric':<30} | {'AutoAscend Baseline':<20} | {'CORP Result':<20}")
+    print(f"{'Metric':<30} | {'AutoAscend Baseline':<20} | {'LOX-ψ Result':<20}")
     print("-" * 80)
     print(f"{'Median Dungeon Depth':<30} | {base['median_depth']:<20.1f} | {median_depth:<20.1f}")
     print(f"{'Mean Turns Survived':<30} | {base['mean_turns']:<20.1f} | {mean_turns:<20.1f}")
