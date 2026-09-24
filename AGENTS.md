@@ -25,12 +25,11 @@ knowledge. Porting an expert HTN would falsify the claim.
 
 ### STRICT Operational Constraints
 
-1. **PURE CPU SYMBOLIC EXECUTION ONLY**:
-   - ZERO GPU / zero CUDA contexts. The user trains a MARL environment on the local GPU. All execution
-     (A\*, HTN, epistemics, telemetry, evolution) is CPU-only. The LLM author runs via **API** (primary) or
-     llama.cpp (repro path, run on demand — it is the only permitted CPU-heavy non-executor process).
+1. **PURE CPU SYMBOLIC EXECUTION ONLY (ENVIRONMENT & PLANNER)**:
+   - All environment execution and symbolic logic (A\*, HTN, epistemics, telemetry, evolution batch simulation) is CPU-only across 30+ workers.
+   - The LLM author runs via **API** (OpenRouter / Gemini) or local GPU-accelerated server (RTX 3080 Ti, 12GB VRAM via llama.cpp / vLLM / Ollama at 100+ t/s). Local LLM offloading to the GPU is authorized and runs in tandem with the CPU batch simulation.
 2. **ENVIRONMENT INVOCATION**: always `uv run` for python/pytest.
-3. **100% REGRESSION-FREE TEST SUITE**: `uv run pytest` — currently **575 passing tests (~17s)**. Every
+3. **100% REGRESSION-FREE TEST SUITE**: `uv run pytest` — currently **578 passing tests (~18s)**. Every
    commit maintains the full count. Never disable or skip tests to mask errors.
 4. **CLEAN TELEMETRY**: parquet (`logs/parquet/`) must be consolidated into
    `data/lox_telemetry.duckdb` (7.2M+ ticks) via `scripts/clean_telemetry.py` — never let raw parquet
@@ -208,7 +207,7 @@ the mechanical guardrails (§4) stay in code.
 
 - `data/lox_telemetry.duckdb`: `episodes`, `ticks` (7.2M+), `goal_events`, views `v_eval_summary`,
   `v_lethal_taxonomy`. The author's `query_duckdb` tool reads this read-only.
-- Test suite: `uv run pytest` → **575 passed (~17s)**. Flake protocol: one transient failure → rerun once
+- Test suite: `uv run pytest` → **578 passed (~18s)**. Flake protocol: one transient failure → rerun once
   before diagnosing (combat-manager suites are timing-sensitive); never skip. Includes: R6 milestone
   certifications (18), target-conditionality invariant tests, food-security policy locks (6), validator
   gates, combat/navigation mixins, loop tests, epistemic, telemetry, adapters, Numba equivalents, infix parser

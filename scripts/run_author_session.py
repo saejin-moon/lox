@@ -53,13 +53,13 @@ from lox.policy.report import build_report_bundle, DEFAULT_DB_PATH
 from lox.policy.validator import ValidatorHooks
 
 
-def get_provider(provider_type: str, model: str | None = None):
+def get_provider(provider_type: str, model: str | None = None, base_url: str | None = None):
     if provider_type == "gemini":
         return GeminiProvider(model=model, timeout=180.0)
     if provider_type == "openrouter":
         return OpenRouterProvider(model=model, timeout=180.0)
     if provider_type == "llama_cpp":
-        return LlamaCppProvider(model=model, timeout=180.0)
+        return LlamaCppProvider(model=model, base_url=base_url, timeout=180.0)
     return MockProvider()
 
 
@@ -128,7 +128,7 @@ async def run_session(args) -> int:
                               live_macros={m["name"]: m["body"] for m in program.macros})
     bundle = build_report_bundle(args.db_path, args.ledger_path, program.domain)
     hooks = build_hooks(args, program)
-    provider = get_provider(args.provider, args.model)
+    provider = get_provider(args.provider, args.model, base_url=args.base_url)
     author_label = args.model or getattr(provider, "model", args.provider)
     ledger = RevisionLedger(args.ledger_path)
 
@@ -164,6 +164,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--provider", choices=["mock", "gemini", "openrouter", "llama_cpp"],
                    default="mock")
     p.add_argument("--model", type=str, default=None)
+    p.add_argument("--base-url", type=str, default=None,
+                   help="custom base URL for llama_cpp / local model server (e.g. http://localhost:8080/v1)")
     p.add_argument("--author-mode", choices=["agentic", "bundle"], default="agentic",
                    help="agentic = tool-loop author (S0); bundle = single-shot Reviser baseline")
     p.add_argument("--prompt-version", type=str, default=None,

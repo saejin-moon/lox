@@ -361,7 +361,13 @@ def _rule_from_args(args: list, ctx: str) -> dict:
 
 
 def parse_diff(text: str) -> PolicyDiff:
-    """Parses a full diff document into a PolicyDiff. Raises DiffParseError (ERR_PARSE)."""
+    """Parses a full diff document into a PolicyDiff. Raises DiffParseError (ERR_PARSE).
+    Supports both pure Pythonic Infix AST diffs (zero parentheses) and legacy S-expressions."""
+    stripped = text.strip()
+    if not stripped.startswith("("):
+        from lox.policy.infix import parse_pythonic_diff  # noqa: PLC0415
+        return parse_pythonic_diff(text)
+
     forms = parse_diff_forms(text)
     if not forms:
         raise DiffParseError("ERR_PARSE", "no forms in diff")
@@ -436,13 +442,37 @@ def render_node(node) -> str:
 
 
 def extract_diff_text(raw: str) -> str:
-    """Extracts the full top-level form sequence starting at the first `(revision ...)`
-    from raw LLM output (API path). Handles code fences, prose, and trailing text by
-    balancing parens per form and continuing while further top-level forms follow.
+    """Extracts the diff from raw LLM output.
+    Supports both:
+    1. Pythonic Infix AST diffs (natural lines starting with 'revision:', or inside code fences)
+    2. S-expression diffs (starting with '(revision ...)')
     Raises DiffParseError(ERR_PARSE) if absent."""
+    import re
+    # Check for markdown code fences first
+    fence_match = re.search(r"```(?:diff|python|lox)?\s*\n(.*?revision.*?)\n```", raw, re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        cand = fence_match.group(1).strip()
+        if "(revision" in cand:
+            return extract_diff_text(cand)
+        if re.search(r"\brevision\b", cand, re.IGNORECASE):
+            return cand
+
     idx = raw.find("(revision")
     if idx < 0:
-        raise DiffParseError("ERR_PARSE", "no (revision ...) form found in author output")
+        # Check for Pythonic diff
+        m_rev = re.search(r"^\s*(revision\s*[:\s=].*)$", raw, re.MULTILINE | re.IGNORECASE)
+        if m_rev:
+            start_pos = m_rev.start()
+            lines = []
+            for line in raw[start_pos:].splitlines():
+                sline = line.strip()
+                if sline.startswith("# ") or sline.startswith("## ") or sline.startswith("### "):
+                    break
+                lines.append(line)
+            diff_cand = "\n".join(lines).strip()
+            if diff_cand:
+                return diff_cand
+        raise DiffParseError("ERR_PARSE", "no revision form found in author output")
     end = idx
     i = idx
     n = len(raw)

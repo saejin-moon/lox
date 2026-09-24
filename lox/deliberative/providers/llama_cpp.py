@@ -21,15 +21,16 @@ class LlamaCppProvider(LLMProvider):
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8080/v1",
+        base_url: str | None = None,
         api_key: str = "EMPTY",
         model: str | None = None,
         temperature: float = 0.0,
         timeout: float = 30.0,
     ):
         import os
-        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
-        self.model = model or os.environ.get("LLAMA_CPP_MODEL", "local-model")
+        url = base_url or os.environ.get("LLAMA_CPP_BASE_URL") or os.environ.get("LOCAL_LLM_BASE_URL") or "http://localhost:8080/v1"
+        self.client = AsyncOpenAI(base_url=url, api_key=api_key, timeout=timeout)
+        self.model = model or os.environ.get("LLAMA_CPP_MODEL") or os.environ.get("LOCAL_LLM_MODEL") or "local-model"
         self.temperature = temperature
 
     async def generate_reasoning_and_json(
@@ -82,6 +83,13 @@ class LlamaCppProvider(LLMProvider):
         response = await self.client.chat.completions.create(**kwargs)
         raw_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
+        tokens_in = response.usage.prompt_tokens if response.usage else 0
+        tokens_out = response.usage.completion_tokens if response.usage else 0
+        tokens_thought = 0
+        if response.usage and hasattr(response.usage, "completion_tokens_details"):
+            details = response.usage.completion_tokens_details
+            if details and hasattr(details, "reasoning_tokens"):
+                tokens_thought = getattr(details, "reasoning_tokens", 0) or 0
         latency = (time.perf_counter() - start_time) * 1000.0
         return LLMResponse(
             thinking_content="",
@@ -89,4 +97,7 @@ class LlamaCppProvider(LLMProvider):
             raw_text=raw_text,
             tokens_consumed=tokens,
             latency_ms=latency,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            tokens_thought=tokens_thought,
         )

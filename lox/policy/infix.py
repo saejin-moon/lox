@@ -332,3 +332,161 @@ def parse_infix_rule(text: str, max_depth: int = 3) -> InfixRule:
     unless_tuple = parse_infix_condition(unless_str, max_depth=max_depth) if unless_str else None
 
     return InfixRule(when=when_tuple, do=do_verb, unless=unless_tuple, note=note)
+
+
+def parse_pythonic_diff(text: str, max_depth: int = 3):
+    """
+    Parses a pure Pythonic Infix AST policy diff document into a PolicyDiff.
+    Zero Lisp S-expression parentheses required.
+    """
+    from lox.policy.dsl import (  # noqa: PLC0415
+        PolicyDiff,
+        DiffHeader,
+        SetOp,
+        RuleOp,
+        GoalOp,
+        NogoodOp,
+        DefmacroOp,
+        NoteOp,
+        DiffParseError,
+    )
+
+    cleaned = text.strip()
+    if not cleaned:
+        raise DiffParseError("ERR_PARSE", "empty diff document")
+
+    # Header extraction
+    m_rev = re.search(r"revision[:\s=]+(\d+)", cleaned, re.I)
+    m_par = re.search(r"parent[:\s=]+(\d+)", cleaned, re.I)
+    if not m_rev:
+        raise DiffParseError("ERR_PARSE", "first statement must specify revision (e.g. revision: 5)")
+    if not m_par:
+        raise DiffParseError("ERR_HEADER", "revision header requires parent (e.g. parent: 4)")
+
+    m_auth = re.search(r'author[:\s=]+["\']?([^,"\']+)["\']?', cleaned, re.I)
+    m_dom = re.search(r'domain[:\s=]+["\']?([^,"\']+)["\']?', cleaned, re.I)
+    m_reas = re.search(r'reason[:\s=]+["\']?([^"\'\n]+)["\']?', cleaned, re.I)
+
+    header = DiffHeader(
+        revision=int(m_rev.group(1)),
+        parent=int(m_par.group(1)),
+        author=m_auth.group(1).strip() if m_auth else "unknown",
+        domain=m_dom.group(1).strip() if m_dom else "nethack",
+        reason=m_reas.group(1).strip() if m_reas else "",
+    )
+
+    diff = PolicyDiff(header=header)
+
+    lines = [line.strip() for line in cleaned.splitlines()]
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("//") or line.startswith(";") or line.startswith("```"):
+            continue
+
+        # Skip standalone header line
+        if re.search(r"^\s*revision\b", line, re.I) and not re.search(r"\b(set|rule|goal|macro|defmacro|nogood)\b", line, re.I):
+            continue
+
+        # Note statement
+        m_note = re.match(r'^note[:\s]+["\']([^"\']+)["\']$', line, re.I)
+        if m_note:
+            diff.notes.append(NoteOp(text=m_note.group(1).strip()))
+            continue
+
+        # Set tunable: `set policy_params.x = y` or `policy_params.x = y`
+        m_set = re.match(r"^(?:set\s+)?(policy_params\.[a-zA-Z0-9_.]+)\s*[:= ]\s*(.+)$", line, re.I)
+        if m_set:
+            path = m_set.group(1).strip()
+            val_str = m_set.group(2).strip()
+            try:
+                val = ast.literal_eval(val_str)
+            except Exception:
+                val = val_str
+            if not isinstance(val, (int, float, bool, str)):
+                raise DiffParseError("ERR_PARSE", f"invalid set value: {val_str}")
+            diff.sets.append(SetOp(path=path, value=val))
+            continue
+
+        # Rule remove: `rule remove tactic_rules: 2` or `rule remove: 2`
+        m_rrem = re.match(r"^rule\s+remove(?:\s+tactic_rules)?\s*[:= ]\s*(\d+)$", line, re.I)
+        if m_rrem:
+            diff.rules.append(RuleOp(action="remove", index=int(m_rrem.group(1)), rule=None))
+            continue
+
+        # Rule add: `rule add tactic_rules: when ...` or `rule: when ...` or `when ... do ...`
+        m_radd = re.match(r"^(?:rule(?:\s+add)?(?:\s+tactic_rules)?\s*[:]\s*)?(when\s+.+)$", line, re.I)
+        if m_radd:
+            rule_content = m_radd.group(1).strip()
+            note = None
+            note_match = re.search(r'note\s+"([^"]*)"', rule_content, re.I)
+            if note_match:
+                note = note_match.group(1)
+                rule_content = rule_content[:note_match.start()] + rule_content[note_match.end():]
+
+            pat = r"when\s+(.+?)\s+do\s+([a-zA-Z0-9_]+)(?:\s+unless\s+(.+))?$"
+            rmatch = re.search(pat, rule_content, re.I)
+            if not rmatch:
+                raise DiffParseError("ERR_PARSE", f"Invalid rule format in '{line}'. Expected: 'when <expr> do <verb> [unless <expr>]'")
+            when_str = rmatch.group(1).strip()
+            do_verb = rmatch.group(2).strip().lower()
+            unless_str = rmatch.group(3).strip() if rmatch.group(3) else None
+
+            when_ast = parse_infix_to_canonical(when_str, max_depth=max_depth)
+            unless_ast = parse_infix_to_canonical(unless_str, max_depth=max_depth) if unless_str else None
+            diff.rules.append(RuleOp(action="add", rule={"when": when_ast, "do": do_verb, "unless": unless_ast, "note": note}))
+            continue
+
+        # Goal prioritize: `goal prioritize reach_stairs: when ...`
+        m_g_prio = re.match(r"^goal\s+prioritize\s+([a-zA-Z0-9_]+)\s*[:]?\s*(?:when\s+(.+?))?(?:\s+until\s+(.+))?$", line, re.I)
+        if m_g_prio:
+            goal_name = m_g_prio.group(1).strip()
+            when_str = m_g_prio.group(2).strip() if m_g_prio.group(2) else None
+            until_str = m_g_prio.group(3).strip() if m_g_prio.group(3) else None
+            when_ast = parse_infix_to_canonical(when_str, max_depth=max_depth) if when_str else None
+            until_ast = parse_infix_to_canonical(until_str, max_depth=max_depth) if until_str else None
+            diff.goals.append(GoalOp(kind="prioritize", goal=goal_name, when=when_ast, until=until_ast))
+            continue
+
+        # Goal deprioritize: `goal deprioritize explore: after ...`
+        m_g_deprio = re.match(r"^goal\s+deprioritize\s+([a-zA-Z0-9_]+)\s*[:]?\s*(?:after\s+(.+))?$", line, re.I)
+        if m_g_deprio:
+            goal_name = m_g_deprio.group(1).strip()
+            after_str = m_g_deprio.group(2).strip() if m_g_deprio.group(2) else None
+            after_ast = parse_infix_to_canonical(after_str, max_depth=max_depth) if after_str else None
+            diff.goals.append(GoalOp(kind="deprioritize", goal=goal_name, after=after_ast))
+            continue
+
+        # Goal set threshold: `goal set_threshold reach_stairs: timeout = 500`
+        m_g_thresh = re.match(r"^goal\s+set_threshold\s+([a-zA-Z0-9_]+)\s*[:]?\s*([a-zA-Z0-9_.]+)\s*[:= ]\s*(.+)$", line, re.I)
+        if m_g_thresh:
+            goal_name = m_g_thresh.group(1).strip()
+            path = m_g_thresh.group(2).strip()
+            val_str = m_g_thresh.group(3).strip()
+            try:
+                val = ast.literal_eval(val_str)
+            except Exception:
+                val = val_str
+            diff.goals.append(GoalOp(kind="set_threshold", goal=goal_name, path=path, value=val))
+            continue
+
+        # Macro: `macro low_hp = hp_frac <= 0.50`
+        m_macro = re.match(r"^(?:defmacro|macro)\s+([a-zA-Z0-9_]+)\s*=\s*(.+)$", line, re.I)
+        if m_macro:
+            m_name = m_macro.group(1).strip()
+            body_str = m_macro.group(2).strip()
+            body_ast = parse_infix_to_canonical(body_str, max_depth=max_depth)
+            diff.defmacros.append(DefmacroOp(name=m_name, body=body_ast))
+            continue
+
+        # Nogood: `nogood: when ... cause "..." [forbid ...]`
+        m_ng = re.match(r"^nogood\s*[:]?\s*when\s+(.+?)\s+cause\s+\"([^\"]+)\"(?:\s+forbid\s+([a-zA-Z0-9_]+))?$", line, re.I)
+        if m_ng:
+            when_ast = parse_infix_to_canonical(m_ng.group(1).strip(), max_depth=max_depth)
+            cause = m_ng.group(2).strip()
+            forbid = m_ng.group(3).strip() if m_ng.group(3) else None
+            diff.nogoods.append(NogoodOp(when=when_ast, cause=cause, forbid=forbid))
+            continue
+
+        raise DiffParseError("ERR_PARSE", f"unrecognized statement: '{line}'")
+
+    return diff

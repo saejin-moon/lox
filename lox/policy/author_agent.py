@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -208,8 +209,8 @@ class AgenticAuthor:
                 meta[k] += getattr(resp, k, 0) or 0
             raw = resp.raw_text or ""
 
-            # A turn containing (revision ...) is the FINAL answer.
-            if "(revision" in raw:
+            # A turn containing revision header is the FINAL answer.
+            if "(revision" in raw or "revision:" in raw or re.search(r"^\s*revision\s+[\d:]", raw, re.MULTILINE | re.IGNORECASE):
                 try:
                     return extract_diff_text(raw)
                 except DiffParseError:

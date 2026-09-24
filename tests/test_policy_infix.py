@@ -147,3 +147,99 @@ def test_validate_infix_diff_against_program():
     res = validate_diff(diff_text, base, manifest=manifest)
     assert res.ok, f"Validation failed: {res.error_code} - {res.detail}"
 
+
+def test_pure_pythonic_diff_zero_parentheses():
+    from lox.policy.dsl import parse_diff
+
+    pythonic_diff = """
+    # Pure Pythonic Infix AST diff (zero S-expression parentheses)
+    revision: 5, parent: 4, author: "qwen-8b", domain: "minihack", reason: "retreat when wounded"
+    set policy_params.hp_retreat_ratio = 0.35
+    rule add tactic_rules: when monster == "j" and hp_frac <= 0.40 do retreat unless blind note "emergency retreat"
+    rule remove tactic_rules: 2
+    goal prioritize reach_stairs: when stairs_known and not adjacent_hostiles
+    goal deprioritize explore: after hp_frac < 0.20
+    macro low_hp = hp_frac <= 0.50
+    """
+    diff = parse_diff(pythonic_diff)
+    assert diff.header.revision == 5
+    assert diff.header.parent == 4
+    assert diff.header.author == "qwen-8b"
+    assert diff.header.domain == "minihack"
+    assert diff.header.reason == "retreat when wounded"
+
+    assert len(diff.sets) == 1
+    assert diff.sets[0].path == "policy_params.hp_retreat_ratio"
+    assert diff.sets[0].value == 0.35
+
+    assert len(diff.rules) == 2
+    assert diff.rules[0].action == "add"
+    assert diff.rules[0].rule["do"] == "retreat"
+    assert diff.rules[0].rule["note"] == "emergency retreat"
+    assert diff.rules[0].rule["when"] == (
+        "call",
+        "and",
+        [("call", "monster", ["j"]), ("call", "hp_frac", ["<=", 0.40])],
+    )
+    assert diff.rules[0].rule["unless"] == ("call", "blind", [])
+    assert diff.rules[1].action == "remove"
+    assert diff.rules[1].index == 2
+
+    assert len(diff.goals) == 2
+    assert diff.goals[0].kind == "prioritize"
+    assert diff.goals[0].goal == "reach_stairs"
+    assert diff.goals[0].when == (
+        "call",
+        "and",
+        [("call", "stairs_known", []), ("call", "not", [("call", "adjacent_hostiles", [])])],
+    )
+    assert diff.goals[1].kind == "deprioritize"
+    assert diff.goals[1].goal == "explore"
+    assert diff.goals[1].after == ("call", "hp_frac", ["<", 0.20])
+
+    assert len(diff.defmacros) == 1
+    assert diff.defmacros[0].name == "low_hp"
+    assert diff.defmacros[0].body == ("call", "hp_frac", ["<=", 0.50])
+
+
+def test_validate_pure_pythonic_diff():
+    from lox.policy.validator import validate_diff
+    from lox.policy.program import PolicyProgram
+    from lox.executor.minihack_adapter import MiniHackAdapter
+
+    adapter = MiniHackAdapter()
+    manifest = adapter.manifest("v1")
+    base = PolicyProgram.load("data/compiled/minihack.json")
+
+    pythonic_text = f"""
+    revision: {base.version + 1}, parent: {base.version}, author: "local-qwen", domain: "minihack", reason: "retreat discipline"
+    rule add tactic_rules: when monster == "j" and hp_frac <= 0.35 do retreat
+    goal prioritize reach_stairs: when stairs_known and not adjacent_hostiles
+    """
+    res = validate_diff(pythonic_text, base, manifest=manifest)
+    assert res.ok, f"Validation failed: {res.error_code} - {res.detail}"
+
+
+def test_extract_diff_text_pythonic():
+    from lox.policy.dsl import extract_diff_text, parse_diff
+
+    llm_output = """
+    I reviewed the duckdb telemetry. We are dying to monster 'j'.
+    Here is my proposed diff:
+
+    ```python
+    revision: 5, parent: 4, author: "qwen-8b", domain: "minihack", reason: "kite jacks"
+    rule add tactic_rules: when monster == "j" and hp_frac <= 0.40 do retreat
+    ```
+
+    # SUMMARY
+    This will prevent melee deaths against jackals.
+    """
+
+    extracted = extract_diff_text(llm_output)
+    diff = parse_diff(extracted)
+    assert diff.header.revision == 5
+    assert len(diff.rules) == 1
+    assert diff.rules[0].rule["do"] == "retreat"
+
+
