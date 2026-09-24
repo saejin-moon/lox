@@ -7,6 +7,9 @@ import path) and composes these mixins — behavior-preserving split.
 from lox.domain.navigation.level_map import LevelMap, LevelStore
 from lox.domain.navigation.stepping import SteppingMixin
 from lox.domain.navigation.exploration import ExplorationMixin
+from lox.domain.navigation.search_policy import SearchPolicy
+from lox.domain.navigation.stair_routing import StairRouter
+from lox.domain.navigation.feature_navigation import FeatureNavigator
 
 
 def __getattr__(name):
@@ -17,4 +20,13 @@ def __getattr__(name):
         return NavigationManager
     raise AttributeError(name)
 
-__all__ = ["LevelMap", "LevelStore", "SteppingMixin", "ExplorationMixin", "NavigationManager"]
+__all__ = [
+    "LevelMap",
+    "LevelStore",
+    "SteppingMixin",
+    "ExplorationMixin",
+    "SearchPolicy",
+    "StairRouter",
+    "FeatureNavigator",
+    "NavigationManager",
+]

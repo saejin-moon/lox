@@ -18,6 +18,9 @@ from lox.policy.config import PolicyConfig, default_config
 from lox.domain.navigation.level_map import LevelMap, LevelStore
 from lox.domain.navigation.stepping import SteppingMixin
 from lox.domain.navigation.exploration import ExplorationMixin
+from lox.domain.navigation.search_policy import SearchPolicy
+from lox.domain.navigation.stair_routing import StairRouter
+from lox.domain.navigation.feature_navigation import FeatureNavigator
 
 
 class NavigationManager(ExplorationMixin, SteppingMixin):
@@ -80,6 +83,9 @@ class NavigationManager(ExplorationMixin, SteppingMixin):
         self.levels: LevelStore[tuple[int, int], LevelMap] = LevelStore()
         self.astar = GridAStar()
         self.frontier_explorer = FrontierExplorer()
+        self.search_policy = SearchPolicy(self.cfg)
+        self.stair_router = StairRouter(self.cfg)
+        self.feature_nav = FeatureNavigator(self.cfg)
         self.last_step_delta: tuple[int, int] | None = None
         self.unlock_tool_slot: str | None = None
         self._current_search_spot: tuple[int, int] | None = None
