@@ -53,7 +53,6 @@ Any agent picking up this workspace can immediately execute the MiniHack synthes
      --host 0.0.0.0 \
      --port 8000 \
      --max-model-len 32768 \
-     --kv-cache-dtype fp8 \
      --gpu-memory-utilization 0.90 \
      --enforce-eager \
      --disable-uvicorn-access-log
