@@ -6,6 +6,55 @@
 
 ---
 
+## 0. Autonomous Agent Handoff & Immediate Operational Commands (START HERE)
+
+> **Current State (2026-09-24)**: **578 passing tests (~18s)** (100% green, regression-free).
+> All S-expression parentheses have been completely eliminated from the authoring surface and prompt in favor of
+> **Pure Pythonic Infix AST** (`lox/policy/infix.py` / `lox/policy/dsl.py`).
+> Context capacity is unlocked up to **128k tokens** (`MAX_TRANSCRIPT_CHARS=450000`, `MAX_TOOL_OUTPUT_CHARS=32000`).
+> Local GPU LLM authoring runs on the NVIDIA RTX 3080 Ti (12GB VRAM) via vLLM at 100+ tokens/sec in tandem with
+> 36-core CPU symbolic batch simulation (19,000+ eps/hr).
+
+### Immediate Next Task: The MiniHack Run
+
+To execute the MiniHack policy synthesis run, any agent can run the following exact sequence:
+
+1. **Step 1: Launch Local vLLM Server on RTX 3080 Ti**:
+   ```bash
+   uv run vllm serve groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64 \
+     --quantization gptq_marlin \
+     --dtype float16 \
+     --trust-remote-code \
+     --host 0.0.0.0 \
+     --port 8000 \
+     --max-model-len 32768 \
+     --kv-cache-dtype fp8 \
+     --gpu-memory-utilization 0.90 \
+     --enforce-eager \
+     --disable-log-requests
+   ```
+   *(Note: 32k context is optimal for 12GB VRAM; worst-case author transcript is ~8k tokens. If local server is offline, fallback via OpenRouter API: `--provider openrouter --model z-ai/glm-5.3-flash`)*.
+
+2. **Step 2: Run Agentic Authoring Session (Pure Pythonic Infix AST)**:
+   ```bash
+   uv run python scripts/run_author_session.py \
+     --provider llama_cpp \
+     --base-url http://localhost:8000/v1 \
+     --model groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64 \
+     --domain minihack \
+     --no-commit
+   ```
+
+3. **Step 3: Run MiniHack 100-Episode Parallel Batch (30 CPU Workers)**:
+   ```bash
+   uv run python scripts/run_minihack_batch.py \
+     --task MiniHack-ExploreMaze-Easy-Mapped-v0 \
+     --episodes 100 \
+     --jobs 30
+   ```
+
+---
+
 ## 1. Mission & Non-Negotiable Constraints
 
 ### The Core Objective

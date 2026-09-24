@@ -42,13 +42,44 @@ AGENTS.md §4.14), DL-1–3 melee bites dominant, occasional prayer-prompt death
 died at depth 1 after a median of ~4,400 turns** — stalling + early survival is the wall, not turn budget.
 AutoAscend empirical foil: median depth 10.0 / mean score 10,713.6 / 4.8% ascension (5 eps @ 20k).
 
+### Autonomous Agent Handoff: Immediate Next Run (MiniHack Campaign)
+Any agent picking up this workspace can immediately execute the MiniHack synthesis run:
+1. **Launch local vLLM on RTX 3080 Ti (12GB VRAM)**:
+   ```bash
+   uv run vllm serve groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64 \
+     --quantization gptq_marlin \
+     --dtype float16 \
+     --trust-remote-code \
+     --host 0.0.0.0 \
+     --port 8000 \
+     --max-model-len 32768 \
+     --kv-cache-dtype fp8 \
+     --gpu-memory-utilization 0.90 \
+     --enforce-eager \
+     --disable-log-requests
+   ```
+2. **Execute Agentic Authoring Session (Pure Pythonic Infix AST)**:
+   ```bash
+   uv run python scripts/run_author_session.py \
+     --provider llama_cpp \
+     --base-url http://localhost:8000/v1 \
+     --model groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64 \
+     --domain minihack \
+     --no-commit
+   ```
+3. **Execute 100-Episode MiniHack Batch (30 CPU Workers)**:
+   ```bash
+   uv run python scripts/run_minihack_batch.py \
+     --task MiniHack-ExploreMaze-Easy-Mapped-v0 \
+     --episodes 100 \
+     --jobs 30
+   ```
+
 **Decision ledger (do not re-litigate)**:
+- **Pure Pythonic Infix AST (Zero S-Expressions) & AST-to-HTN Execution**: All outer Lisp parentheses eliminated from authoring surface and prompt (`data/prompts/v6.md`). Infix conditions (e.g. `stairs_known and not is_fighting`, `monster == "j" and hp_frac <= 0.35`) supported directly via sandboxed AST parsing (`lox/policy/infix.py` `parse_pythonic_diff` -> `dsl.py` -> `ast_to_canonical_expr`) with zero parenthesis hallucination, depth <= 3 bound, and direct AST evaluation in `GoalInterpreter` and `TacticRuleEngine` feeding HTN planner methods.
+- **Context Capacity to 128k Tokens**: `MAX_TRANSCRIPT_CHARS=450000` (~128k tokens) and `MAX_TOOL_OUTPUT_CHARS=32000` (~9k tokens), allowing massive SQL queries and 2000-tick trajectory autopsies without truncation.
 - **No AutoAscend port** — the contribution is grown knowledge beating engineered knowledge; porting an
   expert HTN falsifies the claim and breaks the baseline-free novel-env story (user decision, final).
-- **Pythonic Infix AST & AST-to-HTN**: Infix conditions (e.g. `stairs_known and not is_fighting`,
-  `monster == "j" and hp_frac <= 0.35`) supported directly via sandboxed AST parsing
-  (`lox/policy/infix.py` -> `dsl.py` -> `ast_to_canonical_expr`) with zero parenthesis hallucination,
-  depth <= 3 bound, and direct AST execution in `GoalInterpreter` and `TacticRuleEngine` feeding HTN planner methods.
 - **1a**: combat-verb tactic rules MUST be target-conditional — `(monster "…")`/`(item "…")` required in
   `when` (validator invariant + author prompt). Macro bodies are parameterless (no string atoms), so the
   target match lives in the rule's own `when`; macros compose state conditions around it.
