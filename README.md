@@ -1,7 +1,7 @@
 # LOX-ψ: LLM-Oriented Synthesis of Symbolic Policies
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
-[![Test Suite](https://img.shields.io/badge/tests-572%20passed%20(100%25)-brightgreen.svg)]()
+[![Test Suite](https://img.shields.io/badge/tests-575%20passed%20(100%25)-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Execution: Pure CPU](https://img.shields.io/badge/execution-Pure%20CPU%20(0%20GPU)-orange.svg)]()
 
@@ -122,7 +122,7 @@ uv sync
 The test suite enforces 100% regression-free verification:
 ```bash
 uv run pytest -q
-# 572 passed in ~17s
+# 575 passed in ~17s
 ```
 
 ---

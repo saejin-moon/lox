@@ -32,7 +32,7 @@ Parity is the crossover; the design goal is that our loop's improvement rate **c
 
 ## 0.5 WHERE WE ARE (state of record, 2026-09-24) — read before working
 
-**Suite**: **572 passing tests (~17s)** (`uv run pytest -q`). Telemetry: **7.2M+ ticks in DuckDB**.
+**Suite**: **575 passing tests (~17s)** (`uv run pytest -q`). Telemetry: **7.2M+ ticks in DuckDB**.
 **Program**: live NetHack program = **v6** (`data/policy_program.json`; interlock-only tactic rules — the 3
 llm-authored combat rules were reverted after an A/B showed they cost 45% mean score). MiniHack program v4.
 **Current NetHack baseline band (100-ep batches, valkyrie, v6 rules)**: mean score **330–396**, median depth
@@ -45,6 +45,10 @@ AutoAscend empirical foil: median depth 10.0 / mean score 10,713.6 / 4.8% ascens
 **Decision ledger (do not re-litigate)**:
 - **No AutoAscend port** — the contribution is grown knowledge beating engineered knowledge; porting an
   expert HTN falsifies the claim and breaks the baseline-free novel-env story (user decision, final).
+- **Pythonic Infix AST & AST-to-HTN**: Infix conditions (e.g. `stairs_known and not is_fighting`,
+  `monster == "j" and hp_frac <= 0.35`) supported directly via sandboxed AST parsing
+  (`lox/policy/infix.py` -> `dsl.py` -> `ast_to_canonical_expr`) with zero parenthesis hallucination,
+  depth <= 3 bound, and direct AST execution in `GoalInterpreter` and `TacticRuleEngine` feeding HTN planner methods.
 - **1a**: combat-verb tactic rules MUST be target-conditional — `(monster "…")`/`(item "…")` required in
   `when` (validator invariant + author prompt). Macro bodies are parameterless (no string atoms), so the
   target match lives in the rule's own `when`; macros compose state conditions around it.

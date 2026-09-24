@@ -30,7 +30,7 @@ knowledge. Porting an expert HTN would falsify the claim.
      (A\*, HTN, epistemics, telemetry, evolution) is CPU-only. The LLM author runs via **API** (primary) or
      llama.cpp (repro path, run on demand — it is the only permitted CPU-heavy non-executor process).
 2. **ENVIRONMENT INVOCATION**: always `uv run` for python/pytest.
-3. **100% REGRESSION-FREE TEST SUITE**: `uv run pytest` — currently **572 passing tests (~17s)**. Every
+3. **100% REGRESSION-FREE TEST SUITE**: `uv run pytest` — currently **575 passing tests (~17s)**. Every
    commit maintains the full count. Never disable or skip tests to mask errors.
 4. **CLEAN TELEMETRY**: parquet (`logs/parquet/`) must be consolidated into
    `data/lox_telemetry.duckdb` (7.2M+ ticks) via `scripts/clean_telemetry.py` — never let raw parquet
@@ -208,11 +208,11 @@ the mechanical guardrails (§4) stay in code.
 
 - `data/lox_telemetry.duckdb`: `episodes`, `ticks` (7.2M+), `goal_events`, views `v_eval_summary`,
   `v_lethal_taxonomy`. The author's `query_duckdb` tool reads this read-only.
-- Test suite: `uv run pytest` → **572 passed (~17s)**. Flake protocol: one transient failure → rerun once
+- Test suite: `uv run pytest` → **575 passed (~17s)**. Flake protocol: one transient failure → rerun once
   before diagnosing (combat-manager suites are timing-sensitive); never skip. Includes: R6 milestone
   certifications (18), target-conditionality invariant tests, food-security policy locks (6), validator
-  gates, combat/navigation mixins, loop tests, epistemic, telemetry, adapters, Numba equivalents, infix parser,
-  and token optimization domain isolation tests (4).
+  gates, combat/navigation mixins, loop tests, epistemic, telemetry, adapters, Numba equivalents, infix parser
+  and AST-to-HTN direct evaluation tests (10), and token optimization domain isolation tests (4).
 - Certifications: `scripts/run_skill_certifications.py` (4 suites, incl. the R6 Early Survival Gauntlet) —
   all CERTIFIED. Per-domain adapter certification suites gate handler promotion.
 - Every campaign appends to `data/revision_ledger.jsonl` (author, tokens, cost, latency, accept/reject,

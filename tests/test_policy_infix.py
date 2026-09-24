@@ -88,3 +88,62 @@ def test_parse_infix_rule():
     )
     assert rule.unless == ("blind",)
     assert rule.note == "emergency retreat"
+
+
+def test_dsl_diff_with_pythonic_infix():
+    from lox.policy.dsl import parse_diff
+
+    diff_text = """(revision 1 (parent 0) (domain "minihack"))
+(goal prioritize reach_stairs (when stairs_known and not adjacent_hostiles))
+(rule add tactic_rules (do retreat) (when monster == "j" and hp_frac <= 0.35))
+"""
+    diff = parse_diff(diff_text)
+    assert len(diff.goals) == 1
+    assert diff.goals[0].when == (
+        "call",
+        "and",
+        [("call", "stairs_known", []), ("call", "not", [("call", "adjacent_hostiles", [])])],
+    )
+
+    assert len(diff.rules) == 1
+    assert diff.rules[0].rule["when"] == (
+        "call",
+        "and",
+        [("call", "monster", ["j"]), ("call", "hp_frac", ["<=", 0.35])],
+    )
+
+
+def test_infix_canonical_equivalence():
+    from lox.policy.dsl import parse_diff
+
+    # S-expression style
+    sexpr_diff = """(revision 1 (parent 0))
+(rule add tactic_rules (do retreat) (when (and (monster "j") (hp_frac <= 0.35))))
+"""
+    # Pythonic infix style
+    infix_diff = """(revision 1 (parent 0))
+(rule add tactic_rules (do retreat) (when monster == "j" and hp_frac <= 0.35))
+"""
+    d_sexpr = parse_diff(sexpr_diff)
+    d_infix = parse_diff(infix_diff)
+
+    assert d_sexpr.rules[0].rule["when"] == d_infix.rules[0].rule["when"]
+
+
+def test_validate_infix_diff_against_program():
+    from lox.policy.dsl import parse_diff
+    from lox.policy.validator import validate_diff
+    from lox.policy.program import PolicyProgram
+    from lox.executor.minihack_adapter import MiniHackAdapter
+
+    adapter = MiniHackAdapter()
+    manifest = adapter.manifest("v1")
+    base = PolicyProgram.load("data/compiled/minihack.json")
+
+    diff_text = f"""(revision {base.version + 1} (parent {base.version}) (domain "minihack"))
+(goal prioritize reach_stairs (when stairs_known and not adjacent_hostiles))
+(rule add tactic_rules (do retreat) (when monster == "j" and hp_frac <= 0.35))
+"""
+    res = validate_diff(diff_text, base, manifest=manifest)
+    assert res.ok, f"Validation failed: {res.error_code} - {res.detail}"
+

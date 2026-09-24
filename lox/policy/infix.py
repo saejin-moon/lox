@@ -63,7 +63,7 @@ class SafeASTVisitor(ast.NodeVisitor):
         if not isinstance(node, self.ALLOWED_NODES):
             raise InfixSyntaxError(
                 f"Disallowed syntax element: {type(node).__name__}. "
-                f"Only boolean logic ('and', 'or', 'not'), comparisons, identifiers, and numbers are permitted."
+                f"Only boolean logic ('and', 'or', 'not'), comparisons, identifiers, calls, and numbers are permitted."
             )
         super().generic_visit(node)
 
@@ -125,6 +125,17 @@ def _ast_to_condition_tuple(node: ast.AST) -> tuple | str | int | float | bool:
 
         return ("compare", left_id, op_str, right_val)
 
+    if isinstance(node, ast.Call):
+        args = []
+        for a in node.args:
+            if isinstance(a, ast.Constant):
+                args.append(a.value)
+            elif isinstance(a, ast.UnaryOp) and isinstance(a.op, ast.USub) and isinstance(a.operand, ast.Constant):
+                args.append(-a.operand.value)
+            else:
+                raise InfixSyntaxError("Arguments to predicate calls must be literal constants.")
+        return ("call", node.func.id, args)
+
     if isinstance(node, ast.Name):
         return (node.id,)
 
@@ -134,6 +145,90 @@ def _ast_to_condition_tuple(node: ast.AST) -> tuple | str | int | float | bool:
         raise InfixSyntaxError(f"Bare constant '{node.value}' not allowed as standalone condition.")
 
     raise InfixSyntaxError(f"Cannot convert AST node {type(node).__name__} to condition tuple.")
+
+
+def ast_to_canonical_expr(node: ast.AST) -> tuple:
+    """Transforms a validated AST node into LOX-ψ's canonical ('call', name, args) tuple."""
+    if isinstance(node, ast.Expression):
+        return ast_to_canonical_expr(node.body)
+
+    if isinstance(node, ast.BoolOp):
+        op_name = "and" if isinstance(node.op, ast.And) else "or"
+        children = [ast_to_canonical_expr(val) for val in node.values]
+        return ("call", op_name, children)
+
+    if isinstance(node, ast.UnaryOp):
+        if isinstance(node.op, ast.Not):
+            return ("call", "not", [ast_to_canonical_expr(node.operand)])
+        raise InfixSyntaxError(f"Unsupported unary operator: {type(node.op).__name__}")
+
+    if isinstance(node, ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise InfixSyntaxError("Chained comparisons (e.g. 1 < x < 5) are not permitted; use 'and'.")
+        op_type = type(node.ops[0])
+        if op_type not in _CMP_OPS:
+            raise InfixSyntaxError(f"Unsupported comparison operator: {op_type.__name__}")
+        op_str = _CMP_OPS[op_type]
+
+        if not isinstance(node.left, ast.Name):
+            raise InfixSyntaxError("Left side of comparison must be a valid identifier.")
+        left_id = node.left.id
+
+        right_node = node.comparators[0]
+        if isinstance(right_node, ast.Constant):
+            right_val = right_node.value
+        elif isinstance(right_node, ast.UnaryOp) and isinstance(right_node.op, ast.USub) and isinstance(right_node.operand, ast.Constant):
+            right_val = -right_node.operand.value
+        else:
+            raise InfixSyntaxError("Right side of comparison must be a literal constant.")
+
+        if left_id in ("monster", "item") and op_str == "==":
+            return ("call", left_id, [right_val])
+        return ("call", left_id, [op_str, right_val])
+
+    if isinstance(node, ast.Call):
+        args = []
+        for a in node.args:
+            if isinstance(a, ast.Constant):
+                args.append(a.value)
+            elif isinstance(a, ast.UnaryOp) and isinstance(a.op, ast.USub) and isinstance(a.operand, ast.Constant):
+                args.append(-a.operand.value)
+            else:
+                raise InfixSyntaxError("Arguments to predicate calls must be literal constants.")
+        return ("call", node.func.id, args)
+
+    if isinstance(node, ast.Name):
+        return ("call", node.id, [])
+
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool):
+            return ("call", "true" if node.value else "false", [])
+        raise InfixSyntaxError(f"Bare constant '{node.value}' not allowed as standalone condition.")
+
+    raise InfixSyntaxError(f"Cannot convert AST node {type(node).__name__} to canonical expression.")
+
+
+def parse_infix_to_canonical(expr_str: str, max_depth: int = 3) -> tuple:
+    """Parses a Pythonic infix condition string into LOX-ψ's canonical ('call', name, args) tuple."""
+    cleaned = expr_str.strip()
+    if not cleaned:
+        raise InfixSyntaxError("Empty condition expression.")
+
+    try:
+        tree = ast.parse(cleaned, mode="eval")
+    except SyntaxError as e:
+        raise InfixSyntaxError(f"Syntax error in expression '{cleaned}': {e.msg}") from e
+
+    validator = SafeASTVisitor(max_depth=max_depth)
+    validator.visit(tree)
+
+    depth = _measure_depth(tree)
+    if depth > max_depth:
+        raise InfixSyntaxError(
+            f"Condition nesting depth {depth} exceeds allowed budget of {max_depth} in '{cleaned}'"
+        )
+
+    return ast_to_canonical_expr(tree)
 
 
 def parse_infix_condition(expr_str: str, max_depth: int = 3) -> tuple:

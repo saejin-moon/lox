@@ -183,11 +183,14 @@ def _need_int(args, i, ctx: str) -> int:
     return args[i]
 
 
-def _extract_opt(form_args: list, key: str) -> tuple | None:
-    """Finds (key <expr>) inside a form's args; returns the expr node or None."""
+def _extract_opt(form_args: list, key: str):
+    """Finds (key <expr>) inside a form's args; returns the expr node, token list, or None."""
     for a in form_args:
-        if _is_expr_node(a) and a[1] == key and len(a[2]) == 1:
-            return a[2][0]
+        if _is_expr_node(a) and a[1] == key:
+            if len(a[2]) == 1:
+                return a[2][0]
+            elif len(a[2]) > 1:
+                return a[2]
     return None
 
 
@@ -199,11 +202,54 @@ def _extract_opt_str(form_args: list, key: str) -> str | None:
 
 
 def _as_expr(node):
-    """Leniency for API authors: a bare symbol where an expression is expected is
-    wrapped as a zero-arg predicate call (`(when is_fighting)` == `(when (is_fighting))`).
-    Non-string atoms are rejected (they are values, not conditions)."""
+    """Leniency and Pythonic Infix AST parsing:
+    1. If node is a list of tokens (e.g. from `(when hp_frac <= 0.40 and not is_fighting)`),
+       parse it as a Pythonic infix AST condition.
+    2. If node is a string containing infix operators ('and', 'or', 'not', '<=', '>=', '<', '>', '==', '!='),
+       parse it as a Pythonic infix AST condition.
+    3. If node is a bare string identifier (e.g. 'is_fighting'), wrap as ('call', node, []).
+    4. If node is a ('call', name, args) tuple where args contain unparsed infix operators,
+       parse via infix.
+    5. Otherwise return the canonical ('call', name, args) tuple.
+    """
+    if node is None:
+        return None
+
+    def _fmt(x):
+        if isinstance(x, QuotedStr):
+            return f'"{x}"'
+        if isinstance(x, str):
+            if x.isidentifier() or x in ("and", "or", "not", "<=", ">=", "<", ">", "==", "!="):
+                return x
+            if x.startswith('"') and x.endswith('"'):
+                return x
+            return f'"{x}"'
+        return str(x)
+
+    if isinstance(node, list):
+        tokens_str = " ".join(_fmt(x) for x in node)
+        try:
+            from lox.policy.infix import parse_infix_to_canonical  # noqa: PLC0415
+            return parse_infix_to_canonical(tokens_str)
+        except Exception:
+            pass
     if isinstance(node, str):
+        if any(tok in node for tok in (" and ", " or ", "not ", "<=", ">=", "<", ">", "==", "!=")):
+            try:
+                from lox.policy.infix import parse_infix_to_canonical  # noqa: PLC0415
+                return parse_infix_to_canonical(node)
+            except Exception:
+                pass
         return ("call", node, [])
+    if isinstance(node, tuple) and node and node[0] == "call":
+        name, args = node[1], node[2]
+        if args and any(isinstance(a, str) and a in ("and", "or", "not", "<=", ">=", "<", ">", "==", "!=") for a in args):
+            tokens_str = f"{name} {' '.join(_fmt(a) for a in args)}"
+            try:
+                from lox.policy.infix import parse_infix_to_canonical  # noqa: PLC0415
+                return parse_infix_to_canonical(tokens_str)
+            except Exception:
+                pass
     return node
 
 
@@ -298,17 +344,17 @@ def _rule_from_args(args: list, ctx: str) -> dict:
         if _is_expr_node(a):
             if a[1] == "do" and len(a[2]) == 1 and isinstance(a[2][0], str):
                 do_verb = a[2][0]
-            elif a[1] == "when" and len(a[2]) == 1:
-                when = a[2][0]
-            elif a[1] == "unless" and len(a[2]) == 1:
-                unless = a[2][0]
+            elif a[1] == "when":
+                when = a[2][0] if len(a[2]) == 1 else a[2]
+            elif a[1] == "unless":
+                unless = a[2][0] if len(a[2]) == 1 else a[2]
             elif a[1] == "note" and len(a[2]) == 1 and isinstance(a[2][0], str):
                 note = a[2][0]
     if do_verb is None or when is None:
         raise DiffParseError("ERR_PARSE", f"rule body requires (when <expr>) and (do <verb>): {ctx}")
-    if not isinstance(when, (tuple, str)):
+    if not isinstance(when, (tuple, str, list)):
         raise DiffParseError("ERR_PARSE", f"rule (when ...) requires an expression: {ctx}")
-    if not isinstance(unless, (tuple, str)) and unless is not None:
+    if not isinstance(unless, (tuple, str, list)) and unless is not None:
         raise DiffParseError("ERR_PARSE", f"rule (unless ...) requires an expression: {ctx}")
     return {"when": _as_expr(when), "do": do_verb,
             "unless": _as_expr(unless) if unless is not None else None, "note": note}

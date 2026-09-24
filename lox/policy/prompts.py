@@ -84,8 +84,11 @@ square brackets, they are only used below to mark optional parts):
 
 Rules:
 - header: (revision <parent+1> (parent <parent>) (author "<model>") (domain <domain>) (reason "<grounded rationale>"))
-- conditions MUST be parenthesized predicate calls, e.g. (when (is_fighting)) or
-  (hp_frac <= 0.40); combinators and/or/not take call expressions only.
+- conditions can be written in natural Pythonic infix or parenthesized calls:
+  (when hp_frac <= 0.40 and not is_fighting)
+  (when monster == "j" and hp_frac <= 0.35)
+  (when stairs_known and not adjacent_hostiles)
+  Combinators: and, or, not, comparisons (<=, >=, <, >, ==, !=).
 - condition depth <= 3.
 - keep diffs surgical: tune params, add/retire tactic rules, reprioritize goals.
 - combat tactic rules MUST be target-conditional: the (when ...) of a combat-verb rule
