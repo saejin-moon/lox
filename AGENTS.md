@@ -31,7 +31,7 @@ To execute the MiniHack policy synthesis run, any agent can run the following ex
      --kv-cache-dtype fp8 \
      --gpu-memory-utilization 0.90 \
      --enforce-eager \
-     --disable-log-requests
+     --disable-uvicorn-access-log
    ```
    *(Note: 32k context is optimal for 12GB VRAM; worst-case author transcript is ~8k tokens. If local server is offline, fallback via OpenRouter API: `--provider openrouter --model z-ai/glm-5.3-flash`)*.
 

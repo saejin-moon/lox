@@ -56,7 +56,7 @@ Any agent picking up this workspace can immediately execute the MiniHack synthes
      --kv-cache-dtype fp8 \
      --gpu-memory-utilization 0.90 \
      --enforce-eager \
-     --disable-log-requests
+     --disable-uvicorn-access-log
    ```
 2. **Execute Agentic Authoring Session (Pure Pythonic Infix AST)**:
    ```bash
