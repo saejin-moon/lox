@@ -78,6 +78,13 @@ class OpenRouterProvider(LLMProvider):
         response = await self.client.chat.completions.create(**kwargs)
         raw_text = response.choices[0].message.content or ""
         tokens = response.usage.total_tokens if response.usage else 0
+        tokens_in = response.usage.prompt_tokens if response.usage else 0
+        tokens_out = response.usage.completion_tokens if response.usage else 0
+        tokens_thought = 0
+        if response.usage and hasattr(response.usage, "completion_tokens_details"):
+            details = response.usage.completion_tokens_details
+            if details and hasattr(details, "reasoning_tokens"):
+                tokens_thought = getattr(details, "reasoning_tokens", 0) or 0
         latency = (time.perf_counter() - start_time) * 1000.0
         return LLMResponse(
             thinking_content="",
@@ -85,4 +92,7 @@ class OpenRouterProvider(LLMProvider):
             raw_text=raw_text,
             tokens_consumed=tokens,
             latency_ms=latency,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            tokens_thought=tokens_thought,
         )

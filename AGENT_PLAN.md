@@ -32,7 +32,7 @@ Parity is the crossover; the design goal is that our loop's improvement rate **c
 
 ## 0.5 WHERE WE ARE (state of record, 2026-09-24) — read before working
 
-**Suite**: **549 passing tests (~15s)** (`uv run pytest -q`). Telemetry: **7.2M+ ticks in DuckDB**.
+**Suite**: **572 passing tests (~17s)** (`uv run pytest -q`). Telemetry: **7.2M+ ticks in DuckDB**.
 **Program**: live NetHack program = **v6** (`data/policy_program.json`; interlock-only tactic rules — the 3
 llm-authored combat rules were reverted after an A/B showed they cost 45% mean score). MiniHack program v4.
 **Current NetHack baseline band (100-ep batches, valkyrie, v6 rules)**: mean score **330–396**, median depth

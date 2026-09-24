@@ -51,6 +51,51 @@ def _trim_transcript(transcript: str) -> str:
     return head + "\n\n[…] earlier tool results elided to bound session tokens (re-query if needed) […]\n\n" + tail
 
 
+def format_bundle_summary(bundle: dict) -> str:
+    """Concise markdown summary of the run report (~400-800 chars) instead of dumping
+    14,000 chars of raw JSON. Detailed telemetry is accessible via query_duckdb / read_trajectory."""
+    lines = ["# RUN REPORT (scoped summary — use query_duckdb / read_trajectory for details)"]
+    scope = bundle.get("scope", {})
+    batch = bundle.get("batch", {})
+    domain = bundle.get("domain", "unknown")
+    rid = scope.get("run_id") or "none"
+    eps = batch.get("episodes", scope.get("episode_count", 0))
+    lines.append(f"- Domain: {domain} | Run ID: {rid} | Episodes: {eps} ({scope.get('source', 'none')})")
+
+    metrics = []
+    if "success_rate" in batch and batch.get("episodes", 0) > 0:
+        metrics.append(f"success_rate={batch['success_rate']*100:.1f}%")
+    if "median_steps_on_success" in batch and batch["median_steps_on_success"] is not None:
+        metrics.append(f"median_steps_success={batch['median_steps_on_success']}")
+    if "mean_score" in batch and batch.get("episodes", 0) > 0:
+        metrics.append(f"mean_score={batch['mean_score']:.1f}")
+    if "median_depth" in batch and batch.get("episodes", 0) > 0:
+        metrics.append(f"median_depth={batch['median_depth']:.1f}")
+    if "survival_rate" in batch and batch.get("episodes", 0) > 0:
+        metrics.append(f"survival_rate={batch['survival_rate']*100:.1f}%")
+    if metrics:
+        lines.append(f"- Batch Metrics: {', '.join(metrics)}")
+
+    deaths = bundle.get("death_taxonomy", [])
+    if deaths:
+        top_deaths = [f"{d.get('cause')}: {d.get('count')} (d{d.get('median_depth_at_death')})" for d in deaths[:4]]
+        lines.append(f"- Top Deaths: {', '.join(top_deaths)}")
+
+    fc = bundle.get("failure_counters", [])
+    if fc:
+        top_fc = [f"{c.get('goal')}: {c.get('failures')}" for c in fc[:4]]
+        lines.append(f"- Goal Failures: {', '.join(top_fc)}")
+
+    digests = bundle.get("episode_digests", [])
+    if digests:
+        lines.append("- Representative Episodes:")
+        for d in digests[:2]:
+            first_line = d.strip().split("\n")[0]
+            lines.append(f"    * {first_line}")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # AgenticAuthor: bounded tool loop → one validated diff
 # ---------------------------------------------------------------------------
@@ -91,7 +136,7 @@ class AgenticAuthor:
                            manifest: VocabularyManifest,
                            bundle: dict | None = None) -> str:
         prompt_text = load_prompt_text(self.prompt_version)
-        system = render_system_prompt(prompt_text, tool_docs())
+        system = render_system_prompt(prompt_text, tool_docs(domain=manifest.domain))
 
         user_parts = [
             "# VOCABULARY MANIFEST (the only symbols your diff may reference; "
@@ -104,12 +149,7 @@ class AgenticAuthor:
         if self.include_bundle and bundle is not None:
             user_parts += [
                 "",
-                "# RUN REPORT (scoped to one run; digests + deltas — use tools for detail)",
-                "```json",
-                # compact separators: the pretty-printed form was ~20% larger and could
-                # truncate the episode digests before they reached the author
-                json.dumps(bundle, separators=(",", ":"))[:14000],
-                "```",
+                format_bundle_summary(bundle),
                 "",
                 "# LAST LEDGER ENTRIES (recent revisions and their fates)",
             ]

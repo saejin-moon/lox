@@ -79,10 +79,12 @@ TOOL_SPECS: dict[str, ToolSpec] = {
 }
 
 
-def tool_docs() -> str:
+def tool_docs(domain: str = "nethack") -> str:
     """Rendered tool documentation for the author system prompt."""
     lines = []
     for spec in TOOL_SPECS.values():
+        if domain != "nethack" and spec.name == "wiki_search":
+            continue
         args = ", ".join(f'"{a}"' for a in spec.args)
         call = f'(tool {spec.name} {args})' if args else f'(tool {spec.name})'
         lines.append(f"  {call}\n      # {spec.desc}")
@@ -400,11 +402,27 @@ _CONDITION_CHANNELS = (
 def read_env_schema(domain: str = "nethack") -> str:
     """Every action + every observation channel, as markdown."""
     lines = [f"# ENV SCHEMA: {domain}"]
-    if domain == "nethack":
-        lines.append("obs: NLE dict — glyphs/chars grid (21×79), message line, "
-                     "blstats(26-vector), inventory parses, AutoMoreWrapper "
-                     "instrumentation; episode step cap 20000; unseeded "
-                     "(NetHackChallenge-v0 forbids seeding)")
+    if domain == "minihack":
+        lines.append("obs: Gymnasium dict — glyphs, chars (21×79), blstats, message; step cap 4000; seeded")
+        lines += ["", "## ACTIONS (8-way movement + standard navigation)",
+                  "  compass movement: k/l/j/h/u/n/b/y (north/east/south/west/ne/se/sw/nw)",
+                  "  wait: '.'",
+                  "  search: 's'",
+                  "  open: 'o<dir>'",
+                  "  kick: '^D<dir>'"]
+        lines += ["", "## REWARD & TERMINATION",
+                  "  Reward is granted on reaching the staircase ('>').",
+                  "  ExploreMaze family episodes terminate on stairs or step limit."]
+        return _truncate("\n".join(lines), limit=4000)
+    if domain == "craftax":
+        lines.append("obs: 8268-float flat observation vector")
+        lines += ["", "## ACTIONS",
+                  "  noop, left, right, up, down, do, sleep, ..."]
+        return _truncate("\n".join(lines), limit=4000)
+    lines.append("obs: NLE dict — glyphs/chars grid (21×79), message line, "
+                 "blstats(26-vector), inventory parses, AutoMoreWrapper "
+                 "instrumentation; episode step cap 20000; unseeded "
+                 "(NetHackChallenge-v0 forbids seeding)")
     lines += ["", "## ACTIONS (name → key: mechanism description)"]
     for name, (key, desc) in NETHACK_ACTIONS.items():
         lines.append(f"  {name}: {key!r} — {desc}")
@@ -490,14 +508,17 @@ def execute_tool_call(name: str, args: list, *, manifest: VocabularyManifest | N
         return (f"ERROR: tool {name} takes {len(spec.args)} arg(s) ({', '.join(spec.args)}), "
                 f"got {len(args)}")
     try:
+        domain = manifest.domain if manifest else (program.domain if program else "nethack")
         if name == "query_duckdb":
             return query_duckdb(str(args[0]), db_path=db_path)
         if name == "wiki_search":
+            if domain != "nethack":
+                return f"ERROR: wiki_search is only available for NetHack (current domain: {domain})"
             return wiki_search(str(args[0]), db_path=wiki_db_path)
         if name == "read_trajectory":
             return read_trajectory(str(args[0]), args[1], args[2], db_path=db_path)
         if name == "read_env_schema":
-            return read_env_schema()
+            return read_env_schema(domain=domain)
         if name == "read_manifest":
             if manifest is None:
                 return "ERROR: manifest not loaded"

@@ -81,17 +81,40 @@ def _scope_base(run_id: str) -> str:
     return re.sub(r"_w\d+$", "", run_id or "")
 
 
-def _resolve_run(con, run_id: str | None) -> tuple[str | None, str]:
+def _resolve_run(con, run_id: str | None, domain: str = "nethack") -> tuple[str | None, str]:
     if run_id:
         return _scope_base(run_id), "explicit"
     try:
-        row = con.execute("SELECT run_id FROM episodes ORDER BY rowid DESC LIMIT 1").fetchone()
+        ecols = _table_cols(con, "episodes")
+        if ecols and "domain" in ecols:
+            row = con.execute(
+                "SELECT run_id FROM episodes WHERE domain = ? ORDER BY rowid DESC LIMIT 1",
+                (domain,),
+            ).fetchone()
+            if row and row[0]:
+                base = _scope_base(row[0])
+                return base, ("latest_batch" if base != row[0] else "latest_run")
+
+        if domain != "nethack":
+            tcols_lineage = _table_cols(con, "run_lineage")
+            if tcols_lineage and "domain" in tcols_lineage:
+                row = con.execute(
+                    "SELECT base_run_id FROM run_lineage WHERE domain = ? ORDER BY created_ts DESC LIMIT 1",
+                    (domain,),
+                ).fetchone()
+                if row and row[0]:
+                    return row[0], "latest_domain_batch"
+            return None, "empty"
+
+        if ecols:
+            row = con.execute("SELECT run_id FROM episodes ORDER BY rowid DESC LIMIT 1").fetchone()
+            if row and row[0]:
+                base = _scope_base(row[0])
+                return base, ("latest_batch" if base != row[0] else "latest_run")
+
+        return None, "empty"
     except Exception:  # noqa: BLE001
         return None, "empty"
-    if not row or row[0] is None:
-        return None, "empty"
-    base = _scope_base(row[0])
-    return base, ("latest_batch" if base != row[0] else "latest_run")
 
 
 def _run_episode_ids(con, run_id: str | None) -> list[str]:
@@ -220,7 +243,7 @@ def _digest_episode(con, tcols: set[str] | None, ep: dict) -> str:
 
 
 def build_episode_digests(db_path: str, run_id: str | None = None,
-                          n: int = 4) -> list[str]:
+                          n: int = 4, domain: str = "nethack") -> list[str]:
     """Condensed per-episode digests for representative episodes of one run:
     the longest deaths by normalized cause + the deepest + the longest-stalling.
     Returns a list of compact markdown strings."""
@@ -235,13 +258,15 @@ def build_episode_digests(db_path: str, run_id: str | None = None,
         ecols = _table_cols(con, "episodes")
         if not ecols:
             return []
-        rid, _src = _resolve_run(con, run_id)
+        rid, _src = _resolve_run(con, run_id, domain=domain)
+        if rid is None:
+            return []
         tcols = _table_cols(con, "ticks")
         wanted = ["episode_id", "death_message", "death_category", "max_depth",
                   "final_score", "total_turns", "run_id"]
         sel = [c for c in wanted if c in ecols]
-        where = "WHERE run_id LIKE ?" if rid is not None else ""
-        params = [rid + "%"] if rid is not None else []
+        where = "WHERE run_id LIKE ?"
+        params = [rid + "%"]
         rows = con.execute(
             f"SELECT {', '.join(sel)} FROM episodes {where} "
             f"ORDER BY total_turns DESC LIMIT 50", params).fetchall()
@@ -304,7 +329,7 @@ def _rle_window(rows: list[tuple], cols: list[str]) -> str:
 
 
 def build_run_distribution(db_path: str, run_id: str | None = None,
-                           d1_stall_turns: int = 5000) -> dict:
+                           d1_stall_turns: int = 5000, domain: str = "nethack") -> dict:
     """DISTRIBUTIONAL shape of one run — the batch-level view a per-episode digest
     cannot give: how many episodes never left depth 1, how many burned the budget
     stalled there, the batch-wide action mix, and the event/anomaly census.
@@ -325,9 +350,11 @@ def build_run_distribution(db_path: str, run_id: str | None = None,
         ecols = _table_cols(con, "episodes")
         if not ecols:
             return dist
-        rid, _src = _resolve_run(con, run_id)
-        where = "WHERE run_id LIKE ?" if rid is not None else ""
-        params = [rid + "%"] if rid is not None else []
+        rid, _src = _resolve_run(con, run_id, domain=domain)
+        if rid is None:
+            return dist
+        where = "WHERE run_id LIKE ?"
+        params = [rid + "%"]
         rows = con.execute(
             f"SELECT max_depth, total_turns FROM episodes {where}", params).fetchall()
         dist["episodes"] = len(rows)
@@ -374,7 +401,7 @@ def build_run_distribution(db_path: str, run_id: str | None = None,
 
 
 def build_trajectory_slices(db_path: str, n_episodes: int = 3, last_ticks: int = 40,
-                            run_id: str | None = None) -> list[dict]:
+                            run_id: str | None = None, domain: str = "nethack") -> list[dict]:
     """Event-anchored (death) trajectory slices for the run: RLE-encoded ticks +
     goal events. Keyed {episode_id, death_message, cause, slice}."""
     if not os.path.exists(db_path):
@@ -388,16 +415,15 @@ def build_trajectory_slices(db_path: str, n_episodes: int = 3, last_ticks: int =
         ecols = _table_cols(con, "episodes")
         if not ecols or "death_message" not in ecols:
             return []
-        rid, _src = _resolve_run(con, run_id)
+        rid, _src = _resolve_run(con, run_id, domain=domain)
+        if rid is None:
+            return []
         tcols = _table_cols(con, "ticks")
         tsel = [c for c in ("step", "turn", "depth", "hp", "max_hp", "action_name")
                 if tcols and c in tcols]
         where = "WHERE death_message IS NOT NULL AND death_message != '' " \
-                "AND LOWER(death_message) NOT IN ('survived','alive','ascended')"
-        params: list = []
-        if rid is not None:
-            where += " AND run_id LIKE ?"
-            params.append(rid + "%")
+                "AND LOWER(death_message) NOT IN ('survived','alive','ascended') AND run_id LIKE ?"
+        params: list = [rid + "%"]
         eps = con.execute(
             f"SELECT episode_id, death_message, death_category, max_depth, total_turns "
             f"FROM episodes {where} ORDER BY rowid DESC LIMIT ?",
@@ -524,9 +550,9 @@ def build_report_bundle(
                             else:
                                 rid, src = None, "candidate_missing"
                         except Exception:  # noqa: BLE001
-                            rid, src = _resolve_run(con, run_id)
+                            rid, src = _resolve_run(con, run_id, domain=domain)
                     else:
-                        rid, src = _resolve_run(con, run_id)
+                        rid, src = _resolve_run(con, run_id, domain=domain)
                     eval_type = None
                     if rid is not None and "eval_type" in ecols:
                         try:
@@ -549,9 +575,14 @@ def build_report_bundle(
                     # previous distinct run (change attribution)
                     if rid is not None:
                         try:
+                            prev_where = "run_id NOT LIKE ?"
+                            prev_params = [rid + "%"]
+                            if "domain" in ecols:
+                                prev_where += " AND domain = ?"
+                                prev_params.append(domain)
                             prev = con.execute(
-                                """SELECT run_id FROM episodes WHERE run_id NOT LIKE ?
-                                   ORDER BY rowid DESC LIMIT 1""", (rid + "%",)).fetchone()
+                                f"""SELECT run_id FROM episodes WHERE {prev_where}
+                                   ORDER BY rowid DESC LIMIT 1""", prev_params).fetchone()
                             if prev and prev[0] is not None:
                                 bundle["prev_run"] = {
                                     "run_id": _scope_base(prev[0]),
@@ -654,17 +685,17 @@ def build_report_bundle(
             pass
         try:
             bundle["distribution"] = build_run_distribution(
-                db_path, run_id=bundle["scope"].get("run_id"))
+                db_path, run_id=bundle["scope"].get("run_id"), domain=domain)
         except Exception:  # noqa: BLE001
             pass
         try:
             bundle["episode_digests"] = build_episode_digests(
-                db_path, run_id=bundle["scope"].get("run_id"), n=digest_episodes)
+                db_path, run_id=bundle["scope"].get("run_id"), n=digest_episodes, domain=domain)
         except Exception:  # noqa: BLE001
             pass
         try:
             bundle["trajectory_slices"] = build_trajectory_slices(
-                db_path, run_id=bundle["scope"].get("run_id"))
+                db_path, run_id=bundle["scope"].get("run_id"), domain=domain)
         except Exception:  # noqa: BLE001
             pass
 

@@ -348,3 +348,36 @@ def test_validated_agentic_candidate_keeps_invariants(session_env):
     cand = out.candidate
     assert {g.goal for g in cand.strategy_plan} >= {g.goal for g in program.strategy_plan}
     assert cand.nogoods == program.nogoods
+
+
+# ===========================================================================
+# S0/Transfer Token Optimization & Domain Isolation Tests
+# ===========================================================================
+
+class TestTokenOptimizationAndDomainScoping:
+    def test_minihack_manifest_compact_and_isolated(self):
+        m = build_manifest(1, domain="minihack")
+        rendered = m.render(compact=True)
+        assert len(rendered) < 1000
+        assert "explore.stuck_patience" in rendered
+        assert "has_excalibur" not in rendered
+        assert "castle_done" not in rendered
+
+    def test_tool_docs_domain_filtering(self):
+        nh_docs = tool_docs(domain="nethack")
+        mh_docs = tool_docs(domain="minihack")
+        assert "wiki_search" in nh_docs
+        assert "wiki_search" not in mh_docs
+
+    def test_bundle_formatting_compactness(self, mini_db):
+        from lox.policy.author_agent import format_bundle_summary
+        bundle = build_report_bundle(mini_db, domain="nethack")
+        summary = format_bundle_summary(bundle)
+        assert len(summary) < 1000
+        assert "Domain: nethack" in summary
+
+    def test_minihack_report_does_not_leak_nethack_runs(self, mini_db):
+        mh_bundle = build_report_bundle(mini_db, domain="minihack")
+        assert mh_bundle["domain"] == "minihack"
+        assert len(mh_bundle["death_taxonomy"]) == 0
+        assert mh_bundle["batch"]["episodes"] == 0

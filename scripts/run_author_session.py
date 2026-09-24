@@ -115,6 +115,10 @@ def build_hooks(args, program: PolicyProgram) -> ValidatorHooks:
 
 
 async def run_session(args) -> int:
+    if args.program_path == DEFAULT_PROGRAM_PATH and args.domain != "nethack":
+        candidate_path = f"data/compiled/{args.domain}.json"
+        if os.path.exists(candidate_path):
+            args.program_path = candidate_path
     program = PolicyProgram.load(args.program_path)
     print(f"[session] program v{program.version} from {args.program_path} | "
           f"provider={args.provider} mode={args.author_mode} "

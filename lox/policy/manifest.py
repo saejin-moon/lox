@@ -290,6 +290,16 @@ def param_leaves_from_config(cfg: PolicyConfig | None = None) -> dict[str, dict]
 def build_manifest(program_version: int, domain: str = "nethack",
                    live_macros: dict[str, str] | None = None,
                    cfg: PolicyConfig | None = None) -> "VocabularyManifest":
+    if domain != "nethack":
+        try:
+            from lox.executor.interface import get_adapter  # noqa: PLC0415
+            adapter = get_adapter(domain)
+            m = adapter.manifest(program_version)
+            if live_macros:
+                m.macros = dict(live_macros)
+            return m
+        except Exception:
+            pass
     return VocabularyManifest(
         domain=domain,
         version=program_version,
