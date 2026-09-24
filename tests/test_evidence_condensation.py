@@ -16,7 +16,7 @@ import os
 import duckdb
 import pytest
 
-from lox.policy.author_tools import read_trajectory
+from lox.policy.author_tools import read_trajectory, MAX_TOOL_OUTPUT_CHARS
 from lox.policy.author_agent import _trim_transcript, MAX_TRANSCRIPT_CHARS
 from lox.policy.manifest import build_manifest
 from lox.policy.program import PolicyProgram
@@ -188,7 +188,7 @@ class TestCondensation:
 
     def test_read_trajectory_large_window_is_bounded(self, stall_db):
         out = read_trajectory("ep_stall", 0, 0, db_path=stall_db)
-        assert len(out) <= 4200  # MAX_TOOL_OUTPUT_CHARS + truncation note
+        assert len(out) <= MAX_TOOL_OUTPUT_CHARS + 200  # MAX_TOOL_OUTPUT_CHARS + truncation note
 
 
 class TestTokenFootprint:

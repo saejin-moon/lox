@@ -37,8 +37,8 @@ from lox.policy.prompts import load_prompt_text, render_system_prompt
 from lox.policy.report import build_report_bundle, DEFAULT_DB_PATH
 from lox.policy.validator import validate_diff, ValidatorHooks
 
-MAX_TOOL_OUTPUT_CHARS = 3000   # per-tool-result budget inside the transcript
-MAX_TRANSCRIPT_CHARS = 24000   # total conversation budget (tokens are the cost driver)
+MAX_TOOL_OUTPUT_CHARS = int(os.environ.get("LOX_MAX_TOOL_OUTPUT_CHARS", "32000"))   # per-tool-result budget
+MAX_TRANSCRIPT_CHARS = int(os.environ.get("LOX_MAX_TRANSCRIPT_CHARS", "450000"))   # total conversation budget (~128k tokens)
 
 
 def _trim_transcript(transcript: str) -> str:

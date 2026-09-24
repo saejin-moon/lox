@@ -26,11 +26,11 @@ from lox.policy.program import PolicyProgram
 DEFAULT_DB_PATH = "data/lox_telemetry.duckdb"
 DEFAULT_WIKI_DB_PATH = "data/wiki_index.db"
 
-# Output budgets (author prompt hygiene — every tool result is truncated to these)
-MAX_TOOL_OUTPUT_CHARS = 4000
-MAX_QUERY_ROWS = 40
-MAX_CELL_CHARS = 200
-MAX_TRAJECTORY_TICKS = 120
+# Output budgets (author prompt hygiene — expanded for up to 128k context window)
+MAX_TOOL_OUTPUT_CHARS = int(os.environ.get("LOX_MAX_TOOL_OUTPUT_CHARS", "32000"))
+MAX_QUERY_ROWS = int(os.environ.get("LOX_MAX_QUERY_ROWS", "500"))
+MAX_CELL_CHARS = int(os.environ.get("LOX_MAX_CELL_CHARS", "1000"))
+MAX_TRAJECTORY_TICKS = int(os.environ.get("LOX_MAX_TRAJECTORY_TICKS", "2000"))
 
 
 # ---------------------------------------------------------------------------
