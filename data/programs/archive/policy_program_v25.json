@@ -1,5 +1,5 @@
 {
-  "version": 26,
+  "version": 25,
   "domain": "nethack",
   "params": {
     "nutrition.food_radius": 4,
@@ -18,7 +18,7 @@
     "nutrition.pray_major_first": 80,
     "descent.deep_min_depth": 6,
     "descent.min_hp_frac": 0.35,
-    "strategy.survival_timeout_steps": 1125
+    "strategy.survival_timeout_steps": 1000
   },
   "macros": [],
   "tactic_rules": [
@@ -245,8 +245,8 @@
   "provenance": {
     "author": "LOX-\u03c8",
     "note": "REVERT of 3 llm-authored combat rules: A/B on v5 (100 eps each, parallel runner) showed mean score 217.0 WITH rules vs 396.4 WITHOUT (median depth 2 vs 3). Rules engraved Elbereth while adjacent at <=40% HP and forced ranged_then_kill against everything \u2014 wrong response tier for DL1-3 melee deaths. Superseded by interlock-only rule set.",
-    "parent_version": 25,
-    "reason": "Telemetry reveals a critical failure mode where agents spend excessive turns (18k-20k) on depth 1, leading to starvation deaths. Despite previous attempts to adjust descent, the survival_timeout_steps is likely too high, allowing agents to linger in",
+    "parent_version": 24,
+    "reason": "Massive starvation crisis on depths 1-3. Telemetry shows agents spending excessive turns (up to 20k) exploring without descending, eventually fainting and being killed by trivial monsters. Descent thresholds are too restrictive for early survival. Lowering deep_min_depth and min_hp_frac to encourage faster progression and reducing the timeout for survival goals to prevent aimless wandering.",
     "parent_author": "gemma-4-26b@ablation"
   }
 }

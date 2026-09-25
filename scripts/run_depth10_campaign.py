@@ -65,13 +65,31 @@ def run_campaign(
 
     start_wall = time.perf_counter()
 
-    for iteration in range(1, max_iterations + 1):
+    start_iteration = 1
+    if os.path.exists(output_log):
+        with open(output_log, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        entry = json.loads(line)
+                        start_iteration = max(start_iteration, entry.get("iteration", 0) + 1)
+                    except Exception:
+                        pass
+
+    current_iter = start_iteration
+    while True:
+        iteration = current_iter
+        if max_iterations is not None and iteration >= start_iteration + max_iterations:
+            print(f"[campaign] Reached max iterations limit ({max_iterations}). Ending loop.")
+            break
+        current_iter += 1
+
         program_path = "data/compiled/nethack.json"
         if not os.path.exists(program_path):
             program_path = DEFAULT_PROGRAM_PATH
 
         live_prog = PolicyProgram.load(program_path)
-        print(f"\n>>> [CAMPAIGN ITERATION {iteration}/{max_iterations}] Evaluating Program v{live_prog.version}...")
+        print(f"\n>>> [CAMPAIGN ITERATION {iteration}] Evaluating Program v{live_prog.version}...")
 
         # 1. Run Parallel Batch Evaluation
         batch_output = f"data/campaign_batch_iter{iteration}_v{live_prog.version}.json"
@@ -180,7 +198,7 @@ def main():
     parser.add_argument("--role", type=str, default="valkyrie")
     parser.add_argument("--provider", type=str, default="openrouter", choices=["openrouter", "gemini"])
     parser.add_argument("--model", type=str, default="google/gemma-4-31b-it")
-    parser.add_argument("--max-iterations", type=int, default=50)
+    parser.add_argument("--max-iterations", type=int, default=500)
     parser.add_argument("--output-log", type=str, default="data/depth10_campaign_log.jsonl")
     args = parser.parse_args()
 

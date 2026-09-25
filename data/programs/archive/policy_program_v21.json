@@ -1,24 +1,19 @@
 {
-  "version": 26,
+  "version": 21,
   "domain": "nethack",
   "params": {
     "nutrition.food_radius": 4,
     "nutrition.food_radius_hungry": 120,
     "nutrition.pray_routine": 425,
-    "nutrition.pray_routine_first": 250,
+    "nutrition.pray_routine_first": 150,
     "nutrition.pray_major": 350,
-    "combat.heavy_wounded_frac": 0.85,
+    "combat.heavy_wounded_frac": 0.7,
     "strategy.triage_hp_frac": 0.5,
     "strategy.triage_min_hp": 6,
     "descent.should_descend_unvisited": 12,
-    "descent.should_descend_turns": 80,
-    "survival.rest_until_frac": 0.95,
-    "strategy.survival_exit_depth": 5,
-    "descent.should_descend_xl": 1,
-    "nutrition.pray_major_first": 80,
-    "descent.deep_min_depth": 6,
-    "descent.min_hp_frac": 0.35,
-    "strategy.survival_timeout_steps": 1125
+    "descent.should_descend_turns": 50,
+    "survival.rest_until_frac": 0.9,
+    "strategy.survival_exit_depth": 3
   },
   "macros": [],
   "tactic_rules": [
@@ -243,10 +238,10 @@
     }
   ],
   "provenance": {
-    "author": "LOX-\u03c8",
+    "author": "strategy-tuning-author",
     "note": "REVERT of 3 llm-authored combat rules: A/B on v5 (100 eps each, parallel runner) showed mean score 217.0 WITH rules vs 396.4 WITHOUT (median depth 2 vs 3). Rules engraved Elbereth while adjacent at <=40% HP and forced ranged_then_kill against everything \u2014 wrong response tier for DL1-3 melee deaths. Superseded by interlock-only rule set.",
-    "parent_version": 25,
-    "reason": "Telemetry reveals a critical failure mode where agents spend excessive turns (18k-20k) on depth 1, leading to starvation deaths. Despite previous attempts to adjust descent, the survival_timeout_steps is likely too high, allowing agents to linger in",
+    "parent_version": 20,
+    "reason": "Trajectory analysis of starvation deaths on depth 1 (ep_valk_b9b91a5e, ep_valk_9b5a0225) reveals a critical failure: the agent enters massive exploration/search loops (hundreds of turns of SEARCH and STEP) without successfully finding food or descending, even after praying multiple times. Despite previous reductions in descent parameters, agents are still spending 3k-6k turns on the first floor. I am further tightening descent.should_descend_turns and descent.should_descend_unvisited to their lower bounds and increasing the a-priori priority of descending by narrowing the early_survival_stack exit depth, forcing the agent to abandon fruitless early-floor exploration in favor of descending to find more varied food sources.",
     "parent_author": "gemma-4-26b@ablation"
   }
 }

@@ -282,6 +282,24 @@ class ExplorationMixin:
                 best_prio = prio
                 best_pos = (r, c)
 
+        if best_pos is None and len(cand_pts) > 0 and lvl.stairs_down is None:
+            # Stall breaker: if NO reachable unvisited floor remains and stairs are still missing,
+            # do not abandon searching to pace back and forth in loops. Search the least-searched candidate.
+            unvisited_count = int(((lvl.walkable & (lvl.visited == 0)) & (dist_grid >= 0)).sum())
+            if unvisited_count == 0:
+                best_emergency_prio = -1e9
+                for pt in cand_pts:
+                    r, c = int(pt[0]), int(pt[1])
+                    searches = int(lvl.searched[r, c]) + int(lvl.dead_end_searches.get((r, c), 0))
+                    if searches >= 60:
+                        continue
+                    prio = 100.0 - searches * 2.0 - dist_grid[r, c] * 1.5
+                    if is_dead_end[r, c]:
+                        prio += 200.0
+                    if prio > best_emergency_prio:
+                        best_emergency_prio = prio
+                        best_pos = (r, c)
+
         return best_pos
 
     def _find_unsearched_dead_end(

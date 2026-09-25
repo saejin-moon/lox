@@ -387,8 +387,8 @@ def parse_pythonic_diff(text: str, max_depth: int = 3):
         if re.search(r"^\s*revision\b", line, re.I) and not re.search(r"\b(set|rule|goal|macro|defmacro|nogood)\b", line, re.I):
             continue
 
-        # Note statement
-        m_note = re.match(r'^note[:\s]+["\']([^"\']+)["\']$', line, re.I)
+        # Note / Reason statement
+        m_note = re.match(r'^(?:note|reason)[:\s]+["\']?([^"\']+)["\']?$', line, re.I)
         if m_note:
             diff.notes.append(NoteOp(text=m_note.group(1).strip()))
             continue

@@ -212,8 +212,8 @@ _DEFAULTS: PolicyConfig | None = None
 
 
 def default_config() -> PolicyConfig:
-    """Module-level shared defaults (for static guards). Single instance, treated as immutable."""
+    """Module-level shared defaults (for static guards). Treated as immutable."""
     global _DEFAULTS
     if _DEFAULTS is None:
         _DEFAULTS = PolicyConfig.defaults()
-    return _DEFAULTS
+    return _DEFAULTS.copy()

@@ -1,24 +1,15 @@
 {
-  "version": 26,
+  "version": 10,
   "domain": "nethack",
   "params": {
-    "nutrition.food_radius": 4,
+    "nutrition.food_radius": 6,
     "nutrition.food_radius_hungry": 120,
-    "nutrition.pray_routine": 425,
-    "nutrition.pray_routine_first": 250,
+    "nutrition.pray_routine": 600,
+    "nutrition.pray_routine_first": 200,
     "nutrition.pray_major": 350,
-    "combat.heavy_wounded_frac": 0.85,
-    "strategy.triage_hp_frac": 0.5,
-    "strategy.triage_min_hp": 6,
-    "descent.should_descend_unvisited": 12,
-    "descent.should_descend_turns": 80,
-    "survival.rest_until_frac": 0.95,
-    "strategy.survival_exit_depth": 5,
-    "descent.should_descend_xl": 1,
-    "nutrition.pray_major_first": 80,
-    "descent.deep_min_depth": 6,
-    "descent.min_hp_frac": 0.35,
-    "strategy.survival_timeout_steps": 1125
+    "combat.heavy_wounded_frac": 0.55,
+    "strategy.triage_hp_frac": 0.45,
+    "strategy.triage_min_hp": 6
   },
   "macros": [],
   "tactic_rules": [
@@ -245,8 +236,8 @@
   "provenance": {
     "author": "LOX-\u03c8",
     "note": "REVERT of 3 llm-authored combat rules: A/B on v5 (100 eps each, parallel runner) showed mean score 217.0 WITH rules vs 396.4 WITHOUT (median depth 2 vs 3). Rules engraved Elbereth while adjacent at <=40% HP and forced ranged_then_kill against everything \u2014 wrong response tier for DL1-3 melee deaths. Superseded by interlock-only rule set.",
-    "parent_version": 25,
-    "reason": "Telemetry reveals a critical failure mode where agents spend excessive turns (18k-20k) on depth 1, leading to starvation deaths. Despite previous attempts to adjust descent, the survival_timeout_steps is likely too high, allowing agents to linger in",
+    "parent_version": 9,
+    "reason": "High incidence of melee deaths by bites at depth 1 and 2 suggests an overly aggressive stance against common early-game enemies when wounded. Since previous attempts to add rules for specific monsters failed due to syntax errors, I am shifting to a parameter-based tuning strategy. Lowering the heavy_wounded_frac and adjusting the triage thresholds will make the agent more conservative and trigger retreat/healing behaviors earlier, reducing attrition from biting monsters.",
     "parent_author": "gemma-4-26b@ablation"
   }
 }

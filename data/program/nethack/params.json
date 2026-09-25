@@ -1,9 +1,21 @@
 {
   "params": {
-    "nutrition.food_radius": 6,
+    "nutrition.food_radius": 4,
     "nutrition.food_radius_hungry": 120,
-    "nutrition.pray_routine": 600,
-    "nutrition.pray_routine_first": 200,
-    "nutrition.pray_major": 350
+    "nutrition.pray_routine": 425,
+    "nutrition.pray_routine_first": 250,
+    "nutrition.pray_major": 350,
+    "combat.heavy_wounded_frac": 0.85,
+    "strategy.triage_hp_frac": 0.5,
+    "strategy.triage_min_hp": 6,
+    "descent.should_descend_unvisited": 12,
+    "descent.should_descend_turns": 80,
+    "survival.rest_until_frac": 0.95,
+    "strategy.survival_exit_depth": 5,
+    "descent.should_descend_xl": 1,
+    "nutrition.pray_major_first": 80,
+    "descent.deep_min_depth": 6,
+    "descent.min_hp_frac": 0.35,
+    "strategy.survival_timeout_steps": 1125
   }
 }
