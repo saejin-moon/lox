@@ -20,7 +20,7 @@ Instead of hand-crafting thousands of heuristic rules, **the human role is delib
 │          read_env_schema() · read_manifest() · read_program_tree()         │
 │   input: full run telemetry (7.2M+ ticks, episodes, deaths, stalls)        │
 │          + domain-scoped vocabulary manifest & compact summaries           │
-│   output: S-EXPRESSION POLICY DIFF (Pythonic Infix AST, depth ≤ 3)         │
+│   output: PYTHONIC INFIX AST POLICY DIFF (pure infix, zero parens, depth ≤ 3)│
 └──────────────┬─────────────────────────────────────────────────────────────┘
                ▼ VALIDATOR GATES (Machine-checkable, no human in the loop)
    grammar → schema → bounds → target-conditionality → macro expansion

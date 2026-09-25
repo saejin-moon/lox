@@ -1,14 +1,15 @@
 """
-LOX-ψ Policy Layer (LOX-ψ): named predicate registry + S-expression condition evaluator (R2).
+LOX-ψ Policy Layer (LOX-ψ): named predicate registry + Pythonic Infix AST condition evaluator (R2).
 
-Conditions in the policy program are S-expression strings over a **closed vocabulary** of
+Conditions in the policy program are Pythonic Infix AST expressions over a **closed vocabulary** of
 named predicates bound per-episode by the GoalInterpreter, e.g.:
 
-    "(or (xl_ge 4) (depth_ge 4))"
-    "(and (lawful) (xl_ge 5) (not has_excalibur))"
+    "xl_ge(4) or depth_ge(4)"
+    "lawful and xl_ge(5) and not has_excalibur"
+    "monster == 'jackal' and hp_frac <= 0.40"
 
-This is the R2 subset of the full diff DSL (MACRO.md): conditions only — `set`/`rule`/`goal`
-operations arrive in R3 and reuse this parser. Depth limit 3 enforced here as well.
+Pure Pythonic Infix AST is the primary condition syntax (zero Lisp parentheses), with legacy
+forms supported for backward compatibility. Depth limit 3 enforced across all forms.
 """
 from __future__ import annotations
 
@@ -48,41 +49,58 @@ def tokenize(text: str) -> list[str]:
 
 
 def parse(text: str):
-    """Parse one S-expression. Returns nested tuples: ('call', name, [args...]).
-    Args are str | int | float | nested node."""
-    tokens = tokenize(text)
-    if not tokens:
+    """Parse a condition expression into canonical nested tuples: ('call', name, [args...]).
+    Supports Pure Pythonic Infix AST (zero parentheses) and legacy parenthesized forms."""
+    stripped = text.strip()
+    if not stripped:
         raise ValueError("empty condition")
-    pos = 0
 
-    def parse_one(depth: int):
-        nonlocal pos
-        if depth > 3:
-            raise ValueError("ERR_DEPTH_BUDGET: condition nesting exceeds 3")
-        tok = tokens[pos]
-        if tok == "(":
-            pos += 1
-            if tokens[pos] == "(":
-                raise ValueError("expected predicate name after '('")
-            name = tokens[pos]
-            pos += 1
-            args: list = []
-            while pos < len(tokens) and tokens[pos] != ")":
+    if not stripped.startswith("("):
+        from lox.policy.infix import parse_infix_to_canonical  # noqa: PLC0415
+        return parse_infix_to_canonical(text)
+
+    try:
+        tokens = tokenize(text)
+        if not tokens:
+            raise ValueError("empty condition")
+        pos = 0
+
+        def parse_one(depth: int):
+            nonlocal pos
+            if depth > 3:
+                raise ValueError("ERR_DEPTH_BUDGET: condition nesting exceeds 3")
+            tok = tokens[pos]
+            if tok == "(":
+                pos += 1
+                if pos >= len(tokens):
+                    raise ValueError("unbalanced parens")
                 if tokens[pos] == "(":
-                    args.append(parse_one(depth + 1))
-                else:
-                    args.append(_atom(tokens[pos]))
-                    pos += 1
-            if pos >= len(tokens):
-                raise ValueError("unbalanced parens")
-            pos += 1  # consume ')'
-            return ("call", name, args)
-        raise ValueError(f"expected '(' got {tok!r}")
+                    raise ValueError("expected predicate name after '('")
+                name = tokens[pos]
+                pos += 1
+                args: list = []
+                while pos < len(tokens) and tokens[pos] != ")":
+                    if tokens[pos] == "(":
+                        args.append(parse_one(depth + 1))
+                    else:
+                        args.append(_atom(tokens[pos]))
+                        pos += 1
+                if pos >= len(tokens):
+                    raise ValueError("unbalanced parens")
+                pos += 1  # consume ')'
+                return ("call", name, args)
+            raise ValueError(f"expected '(' got {tok!r}")
 
-    node = parse_one(0)
-    if pos != len(tokens):
-        raise ValueError("trailing tokens after expression")
-    return node
+        node = parse_one(0)
+        if pos != len(tokens):
+            raise ValueError("trailing tokens after expression")
+        return node
+    except ValueError as sexpr_err:
+        try:
+            from lox.policy.infix import parse_infix_to_canonical  # noqa: PLC0415
+            return parse_infix_to_canonical(text)
+        except Exception:
+            raise sexpr_err
 
 
 def _atom(tok: str):

@@ -7,10 +7,9 @@ read_trajectory, read_env_schema, read_manifest, read_program_tree) and emits
 exactly ONE final policy diff, which flows through the same validator gates.
 
 Provider-agnostic by design: the loop rides the existing `generate_text`
-surface. The protocol is textual S-expressions — each non-final turn contains
-only `(tool <name> <args...>)` forms; a turn containing `(revision ...)` ends
-the session as the final diff. One repair retry on unextractable output
-(MACRO.md §2.4), mirroring the Reviser.
+surface. The protocol is Pythonic Infix AST — tool calls use standard functional call syntax;
+a turn containing a revision header (e.g. `revision: ...`) ends the session as the final diff.
+One repair retry on unextractable output (MACRO.md §2.4), mirroring the Reviser.
 
 `author_session` orchestrates one gated session end-to-end (manifest + bundle →
 author → validator gates → ledger entry → optional commit) and is shared by

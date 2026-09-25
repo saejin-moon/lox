@@ -243,3 +243,41 @@ def test_extract_diff_text_pythonic():
     assert diff.rules[0].rule["do"] == "retreat"
 
 
+def test_predicates_parse_and_eval_infix():
+    from lox.policy.predicates import parse, eval_condition, nethack_bindings, default_ctx
+    ctx = default_ctx(hp=10, max_hp=20, xl=5, lawful=True, monster_name="jackal")
+    bindings = nethack_bindings(ctx)
+
+    # 1. Pure infix without outer parentheses
+    node = parse("monster == 'jackal' and hp_frac <= 0.60")
+    assert node == ("call", "and", [("call", "monster", ["jackal"]), ("call", "hp_frac", ["<=", 0.60])])
+    assert eval_condition("monster == 'jackal' and hp_frac <= 0.60", bindings) is True
+
+    # 2. Infix with grouping parentheses
+    assert eval_condition("(monster == 'jackal' and hp_frac <= 0.60) or not lawful", bindings) is True
+    assert eval_condition("(monster == 'soldier ant' and hp_frac <= 0.60) and lawful", bindings) is False
+
+    # 3. Simple bare-predicate infix
+    assert eval_condition("lawful and not has_excalibur", bindings) is True
+
+
+def test_render_infix_roundtrip():
+    from lox.policy.dsl import render_infix
+    from lox.policy.infix import parse_infix_to_canonical
+
+    exprs = [
+        "monster == 'jackal' and hp_frac <= 0.4",
+        "stairs_known and not adjacent_hostiles",
+        "hp_frac <= 0.35 or is_fighting",
+        "true",
+        "false",
+        "lawful",
+    ]
+    for expr in exprs:
+        node = parse_infix_to_canonical(expr)
+        rendered = render_infix(node)
+        re_parsed = parse_infix_to_canonical(rendered)
+        assert re_parsed == node, f"Mismatch on {expr}: rendered={rendered}, re_parsed={re_parsed}"
+
+
+

@@ -1,0 +1,39 @@
+# LOX-ψ policy-diff Pythonic Infix AST grammar for llama.cpp GBNF decoding.
+# Depth ≤ 3 nesting on conditions; clean line-by-line Pythonic statements (zero S-expression parentheses).
+
+root        ::= ws diff ws
+diff        ::= header (nl statement)*
+header      ::= "revision:" ws int "," ws "parent:" ws int ("," ws "author:" ws string)? ("," ws "domain:" ws symbol)? ("," ws "reason:" ws string)?
+statement   ::= set-stmt | rule-stmt | goal-stmt | macro-stmt | note-stmt
+
+set-stmt    ::= "set" ws param-path ws ("=" | ":") ws value
+param-path  ::= "policy_params." symbol ("." symbol)*
+value       ::= float | int | bool | string
+
+rule-stmt   ::= "rule" ws ("add" | "remove") (ws "tactic_rules")? (":" | ws) (int | rule-body)
+rule-body   ::= "when" ws expr ws "do" ws verb (ws "unless" ws expr)? (ws "note" ws string)?
+verb        ::= "ranged_only" | "ranged_then_kill" | "retreat" | "retreat_when_wounded" | "avoid" | "kite" | "elbereth_first" | "never_melee"
+
+goal-stmt   ::= "goal" ws ("prioritize" | "deprioritize" | "set_threshold") ws symbol (":" | ws) goal-body
+goal-body   ::= ("when" ws expr)? (ws "until" ws expr)? (ws "after" ws expr)? (ws param-leaf ws ("=" | ":") ws value)?
+param-leaf  ::= symbol ("." symbol)*
+
+macro-stmt  ::= ("defmacro" | "macro") ws symbol (ws "=" ws | ":") ws expr
+note-stmt   ::= ("note" | "reason") (":" | ws) ws string
+
+expr        ::= or-expr
+or-expr     ::= and-expr (ws "or" ws and-expr)*
+and-expr    ::= not-expr (ws "and" ws not-expr)*
+not-expr    ::= ("not" ws)? comp-expr
+comp-expr   ::= pred-atom (ws op ws pred-atom)?
+pred-atom   ::= symbol ("(" ws (atom (ws "," ws atom)*)? ws ")")? | atom
+atom        ::= float | int | bool | string | symbol
+op          ::= "<=" | ">=" | "<" | ">" | "==" | "!="
+
+int         ::= "-"? [0-9]+
+float       ::= "-"? [0-9]+ "." [0-9]+
+bool        ::= "true" | "false"
+symbol      ::= [a-zA-Z_] [a-zA-Z0-9_]*
+string      ::= "\"" ( [^"\\] | "\\" . )* "\"" | "'" ( [^'\\] | "\\" . )* "'"
+ws          ::= [ \t]*
+nl          ::= ([ \t]* "\n")+ [ \t]*

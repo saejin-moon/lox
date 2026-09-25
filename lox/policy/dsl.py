@@ -1,13 +1,13 @@
 """
-LOX-ψ Policy Layer: S-expression policy-diff reader (R3, MACRO.md §2–3).
+LOX-ψ Policy Layer: Policy-diff reader & AST parser (Pure Pythonic Infix AST + backward-compatible forms).
 
-Parses a full diff document (revision header + top-level forms) into typed diff objects.
-The LLM emits diffs as text; the GBNF grammar guarantees validity on the local decode path
-and this parser re-enforces it on the API path (parse-and-reject, one repair retry).
+Parses a full diff document into typed diff objects.
+The primary diff language is Pure Pythonic Infix AST (zero parentheses in authoring),
+parsed safely via `lox.policy.infix`. Legacy parenthesized diff forms remain fully
+supported for backward compatibility.
 
-Depth budget (MACRO.md §2.2): condition nesting ≤ 3 is enforced by lox.policy.predicates
-(node depth), and whole-form paren nesting ≤ 4 (accommodates the `(rule ... (when (and
-(...))))` wrapper — the spec's own example). Error codes follow MACRO.md §6 taxonomy.
+Depth budget: condition nesting ≤ 3 is enforced by AST depth bounding.
+Error codes follow MACRO.md §6 taxonomy.
 """
 from __future__ import annotations
 
@@ -446,6 +446,37 @@ def render_node(node) -> str:
             return node
         return '"' + node + '"'
     return str(node)
+
+
+def render_infix(node, top: bool = True) -> str:
+    """Serializes a canonical ('call', name, args) expr node to Pythonic Infix AST text."""
+    if not isinstance(node, tuple) or len(node) != 3 or node[0] != "call":
+        if isinstance(node, bool):
+            return "true" if node else "false"
+        if isinstance(node, str):
+            clean = node.strip("\"'")
+            return f'"{clean}"'
+        return str(node)
+    _, name, args = node
+    if name == "and":
+        s = " and ".join(render_infix(a, False) for a in args)
+        return s if top else f"({s})"
+    if name == "or":
+        s = " or ".join(render_infix(a, False) for a in args)
+        return s if top else f"({s})"
+    if name == "not":
+        return f"not {render_infix(args[0], False)}"
+    if name in ("true", "false") and not args:
+        return name
+    if not args:
+        return name
+    if len(args) == 1 and name in ("monster", "item"):
+        clean = str(args[0]).strip("\"'")
+        return f'{name} == "{clean}"'
+    if len(args) == 2 and args[0] in ("<=", ">=", "<", ">", "==", "!="):
+        return f"{name} {args[0]} {args[1]}"
+    rendered_args = ", ".join(render_infix(a, True) for a in args)
+    return f"{name}({rendered_args})"
 
 
 def extract_diff_text(raw: str) -> str:

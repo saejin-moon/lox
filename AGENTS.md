@@ -101,7 +101,7 @@ knowledge. Porting an expert HTN would falsify the claim.
 │          read_env_schema() · read_manifest() · read_program_tree()         │
 │   input: full run telemetry (6.6M ticks, episodes, goal_events, deaths,    │
 │          stalls, failure counters) + wiki FTS + trajectory autopsies       │
-│   output: S-EXPRESSION POLICY DIFF (grammar-constrained, depth ≤ 3)        │
+│   output: PYTHONIC INFIX AST POLICY DIFF (pure infix, zero parens, depth ≤ 3)│
 └──────────────┬─────────────────────────────────────────────────────────────┘
                ▼ VALIDATOR GATES (machine-checkable, no human in the loop)
    grammar → schema → bounds → target-conditionality → macro closure/expansion
@@ -154,13 +154,13 @@ lox/
 │   ├── prompts/                 # NEW(S0): versioned system-prompt templates (data/prompts/)
 │   ├── config.py                # typed bounded tunables (the ISA's numeric surface)
 │   ├── program.py               # compiled-program container + overlay logic
-│   ├── dsl.py / macros.py       # S-expr diff reader · defmacro (parameterized in S3)
+│   ├── dsl.py / infix.py        # Pythonic Infix AST reader · defmacro (parameterized in S3)
 │   ├── manifest.py              # machine-generated vocabulary: predicates/verbs/goals/actions
 │   ├── validator.py             # full gate pipeline (the only program writer)
 │   ├── tactics.py / predicates.py / profiles.py / goal_interpreter.py / goal_state.py
 │   ├── corpus.py                # per-domain FTS5 RAG corpora (data/corpus/<domain>/)
 │   ├── ledger.py / report.py    # provenance ledger · run-report bundles
-│   └── grammar/nethack.sexpr.gbnf
+│   └── grammar/nethack.infix.gbnf
 ├── evolution/                   # NEW(S2): population manager, selection, lineage
 ├── executor/                    # DomainAdapter ABC + nethack/minihack/craftax adapters
 ├── agent/                       # lox_agent core + htn_methods + episode_runner + episode

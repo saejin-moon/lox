@@ -59,7 +59,7 @@ def render_system_prompt(prompt_text: str, tool_docs: str) -> str:
     """Injects the generated tool reference into a prompt version."""
     if "{tool_docs}" in prompt_text:
         return prompt_text.replace("{tool_docs}", tool_docs)
-    return prompt_text.rstrip() + "\n\n# AVAILABLE TOOLS (call with (tool <name> <args>...))\n" + tool_docs
+    return prompt_text.rstrip() + "\n\n# AVAILABLE TOOLS (call with <tool_name>(<args...>))\n" + tool_docs
 
 
 # The v1-equivalent baseline (matches lox.policy.reviser.SYSTEM_PROMPT content;
