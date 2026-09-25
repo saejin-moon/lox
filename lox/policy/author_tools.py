@@ -86,23 +86,59 @@ def tool_docs(domain: str = "nethack") -> str:
         if domain != "nethack" and spec.name == "wiki_search":
             continue
         args = ", ".join(f'"{a}"' for a in spec.args)
-        call = f'(tool {spec.name} {args})' if args else f'(tool {spec.name})'
+        call = f'{spec.name}({args})' if args else f'{spec.name}()'
         lines.append(f"  {call}\n      # {spec.desc}")
     return "\n".join(lines)
 
 
 def parse_tool_calls(text: str) -> list[tuple[str, list]]:
-    """Parses `(tool <name> [args...])` forms out of an author turn. Returns
-    (name, [str|num args]) pairs. Non-tool forms and prose are ignored; the
-    S-expression tokenizer keeps quoted strings (SQL, queries) intact."""
-    from lox.policy.predicates import tokenize, _atom
-
+    """Parses tool calls out of an author turn. Supports Pythonic syntax
+    `read_env_schema()` / `query_duckdb("SELECT ...")` and legacy `(tool ...)` forms.
+    Returns (name, [str|num args]) pairs."""
+    import ast
     calls: list[tuple[str, list]] = []
+    tool_names = set(TOOL_SPECS.keys())
+
+    # 1. Pythonic function call syntax: name(...)
+    for name in tool_names:
+        pattern = rf"(?:call:\s*|tool:\s*)?\b({name})\s*\((.*?)\)"
+        for match in re.finditer(pattern, text, re.DOTALL):
+            fn_name = match.group(1)
+            raw_args = match.group(2).strip()
+            if not raw_args:
+                calls.append((fn_name, []))
+                continue
+            try:
+                parsed = ast.parse(f"{fn_name}({raw_args})")
+                call_node = parsed.body[0].value
+                args = []
+                for a in call_node.args:
+                    if isinstance(a, ast.Constant):
+                        args.append(a.value)
+                    elif isinstance(a, ast.UnaryOp) and isinstance(a.operand, ast.Constant):
+                        val = a.operand.value
+                        args.append(-val if isinstance(a.op, ast.USub) else val)
+                    else:
+                        args.append(ast.unparse(a))
+                for kw in call_node.keywords:
+                    if isinstance(kw.value, ast.Constant):
+                        args.append(kw.value.value)
+                    else:
+                        args.append(ast.unparse(kw.value))
+                calls.append((fn_name, args))
+            except Exception:
+                if (raw_args.startswith('"') and raw_args.endswith('"')) or (raw_args.startswith("'") and raw_args.endswith("'")):
+                    calls.append((fn_name, [raw_args[1:-1]]))
+
+    if calls:
+        return calls
+
+    # 2. Legacy S-expression fallback: (tool <name> ...)
+    from lox.policy.predicates import tokenize, _atom
     try:
         tokens = tokenize(text)
     except ValueError:
         return calls
-    # Cheap pre-filter: only bother parsing turns that mention a tool form.
     if "(tool" not in text and "(tool\n" not in text and "tool " not in text:
         return calls
     pos = 0
@@ -110,7 +146,6 @@ def parse_tool_calls(text: str) -> list[tuple[str, list]]:
 
     def parse_one():
         nonlocal pos
-        # nested depth is bounded by the author contract (depth ≤ 3 forms)
         if tokens[pos] != "(":
             raise ValueError("expected '('")
         pos += 1
@@ -135,7 +170,6 @@ def parse_tool_calls(text: str) -> list[tuple[str, list]]:
             else:
                 pos += 1
     except (ValueError, IndexError):
-        # Malformed turn: return whatever completed before the error.
         pass
     return calls
 

@@ -46,7 +46,10 @@ AutoAscend empirical foil: median depth 10.0 / mean score 10,713.6 / 4.8% ascens
 Any agent picking up this workspace can immediately execute the MiniHack synthesis run:
 1. **Launch local vLLM on RTX 3080 Ti (12GB VRAM)**:
    ```bash
-   uv run vllm serve groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64 \
+   # (Optional) Download weights if not already present:
+   # uv run --env-file .env hf download groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64
+
+   VLLM_USE_FLASHINFER_SAMPLER=0 uv run vllm serve groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64 \
      --quantization gptq_marlin \
      --dtype float16 \
      --trust-remote-code \

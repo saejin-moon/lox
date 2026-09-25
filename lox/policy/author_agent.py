@@ -162,7 +162,10 @@ class AgenticAuthor:
             "",
             f"# TASK: propose ONE policy diff for version {program.version + 1} "
             f"(parent {program.version}). Gather evidence with tool calls first; "
-            "when you have enough, emit the final diff (first form (revision ...)).",
+            f"when you have enough, emit the final diff in pure Pythonic format:\n"
+            f"revision: {program.version + 1}, parent: {program.version}, author: <model>\n"
+            "reason: <explanation>\n"
+            "<changes>",
         ]
         user = "\n".join(user_parts)
 
@@ -177,11 +180,13 @@ class AgenticAuthor:
         if diff_text is None:
             diff_text = await self._loop(
                 system, user + "\n\n# REPAIR REQUIRED\nYour previous session produced "
-                "no extractable diff. Re-emit ONE valid diff document whose FIRST form "
-                "is (revision ...). You may still use tools first.",
+                "no extractable diff. Re-emit ONE valid diff document whose header is:\n"
+                f"revision: {program.version + 1}, parent: {program.version}, author: <model>\n"
+                "reason: <explanation>\n"
+                "followed by your changes. You may still use tools first.",
                 program, manifest, context, tool_log, meta, repair=True)
         if diff_text is None:
-            raise DiffParseError("ERR_PARSE", "author produced no (revision ...) form "
+            raise DiffParseError("ERR_PARSE", "author produced no valid revision diff "
                                              "within the tool-turn budget")
 
         self.last_meta = {
@@ -217,7 +222,7 @@ class AgenticAuthor:
                     if turn == self.max_turns - 1:
                         return None
                     transcript += (f"\n\n# AUTHOR TURN {turn + 1} (REJECTED — unextractable)\n"
-                                   f"{raw[:1500]}\n\n# SYSTEM\nYour revision form was "
+                                   f"{raw[:1500]}\n\n# SYSTEM\nYour revision diff was "
                                    "unbalanced or malformed. Emit tool calls or ONE "
                                    "well-formed diff.")
                     transcript = _trim_transcript(transcript)
@@ -226,8 +231,8 @@ class AgenticAuthor:
             calls = parse_tool_calls(raw)
             if not calls:
                 transcript += (f"\n\n# AUTHOR TURN {turn + 1}\n{raw[:800]}\n\n# SYSTEM\n"
-                               "No tool call and no diff detected. Emit (tool <name> ...) "
-                               "forms, or the final (revision ...) diff.")
+                               "No tool call and no diff detected. Emit tool calls like "
+                               "`query_duckdb(\"SELECT ...\")`, or the final policy diff.")
                 transcript = _trim_transcript(transcript)
                 continue
 
@@ -252,7 +257,7 @@ class AgenticAuthor:
             if spent > self.max_tokens and not getattr(self, "_budget_warned", False):
                 self._budget_warned = True
                 transcript += ("\n\n# SYSTEM: TOKEN BUDGET REACHED — emit the final "
-                               "(revision ...) diff NOW; no further tool calls.")
+                               "policy diff NOW; no further tool calls.")
         return None
 
 

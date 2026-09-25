@@ -149,7 +149,7 @@ class TestEvidenceTools:
         docs = tool_docs()
         for t in ("query_duckdb", "wiki_search", "read_trajectory",
                   "read_env_schema", "read_manifest", "read_program_tree"):
-            assert f"(tool {t}" in docs
+            assert f"{t}(" in docs
 
 
 class TestToolDispatch:

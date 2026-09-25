@@ -47,11 +47,13 @@ class GeminiProvider(LLMProvider):
 
         # Native google-genai path (author path with thinking); auto-enabled when the
         # SDK is importable, forced off with use_native_genai=False or GEMINI_USE_GENAI=0.
+        # Note: Gemma models on AI Studio require OpenAI-compatible endpoint without system role.
+        is_gemma = "gemma" in (self.model or "").lower()
         env_flag = os.environ.get("GEMINI_USE_GENAI", "1") not in ("0", "false", "False")
         self._genai_client = None
         if use_native_genai is None:
-            use_native_genai = env_flag
-        if use_native_genai:
+            use_native_genai = env_flag and not is_gemma
+        if use_native_genai and not is_gemma:
             try:
                 from google import genai as _genai  # noqa: PLC0415
                 self._genai_client = _genai.Client(api_key=self.api_key)
@@ -166,17 +168,46 @@ class GeminiProvider(LLMProvider):
             usage = out["usage"]
             tokens = usage["total"]
         else:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            is_gemma = "gemma" in (self.model or "").lower()
+            if is_gemma and system_prompt:
+                messages = [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
+            else:
+                messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
-                ],
-            )
+                ]
+            response = None
+            for attempt in range(5):
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                    )
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    if any(c in err_str for c in ("429", "503", "UNAVAILABLE")) and attempt < 4:
+                        import asyncio  # noqa: PLC0415
+                        await asyncio.sleep((attempt + 1) * 8)
+                        continue
+                    raise
             raw_text = response.choices[0].message.content or ""
             thought_text = ""
-            usage = {"in": 0, "out": 0, "thought": 0}
-            tokens = response.usage.total_tokens if response.usage else 0
+            if "<thought>" in raw_text and "</thought>" in raw_text:
+                import re  # noqa: PLC0415
+                m = re.search(r"<thought>(.*?)</thought>", raw_text, re.DOTALL)
+                if m:
+                    thought_text = m.group(1).strip()
+                    raw_text = re.sub(r"<thought>.*?</thought>", "", raw_text, flags=re.DOTALL).strip()
+            
+            um = getattr(response, "usage", None)
+            usage = {
+                "in": getattr(um, "prompt_tokens", 0) or 0,
+                "out": getattr(um, "completion_tokens", 0) or 0,
+                "thought": len(thought_text.split()) if thought_text else 0,
+                "total": getattr(um, "total_tokens", 0) or 0,
+            }
+            tokens = usage["total"]
         latency = (time.perf_counter() - start_time) * 1000.0
         return LLMResponse(
             thinking_content=thought_text,   # native thought-channel output (ledger-captured)

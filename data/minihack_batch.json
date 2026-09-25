@@ -1,0 +1,1517 @@
+{
+  "task": "MiniHack-ExploreMaze-Easy-Mapped-v0",
+  "program_version": 4,
+  "program_path": "data/compiled/minihack.json",
+  "episodes": 100,
+  "workers": 30,
+  "max_steps": 1000,
+  "total_wall_sec": 3.85,
+  "episodes_per_hour": 93527.9,
+  "success_rate": 1.0,
+  "mean_reward": 1.0,
+  "mean_steps": 12.36,
+  "median_steps_on_success": 12.0,
+  "mean_coverage": 12.36,
+  "results": [
+    {
+      "reward": 1.0,
+      "steps": 15,
+      "success": true,
+      "coverage": 15,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 42,
+      "wall_sec": 1.609694900980685
+    },
+    {
+      "reward": 1.0,
+      "steps": 16,
+      "success": true,
+      "coverage": 16,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 43,
+      "wall_sec": 2.3007943329866976
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 44,
+      "wall_sec": 2.2435183479683474
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 45,
+      "wall_sec": 2.1233162859571166
+    },
+    {
+      "reward": 1.0,
+      "steps": 13,
+      "success": true,
+      "coverage": 13,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 46,
+      "wall_sec": 2.291151020966936
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 47,
+      "wall_sec": 2.0590558109688573
+    },
+    {
+      "reward": 1.0,
+      "steps": 13,
+      "success": true,
+      "coverage": 13,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 48,
+      "wall_sec": 2.265972602996044
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 49,
+      "wall_sec": 1.5792659809812903
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 50,
+      "wall_sec": 2.15160859801108
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 51,
+      "wall_sec": 2.1002971989801154
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 52,
+      "wall_sec": 1.5603743310202844
+    },
+    {
+      "reward": 1.0,
+      "steps": 15,
+      "success": true,
+      "coverage": 15,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 53,
+      "wall_sec": 2.248060309968423
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 54,
+      "wall_sec": 2.2421685290173627
+    },
+    {
+      "reward": 1.0,
+      "steps": 8,
+      "success": true,
+      "coverage": 8,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 55,
+      "wall_sec": 1.5854569000075571
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 56,
+      "wall_sec": 2.042989926005248
+    },
+    {
+      "reward": 1.0,
+      "steps": 15,
+      "success": true,
+      "coverage": 15,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 57,
+      "wall_sec": 2.0932046369998716
+    },
+    {
+      "reward": 1.0,
+      "steps": 13,
+      "success": true,
+      "coverage": 13,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 58,
+      "wall_sec": 2.1239421920035966
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 59,
+      "wall_sec": 2.2336350150289945
+    },
+    {
+      "reward": 1.0,
+      "steps": 17,
+      "success": true,
+      "coverage": 17,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 60,
+      "wall_sec": 1.5553072529728524
+    },
+    {
+      "reward": 1.0,
+      "steps": 20,
+      "success": true,
+      "coverage": 20,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 61,
+      "wall_sec": 2.062522699008696
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 62,
+      "wall_sec": 2.1953211899963208
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 63,
+      "wall_sec": 2.049856861005537
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 64,
+      "wall_sec": 2.191616336000152
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 65,
+      "wall_sec": 1.6318392880493775
+    },
+    {
+      "reward": 1.0,
+      "steps": 13,
+      "success": true,
+      "coverage": 13,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 66,
+      "wall_sec": 2.070986164966598
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 67,
+      "wall_sec": 2.209082273009699
+    },
+    {
+      "reward": 1.0,
+      "steps": 16,
+      "success": true,
+      "coverage": 16,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 68,
+      "wall_sec": 2.240781979984604
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 69,
+      "wall_sec": 2.1968568160082214
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 70,
+      "wall_sec": 2.0581055019865744
+    },
+    {
+      "reward": 1.0,
+      "steps": 16,
+      "success": true,
+      "coverage": 16,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 71,
+      "wall_sec": 2.0477069019689225
+    },
+    {
+      "reward": 1.0,
+      "steps": 8,
+      "success": true,
+      "coverage": 8,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 72,
+      "wall_sec": 0.005588304018601775
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 73,
+      "wall_sec": 0.006140901998151094
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 74,
+      "wall_sec": 0.008061036001890898
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 75,
+      "wall_sec": 0.005896159971598536
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 76,
+      "wall_sec": 0.006356801954098046
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 77,
+      "wall_sec": 0.006340072024613619
+    },
+    {
+      "reward": 1.0,
+      "steps": 18,
+      "success": true,
+      "coverage": 18,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 78,
+      "wall_sec": 0.007457971980329603
+    },
+    {
+      "reward": 1.0,
+      "steps": 15,
+      "success": true,
+      "coverage": 15,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 79,
+      "wall_sec": 0.011303407023660839
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 80,
+      "wall_sec": 0.005966697994153947
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 81,
+      "wall_sec": 0.006981935992371291
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 82,
+      "wall_sec": 0.005955070024356246
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 83,
+      "wall_sec": 0.006531034014187753
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 84,
+      "wall_sec": 0.010868890036363155
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 85,
+      "wall_sec": 0.00657824199879542
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 86,
+      "wall_sec": 0.006565367977600545
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 87,
+      "wall_sec": 0.006577502004802227
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 88,
+      "wall_sec": 0.00661824201233685
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 89,
+      "wall_sec": 0.013748264987953007
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 90,
+      "wall_sec": 0.0059239029651507735
+    },
+    {
+      "reward": 1.0,
+      "steps": 20,
+      "success": true,
+      "coverage": 20,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 91,
+      "wall_sec": 0.010916479979641736
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 92,
+      "wall_sec": 0.014345574018079787
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 93,
+      "wall_sec": 0.00809075398137793
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 94,
+      "wall_sec": 0.01218798104673624
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 95,
+      "wall_sec": 0.006979346042498946
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 96,
+      "wall_sec": 0.006489626015536487
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 97,
+      "wall_sec": 0.006424884020816535
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 98,
+      "wall_sec": 0.013405377976596355
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 99,
+      "wall_sec": 0.010029280034359545
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 100,
+      "wall_sec": 0.005835974006913602
+    },
+    {
+      "reward": 1.0,
+      "steps": 13,
+      "success": true,
+      "coverage": 13,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 101,
+      "wall_sec": 0.006793221982661635
+    },
+    {
+      "reward": 1.0,
+      "steps": 16,
+      "success": true,
+      "coverage": 16,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 102,
+      "wall_sec": 0.007513454009313136
+    },
+    {
+      "reward": 1.0,
+      "steps": 15,
+      "success": true,
+      "coverage": 15,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 103,
+      "wall_sec": 0.006945799046661705
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 104,
+      "wall_sec": 0.008401791041251272
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 105,
+      "wall_sec": 0.008712372975423932
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 106,
+      "wall_sec": 0.013353132002521306
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 107,
+      "wall_sec": 0.0065610610181465745
+    },
+    {
+      "reward": 1.0,
+      "steps": 15,
+      "success": true,
+      "coverage": 15,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 108,
+      "wall_sec": 0.013853355019818991
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 109,
+      "wall_sec": 0.009297383017838001
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 110,
+      "wall_sec": 0.005826776032336056
+    },
+    {
+      "reward": 1.0,
+      "steps": 18,
+      "success": true,
+      "coverage": 18,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 111,
+      "wall_sec": 0.010534175962675363
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 112,
+      "wall_sec": 0.009471259021665901
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 113,
+      "wall_sec": 0.0058014969690702856
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 114,
+      "wall_sec": 0.0056206039735116065
+    },
+    {
+      "reward": 1.0,
+      "steps": 16,
+      "success": true,
+      "coverage": 16,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 115,
+      "wall_sec": 0.007722940994426608
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 116,
+      "wall_sec": 0.006413737952243537
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 117,
+      "wall_sec": 0.005925665027461946
+    },
+    {
+      "reward": 1.0,
+      "steps": 13,
+      "success": true,
+      "coverage": 13,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 118,
+      "wall_sec": 0.007308340980671346
+    },
+    {
+      "reward": 1.0,
+      "steps": 19,
+      "success": true,
+      "coverage": 19,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 119,
+      "wall_sec": 0.01918202399974689
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 120,
+      "wall_sec": 0.006547881988808513
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 121,
+      "wall_sec": 0.006249488971661776
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 122,
+      "wall_sec": 0.01030265202280134
+    },
+    {
+      "reward": 1.0,
+      "steps": 13,
+      "success": true,
+      "coverage": 13,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 123,
+      "wall_sec": 0.009929585037752986
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 124,
+      "wall_sec": 0.010703616018872708
+    },
+    {
+      "reward": 1.0,
+      "steps": 11,
+      "success": true,
+      "coverage": 11,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 125,
+      "wall_sec": 0.0064033009693957865
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 126,
+      "wall_sec": 0.006409520981833339
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 127,
+      "wall_sec": 0.007144492992665619
+    },
+    {
+      "reward": 1.0,
+      "steps": 15,
+      "success": true,
+      "coverage": 15,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 128,
+      "wall_sec": 0.01506705000065267
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 129,
+      "wall_sec": 0.012328297947533429
+    },
+    {
+      "reward": 1.0,
+      "steps": 13,
+      "success": true,
+      "coverage": 13,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 130,
+      "wall_sec": 0.006570235011167824
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 131,
+      "wall_sec": 0.005772975040599704
+    },
+    {
+      "reward": 1.0,
+      "steps": 12,
+      "success": true,
+      "coverage": 12,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 132,
+      "wall_sec": 0.006885989976581186
+    },
+    {
+      "reward": 1.0,
+      "steps": 15,
+      "success": true,
+      "coverage": 15,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 133,
+      "wall_sec": 0.015313100011553615
+    },
+    {
+      "reward": 1.0,
+      "steps": 14,
+      "success": true,
+      "coverage": 14,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 134,
+      "wall_sec": 0.006966745015233755
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 135,
+      "wall_sec": 0.0063441910315304995
+    },
+    {
+      "reward": 1.0,
+      "steps": 16,
+      "success": true,
+      "coverage": 16,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 136,
+      "wall_sec": 0.007176809012889862
+    },
+    {
+      "reward": 1.0,
+      "steps": 17,
+      "success": true,
+      "coverage": 17,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 137,
+      "wall_sec": 0.0120660699903965
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 138,
+      "wall_sec": 0.005544161016587168
+    },
+    {
+      "reward": 1.0,
+      "steps": 10,
+      "success": true,
+      "coverage": 10,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 139,
+      "wall_sec": 0.006111049035098404
+    },
+    {
+      "reward": 1.0,
+      "steps": 18,
+      "success": true,
+      "coverage": 18,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 140,
+      "wall_sec": 0.007643199001904577
+    },
+    {
+      "reward": 1.0,
+      "steps": 9,
+      "success": true,
+      "coverage": 9,
+      "goal_events": [
+        {
+          "goal": "reach_stairs",
+          "event": "activated",
+          "step": 1
+        }
+      ],
+      "seed": 141,
+      "wall_sec": 0.008657715981826186
+    }
+  ]
+}

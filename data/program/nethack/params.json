@@ -1,3 +1,8 @@
 {
-  "params": {}
+  "params": {
+    "nutrition.food_radius": 6,
+    "nutrition.food_radius_hungry": 70,
+    "nutrition.pray_routine": 600,
+    "nutrition.pray_routine_first": 200
+  }
 }

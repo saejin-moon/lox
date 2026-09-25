@@ -19,9 +19,13 @@
 
 To execute the MiniHack policy synthesis run, any agent can run the following exact sequence:
 
-1. **Step 1: Launch Local vLLM Server on RTX 3080 Ti**:
+1. **Step 1: Download Weights & Launch Local vLLM Server on RTX 3080 Ti**:
    ```bash
-   uv run vllm serve groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64 \
+   # Download weights using .env credentials
+   uv run --env-file .env hf download groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64
+
+   # Launch vLLM server (VLLM_USE_FLASHINFER_SAMPLER=0 disables FlashInfer JIT compilation if nvcc is not on path)
+   VLLM_USE_FLASHINFER_SAMPLER=0 uv run vllm serve groxaxo/Huihui-Qwen3.5-9B-abliterated-GPTQ-Pro-4bit-g64 \
      --quantization gptq_marlin \
      --dtype float16 \
      --trust-remote-code \
@@ -32,7 +36,7 @@ To execute the MiniHack policy synthesis run, any agent can run the following ex
      --enforce-eager \
      --disable-uvicorn-access-log
    ```
-   *(Note: 32k context is optimal for 12GB VRAM; worst-case author transcript is ~8k tokens. If local server is offline, fallback via OpenRouter API: `--provider openrouter --model z-ai/glm-5.3-flash`)*.
+   *(Note: 32k context is optimal for 12GB VRAM; worst-case author transcript is ~8k tokens. If local server is offline, fallback via OpenRouter API: `--provider openrouter --model z-ai/glm-5.3-flash` or Gemini)*.
 
 2. **Step 2: Run Agentic Authoring Session (Pure Pythonic Infix AST)**:
    ```bash
