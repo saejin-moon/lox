@@ -10,14 +10,14 @@
     "combat.heavy_wounded_frac": 0.65,
     "strategy.triage_hp_frac": 0.45,
     "strategy.triage_min_hp": 6,
-    "descent.should_descend_unvisited": 20,
-    "descent.should_descend_turns": 80,
+    "descent.should_descend_unvisited": 15,
+    "descent.should_descend_turns": 150,
     "survival.rest_until_frac": 0.95,
     "strategy.survival_exit_depth": 3,
     "descent.should_descend_xl": 1,
     "nutrition.pray_major_first": 80,
     "descent.deep_min_depth": 6,
-    "descent.min_hp_frac": 0.4,
+    "descent.min_hp_frac": 0.225,
     "strategy.survival_timeout_steps": 1200,
     "strategy.early_exit_depth": 2,
     "search.hard_cap_early": 10,
@@ -167,28 +167,16 @@
       "interlock": true
     },
     {
-      "when": "(and (monster \"jackal\") (hp_frac \"<\" 0.6))",
+      "when": "(and (monster \"giant rat\") (hp_frac <= 0.6))",
       "do": "retreat",
       "unless": null,
-      "note": null
+      "note": "Avoid rat attrition early game"
     },
     {
-      "when": "(and (monster \"giant rat\") (hp_frac \"<\" 0.6))",
+      "when": "(and (monster \"garter snake\") (hp_frac <= 0.6))",
       "do": "retreat",
       "unless": null,
-      "note": null
-    },
-    {
-      "when": "(and (monster \"giant bat\") (hp_frac \"<\" 0.6))",
-      "do": "retreat",
-      "unless": null,
-      "note": null
-    },
-    {
-      "when": "(and (monster \"garter snake\") (hp_frac \"<\" 0.6))",
-      "do": "retreat",
-      "unless": null,
-      "note": null
+      "note": "Avoid snake attrition early game"
     }
   ],
   "nogoods": [],
@@ -197,8 +185,8 @@
   "strategy_plan": [
     {
       "goal": "descend",
-      "when": "(or (stairs_known) (turn_ge 3000))",
-      "until": "(depth_ge 14)",
+      "when": "(or (stairs_known) (unvisited_count <= 15))",
+      "until": "(depth_ge 4)",
       "directive": "DESCEND"
     },
     {
@@ -268,15 +256,15 @@
     },
     {
       "goal": "explore_floor",
-      "when": "(or (stairs_known) (turn_ge 3000))",
-      "until": "(or (xl_ge 4) (depth_ge 4))"
+      "when": "(or (stairs_known) (unvisited_count <= 10))",
+      "until": "(depth_ge 4)"
     }
   ],
   "provenance": {
-    "author": "LOX-\u03c8",
+    "author": "google/gemma-4-31b-it",
     "note": "REVERT of 3 llm-authored combat rules: A/B on v5 (100 eps each, parallel runner) showed mean score 217.0 WITH rules vs 396.4 WITHOUT (median depth 2 vs 3). Rules engraved Elbereth while adjacent at <=40% HP and forced ranged_then_kill against everything \u2014 wrong response tier for DL1-3 melee deaths. Superseded by interlock-only rule set.",
     "parent_version": 58,
-    "reason": "Eliminate DL1-3 pacing loops and starvation by deprioritizing exploration once stairs are known or global turn count is excessive. Adding tactical retreats for high-attrition early-game monsters.",
+    "reason": "Fix ERR_PARSE by replacing the invalid macro expression `unvisited_count(<=, unvisited_limit)` with a valid predicate call `unvisited_count <= 10` and `unvisited_count <= 15` directly in the goals, as the policy language does not support parameterized macros for predicate operators in that syntax.",
     "parent_author": "gemma-4-26b@ablation"
   }
 }

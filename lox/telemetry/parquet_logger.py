@@ -114,6 +114,18 @@ EVENT_SCHEMA = pa.schema([
     ("detail", pa.string()),    # short detail (truncated)
 ])
 
+GOAL_EVENT_SCHEMA = pa.schema([
+    ("ts", pa.float64()),
+    ("run_id", pa.string()),
+    ("episode_id", pa.string()),
+    ("depth", pa.int32()),
+    ("dnum", pa.int32()),
+    ("turn", pa.int32()),
+    ("goal", pa.string()),
+    ("event", pa.string()),
+    ("steps_in_goal", pa.int32()),
+])
+
 
 @dataclass(slots=True)
 class TickRecord:
@@ -218,6 +230,19 @@ class EventRecord:
     detail: str
 
 
+@dataclass(slots=True)
+class GoalEventRecord:
+    ts: float
+    run_id: str
+    episode_id: str
+    depth: int
+    dnum: int
+    turn: int
+    goal: str
+    event: str
+    steps_in_goal: int
+
+
 class ParquetLogger:
     """
     Streaming Parquet telemetry logger. Buffers records in memory and flushes
@@ -238,19 +263,29 @@ class ParquetLogger:
         self.episodes_dir = os.path.join(base_dir, "episodes")
         self.llm_queries_dir = os.path.join(base_dir, "llm_queries")
         self.events_dir = os.path.join(base_dir, "events")
+        self.goal_events_dir = os.path.join(base_dir, "goal_events")
         os.makedirs(self.ticks_dir, exist_ok=True)
         os.makedirs(self.episodes_dir, exist_ok=True)
         os.makedirs(self.llm_queries_dir, exist_ok=True)
         os.makedirs(self.events_dir, exist_ok=True)
+        os.makedirs(self.goal_events_dir, exist_ok=True)
 
         self._tick_buffer: list[dict[str, Any]] = []
         self._episode_buffer: list[dict[str, Any]] = []
         self._llm_query_buffer: list[dict[str, Any]] = []
         self._event_buffer: list[dict[str, Any]] = []
+        self._goal_event_buffer: list[dict[str, Any]] = []
         self._tick_file_counter = 0
         self._episode_file_counter = 0
         self._llm_query_file_counter = 0
         self._event_file_counter = 0
+        self._goal_event_file_counter = 0
+
+    def log_goal_event(self, record: GoalEventRecord):
+        """Buffers a goal transition event."""
+        self._goal_event_buffer.append(asdict(record))
+        if len(self._goal_event_buffer) >= self.tick_batch_size:
+            self._flush_goal_events()
 
     def log_tick(self, record: TickRecord):
         """Buffers a tick frame and flushes if batch threshold reached."""
@@ -310,6 +345,18 @@ class ParquetLogger:
         self._llm_query_buffer.clear()
         self._llm_query_file_counter += 1
 
+    def _flush_goal_events(self):
+        if not self._goal_event_buffer:
+            return
+        table = pa.Table.from_pylist(self._goal_event_buffer, schema=GOAL_EVENT_SCHEMA)
+        out_path = os.path.join(
+            self.goal_events_dir,
+            f"goal_events_{self.run_id}_{self._goal_event_file_counter:04d}.parquet",
+        )
+        pq.write_table(table, out_path, compression="SNAPPY")
+        self._goal_event_buffer.clear()
+        self._goal_event_file_counter += 1
+
     def _flush_events(self):
         if not self._event_buffer:
             return
@@ -328,3 +375,5 @@ class ParquetLogger:
         self._flush_episodes()
         self._flush_llm_queries()
         self._flush_events()
+        self._flush_goal_events()
+

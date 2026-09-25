@@ -13,7 +13,7 @@ def test_manifest_contains_new_sensory_predicates():
         "count_hostiles", "closest_threat", "closest_speed", "has_ranged_target",
         "is_monster_fleeing", "carried_food_count", "turns_since_pray",
         "can_safely_pray", "has_intrinsic", "current_ac", "weapon_enchantment",
-        "has_item", "hunger_level",
+        "has_item", "hunger_level", "closest_monster_dist", "turns_on_current_level",
     ]
     for p in new_preds:
         assert p in manifest.predicates, f"Missing predicate {p} in manifest"
@@ -33,6 +33,8 @@ def test_sensory_predicates_eval_default_ctx():
     assert bindings["carried_food_count"](">", 0) is True
     assert bindings["turns_since_pray"](">=", 400) is True
     assert bindings["current_ac"]("<=", 10) is True
+    assert bindings["closest_monster_dist"](">", 5) is True
+    assert bindings["turns_on_current_level"]("<=", 100) is True
 
 
 def test_sensory_predicates_with_overrides():
@@ -49,6 +51,8 @@ def test_sensory_predicates_with_overrides():
         intrinsics={"poison_res", "reflection"},
         ac=-2,
         inventory_items={"scroll of teleportation", "potion of healing"},
+        closest_monster_dist=2,
+        turns_on_current_level=750,
     )
     bindings = nethack_bindings(ctx)
 
@@ -65,3 +69,6 @@ def test_sensory_predicates_with_overrides():
     assert bindings["current_ac"]("<=", 0) is True
     assert bindings["has_item"]("scroll", "teleport") is True
     assert bindings["has_item"]("wand", "wishing") is False
+    assert bindings["closest_monster_dist"]("<=", 2) is True
+    assert bindings["turns_on_current_level"](">", 500) is True
+

@@ -50,3 +50,6 @@ class MacroDirectorState:
     castle_wishing_done: bool = False            # BoH / dragon scale mail acquired past the Castle
     vlad_defeated: bool = False
     invocation_done: bool = False                # performed at the Vibrating Square
+    turns_on_current_level: int = 0
+    closest_monster_dist: int = 99
+

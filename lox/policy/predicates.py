@@ -152,6 +152,7 @@ DEFAULT_FIXTURE_CTX: dict = {
     "has_ranged_target": False, "is_monster_fleeing": False,
     "carried_food_count": 1, "turns_since_pray": 500, "can_safely_pray": True,
     "intrinsics": set(), "weapon_enchantment": 0, "inventory_items": set(),
+    "closest_monster_dist": 99, "turns_on_current_level": 50,
 }
 
 
@@ -260,6 +261,8 @@ def nethack_bindings(ctx: dict) -> dict:
         "weapon_enchantment": lambda op, v: _cmp(_c(ctx, "weapon_enchantment", 0), op, int(v)),
         "has_item": lambda cat, name: any(str(cat).lower() in item.lower() and str(name).lower() in item.lower() for item in _c(ctx, "inventory_items", set())),
         "hunger_level": lambda op, v: _cmp(hunger_raw, op, _hunger_level(v)),
+        "closest_monster_dist": lambda op, v: _cmp(_c(ctx, "closest_monster_dist", 99), op, int(v)),
+        "turns_on_current_level": lambda op, v: _cmp(_c(ctx, "turns_on_current_level", 0), op, int(v)),
     }
 
 

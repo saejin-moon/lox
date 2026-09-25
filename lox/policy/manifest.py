@@ -78,6 +78,8 @@ PREDICATE_SIGNATURES: dict[str, dict] = {
     "is_monster_fleeing": {"args": [], "desc": "primary target monster is fleeing"},
     "carried_food_count": {"args": [("op",), ("int",)], "desc": "count of safe carried food rations compared to n, e.g. (carried_food_count == 0)"},
     "turns_since_pray": {"args": [("op",), ("int",)], "desc": "turns elapsed since last prayer compared to n, e.g. (turns_since_pray >= 400)"},
+    "closest_monster_dist": {"args": [("op",), ("int",)], "desc": "distance to closest hostile monster compared to n, e.g. (closest_monster_dist <= 3)"},
+    "turns_on_current_level": {"args": [("op",), ("int",)], "desc": "turns spent on current floor/level compared to n, e.g. (turns_on_current_level >= 500)"},
     "can_safely_pray": {"args": [], "desc": "prayer cooldown has safely elapsed without divine wrath"},
     "has_intrinsic":  {"args": [("str",)], "desc": "hero has intrinsic (poison_res, reflection, cold_res, stealth)"},
     "current_ac":     {"args": [("op",), ("int",)], "desc": "hero Armour Class compared to n (lower is better), e.g. (current_ac <= 0)"},
@@ -258,6 +260,9 @@ class VocabularyManifest:
 
     def _render_compact(self) -> str:
         def sig(name, spec):
+            if spec["args"] and spec["args"][0][0] == "op":
+                val_type = spec["args"][1][0] if len(spec["args"]) > 1 else "val"
+                return f"{name}<op><{val_type}>"
             args = ",".join(str(a[0]) for a in spec["args"])
             return f"{name}({args})" if args else name
 

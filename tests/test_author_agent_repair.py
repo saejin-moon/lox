@@ -201,3 +201,27 @@ goal prioritize descend: when stairs_known and count_hostiles(==, 0)
     assert parsed.rules[0].rule["note"] == "Avoid jackal attrition"
     assert parsed.rules[1].rule["note"] == "Avoid rat attrition"
     assert len(parsed.goals) == 1
+
+
+def test_repair_macro_param_callable_comparisons():
+    prog = PolicyProgram.from_dict(DEFAULT_PROGRAM)
+    prog.version = 59
+
+    diff_text = """
+revision: 60, parent: 59, author: "LOX-ψ", reason: "macro param comparison repair"
+defmacro early_stalled(unvisited_limit) = unvisited_count(<=, unvisited_limit) or stairs_known
+goal deprioritize explore_floor: when turns_on_current_level(>=, 500)
+rule add tactic_rules: when monster == "jackal" and closest_monster_dist(<=, 2) do retreat
+"""
+    repaired = repair_diff_text(diff_text, prog, MANIFEST)
+    assert "unvisited_count <= unvisited_limit" in repaired
+    assert "turns_on_current_level >= 500" in repaired
+    assert "closest_monster_dist <= 2" in repaired
+
+    from lox.policy.infix import parse_pythonic_diff
+    parsed = parse_pythonic_diff(repaired)
+    assert len(parsed.defmacros) == 1
+    assert parsed.defmacros[0].params == ["unvisited_limit"]
+    assert len(parsed.goals) == 1
+    assert len(parsed.rules) == 1
+

@@ -268,3 +268,47 @@ def test_duckdb_consolidator_cleanup():
         # Verify vacuum runs cleanly
         consolidator.vacuum()
 
+
+def test_parquet_logger_and_duckdb_goal_events():
+    from lox.telemetry.parquet_logger import GoalEventRecord
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        parquet_dir = os.path.join(tmpdir, "parquet")
+        duckdb_path = os.path.join(tmpdir, "telemetry.duckdb")
+
+        logger = ParquetLogger(
+            base_dir=parquet_dir,
+            run_id="test_goal_run",
+            tick_batch_size=5,
+        )
+
+        rec = GoalEventRecord(
+            ts=time.time(),
+            run_id="test_goal_run",
+            episode_id="ep_test_001",
+            depth=1,
+            dnum=0,
+            turn=42,
+            goal="explore_floor",
+            event="activated",
+            steps_in_goal=0,
+        )
+        logger.log_goal_event(rec)
+        logger.flush_all()
+
+        goal_files = os.listdir(os.path.join(parquet_dir, "goal_events"))
+        assert len(goal_files) == 1
+
+        consolidator = DuckDBConsolidator(
+            db_path=duckdb_path,
+            parquet_dir=parquet_dir,
+        )
+        counts = consolidator.consolidate(clean_parquet=True)
+        assert counts["goal_events"] == 1
+        assert counts["deleted_files"] == 1
+
+        rows = consolidator.query("SELECT goal, event, turn FROM goal_events")
+        assert len(rows) == 1
+        assert rows[0] == ("explore_floor", "activated", 42)
+
+

@@ -26,6 +26,7 @@ class DuckDBConsolidator:
         self.episodes_glob = os.path.join(parquet_dir, "episodes", "*.parquet")
         self.llm_queries_glob = os.path.join(parquet_dir, "llm_queries", "*.parquet")
         self.events_glob = os.path.join(parquet_dir, "events", "*.parquet")
+        self.goal_events_glob = os.path.join(parquet_dir, "goal_events", "*.parquet")
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
     def consolidate(self, clean_parquet: bool = False) -> dict[str, Any]:
@@ -166,6 +167,29 @@ class DuckDBConsolidator:
                 ORDER BY run_id, count(*) DESC;
             """)
 
+        # 3c. Ingest Goal Events
+        has_goal_events = any(
+            f.endswith(".parquet")
+            for f in os.listdir(os.path.join(self.parquet_dir, "goal_events"))
+        ) if os.path.exists(os.path.join(self.parquet_dir, "goal_events")) else False
+
+        goal_events_count = 0
+        if has_goal_events:
+            conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS goal_events AS 
+                SELECT * FROM read_parquet('{self.goal_events_glob}') WHERE 1=0;
+            """)
+            conn.execute(f"""
+                INSERT INTO goal_events
+                SELECT p.* FROM read_parquet('{self.goal_events_glob}') p
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM goal_events g
+                    WHERE g.episode_id = p.episode_id AND g.turn = p.turn
+                      AND g.goal = p.goal AND g.event = p.event
+                );
+            """)
+            goal_events_count = conn.execute("SELECT count(*) FROM goal_events").fetchone()[0]
+
         # 4. Build Canonical Analytical Views
         if has_episodes:
             conn.execute("""
@@ -242,6 +266,7 @@ class DuckDBConsolidator:
             "ticks": ticks_count,
             "llm_queries": llm_queries_count,
             "events": events_count,
+            "goal_events": goal_events_count,
             **cleanup_stats,
         }
 
@@ -252,7 +277,7 @@ class DuckDBConsolidator:
         """
         deleted_count = 0
         deleted_bytes = 0
-        for sub in ("episodes", "ticks", "llm_queries", "events"):
+        for sub in ("episodes", "ticks", "llm_queries", "events", "goal_events"):
             sub_dir = os.path.join(self.parquet_dir, sub)
             if not os.path.exists(sub_dir):
                 continue

@@ -394,11 +394,32 @@ class EpisodeRunnerMixin:
             self.step()
             steps += 1
 
-        # R2: persist goal transitions to the DuckDB goal_events table
-        try:
-            self.goals.flush_events("data/lox_telemetry.duckdb", goal_flush_target, self.episode_id)
-        except Exception:
-            pass
+        # R2: persist goal transitions via Parquet logger or fallback to DuckDB
+        if self.parquet_logger is not None and hasattr(self.goals, "_events") and self.goals._events:
+            try:
+                from lox.telemetry.parquet_logger import GoalEventRecord
+                for e in self.goals._events:
+                    self.parquet_logger.log_goal_event(
+                        GoalEventRecord(
+                            ts=float(e["ts"]),
+                            run_id=str(goal_flush_target),
+                            episode_id=str(self.episode_id),
+                            depth=int(e["depth"]),
+                            dnum=int(e["dnum"]),
+                            turn=int(e["turn"]),
+                            goal=str(e["goal"]),
+                            event=str(e["event"]),
+                            steps_in_goal=int(e["steps_in_goal"]),
+                        )
+                    )
+                self.goals._events = []
+            except Exception:
+                pass
+        else:
+            try:
+                self.goals.flush_events("data/lox_telemetry.duckdb", goal_flush_target, self.episode_id)
+            except Exception:
+                pass
 
         elapsed = max(1e-4, time.perf_counter() - start_time)
         sps = float(steps) / elapsed

@@ -304,6 +304,7 @@ class LoxAgent(HTNMethodsMixin, EpisodeRunnerMixin):
             has_poison_res=has_pr,
             has_reflection=has_refl,
             temple_donations=self.shop_mgr.priest_donations_count,
+            turns_on_current_level=lvl_map.turns_spent,
         )
 
         # 0.1 Check multi-turn locked intent commitment

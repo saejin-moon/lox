@@ -148,7 +148,8 @@ def repair_diff_text(
         # Callable comparisons: hp_frac('<', 0.6) or count_hostiles(==, 0) -> infix
         op_map = {'lt': '<', 'le': '<=', 'gt': '>', 'ge': '>=', 'eq': '==', 'ne': '!='}
         cmp_preds = ('hp_frac', 'count_hostiles', 'stairs_dist', 'closest_speed', 'closest_threat',
-                     'carried_food_count', 'turns_since_pray', 'current_ac', 'weapon_enchantment', 'unvisited_count')
+                     'carried_food_count', 'turns_since_pray', 'current_ac', 'weapon_enchantment', 'unvisited_count',
+                     'turns_on_current_level', 'closest_monster_dist')
         def _repl_call_cmp(m):
             pred = m.group(1)
             raw_op = m.group(2).strip('"\'')
@@ -156,7 +157,7 @@ def repair_diff_text(
             val = m.group(3)
             return f"{pred} {op} {val}"
         stripped = re.sub(
-            rf'\b({"|".join(cmp_preds)})\s*\(\s*[\'\"]?([<>=!]+|[a-zA-Z]+)[\'\"]?\s*,\s*([0-9.]+)\s*\)',
+            rf'\b({"|".join(cmp_preds)})\s*\(\s*[\'\"]?([<>=!]+|[a-zA-Z]+)[\'\"]?\s*,\s*([a-zA-Z0-9_.-]+)\s*\)',
             _repl_call_cmp,
             stripped
         )

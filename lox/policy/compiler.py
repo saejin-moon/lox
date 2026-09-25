@@ -33,7 +33,8 @@ import shutil
 from contextlib import contextmanager
 
 from lox.policy import dsl
-from lox.policy.program import PolicyProgram
+from lox.policy.program import PolicyProgram, DEFAULT_PROGRAM_PATH
+
 
 PROGRAM_DIR = "data/program"
 COMPILED_DIR = "data/compiled"
@@ -410,6 +411,11 @@ def compile_and_commit(program: PolicyProgram, tree_dir: str,
     os.makedirs(COMPILED_DIR, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(compiled.to_dict(), f, indent=2)
+    if "data/program" in tree_dir:
+        if compiled.domain == "nethack" and live_path != DEFAULT_PROGRAM_PATH:
+            compiled.save(DEFAULT_PROGRAM_PATH)
+        elif compiled.domain == "minihack" and live_path != "data/policy_program_minihack.json":
+            compiled.save("data/policy_program_minihack.json")
     if archive:
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
         stem = (f"policy_program_v{compiled.version}" if compiled.domain == "nethack"

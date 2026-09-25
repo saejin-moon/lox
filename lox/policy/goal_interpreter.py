@@ -90,8 +90,12 @@ class GoalInterpreter:
         has_poison_res: bool = False,
         has_reflection: bool = False,
         temple_donations: int = 0,
+        turns_on_current_level: int = 0,
+        closest_monster_dist: int = 99,
     ) -> AscensionPhase:
         st = self.state
+        st.turns_on_current_level = turns_on_current_level
+        st.closest_monster_dist = closest_monster_dist
         st.total_steps_in_phase += 1
         msg_lower = (message or "").lower()
 
@@ -181,6 +185,8 @@ class GoalInterpreter:
             "ac": blstats.ac,
             "steps_in_goal": self._goal_steps,
             "turn": blstats.turn,
+            "turns_on_current_level": getattr(st, "turns_on_current_level", 0),
+            "closest_monster_dist": getattr(st, "closest_monster_dist", 99),
             # R6 milestone context
             "has_mr": st.mr_obtained,
             "has_light": st.light_source_carried,
@@ -420,27 +426,36 @@ class GoalInterpreter:
         """Appends buffered goal transitions to the DuckDB goal_events table. Returns rows written."""
         if not self._events:
             return 0
-        try:
-            import duckdb
-            con = duckdb.connect(db_path)
-            con.execute(
-                """CREATE TABLE IF NOT EXISTS goal_events (
-                       ts DOUBLE, run_id VARCHAR, episode_id VARCHAR,
-                       depth INTEGER, dnum INTEGER, turn INTEGER,
-                       goal VARCHAR, event VARCHAR, steps_in_goal INTEGER)"""
-            )
-            rows = [
-                (e["ts"], run_id, episode_id, e["depth"], e["dnum"], e["turn"],
-                 e["goal"], e["event"], e["steps_in_goal"])
-                for e in self._events
-            ]
-            con.executemany(
-                "INSERT INTO goal_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
-            )
-            con.close()
-            n = len(rows)
-            self._events = []
-            return n
-        except Exception as e:
-            print(f"[policy] goal_events flush failed: {e}")
-            return 0
+        import time as _time
+        for attempt in range(5):
+            try:
+                import duckdb
+                con = duckdb.connect(db_path)
+                con.execute(
+                    """CREATE TABLE IF NOT EXISTS goal_events (
+                           ts DOUBLE, run_id VARCHAR, episode_id VARCHAR,
+                           depth INTEGER, dnum INTEGER, turn INTEGER,
+                           goal VARCHAR, event VARCHAR, steps_in_goal INTEGER)"""
+                )
+                rows = [
+                    (e["ts"], run_id, episode_id, e["depth"], e["dnum"], e["turn"],
+                     e["goal"], e["event"], e["steps_in_goal"])
+                    for e in self._events
+                ]
+                con.executemany(
+                    "INSERT INTO goal_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+                )
+                con.close()
+                n = len(rows)
+                self._events = []
+                return n
+            except Exception as e:
+                err_str = str(e).lower()
+                if attempt < 4 and ("lock" in err_str or "conflict" in err_str):
+                    _time.sleep(0.05 * (2 ** attempt))
+                    continue
+                if "lock" not in err_str and "conflict" not in err_str:
+                    print(f"[policy] goal_events flush failed: {e}")
+                return 0
+        return 0
+
