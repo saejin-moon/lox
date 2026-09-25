@@ -1,5 +1,5 @@
 {
-  "version": 60,
+  "version": 58,
   "domain": "nethack",
   "params": {
     "nutrition.food_radius": 6,
@@ -24,9 +24,7 @@
     "search.wall_none": 7,
     "search.dead_end_none": 10,
     "strategy.triage_adj_hp_frac": 0.4,
-    "strategy.survival_ac_target": 6,
-    "navigation.water_body_min_tiles": 3,
-    "strategy.triage_adj_min_hp": 9
+    "strategy.survival_ac_target": 6
   },
   "macros": [],
   "tactic_rules": [

@@ -171,6 +171,7 @@ def run_campaign(
             "--model", model_name,
             "--domain", "nethack",
             "--prompt-version", prompt_version,
+            "--program-path", program_path,
             "--commit",
             "--out", f"data/campaign_author_iter{iteration}.json",
         ]
