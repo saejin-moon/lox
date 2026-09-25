@@ -1,10 +1,10 @@
 {
-  "version": 9,
+  "version": 8,
   "domain": "nethack",
   "params": {
     "nutrition.food_radius": 6,
-    "nutrition.food_radius_hungry": 120,
-    "nutrition.pray_routine": 600,
+    "nutrition.food_radius_hungry": 140,
+    "nutrition.pray_routine": 700,
     "nutrition.pray_routine_first": 200,
     "nutrition.pray_major": 350
   },
@@ -233,8 +233,8 @@
   "provenance": {
     "author": "LOX-\u03c8",
     "note": "REVERT of 3 llm-authored combat rules: A/B on v5 (100 eps each, parallel runner) showed mean score 217.0 WITH rules vs 396.4 WITHOUT (median depth 2 vs 3). Rules engraved Elbereth while adjacent at <=40% HP and forced ranged_then_kill against everything \u2014 wrong response tier for DL1-3 melee deaths. Superseded by interlock-only rule set.",
-    "parent_version": 8,
-    "reason": "Starvation deaths at depth 1 are persisting despite previous radius increases, with episodes lasting ~8000 turns. The agent is stuck in explore_floor without transitioning to foraging or praying. Reducing the prayer routine interval significantly to trigger emergency food recovery more frequently and lowering the routine prayer first-threshold to ensure the agent seeks divine sustenance before the hunger state becomes critical.",
+    "parent_version": 7,
+    "reason": "High rate of starvation deaths at depth 1, often occurring after very long episodes (thousands of turns) where the agent fails to find food despite high turn counts. Increasing food_radius_hungry and decreasing prayer intervals to trigger emergency food recovery earlier.",
     "parent_author": "gemma-4-26b@ablation"
   }
 }

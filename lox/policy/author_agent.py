@@ -183,7 +183,7 @@ class AgenticAuthor:
                 "no extractable diff. Re-emit ONE valid diff document whose header is:\n"
                 f"revision: {program.version + 1}, parent: {program.version}, author: <model>\n"
                 "reason: <explanation>\n"
-                "followed by your changes. You may still use tools first.",
+                "followed by your changes. Emit the diff directly NOW without calling tools.",
                 program, manifest, context, tool_log, meta, repair=True)
         if diff_text is None:
             raise DiffParseError("ERR_PARSE", "author produced no valid revision diff "
@@ -251,13 +251,20 @@ class AgenticAuthor:
                            f"# TOOL RESULTS (turn {turn + 1}, truncated per tool)\n"
                            + ("\n\n".join(results))[:MAX_TOOL_OUTPUT_CHARS * 4])
             transcript = _trim_transcript(transcript)
-            # Cost guard: the transcript is re-sent every turn. When the session's token
-            # budget is spent, nudge the author to emit its final diff now.
+            # Cost and turn guard: nudge author to emit diff as turn budget approaches
             spent = meta["tokens_in"] + meta["tokens_out"] + meta["tokens_thought"]
             if spent > self.max_tokens and not getattr(self, "_budget_warned", False):
                 self._budget_warned = True
                 transcript += ("\n\n# SYSTEM: TOKEN BUDGET REACHED — emit the final "
                                "policy diff NOW; no further tool calls.")
+            elif turn == self.max_turns - 2:
+                transcript += (f"\n\n# SYSTEM: Turn {turn + 1}/{self.max_turns} complete. "
+                               f"You have 1 turn remaining. In the next turn, you MUST emit your "
+                               f"final policy diff starting with `revision: {program.version + 1}, "
+                               f"parent: {program.version}`.")
+            elif turn >= self.max_turns - 1:
+                transcript += ("\n\n# SYSTEM: FINAL TURN — emit the final policy diff NOW; "
+                               "no further tool calls.")
         return None
 
 

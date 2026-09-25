@@ -1,0 +1,38 @@
+{
+  "accepted": true,
+  "error_code": null,
+  "gate": null,
+  "detail": "",
+  "wall_sec": 14.33718734595459,
+  "diff_text": "revision: 8, parent: 7, author: \"LOX-\u03c8\", domain: \"nethack\", reason: \"High rate of starvation deaths at depth 1, often occurring after very long episodes (thousands of turns) where the agent fails to find food despite high turn counts. Increasing food_radius_hungry and decreasing prayer intervals to trigger emergency food recovery earlier.\"\nset nutrition.food_radius_hungry = 140\nset nutrition.pray_routine = 700\nset nutrition.pray_major = 350",
+  "meta": {
+    "tokens_in": 34420,
+    "tokens_out": 380,
+    "tokens_thought": 0,
+    "wall_sec": 14.298250060004648,
+    "model": "google/gemma-4-31b-it",
+    "turns": 4,
+    "tool_log": [
+      {
+        "turn": 3,
+        "call": 0,
+        "tool": "query_duckdb",
+        "args": [
+          "SELECT episode_id, turns, final_hp, death_message, death_category FROM episodes WHERE death_category = 'starvation' AND "
+        ],
+        "result_preview": "ERROR: BinderException: Binder Error: Referenced column \"turns\" not found in FROM clause!\nCandidate bindings: \"run_id\", \"mean_sps\", \"timestamp\", \"final_score\", \"total_steps\"\n\nLINE 1: SELECT episode_id"
+      },
+      {
+        "turn": 4,
+        "call": 0,
+        "tool": "query_duckdb",
+        "args": [
+          "SELECT episode_id, total_turns, final_hp, death_message, death_category FROM episodes WHERE death_category = 'starvation"
+        ],
+        "result_preview": "| episode_id | total_turns | final_hp | death_message | death_category |\n|---|---|---|---|---|\n| 35ea826a-af1 | 0 | 0 | You kill the lichen!  You faint from lack of food. | starvation |\n| 3a099ec3-9a2"
+      }
+    ],
+    "prompt_version": "default",
+    "token_budget_exceeded": false
+  }
+}

@@ -393,10 +393,11 @@ def parse_pythonic_diff(text: str, max_depth: int = 3):
             diff.notes.append(NoteOp(text=m_note.group(1).strip()))
             continue
 
-        # Set tunable: `set policy_params.x = y` or `policy_params.x = y`
-        m_set = re.match(r"^(?:set\s+)?(policy_params\.[a-zA-Z0-9_.]+)\s*[:= ]\s*(.+)$", line, re.I)
-        if m_set:
-            path = m_set.group(1).strip()
+        # Set tunable: `set policy_params.x = y` or `set x.y = z` or `x = y`
+        m_set = re.match(r"^(?:set\s+)?([a-zA-Z0-9_.]+)\s*[:= ]\s*(.+)$", line, re.I)
+        if m_set and "." in m_set.group(1):
+            raw_path = m_set.group(1).strip()
+            path = raw_path if raw_path.startswith("policy_params.") else f"policy_params.{raw_path}"
             val_str = m_set.group(2).strip()
             try:
                 val = ast.literal_eval(val_str)

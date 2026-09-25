@@ -1,0 +1,9 @@
+{
+  "accepted": false,
+  "error_code": "ERR_PARSE",
+  "gate": "parse",
+  "detail": "ERR_PARSE: author produced no valid revision diff within the tool-turn budget",
+  "wall_sec": 24.929478064004797,
+  "diff_text": "",
+  "meta": {}
+}
