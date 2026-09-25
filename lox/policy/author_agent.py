@@ -97,6 +97,79 @@ def format_bundle_summary(bundle: dict) -> str:
     return "\n".join(lines)
 
 
+def repair_diff_text(
+    diff_text: str,
+    program: PolicyProgram,
+    manifest: VocabularyManifest | None = None,
+) -> str:
+    """Deterministic programmatic repairs for common LLM syntax slips (Tier 1).
+
+    1. Strip markdown fences (```lisp, ```python, etc.)
+    2. Normalize revision and parent header to (program.version + 1, program.version)
+    3. Ensure `set` tunables have `policy_params.` prefix and correct path
+    4. Normalize defmacro formatting (strip stray 'return')
+    5. Strip trailing punctuation/commas
+    """
+    if not diff_text or not diff_text.strip():
+        return diff_text
+
+    cleaned = diff_text.strip()
+    cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", cleaned)
+    cleaned = re.sub(r"\n```\s*$", "", cleaned)
+    cleaned = cleaned.strip()
+
+    lines = cleaned.splitlines()
+    repaired_lines = []
+
+    leaf_map: dict[str, str] = {}
+    if manifest and hasattr(manifest, "tunables"):
+        for t_path in manifest.tunables:
+            leaf = t_path.split(".")[-1]
+            leaf_map[leaf] = t_path
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Strip trailing commas or semicolons
+        stripped = re.sub(r"[,;]+$", "", stripped).strip()
+
+        # Header normalization
+        m_rev = re.match(r"^revision[:\s=]+(\d+)", stripped, re.I)
+        if m_rev:
+            m_auth = re.search(r'author[:\s=]+["\']?([^,"\']+)["\']?', stripped, re.I)
+            m_reas = re.search(r'reason[:\s=]+["\']?([^"\'\n]+)["\']?', stripped, re.I)
+            auth_str = f', author: "{m_auth.group(1).strip()}"' if m_auth else ""
+            reas_str = f', reason: "{m_reas.group(1).strip()}"' if m_reas else ""
+            repaired_lines.append(f"revision: {program.version + 1}, parent: {program.version}{auth_str}{reas_str}")
+            continue
+
+        # Set operations: prefix with policy_params.
+        m_set = re.match(r"^(?:set\s+)?([a-zA-Z0-9_.]+)\s*[:= ]\s*(.+)$", stripped, re.I)
+        if m_set and not stripped.lower().startswith(("rule", "goal", "macro", "defmacro", "nogood", "note", "reason")):
+            var_name = m_set.group(1).strip()
+            val_part = m_set.group(2).strip()
+            if not var_name.startswith("policy_params."):
+                if leaf_map and var_name in leaf_map:
+                    canonical_path = leaf_map[var_name]
+                    repaired_lines.append(f"set {canonical_path} = {val_part}")
+                    continue
+                elif "." not in var_name:
+                    repaired_lines.append(f"set policy_params.{var_name} = {val_part}")
+                    continue
+
+        # Defmacro: `defmacro name(args): return expr` -> `defmacro name(args) = expr`
+        m_macro_ret = re.match(r"^(defmacro|macro)\s+([a-zA-Z0-9_()]+)\s*[:=]\s*return\s+(.+)$", stripped, re.I)
+        if m_macro_ret:
+            repaired_lines.append(f"{m_macro_ret.group(1)} {m_macro_ret.group(2)} = {m_macro_ret.group(3)}")
+            continue
+
+        repaired_lines.append(stripped)
+
+    return "\n".join(repaired_lines)
+
+
 # ---------------------------------------------------------------------------
 # AgenticAuthor: bounded tool loop → one validated diff
 # ---------------------------------------------------------------------------
@@ -214,16 +287,32 @@ class AgenticAuthor:
                 meta[k] += getattr(resp, k, 0) or 0
             raw = resp.raw_text or ""
 
-            # A turn containing revision header is the FINAL answer.
+            # A turn containing revision header is the candidate answer.
             if "(revision" in raw or "revision:" in raw or re.search(r"^\s*revision\s+[\d:]", raw, re.MULTILINE | re.IGNORECASE):
                 try:
-                    return extract_diff_text(raw)
-                except DiffParseError:
+                    cand_diff = extract_diff_text(raw)
+                    cand_diff = repair_diff_text(cand_diff, program, manifest)
+                    val = validate_diff(cand_diff, program, manifest)
+                    if val.ok or turn == self.max_turns - 1:
+                        return cand_diff
+                    # Compilation error in turn before final turn -> feed back error to LLM!
+                    transcript += (
+                        f"\n\n# AUTHOR TURN {turn + 1} (DIFF COMPILATION ERROR: Gate '{val.gate}' / '{val.error_code}')\n"
+                        f"{raw[:1500]}\n\n"
+                        f"# COMPILER DIAGNOSTIC:\n"
+                        f"{val.detail}\n\n"
+                        f"# SYSTEM\n"
+                        f"Your proposed diff failed validator gate '{val.gate}' ({val.error_code}): {val.detail}. "
+                        f"Please diagnose and emit the corrected policy diff."
+                    )
+                    transcript = _trim_transcript(transcript)
+                    continue
+                except DiffParseError as e:
                     if turn == self.max_turns - 1:
                         return None
                     transcript += (f"\n\n# AUTHOR TURN {turn + 1} (REJECTED — unextractable)\n"
                                    f"{raw[:1500]}\n\n# SYSTEM\nYour revision diff was "
-                                   "unbalanced or malformed. Emit tool calls or ONE "
+                                   f"unbalanced or malformed: {e}. Emit tool calls or ONE "
                                    "well-formed diff.")
                     transcript = _trim_transcript(transcript)
                     continue
@@ -344,7 +433,52 @@ async def author_session(
                               meta=author.last_meta, wall_sec=time.perf_counter() - t0)
     meta = dict(author.last_meta)
 
+    # Tier 1: Programmatic auto-repair
+    diff_text = repair_diff_text(diff_text, program, manifest)
     result = validate_diff(diff_text, program, manifest, hooks=hooks)
+
+    # Tier 2: Interactive LLM error recovery if Tier 1 could not resolve the error
+    if not result.ok:
+        repair_system = (
+            "You are an expert autonomous policy engineer. "
+            "Your previous policy diff failed compiler validation. "
+            "You must diagnose the error, fix the policy diff, and output ONE valid corrected diff."
+        )
+        repair_user = (
+            f"# TASK: FIX COMPILATION FAILURE FOR REVISION {program.version + 1}\n\n"
+            f"## Compiler Diagnostic:\n"
+            f"- Gate: {result.gate}\n"
+            f"- Error Code: {result.error_code}\n"
+            f"- Detail: {result.detail}\n\n"
+            f"## Your Previous Diff That Failed:\n"
+            f"{diff_text}\n\n"
+            f"## Closed Vocabulary Manifest:\n"
+            f"{manifest.render(compact=True)}\n\n"
+            f"## Repair Instructions:\n"
+            f"1. Fix the compilation error above (ensure valid predicate signatures, certified goals, and closed verbs).\n"
+            f"2. Emit ONLY the corrected policy diff starting with:\n"
+            f"revision: {program.version + 1}, parent: {program.version}, author: {model_name}\n"
+            f"reason: <explanation of fix>\n"
+            f"followed by your corrected changes. Emit the diff directly now."
+        )
+        try:
+            repair_resp = await provider.generate_text(
+                repair_system, repair_user,
+                {"version": program.version, "domain": manifest.domain, "mode": "repair"}
+            )
+            for k in ("tokens_in", "tokens_out", "tokens_thought"):
+                meta[k] += getattr(repair_resp, k, 0) or 0
+            repair_raw = repair_resp.raw_text or ""
+            if "revision:" in repair_raw or "(revision" in repair_raw or re.search(r"^\s*revision\s+[\d:]", repair_raw, re.M | re.I):
+                cand_repaired = extract_diff_text(repair_raw)
+                cand_repaired = repair_diff_text(cand_repaired, program, manifest)
+                tier2_val = validate_diff(cand_repaired, program, manifest, hooks=hooks)
+                if tier2_val.ok:
+                    result = tier2_val
+                    diff_text = cand_repaired
+        except Exception:
+            pass  # Fall through to logging the original rejection
+
     wall = time.perf_counter() - t0
     if result.ok:
         candidate = result.candidate

@@ -10,7 +10,7 @@ accuracy compared to Lisp S-expressions.
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from typing import Any
 
@@ -36,7 +36,7 @@ class SafeASTVisitor(ast.NodeVisitor):
     Enforces maximum tree depth and rejects any executable constructs.
     """
 
-    ALLOWED_NODES = (
+    BASE_ALLOWED_NODES = (
         ast.Expression,
         ast.BoolOp,
         ast.UnaryOp,
@@ -53,14 +53,20 @@ class SafeASTVisitor(ast.NodeVisitor):
         ast.GtE,
         ast.Eq,
         ast.NotEq,
+        ast.USub,
     )
 
-    def __init__(self, max_depth: int = 3):
+    def __init__(self, max_depth: int = 3, allow_calls: bool = False):
         self.max_depth = max_depth
         self.current_depth = 0
+        self.allow_calls = allow_calls
+        if allow_calls:
+            self.allowed_nodes = self.BASE_ALLOWED_NODES + (ast.Call,)
+        else:
+            self.allowed_nodes = self.BASE_ALLOWED_NODES
 
     def generic_visit(self, node: ast.AST):
-        if not isinstance(node, self.ALLOWED_NODES):
+        if not isinstance(node, self.allowed_nodes):
             raise InfixSyntaxError(
                 f"Disallowed syntax element: {type(node).__name__}. "
                 f"Only boolean logic ('and', 'or', 'not'), comparisons, identifiers, calls, and numbers are permitted."
@@ -78,6 +84,8 @@ def _measure_depth(node: ast.AST) -> int:
         return 1 + _measure_depth(node.operand)
     elif isinstance(node, ast.Compare):
         return 1
+    elif isinstance(node, ast.Call):
+        return 1 + max((_measure_depth(a) for a in node.args), default=0)
     elif isinstance(node, (ast.Name, ast.Constant)):
         return 0
     return 1
@@ -114,14 +122,16 @@ def _ast_to_condition_tuple(node: ast.AST) -> tuple | str | int | float | bool:
         else:
             raise InfixSyntaxError("Left side of comparison must be a valid attribute or statistic identifier.")
 
-        # Extract right side (constant literal)
+        # Extract right side (constant literal or parameter identifier)
         right_node = node.comparators[0]
         if isinstance(right_node, ast.Constant):
             right_val = right_node.value
         elif isinstance(right_node, ast.UnaryOp) and isinstance(right_node.op, ast.USub) and isinstance(right_node.operand, ast.Constant):
             right_val = -right_node.operand.value
+        elif isinstance(right_node, ast.Name):
+            right_val = right_node.id
         else:
-            raise InfixSyntaxError("Right side of comparison must be a literal constant.")
+            raise InfixSyntaxError("Right side of comparison must be a literal constant or parameter identifier.")
 
         return ("compare", left_id, op_str, right_val)
 
@@ -132,8 +142,12 @@ def _ast_to_condition_tuple(node: ast.AST) -> tuple | str | int | float | bool:
                 args.append(a.value)
             elif isinstance(a, ast.UnaryOp) and isinstance(a.op, ast.USub) and isinstance(a.operand, ast.Constant):
                 args.append(-a.operand.value)
+            elif isinstance(a, ast.Name):
+                args.append(a.id)
+            elif isinstance(a, ast.Call):
+                args.append(_ast_to_condition_tuple(a))
             else:
-                raise InfixSyntaxError("Arguments to predicate calls must be literal constants.")
+                raise InfixSyntaxError(f"Argument to predicate call must be literal, name, or call: {ast.dump(a)}")
         return ("call", node.func.id, args)
 
     if isinstance(node, ast.Name):
@@ -175,26 +189,34 @@ def ast_to_canonical_expr(node: ast.AST) -> tuple:
         left_id = node.left.id
 
         right_node = node.comparators[0]
+        from lox.policy.predicates import QuotedStr  # noqa: PLC0415
         if isinstance(right_node, ast.Constant):
-            right_val = right_node.value
+            right_val = QuotedStr(right_node.value) if isinstance(right_node.value, str) else right_node.value
         elif isinstance(right_node, ast.UnaryOp) and isinstance(right_node.op, ast.USub) and isinstance(right_node.operand, ast.Constant):
             right_val = -right_node.operand.value
+        elif isinstance(right_node, ast.Name):
+            right_val = right_node.id
         else:
-            raise InfixSyntaxError("Right side of comparison must be a literal constant.")
+            raise InfixSyntaxError("Right side of comparison must be a literal constant or parameter identifier.")
 
         if left_id in ("monster", "item") and op_str == "==":
             return ("call", left_id, [right_val])
         return ("call", left_id, [op_str, right_val])
 
     if isinstance(node, ast.Call):
+        from lox.policy.predicates import QuotedStr  # noqa: PLC0415
         args = []
         for a in node.args:
             if isinstance(a, ast.Constant):
-                args.append(a.value)
+                args.append(QuotedStr(a.value) if isinstance(a.value, str) else a.value)
             elif isinstance(a, ast.UnaryOp) and isinstance(a.op, ast.USub) and isinstance(a.operand, ast.Constant):
                 args.append(-a.operand.value)
+            elif isinstance(a, ast.Name):
+                args.append(a.id)
+            elif isinstance(a, (ast.Call, ast.BoolOp, ast.UnaryOp, ast.Compare)):
+                args.append(ast_to_canonical_expr(a))
             else:
-                raise InfixSyntaxError("Arguments to predicate calls must be literal constants.")
+                raise InfixSyntaxError(f"Argument to predicate call must be literal, name, or call: {ast.dump(a)}")
         return ("call", node.func.id, args)
 
     if isinstance(node, ast.Name):
@@ -219,7 +241,7 @@ def parse_infix_to_canonical(expr_str: str, max_depth: int = 3) -> tuple:
     except SyntaxError as e:
         raise InfixSyntaxError(f"Syntax error in expression '{cleaned}': {e.msg}") from e
 
-    validator = SafeASTVisitor(max_depth=max_depth)
+    validator = SafeASTVisitor(max_depth=max_depth, allow_calls=True)
     validator.visit(tree)
 
     depth = _measure_depth(tree)
@@ -231,7 +253,7 @@ def parse_infix_to_canonical(expr_str: str, max_depth: int = 3) -> tuple:
     return ast_to_canonical_expr(tree)
 
 
-def parse_infix_condition(expr_str: str, max_depth: int = 3) -> tuple:
+def parse_infix_condition(expr_str: str, max_depth: int = 3, allow_calls: bool = False) -> tuple:
     """
     Parses a Pythonic infix condition string into a canonical LOX-ψ condition tuple.
 
@@ -252,7 +274,7 @@ def parse_infix_condition(expr_str: str, max_depth: int = 3) -> tuple:
         raise InfixSyntaxError(f"Syntax error in expression '{cleaned}': {e.msg}") from e
 
     # Security check: verify no dangerous or executable nodes
-    validator = SafeASTVisitor(max_depth=max_depth)
+    validator = SafeASTVisitor(max_depth=max_depth, allow_calls=allow_calls)
     validator.visit(tree)
 
     # Budget check: verify nesting depth <= max_depth
@@ -270,25 +292,34 @@ class InfixMacro:
     name: str
     expr_str: str
     body: tuple
+    params: list[str] = field(default_factory=list)
 
 
 def parse_infix_macro(line: str, max_depth: int = 3) -> InfixMacro:
     """
     Parses a macro definition line in format:
         defmacro <name> = <infix-expression>
-        OR macro <name> = <infix-expression>
+        defmacro <name>(param1, param2) = <infix-expression>
+        defmacro <name>(param1, param2): <infix-expression>
+        defmacro <name>(param1, param2): return <infix-expression>
     """
     cleaned = line.strip()
-    match = re.match(r"^(?:defmacro|macro)\s+([a-z_][a-z0-9_]*)\s*=\s*(.+)$", cleaned, re.IGNORECASE)
+    match = re.match(
+        r"^(?:defmacro|macro)\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*\(([^)]*)\))?\s*(?:=|:|\breturn\b)\s*(?:return\s+)?(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
     if not match:
         raise InfixSyntaxError(
-            f"Invalid macro definition: '{cleaned}'. Expected: 'defmacro <name> = <expression>'"
+            f"Invalid macro definition: '{cleaned}'. Expected: 'defmacro <name>[(<params>)] = <expression>'"
         )
 
     name = match.group(1).lower()
-    expr_str = match.group(2).strip()
-    body = parse_infix_condition(expr_str, max_depth=max_depth)
-    return InfixMacro(name=name, expr_str=expr_str, body=body)
+    raw_params = match.group(2)
+    params = [p.strip() for p in raw_params.split(",") if p.strip()] if raw_params else []
+    expr_str = match.group(3).strip()
+    body = parse_infix_condition(expr_str, max_depth=max_depth, allow_calls=True)
+    return InfixMacro(name=name, expr_str=expr_str, body=body, params=params)
 
 
 @dataclass
@@ -437,24 +468,38 @@ def parse_pythonic_diff(text: str, max_depth: int = 3):
             diff.rules.append(RuleOp(action="add", rule={"when": when_ast, "do": do_verb, "unless": unless_ast, "note": note}))
             continue
 
-        # Goal prioritize: `goal prioritize reach_stairs: when ...`
-        m_g_prio = re.match(r"^goal\s+prioritize\s+([a-zA-Z0-9_]+)\s*[:]?\s*(?:when\s+(.+?))?(?:\s+until\s+(.+))?$", line, re.I)
-        if m_g_prio:
-            goal_name = m_g_prio.group(1).strip()
-            when_str = m_g_prio.group(2).strip() if m_g_prio.group(2) else None
-            until_str = m_g_prio.group(3).strip() if m_g_prio.group(3) else None
-            when_ast = parse_infix_to_canonical(when_str, max_depth=max_depth) if when_str else None
-            until_ast = parse_infix_to_canonical(until_str, max_depth=max_depth) if until_str else None
-            diff.goals.append(GoalOp(kind="prioritize", goal=goal_name, when=when_ast, until=until_ast))
-            continue
+        # Goal prioritize / deprioritize: `goal prioritize reach_stairs: when ... until ...`
+        m_g_op = re.match(r"^goal\s+(prioritize|deprioritize)\s+([a-zA-Z0-9_]+)(?:\s*[:]\s*(.*))?$", line, re.I)
+        if m_g_op:
+            kind = m_g_op.group(1).lower()
+            goal_name = m_g_op.group(2).strip()
+            rest = m_g_op.group(3).strip() if m_g_op.group(3) else ""
+            when_ast, until_ast, after_ast = None, None, None
+            if rest:
+                clauses: dict[str, str] = {}
+                pattern = r"\b(when|until|after)\b"
+                splits = list(re.finditer(pattern, rest, re.I))
+                if splits:
+                    for i, sp in enumerate(splits):
+                        c_name = sp.group(1).lower()
+                        start_pos = sp.end()
+                        end_pos = splits[i + 1].start() if i + 1 < len(splits) else len(rest)
+                        c_val = rest[start_pos:end_pos].strip()
+                        clauses[c_name] = c_val
+                else:
+                    if kind == "deprioritize":
+                        clauses["after"] = rest
+                    else:
+                        clauses["when"] = rest
 
-        # Goal deprioritize: `goal deprioritize explore: after ...`
-        m_g_deprio = re.match(r"^goal\s+deprioritize\s+([a-zA-Z0-9_]+)\s*[:]?\s*(?:after\s+(.+))?$", line, re.I)
-        if m_g_deprio:
-            goal_name = m_g_deprio.group(1).strip()
-            after_str = m_g_deprio.group(2).strip() if m_g_deprio.group(2) else None
-            after_ast = parse_infix_to_canonical(after_str, max_depth=max_depth) if after_str else None
-            diff.goals.append(GoalOp(kind="deprioritize", goal=goal_name, after=after_ast))
+                if "when" in clauses and clauses["when"]:
+                    when_ast = parse_infix_to_canonical(clauses["when"], max_depth=max_depth)
+                if "until" in clauses and clauses["until"]:
+                    until_ast = parse_infix_to_canonical(clauses["until"], max_depth=max_depth)
+                if "after" in clauses and clauses["after"]:
+                    after_ast = parse_infix_to_canonical(clauses["after"], max_depth=max_depth)
+
+            diff.goals.append(GoalOp(kind=kind, goal=goal_name, when=when_ast, until=until_ast, after=after_ast))
             continue
 
         # Goal set threshold: `goal set_threshold reach_stairs: timeout = 500`
@@ -470,13 +515,19 @@ def parse_pythonic_diff(text: str, max_depth: int = 3):
             diff.goals.append(GoalOp(kind="set_threshold", goal=goal_name, path=path, value=val))
             continue
 
-        # Macro: `macro low_hp = hp_frac <= 0.50`
-        m_macro = re.match(r"^(?:defmacro|macro)\s+([a-zA-Z0-9_]+)\s*=\s*(.+)$", line, re.I)
+        # Macro: `macro low_hp = hp_frac <= 0.50` or `defmacro danger(dist, hp) = ...`
+        m_macro = re.match(
+            r"^(?:defmacro|macro)\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*\(([^)]*)\))?\s*(?:=|:|\breturn\b)\s*(?:return\s+)?(.+)$",
+            line,
+            re.I
+        )
         if m_macro:
             m_name = m_macro.group(1).strip()
-            body_str = m_macro.group(2).strip()
+            raw_params = m_macro.group(2)
+            params = [p.strip() for p in raw_params.split(",") if p.strip()] if raw_params else []
+            body_str = m_macro.group(3).strip()
             body_ast = parse_infix_to_canonical(body_str, max_depth=max_depth)
-            diff.defmacros.append(DefmacroOp(name=m_name, body=body_ast))
+            diff.defmacros.append(DefmacroOp(name=m_name, body=body_ast, params=params))
             continue
 
         # Nogood: `nogood: when ... cause "..." [forbid ...]`

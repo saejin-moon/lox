@@ -37,12 +37,14 @@ from lox.policy.validator import ValidatorHooks
 
 def run_campaign(
     target_depth: float = 10.0,
-    episodes: int = 30,
+    episodes: int = 100,
     max_steps: int = 15000,
     jobs: int = 30,
     role: str = "valkyrie",
     provider_name: str = "openrouter",
     model_name: str = "google/gemma-4-31b-it",
+    base_url: str | None = None,
+    prompt_version: str = "v7_autonomous",
     max_iterations: int = 50,
     output_log: str = "data/depth10_campaign_log.jsonl",
 ) -> None:
@@ -168,9 +170,12 @@ def run_campaign(
             "--provider", provider_name,
             "--model", model_name,
             "--domain", "nethack",
+            "--prompt-version", prompt_version,
             "--commit",
             "--out", f"data/campaign_author_iter{iteration}.json",
         ]
+        if base_url:
+            author_cmd.extend(["--base-url", base_url])
 
         t0_author = time.perf_counter()
         auth_ret = subprocess.run(author_cmd)
@@ -192,12 +197,14 @@ def run_campaign(
 def main():
     parser = argparse.ArgumentParser(description="LOX-ψ: Depth-10 Autonomous Campaign Loop")
     parser.add_argument("--target-depth", type=float, default=10.0)
-    parser.add_argument("--episodes", type=int, default=30)
+    parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--max-steps", type=int, default=15000)
     parser.add_argument("--jobs", type=int, default=30)
     parser.add_argument("--role", type=str, default="valkyrie")
-    parser.add_argument("--provider", type=str, default="openrouter", choices=["openrouter", "gemini"])
+    parser.add_argument("--provider", type=str, default="openrouter", choices=["openrouter", "gemini", "llama_cpp"])
     parser.add_argument("--model", type=str, default="google/gemma-4-31b-it")
+    parser.add_argument("--base-url", type=str, default=None)
+    parser.add_argument("--prompt-version", type=str, default="v7_autonomous")
     parser.add_argument("--max-iterations", type=int, default=500)
     parser.add_argument("--output-log", type=str, default="data/depth10_campaign_log.jsonl")
     args = parser.parse_args()
@@ -210,6 +217,8 @@ def main():
         role=args.role,
         provider_name=args.provider,
         model_name=args.model,
+        base_url=args.base_url,
+        prompt_version=args.prompt_version,
         max_iterations=args.max_iterations,
         output_log=args.output_log,
     )

@@ -59,9 +59,10 @@ class GateResult:
 # Signature + vocabulary checking (manifest-driven, MACRO.md §4.2 rule 1)
 # ---------------------------------------------------------------------------
 
-def check_signature(name: str, args: list, manifest: VocabularyManifest) -> str:
+def check_signature(name: str, args: list, manifest: VocabularyManifest, declared_params: set[str] | None = None) -> str:
     """Validates a predicate call's arity and argument types. Returns '' when OK,
     otherwise an ERR_SIGNATURE detail string."""
+    params = declared_params or set()
     sig = manifest.predicates.get(name)
     if sig is None:
         return f"symbol {name!r} not in vocabulary"
@@ -69,6 +70,8 @@ def check_signature(name: str, args: list, manifest: VocabularyManifest) -> str:
     if len(args) != len(specs):
         return f"predicate {name!r} expects {len(specs)} args, got {len(args)}"
     for a, spec in zip(args, specs):
+        if isinstance(a, str) and a in params:
+            continue
         kind = spec[0]
         if kind == "op":
             if not (isinstance(a, str) and str(a) in ("<=", ">=", "<", ">", "==")):
@@ -86,15 +89,23 @@ def check_signature(name: str, args: list, manifest: VocabularyManifest) -> str:
                 return f"predicate {name!r}: expected string, got {a!r}"
         elif kind == "level":
             from lox.policy.predicates import _HUNGER_LEVELS
-            if not (isinstance(a, str) and str(a) in _HUNGER_LEVELS):
+            if not ((isinstance(a, str) and str(a) in _HUNGER_LEVELS) or (isinstance(a, int) and 0 <= a <= 4)):
                 return f"predicate {name!r}: bad hunger level {a!r}"
     return ""
 
 
-def _walk_expr(node, manifest: VocabularyManifest, macros_live: set[str]) -> str:
+def _walk_expr(
+    node,
+    manifest: VocabularyManifest,
+    macros_live: set[str],
+    macro_params: dict[str, int] | None = None,
+    declared_params: set[str] | None = None,
+) -> str:
     """Vocabulary walk over an expr node. Returns '' or an error detail string."""
+    params = declared_params or set()
+    m_params = macro_params or {}
     if isinstance(node, str):
-        if node in manifest.predicates or node in macros_live:
+        if node in manifest.predicates or node in macros_live or node in params:
             return ""
         return f"bare symbol {node!r} not in vocabulary"
     if not macro_mod.is_expr_node(node):
@@ -103,32 +114,44 @@ def _walk_expr(node, manifest: VocabularyManifest, macros_live: set[str]) -> str
     if name in ("and", "or", "not"):
         if name == "not" and len(args) != 1:
             return "not/ expects exactly 1 argument"
-        errs = [_walk_atom(a, manifest, macros_live) for a in args]
+        errs = [_walk_atom(a, manifest, macros_live, m_params, params) for a in args]
         return next((e for e in errs if e), "")
+    if name in params:
+        return ""
     if name in macros_live:
-        if args:
-            return f"macro {name!r} is parameterless (v1); called with {len(args)} args"
+        expected_len = m_params.get(name, 0)
+        if len(args) != expected_len:
+            if expected_len == 0:
+                return f"macro {name!r} is parameterless (v1); called with {len(args)} args"
+            return f"macro {name!r} expects {expected_len} args; called with {len(args)}"
         return ""
     if name not in manifest.predicates:
         return f"symbol {name!r} not in vocabulary"
-    err = check_signature(name, args, manifest)
+    err = check_signature(name, args, manifest, declared_params=params)
     if err:
         return err
     # Predicate arguments are values (numbers/op strings) or nested exprs — only
     # nested nodes recurse; bare atoms here are data, not symbols.
     for a in args:
         if macro_mod.is_expr_node(a):
-            err = _walk_expr(a, manifest, macros_live)
+            err = _walk_expr(a, manifest, macros_live, m_params, params)
             if err:
                 return err
     return ""
 
 
-def _walk_atom(a, manifest: VocabularyManifest, macros_live: set[str]) -> str:
+def _walk_atom(
+    a,
+    manifest: VocabularyManifest,
+    macros_live: set[str],
+    macro_params: dict[str, int] | None = None,
+    declared_params: set[str] | None = None,
+) -> str:
     if macro_mod.is_expr_node(a):
-        return _walk_expr(a, manifest, macros_live)
+        return _walk_expr(a, manifest, macros_live, macro_params, declared_params)
     if isinstance(a, str):
-        if a in manifest.predicates or a in macros_live:
+        params = declared_params or set()
+        if a in manifest.predicates or a in macros_live or a in params:
             return ""
         return f"bare symbol {a!r} not in vocabulary"
     return f"bad combinator argument {a!r}"
@@ -202,12 +225,37 @@ def validate_diff(
         return GateResult.reject("ERR_FORM_BUDGET", "budgets",
                                  f"live macro count {n_live_after} exceeds {MAX_LIVE_MACROS}", diff)
     macros_live = {m["name"] for m in program.macros} | {d.name for d in diff.defmacros}
+    macro_params = {m["name"]: len(m.get("params", [])) for m in program.macros}
+    for d in diff.defmacros:
+        macro_params[d.name] = len(d.params)
+
     for d in diff.defmacros:
         if d.name in manifest.predicates or d.name in manifest.verbs or d.name in manifest.goals:
             return GateResult.reject("ERR_MACRO_SHADOW", "macros",
                                      f"macro name {d.name!r} collides with a primitive", diff)
-    for expr in diff.all_exprs():
-        err = _walk_expr(expr, manifest, macros_live)
+
+    for op in diff.rules:
+        if op.rule is not None:
+            if op.rule.get("when") is not None:
+                err = _walk_expr(op.rule["when"], manifest, macros_live, macro_params)
+                if err:
+                    return GateResult.reject("ERR_UNKNOWN_SYMBOL", "vocab", err, diff)
+            if op.rule.get("unless") is not None:
+                err = _walk_expr(op.rule["unless"], manifest, macros_live, macro_params)
+                if err:
+                    return GateResult.reject("ERR_UNKNOWN_SYMBOL", "vocab", err, diff)
+    for op in diff.goals:
+        for e in (op.when, op.until, op.after):
+            if e is not None:
+                err = _walk_expr(e, manifest, macros_live, macro_params)
+                if err:
+                    return GateResult.reject("ERR_UNKNOWN_SYMBOL", "vocab", err, diff)
+    for op in diff.nogoods:
+        err = _walk_expr(op.when, manifest, macros_live, macro_params)
+        if err:
+            return GateResult.reject("ERR_UNKNOWN_SYMBOL", "vocab", err, diff)
+    for d in diff.defmacros:
+        err = _walk_expr(d.body, manifest, macros_live, macro_params, declared_params=set(d.params))
         if err:
             return GateResult.reject("ERR_UNKNOWN_SYMBOL", "vocab", err, diff)
     for op in diff.rules:
@@ -252,16 +300,18 @@ def validate_diff(
     env = macro_mod.MacroEnv()
     for m in program.macros:
         try:
-            env.add(m["name"], dsl.parse_diff_forms(m["body"])[0])
+            m_params = m.get("params", [])
+            m_body = dsl.parse_diff_forms(m["body"])[0] if isinstance(m["body"], str) else m["body"]
+            env.add(m["name"], m_body, params=m_params)
         except Exception as e:  # noqa: BLE001
             return GateResult.reject("ERR_PARSE", "macros",
                                      f"live macro {m['name']!r} body unparseable: {e}", diff)
     for d in diff.defmacros:
         try:
-            macro_mod.check_closure(d.body, set(manifest.predicates), env.names())
+            macro_mod.check_closure(d.body, set(manifest.predicates), env.names(), params=set(d.params))
         except macro_mod.MacroError as e:
             return GateResult.reject(e.code, "macros", f"defmacro {d.name!r}: {e.detail}", diff)
-        env.add(d.name, d.body)
+        env.add(d.name, d.body, params=d.params)
 
     expanded: dict[int, tuple] = {}   # id(expr) -> expanded node
     try:
@@ -419,6 +469,8 @@ def _mount(diff: PolicyDiff, program: PolicyProgram, expanded: dict,
                 g = plan.pop(idx)
             else:
                 g = _goal_spec_from(op)
+            import copy  # noqa: PLC0415
+            g.raw = copy.deepcopy(g.raw)
             if op.when is not None:
                 g.raw["when"] = g.when = render_node(expanded[id(op.when)])
             if op.until is not None:
@@ -429,8 +481,14 @@ def _mount(diff: PolicyDiff, program: PolicyProgram, expanded: dict,
                 return GateResult.reject("ERR_UNKNOWN_SYMBOL", "mount",
                                          f"deprioritize: goal {op.goal!r} not in plan", diff)
             g = plan.pop(idx)
+            import copy  # noqa: PLC0415
+            g.raw = copy.deepcopy(g.raw)
             if op.after is not None:
                 g.raw["after"] = render_node(expanded[id(op.after)])
+            if op.when is not None:
+                g.raw["when"] = g.when = render_node(expanded[id(op.when)])
+            if op.until is not None:
+                g.raw["until"] = g.until = render_node(expanded[id(op.until)])
             plan.append(g)
         else:  # set_threshold
             if idx is None:
@@ -439,11 +497,14 @@ def _mount(diff: PolicyDiff, program: PolicyProgram, expanded: dict,
             cand.params[_leaf_path(op.path)] = op.value
     cand.strategy_plan = plan
 
-    # defmacros: store as {"name", "body"} with the ORIGINAL body text (expansion is
+    # defmacros: store as {"name", "body", "params"} with the ORIGINAL body text (expansion is
     # performed at validation/compile time, never stored expanded — §5.1 definitional).
     for d in diff.defmacros:
         cand.macros = [m for m in cand.macros if m["name"] != d.name]
-        cand.macros.append({"name": d.name, "body": render_node(d.body)})
+        m_entry = {"name": d.name, "body": render_node(d.body)}
+        if d.params:
+            m_entry["params"] = list(d.params)
+        cand.macros.append(m_entry)
 
     # nogoods: append declarative entries (mask compilation lands R4)
     for op in diff.nogoods:

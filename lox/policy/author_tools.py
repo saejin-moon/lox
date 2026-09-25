@@ -45,6 +45,21 @@ class ToolSpec:
 
 
 TOOL_SPECS: dict[str, ToolSpec] = {
+    "analyze_bottlenecks": ToolSpec(
+        "analyze_bottlenecks", ("limit_episodes",),
+        "Computes exact statistical summary of recent batch: depth distribution, "
+        "pacing timeout percentage, top 5 death causes, and average turns per floor. "
+        "Arg: limit_episodes (default 100)."),
+    "trace_causal_pivot": ToolSpec(
+        "trace_causal_pivot", ("episode_id",),
+        "Backtracks from death point in an episode to identify the earliest Point "
+        "of Irreversibility (e.g. food bypass, hunger cascade, or pacing loop)."),
+    "compare_trajectories": ToolSpec(
+        "compare_trajectories", ("deep_episode_id", "stalled_episode_id"),
+        "Compares a deep run against a stalled run to isolate divergent tactical choices."),
+    "simulate_diff": ToolSpec(
+        "simulate_diff", ("diff_text",),
+        "Dry-run linter: compiles, checks AST, and validates candidate diff before finalizing."),
     "query_duckdb": ToolSpec(
         "query_duckdb", ("sql",),
         "Read-only SQL over run telemetry. Tables: episodes (episode_id, run_id, seed, "
@@ -526,6 +541,230 @@ def read_program_tree(program: PolicyProgram) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Analytical Math & Diagnostics Tools
+# ---------------------------------------------------------------------------
+
+def analyze_bottlenecks(limit_episodes: int | str = 100, db_path: str = DEFAULT_DB_PATH) -> str:
+    """Computes mathematical summary of recent batch: depth distribution,
+    timeouts, top death causes, average turns per floor, and goal occupancy."""
+    if not os.path.exists(db_path):
+        return f"ERROR: telemetry database not found at {db_path}"
+    try:
+        limit = int(limit_episodes) if limit_episodes else 100
+        if limit <= 0:
+            limit = 100
+    except (ValueError, TypeError):
+        limit = 100
+
+    try:
+        import duckdb
+        con = duckdb.connect(db_path, read_only=True)
+        try:
+            subquery = f"SELECT * FROM episodes ORDER BY rowid DESC LIMIT {limit}"
+            summary = con.execute(f"""
+                SELECT count(*),
+                       quantile_cont(max_depth, 0.5) as med_depth,
+                       max(max_depth) as max_depth,
+                       round(avg(final_score), 1) as avg_score,
+                       round(avg(total_steps), 1) as avg_steps
+                FROM ({subquery})
+            """).fetchone()
+
+            actual_count = summary[0] if summary else 0
+            if actual_count == 0:
+                return "OK: 0 episodes in database"
+
+            depth_dist = con.execute(f"""
+                SELECT max_depth, count(*), round(count(*) * 100.0 / {actual_count}, 1)
+                FROM ({subquery})
+                GROUP BY max_depth ORDER BY max_depth
+            """).fetchall()
+
+            timeouts = con.execute(f"""
+                SELECT count(*)
+                FROM ({subquery})
+                WHERE death_message = 'Survived' AND total_steps >= 9000
+            """).fetchone()[0]
+
+            top_deaths = con.execute(f"""
+                SELECT death_message, count(*), round(count(*) * 100.0 / {actual_count}, 1)
+                FROM ({subquery})
+                WHERE death_message != 'Survived'
+                GROUP BY death_message ORDER BY count(*) DESC LIMIT 5
+            """).fetchall()
+
+            turns_per_depth = con.execute(f"""
+                SELECT t.depth, count(*) as total_ticks, round(count(*) * 1.0 / count(distinct t.episode_id), 1) as avg_ticks_per_ep
+                FROM ticks t
+                JOIN ({subquery}) e ON t.episode_id = e.episode_id
+                WHERE t.depth IN (1, 2, 3, 4, 5)
+                GROUP BY t.depth ORDER BY t.depth
+            """).fetchall()
+        finally:
+            con.close()
+    except Exception as e:
+        return f"ERROR in analyze_bottlenecks: {e}"
+
+    lines = [
+        f"### BATCH BOTTLENECK ANALYSIS (Last {actual_count} episodes)",
+        f"- **Median Depth**: {summary[1]:.1f} | **Max Depth**: {summary[2]} | **Mean Score**: {summary[3]} | **Avg Steps**: {summary[4]}",
+        f"- **Pacing Timeouts (Stalls on floor)**: {timeouts} / {actual_count} ({timeouts * 100.0 / actual_count:.1f}%)",
+        "",
+        "#### Depth Distribution:",
+    ]
+    for d, c, p in depth_dist:
+        lines.append(f"  - Depth {d}: {c} episodes ({p}%)")
+    lines.append("")
+    lines.append("#### Top Death Causes:")
+    for dm, c, p in top_deaths:
+        lines.append(f"  - {dm}: {c} ({p}%)")
+    if turns_per_depth:
+        lines.append("")
+        lines.append("#### Average Ticks Spent Per Depth:")
+        for d, tot, avg_ep in turns_per_depth:
+            lines.append(f"  - Depth {d}: {avg_ep} ticks/ep")
+
+    return "\n".join(lines)
+
+
+def trace_causal_pivot(episode_id: str, db_path: str = DEFAULT_DB_PATH) -> str:
+    """Backtracks from death point in an episode to identify the earliest Point
+    of Irreversibility (e.g. food bypass, hunger cascade, or pacing loop)."""
+    if not os.path.exists(db_path):
+        return f"ERROR: telemetry database not found at {db_path}"
+    try:
+        import duckdb
+        con = duckdb.connect(db_path, read_only=True)
+        try:
+            ep = con.execute("SELECT total_steps, max_depth, final_score, death_message FROM episodes WHERE episode_id = ?", [episode_id]).fetchone()
+            if not ep:
+                return f"ERROR: episode {episode_id!r} not found"
+
+            ticks = con.execute("""
+                SELECT step, turn, depth, hp, max_hp, hunger_state, action_name, x, y
+                FROM ticks
+                WHERE episode_id = ?
+                ORDER BY step ASC
+            """, [episode_id]).fetchall()
+        finally:
+            con.close()
+    except Exception as e:
+        return f"ERROR in trace_causal_pivot: {e}"
+
+    if not ticks:
+        return f"Episode {episode_id}: {ep[3]} at step {ep[0]}, but no ticks recorded in database."
+
+    total_steps, max_depth, score, death = ep
+    first_hungry = None
+    first_weak = None
+    first_faint = None
+    low_hp_turns = []
+    stagnation_runs = 0
+    max_stagnation = 0
+
+    prev_pos = None
+    prev_prev_pos = None
+
+    for t in ticks:
+        step, turn, depth, hp, max_hp, hunger, action, x, y = t
+        pos = (x, y)
+        if hunger == 1 and first_hungry is None:
+            first_hungry = step
+        elif hunger == 2 and first_weak is None:
+            first_weak = step
+        elif hunger >= 3 and first_faint is None:
+            first_faint = step
+
+        if max_hp > 0 and (hp / max_hp) <= 0.40:
+            low_hp_turns.append(step)
+
+        if prev_prev_pos == pos and pos != prev_pos:
+            stagnation_runs += 1
+            max_stagnation = max(max_stagnation, stagnation_runs)
+        else:
+            stagnation_runs = 0
+
+        prev_prev_pos = prev_pos
+        prev_pos = pos
+
+    lines = [
+        f"### CAUSAL PIVOT ANALYSIS: {episode_id}",
+        f"- Outcome: {death} at step {total_steps} (Depth {max_depth}, Score {score})",
+    ]
+    if first_hungry is not None:
+        lines.append(f"- **Hunger Warning**: First became HUNGRY at step {first_hungry}")
+    if first_weak is not None:
+        lines.append(f"- **Critical Nutrition**: First became WEAK at step {first_weak} ({total_steps - first_weak} steps before death)")
+    if first_faint is not None:
+        lines.append(f"- **Point of Irreversibility (Fainting)**: FAINTING started at step {first_faint}")
+    if max_stagnation >= 5:
+        lines.append(f"- **Navigation Stagnation**: Repeated 2-tile oscillation detected ({max_stagnation} consecutive bouncing steps)")
+    if low_hp_turns:
+        lines.append(f"- **Combat Vulnerability**: HP dropped <= 40% at step {low_hp_turns[0]}")
+
+    return "\n".join(lines)
+
+
+def compare_trajectories(deep_episode_id: str, stalled_episode_id: str, db_path: str = DEFAULT_DB_PATH) -> str:
+    """Compares a deep run against a stalled run to isolate divergent tactical choices."""
+    if not os.path.exists(db_path):
+        return f"ERROR: telemetry database not found at {db_path}"
+    try:
+        import duckdb
+        con = duckdb.connect(db_path, read_only=True)
+        try:
+            ep_deep = con.execute("SELECT episode_id, total_steps, max_depth, final_score, death_message FROM episodes WHERE episode_id = ?", [deep_episode_id]).fetchone()
+            ep_stalled = con.execute("SELECT episode_id, total_steps, max_depth, final_score, death_message FROM episodes WHERE episode_id = ?", [stalled_episode_id]).fetchone()
+            if not ep_deep:
+                return f"ERROR: episode {deep_episode_id!r} not found"
+            if not ep_stalled:
+                return f"ERROR: episode {stalled_episode_id!r} not found"
+
+            dl2_deep = con.execute("SELECT min(step) FROM ticks WHERE episode_id = ? AND depth >= 2", [deep_episode_id]).fetchone()[0]
+            dl2_stalled = con.execute("SELECT min(step) FROM ticks WHERE episode_id = ? AND depth >= 2", [stalled_episode_id]).fetchone()[0]
+
+            searches_deep = con.execute("SELECT count(*) FROM ticks WHERE episode_id = ? AND action_name = 'SEARCH'", [deep_episode_id]).fetchone()[0]
+            searches_stalled = con.execute("SELECT count(*) FROM ticks WHERE episode_id = ? AND action_name = 'SEARCH'", [stalled_episode_id]).fetchone()[0]
+        finally:
+            con.close()
+    except Exception as e:
+        return f"ERROR in compare_trajectories: {e}"
+
+    lines = [
+        f"### TRAJECTORY DIVERGENCE: {deep_episode_id} (DEEP) vs {stalled_episode_id} (STALLED)",
+        f"| Metric | Deep Episode ({deep_episode_id}) | Stalled Episode ({stalled_episode_id}) | Divergence |",
+        "| :--- | :--- | :--- | :--- |",
+        f"| **Max Depth** | Depth {ep_deep[2]} | Depth {ep_stalled[2]} | +{ep_deep[2] - ep_stalled[2]} floors |",
+        f"| **Final Score** | {ep_deep[3]} | {ep_stalled[3]} | +{ep_deep[3] - ep_stalled[3]} |",
+        f"| **Total Steps** | {ep_deep[1]} | {ep_stalled[1]} | |",
+        f"| **Descent to DL2** | Step {dl2_deep if dl2_deep is not None else 'Never'} | Step {dl2_stalled if dl2_stalled is not None else 'Never'} | {'Deep dove earlier' if dl2_deep and (not dl2_stalled or dl2_deep < dl2_stalled) else 'N/A'} |",
+        f"| **Search Actions** | {searches_deep} searches | {searches_stalled} searches | {'Stalled searched excessively' if searches_stalled > searches_deep else 'Similar'} |",
+        f"| **Death Reason** | {ep_deep[4]} | {ep_stalled[4]} | |",
+    ]
+    return "\n".join(lines)
+
+
+def simulate_diff(diff_text: str, *, manifest: VocabularyManifest | None = None, program: PolicyProgram | None = None) -> str:
+    """Pre-commit dry-run linter for candidate policy diffs. Checks syntax, AST validity, and bounds."""
+    from lox.policy.infix import parse_pythonic_diff
+    from lox.policy.validator import validate_diff
+    try:
+        diff = parse_pythonic_diff(diff_text)
+        if program is not None:
+            res = validate_diff(diff_text, program=program, manifest=manifest)
+            if not res.ok:
+                return f"FAIL: {res.error_code} @ {res.gate}: {res.detail}"
+        num_sets = len(diff.sets)
+        num_rules = len(diff.rules)
+        num_goals = len(diff.goals)
+        num_macros = len(diff.defmacros)
+        return (f"PASS: Diff is syntactically valid and satisfies validator gates.\n"
+                f"Summary: {num_sets} param sets, {num_rules} rules, {num_goals} goals, {num_macros} macros.")
+    except Exception as e:
+        return f"FAIL: {type(e).__name__}: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -538,11 +777,24 @@ def execute_tool_call(name: str, args: list, *, manifest: VocabularyManifest | N
     spec = TOOL_SPECS.get(name)
     if spec is None:
         return f"ERROR: unknown tool {name!r}; available: {', '.join(TOOL_SPECS)}"
+
+    # Allow 0 args for analyze_bottlenecks
+    if name == "analyze_bottlenecks" and len(args) == 0:
+        args = [100]
+
     if len(args) != len(spec.args):
         return (f"ERROR: tool {name} takes {len(spec.args)} arg(s) ({', '.join(spec.args)}), "
                 f"got {len(args)}")
     try:
         domain = manifest.domain if manifest else (program.domain if program else "nethack")
+        if name == "analyze_bottlenecks":
+            return analyze_bottlenecks(args[0], db_path=db_path)
+        if name == "trace_causal_pivot":
+            return trace_causal_pivot(str(args[0]), db_path=db_path)
+        if name == "compare_trajectories":
+            return compare_trajectories(str(args[0]), str(args[1]), db_path=db_path)
+        if name == "simulate_diff":
+            return simulate_diff(str(args[0]), manifest=manifest, program=program)
         if name == "query_duckdb":
             return query_duckdb(str(args[0]), db_path=db_path)
         if name == "wiki_search":

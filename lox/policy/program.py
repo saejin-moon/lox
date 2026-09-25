@@ -9,6 +9,7 @@ phase machine exactly.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass, field
@@ -165,19 +166,19 @@ class PolicyProgram:
             until=g.get("until", "(false)"),
             directive=g.get("directive"),
             max_steps=g.get("max_steps"),
-            raw=g,
+            raw=copy.deepcopy(g),
         ) for g in d.get("strategy_plan", [])]
         return cls(
             version=int(d.get("version", 1)),
             domain=d.get("domain", "nethack"),
-            params=dict(d.get("params", {})),
+            params=copy.deepcopy(d.get("params", {})),
             strategy_plan=plan,
-            macros=list(d.get("macros", [])),
-            tactic_rules=list(d.get("tactic_rules", [])),
-            nogoods=list(d.get("nogoods", [])),
-            role_profiles=dict(d.get("role_profiles", {})),
-            domain_profiles=dict(d.get("domain_profiles", {})),
-            provenance=dict(d.get("provenance", {})),
+            macros=copy.deepcopy(d.get("macros", [])),
+            tactic_rules=copy.deepcopy(d.get("tactic_rules", [])),
+            nogoods=copy.deepcopy(d.get("nogoods", [])),
+            role_profiles=copy.deepcopy(d.get("role_profiles", {})),
+            domain_profiles=copy.deepcopy(d.get("domain_profiles", {})),
+            provenance=copy.deepcopy(d.get("provenance", {})),
         )
 
     @classmethod
@@ -206,14 +207,14 @@ class PolicyProgram:
         return {
             "version": self.version,
             "domain": self.domain,
-            "params": self.params,
-            "macros": self.macros,
-            "tactic_rules": self.tactic_rules,
-            "nogoods": self.nogoods,
-            "role_profiles": self.role_profiles,
-            "domain_profiles": self.domain_profiles,
-            "strategy_plan": [g.raw for g in self.strategy_plan],
-            "provenance": self.provenance,
+            "params": copy.deepcopy(self.params),
+            "macros": copy.deepcopy(self.macros),
+            "tactic_rules": copy.deepcopy(self.tactic_rules),
+            "nogoods": copy.deepcopy(self.nogoods),
+            "role_profiles": copy.deepcopy(self.role_profiles),
+            "domain_profiles": copy.deepcopy(self.domain_profiles),
+            "strategy_plan": [copy.deepcopy(g.raw) for g in self.strategy_plan],
+            "provenance": copy.deepcopy(self.provenance),
         }
 
     # ------------------------------------------------------------------

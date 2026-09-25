@@ -46,7 +46,8 @@ def free_symbols(node) -> set[str]:
         for a in args:
             out |= free_symbols(a)
         return out
-    return {node} if isinstance(node, str) else set()
+    from lox.policy.predicates import QuotedStr
+    return {node} if isinstance(node, str) and not isinstance(node, QuotedStr) else set()
 
 
 def expr_names(node) -> set[str]:
@@ -60,12 +61,40 @@ def expr_names(node) -> set[str]:
     return out
 
 
+class MacroDef:
+    """Represents a defined macro with optional parameters."""
+
+    def __init__(self, name: str, body: tuple, params: tuple[str, ...] | list[str] = ()):
+        self.name = name
+        self.body = body
+        self.params = tuple(params)
+
+    def __eq__(self, other):
+        if isinstance(other, MacroDef):
+            return self.name == other.name and self.body == other.body and self.params == other.params
+        return self.body == other
+
+    def __repr__(self):
+        if self.params:
+            return f"MacroDef({self.name}({', '.join(self.params)}) = {self.body})"
+        return f"MacroDef({self.name} = {self.body})"
+
+
 class MacroEnv:
-    """Live macro table: name → body expr node. Immutable after construction except
+    """Live macro table: name → MacroDef. Immutable after construction except
     through the validator's diff-application path."""
 
-    def __init__(self, macros: dict[str, tuple] | None = None):
-        self.macros: dict[str, tuple] = dict(macros or {})
+    def __init__(self, macros: dict[str, Any] | None = None):
+        self.macros: dict[str, MacroDef] = {}
+        if macros:
+            for k, v in macros.items():
+                if isinstance(v, MacroDef):
+                    self.macros[k] = v
+                elif isinstance(v, tuple) and len(v) == 2 and isinstance(v[0], (list, tuple)) and not (len(v[0]) > 0 and v[0][0] == "call"):
+                    # (params, body)
+                    self.macros[k] = MacroDef(k, v[1], tuple(v[0]))
+                else:
+                    self.macros[k] = MacroDef(k, v, ())
 
     def __contains__(self, name: str) -> bool:
         return name in self.macros
@@ -73,8 +102,38 @@ class MacroEnv:
     def names(self) -> set[str]:
         return set(self.macros)
 
-    def add(self, name: str, body: tuple) -> None:
-        self.macros[name] = body
+    def add(self, name: str, body: tuple, params: tuple[str, ...] | list[str] = ()) -> None:
+        self.macros[name] = MacroDef(name, body, tuple(params))
+
+    def get(self, name: str) -> MacroDef | None:
+        return self.macros.get(name)
+
+
+def _substitute(node, param_map: dict[str, Any]):
+    """Substitutes parameter tokens with caller argument values."""
+    if not param_map:
+        return node
+    if isinstance(node, str):
+        return param_map.get(node, node)
+    if is_expr_node(node):
+        tag, name, args = node
+        new_args = [_substitute(a, param_map) for a in args]
+        if name in param_map:
+            replacement = param_map[name]
+            if is_expr_node(replacement):
+                if not new_args:
+                    return replacement
+                return replacement
+            elif isinstance(replacement, str):
+                return (tag, replacement, new_args)
+            else:
+                return replacement
+        return (tag, name, new_args)
+    if isinstance(node, tuple):
+        return tuple(_substitute(x, param_map) for x in node)
+    if isinstance(node, list):
+        return [_substitute(x, param_map) for x in node]
+    return node
 
 
 def expand(node, env: MacroEnv, _stack: tuple = ()):
@@ -83,7 +142,13 @@ def expand(node, env: MacroEnv, _stack: tuple = ()):
     if isinstance(node, str):
         # Bare-symbol sugar: a live macro name used as a zero-arg predicate.
         if node in env.names():
-            return expand(env.macros[node], env, _stack)
+            macro_def = env.macros[node]
+            body = macro_def.body if hasattr(macro_def, "body") else macro_def
+            params = macro_def.params if hasattr(macro_def, "params") else ()
+            if params:
+                raise MacroError("ERR_SIGNATURE",
+                                 f"parameterized macro {node!r} cannot be used as bare symbol without arguments")
+            return expand(body, env, _stack)
         return node
     if is_expr_node(node):
         pass  # handled below
@@ -100,37 +165,50 @@ def expand(node, env: MacroEnv, _stack: tuple = ()):
         if name in _stack:
             chain = " -> ".join(_stack + (name,))
             raise MacroError("ERR_MACRO_CYCLE", f"macro cycle detected: {chain}")
-        if args:
+        macro_def = env.macros[name]
+        body = macro_def.body if hasattr(macro_def, "body") else macro_def
+        params = macro_def.params if hasattr(macro_def, "params") else ()
+
+        if len(args) != len(params):
+            if not params:
+                raise MacroError("ERR_SIGNATURE",
+                                 f"macro {name!r} is parameterless (v1); called with {len(args)} args")
             raise MacroError("ERR_SIGNATURE",
-                             f"macro {name!r} is parameterless (v1); called with {len(args)} args")
+                             f"macro {name!r} expects {len(params)} args ({', '.join(params)}); called with {len(args)}")
+
         if len(_stack) >= MAX_EXPANSION_DEPTH:
             raise MacroError("ERR_MACRO_CYCLE",
                              f"expansion depth exceeds {MAX_EXPANSION_DEPTH} at {name!r}")
-        body = env.macros[name]
+
+        # Substitute arguments into parameters if parameterized
+        if params:
+            param_map = dict(zip(params, args))
+            body = _substitute(body, param_map)
+
         return expand(body, env, _stack + (name,))
 
-    # Ordinary predicate call: expand children (macro names may appear as bare args
-    # inside combinators; a macro as a direct predicate-call head with args is an error
-    # handled above — here the name must be a manifest predicate, checked by the caller).
+    # Ordinary predicate call: expand children
     return ("call", name, [expand(a, env, _stack) for a in args])
 
 
 def check_closure(body, known_predicates: set[str], known_macros: set[str],
-                  where: str = "macro body") -> None:
+                  where: str = "macro body",
+                  params: set[str] | None = None) -> None:
     """§5.3 closure check: every referenced symbol is a manifest predicate, a live macro,
-    or a built-in combinator. Any other symbol → ERR_MACRO_CLOSURE."""
+    a declared parameter, or a built-in combinator. Any other symbol → ERR_MACRO_CLOSURE."""
+    declared = params or set()
     names = expr_names(body)
     for n in names:
         if n in ("and", "or", "not"):
             continue
-        if n in known_predicates or n in known_macros:
+        if n in known_predicates or n in known_macros or n in declared:
             continue
         raise MacroError("ERR_MACRO_CLOSURE",
                          f"{where}: symbol {n!r} is not in the closed vocabulary")
     # Free (bare) symbols must also resolve — they are zero-arg predicates, macros,
-    # or comparison-op strings (values, not symbols).
+    # declared parameters, or comparison-op strings (values, not symbols).
     for s in free_symbols(body):
-        if s in known_predicates or s in known_macros or s in ("<=", ">=", "<", ">", "=="):
+        if s in known_predicates or s in known_macros or s in declared or s in ("<=", ">=", "<", ">", "==", "!="):
             continue
         raise MacroError("ERR_MACRO_CLOSURE",
                          f"{where}: bare symbol {s!r} is not in the closed vocabulary")

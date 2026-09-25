@@ -64,6 +64,7 @@ class NogoodOp:
 class DefmacroOp:
     name: str
     body: tuple
+    params: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -325,9 +326,15 @@ def _convert(form, idx: int):
 
     if head == "defmacro":
         name = _need_str(args, 0, "defmacro")
-        if len(args) < 2 or not isinstance(args[1], (tuple, str)):
-            raise DiffParseError("ERR_PARSE", "defmacro requires (defmacro <name> <expr>)")
-        return DefmacroOp(name=name, body=_as_expr(args[1]))
+        params = []
+        if len(args) >= 3 and isinstance(args[1], (tuple, list)):
+            params = [x for x in args[1] if isinstance(x, str)]
+            body_arg = args[2]
+        elif len(args) >= 2 and isinstance(args[1], (tuple, str)):
+            body_arg = args[1]
+        else:
+            raise DiffParseError("ERR_PARSE", "defmacro requires (defmacro <name> [<params>] <expr>)")
+        return DefmacroOp(name=name, body=_as_expr(body_arg), params=params)
 
     if head == "note":
         return NoteOp(text=_need_str(args, 0, "note"))

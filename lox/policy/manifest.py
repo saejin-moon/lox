@@ -66,6 +66,24 @@ PREDICATE_SIGNATURES: dict[str, dict] = {
     "castle_done":    {"args": [], "desc": "Castle prize acquired (bag of holding / dragon scale mail)"},
     "vlad_done":      {"args": [], "desc": "Vlad defeated (Candelabrum obtained)"},
     "invocation_done": {"args": [], "desc": "Invocation performed at the Vibrating Square"},
+    # Gen-3 Sensory & Epistemic Predicates
+    "stairs_dist":    {"args": [("op",), ("int",)], "desc": "A* distance to stairs down compared to n, e.g. (stairs_dist <= 5)"},
+    "unvisited_count": {"args": [("op",), ("int",)], "desc": "unvisited floor tiles remaining compared to n, e.g. (unvisited_count <= 10)"},
+    "is_corridor":    {"args": [], "desc": "hero is currently standing in a corridor tile (#)"},
+    "is_doorway":     {"args": [], "desc": "hero is currently standing in a doorway tile (+ or ')"},
+    "count_hostiles": {"args": [("op",), ("int",)], "desc": "count of monsters in radius <= 3 compared to n, e.g. (count_hostiles == 0)"},
+    "closest_threat": {"args": [("op",), ("float",)], "desc": "threat score of closest monster compared to v, e.g. (closest_threat >= 5.0)"},
+    "closest_speed":  {"args": [("op",), ("int",)], "desc": "speed of closest monster compared to n (player base is 12), e.g. (closest_speed > 12)"},
+    "has_ranged_target": {"args": [], "desc": "a hostile monster is in raycasted line-of-sight"},
+    "is_monster_fleeing": {"args": [], "desc": "primary target monster is fleeing"},
+    "carried_food_count": {"args": [("op",), ("int",)], "desc": "count of safe carried food rations compared to n, e.g. (carried_food_count == 0)"},
+    "turns_since_pray": {"args": [("op",), ("int",)], "desc": "turns elapsed since last prayer compared to n, e.g. (turns_since_pray >= 400)"},
+    "can_safely_pray": {"args": [], "desc": "prayer cooldown has safely elapsed without divine wrath"},
+    "has_intrinsic":  {"args": [("str",)], "desc": "hero has intrinsic (poison_res, reflection, cold_res, stealth)"},
+    "current_ac":     {"args": [("op",), ("int",)], "desc": "hero Armour Class compared to n (lower is better), e.g. (current_ac <= 0)"},
+    "weapon_enchantment": {"args": [("op",), ("int",)], "desc": "current main weapon enchantment compared to n, e.g. (weapon_enchantment >= 2)"},
+    "has_item":       {"args": [("str",), ("str",)], "desc": "inventory contains item of category and name, e.g. (has_item 'scroll' 'teleport')"},
+    "hunger_level":   {"args": [("op",), ("level",)], "desc": "hunger level compared to level (satiated|normal|hungry|weak|fainting)"},
 }
 
 VERBS: dict[str, str] = {

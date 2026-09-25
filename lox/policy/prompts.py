@@ -17,7 +17,7 @@ import os
 import re
 
 PROMPTS_DIR = "data/prompts"
-VERSION_RE = re.compile(r"^v\d+$")
+VERSION_RE = re.compile(r"^v(\d+)(?:_.*)?$")
 
 
 def list_prompt_versions(prompts_dir: str = PROMPTS_DIR) -> list[str]:
@@ -30,7 +30,8 @@ def list_prompt_versions(prompts_dir: str = PROMPTS_DIR) -> list[str]:
         if VERSION_RE.match(stem):
             out.append(stem)
     def _key(v: str):
-        return int(v[1:])
+        m = VERSION_RE.match(v)
+        return int(m.group(1)) if m else 0
     return sorted(out, key=_key)
 
 

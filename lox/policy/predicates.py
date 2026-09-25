@@ -129,6 +129,11 @@ DEFAULT_FIXTURE_CTX: dict = {
     "hp": 20, "max_hp": 20, "hunger_state": 1, "adjacent_hostiles": 0,
     "has_healing": True, "is_fighting": False, "encumbrance": 0,
     "stairs_known": False, "failures": {}, "failures_total": 0,
+    "stairs_dist": 10, "unvisited_count": 20, "is_corridor": False, "is_doorway": False,
+    "count_hostiles": 0, "closest_threat": 0.0, "closest_speed": 12,
+    "has_ranged_target": False, "is_monster_fleeing": False,
+    "carried_food_count": 1, "turns_since_pray": 500, "can_safely_pray": True,
+    "intrinsics": set(), "weapon_enchantment": 0, "inventory_items": set(),
 }
 
 
@@ -219,6 +224,24 @@ def nethack_bindings(ctx: dict) -> dict:
         "ac_le": lambda n: ctx["ac"] <= int(n),
         "steps_in_goal_ge": lambda n: ctx["steps_in_goal"] >= int(n),
         "turn_ge": lambda t: ctx["turn"] >= int(t),
+        # Gen-3 Sensory & Epistemic Predicates
+        "stairs_dist": lambda op, v: _cmp(_c(ctx, "stairs_dist", 10), op, int(v)),
+        "unvisited_count": lambda op, v: _cmp(_c(ctx, "unvisited_count", 20), op, int(v)),
+        "is_corridor": lambda: bool(_c(ctx, "is_corridor", False)),
+        "is_doorway": lambda: bool(_c(ctx, "is_doorway", False)),
+        "count_hostiles": lambda op, v: _cmp(_c(ctx, "count_hostiles", 0), op, int(v)),
+        "closest_threat": lambda op, v: _cmp(_c(ctx, "closest_threat", 0.0), op, float(v)),
+        "closest_speed": lambda op, v: _cmp(_c(ctx, "closest_speed", 12), op, int(v)),
+        "has_ranged_target": lambda: bool(_c(ctx, "has_ranged_target", False)),
+        "is_monster_fleeing": lambda: bool(_c(ctx, "is_monster_fleeing", False)),
+        "carried_food_count": lambda op, v: _cmp(_c(ctx, "carried_food_count", 1), op, int(v)),
+        "turns_since_pray": lambda op, v: _cmp(_c(ctx, "turns_since_pray", 500), op, int(v)),
+        "can_safely_pray": lambda: bool(_c(ctx, "can_safely_pray", True)),
+        "has_intrinsic": lambda name: (str(name) in _c(ctx, "intrinsics", set())) or bool(ctx.get(f"has_{name}", False)),
+        "current_ac": lambda op, v: _cmp(_c(ctx, "ac", 9), op, int(v)),
+        "weapon_enchantment": lambda op, v: _cmp(_c(ctx, "weapon_enchantment", 0), op, int(v)),
+        "has_item": lambda cat, name: any(str(cat).lower() in item.lower() and str(name).lower() in item.lower() for item in _c(ctx, "inventory_items", set())),
+        "hunger_level": lambda op, v: _cmp(hunger_raw, op, _hunger_level(v)),
     }
 
 

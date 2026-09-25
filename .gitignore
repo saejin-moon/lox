@@ -25,6 +25,7 @@ data/*.parquet
 logs/
 
 # Ephemeral experiment & evaluation JSON/log dumps
+*.log
 data/*.log
 data/ablation_*.json
 data/*_100ep.json
@@ -38,6 +39,7 @@ data/r4_smoke_*.json
 data/prompt_ab_live_partial.json
 data/trajectory.png
 data/ablation_work/
+data/campaign_*.json
 
 # Preserve first-class policy artifacts and program trees
 !data/.gitkeep
