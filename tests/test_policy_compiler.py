@@ -257,3 +257,25 @@ def test_compiled_artifact_is_executor_contract(tmp_path, compiled_live_pair):
     cfg = default_config()
     prog.apply_overlay(cfg)  # must not raise
     assert prog.version == PolicyProgram.load(LIVE["nethack"]).version
+
+
+def test_parameterized_macro_roundtrip_commit(tmp_path):
+    """Parameterized macros must round-trip cleanly through compile_and_commit."""
+    prog = PolicyProgram.from_dict(DEFAULT_PROGRAM)
+    prog.version = 10
+    prog.macros = [
+        {"name": "excessive_turns", "params": ["limit"], "body": "(turn_ge limit)"},
+        {"name": "danger_zone", "params": ["dist", "hp"], "body": "(and (count_hostiles >= 1) (hp_frac <= hp))"},
+        {"name": "simple_sugar", "body": "(stairs_known)"},
+    ]
+    tree = str(tmp_path / "nethack_tree")
+    live = str(tmp_path / "policy_program.json")
+    out = compile_and_commit(prog, tree, live, archive=False)
+    assert os.path.exists(out)
+
+    reloaded = PolicyProgram.load(live)
+    assert reloaded.to_dict() == prog.to_dict()
+    assert len(reloaded.macros) == 3
+    assert reloaded.macros[0]["params"] == ["limit"]
+    assert reloaded.macros[1]["params"] == ["dist", "hp"]
+    assert "params" not in reloaded.macros[2] or reloaded.macros[2].get("params") == []

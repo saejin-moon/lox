@@ -396,14 +396,17 @@ def parse_pythonic_diff(text: str, max_depth: int = 3):
 
     m_auth = re.search(r'author[:\s=]+["\']?([^,"\']+)["\']?', cleaned, re.I)
     m_dom = re.search(r'domain[:\s=]+["\']?([^,"\']+)["\']?', cleaned, re.I)
-    m_reas = re.search(r'reason[:\s=]+["\']?([^"\'\n]+)["\']?', cleaned, re.I)
+    m_reas = re.search(r'reason[:\s=]+(?:"([^"\n]*)"|\'([^\'\n]*)\'|([^\n]+))', cleaned, re.I)
+    reason_str = ""
+    if m_reas:
+        reason_str = (m_reas.group(1) or m_reas.group(2) or m_reas.group(3) or "").strip()
 
     header = DiffHeader(
         revision=int(m_rev.group(1)),
         parent=int(m_par.group(1)),
         author=m_auth.group(1).strip() if m_auth else "unknown",
         domain=m_dom.group(1).strip() if m_dom else "nethack",
-        reason=m_reas.group(1).strip() if m_reas else "",
+        reason=reason_str,
     )
 
     diff = PolicyDiff(header=header)
@@ -414,8 +417,10 @@ def parse_pythonic_diff(text: str, max_depth: int = 3):
         if not line or line.startswith("#") or line.startswith("//") or line.startswith(";") or line.startswith("```"):
             continue
 
-        # Skip standalone header line
-        if re.search(r"^\s*revision\b", line, re.I) and not re.search(r"\b(set|rule|goal|macro|defmacro|nogood)\b", line, re.I):
+        # Skip header lines entirely (never pass to statement parser)
+        if re.match(r"^\s*revision\b", line, re.I):
+            continue
+        if re.match(r"^\s*(parent|author|domain|reason)\s*[:=]", line, re.I):
             continue
 
         # Note / Reason statement
@@ -450,13 +455,13 @@ def parse_pythonic_diff(text: str, max_depth: int = 3):
         if m_radd:
             rule_content = m_radd.group(1).strip()
             note = None
-            note_match = re.search(r'note\s+"([^"]*)"', rule_content, re.I)
+            note_match = re.search(r'note\s+["\']([^"\']*)["\']', rule_content, re.I)
             if note_match:
-                note = note_match.group(1)
-                rule_content = rule_content[:note_match.start()] + rule_content[note_match.end():]
+                note = note_match.group(1).strip()
+                rule_content = (rule_content[:note_match.start()] + rule_content[note_match.end():]).strip()
 
-            pat = r"when\s+(.+?)\s+do\s+([a-zA-Z0-9_]+)(?:\s+unless\s+(.+))?$"
-            rmatch = re.search(pat, rule_content, re.I)
+            pat = r"^when\s+(.+?)\s+do\s+([a-zA-Z0-9_]+)(?:\s+unless\s+(.+))?$"
+            rmatch = re.match(pat, rule_content, re.I)
             if not rmatch:
                 raise DiffParseError("ERR_PARSE", f"Invalid rule format in '{line}'. Expected: 'when <expr> do <verb> [unless <expr>]'")
             when_str = rmatch.group(1).strip()

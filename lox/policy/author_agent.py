@@ -139,11 +139,28 @@ def repair_diff_text(
         m_rev = re.match(r"^revision[:\s=]+(\d+)", stripped, re.I)
         if m_rev:
             m_auth = re.search(r'author[:\s=]+["\']?([^,"\']+)["\']?', stripped, re.I)
-            m_reas = re.search(r'reason[:\s=]+["\']?([^"\'\n]+)["\']?', stripped, re.I)
+            m_reas = re.search(r'reason[:\s=]+(?:"([^"\n]*)"|\'([^\'\n]*)\'|([^\n]+))', stripped, re.I)
             auth_str = f', author: "{m_auth.group(1).strip()}"' if m_auth else ""
-            reas_str = f', reason: "{m_reas.group(1).strip()}"' if m_reas else ""
+            reason_val = (m_reas.group(1) or m_reas.group(2) or m_reas.group(3) or "").strip() if m_reas else ""
+            reas_str = f', reason: "{reason_val}"' if reason_val else ""
             repaired_lines.append(f"revision: {program.version + 1}, parent: {program.version}{auth_str}{reas_str}")
             continue
+
+        # Callable comparisons: hp_frac('<', 0.6) or count_hostiles(==, 0) -> infix
+        op_map = {'lt': '<', 'le': '<=', 'gt': '>', 'ge': '>=', 'eq': '==', 'ne': '!='}
+        cmp_preds = ('hp_frac', 'count_hostiles', 'stairs_dist', 'closest_speed', 'closest_threat',
+                     'carried_food_count', 'turns_since_pray', 'current_ac', 'weapon_enchantment', 'unvisited_count')
+        def _repl_call_cmp(m):
+            pred = m.group(1)
+            raw_op = m.group(2).strip('"\'')
+            op = op_map.get(raw_op, raw_op)
+            val = m.group(3)
+            return f"{pred} {op} {val}"
+        stripped = re.sub(
+            rf'\b({"|".join(cmp_preds)})\s*\(\s*[\'\"]?([<>=!]+|[a-zA-Z]+)[\'\"]?\s*,\s*([0-9.]+)\s*\)',
+            _repl_call_cmp,
+            stripped
+        )
 
         # Set operations: prefix with policy_params.
         m_set = re.match(r"^(?:set\s+)?([a-zA-Z0-9_.]+)\s*[:= ]\s*(.+)$", stripped, re.I)

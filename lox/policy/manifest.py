@@ -231,9 +231,13 @@ class VocabularyManifest:
             return self._render_compact()
         lines = [f"domain: {self.domain}", f"version: {self.version}", "predicates:"]
         for name, sig in sorted(self.predicates.items()):
-            parts = [str(a[0]) if len(a) == 1 else "/".join(str(x) for x in a) for a in sig["args"]]
-            args = ", ".join(parts)
-            lines.append(f"  {name}: ({args})  # {sig['desc']}")
+            if sig["args"] and sig["args"][0][0] == "op":
+                val_type = sig["args"][1][0] if len(sig["args"]) > 1 else "val"
+                lines.append(f"  {name} <op> <{val_type}>  # {sig['desc']} (infix comparison, e.g. {name} <= 0.40)")
+            else:
+                parts = [str(a[0]) if len(a) == 1 else "/".join(str(x) for x in a) for a in sig["args"]]
+                args = ", ".join(parts)
+                lines.append(f"  {name}({args})  # {sig['desc']}")
         lines.append("verbs:")
         for name, desc in self.verbs.items():
             lines.append(f"  {name}: {desc}")

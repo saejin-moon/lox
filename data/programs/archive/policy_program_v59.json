@@ -11,21 +11,20 @@
     "strategy.triage_hp_frac": 0.45,
     "strategy.triage_min_hp": 6,
     "descent.should_descend_unvisited": 20,
-    "descent.should_descend_turns": 75,
+    "descent.should_descend_turns": 80,
     "survival.rest_until_frac": 0.95,
     "strategy.survival_exit_depth": 3,
     "descent.should_descend_xl": 1,
     "nutrition.pray_major_first": 80,
     "descent.deep_min_depth": 6,
-    "descent.min_hp_frac": 0.225,
+    "descent.min_hp_frac": 0.4,
     "strategy.survival_timeout_steps": 1200,
     "strategy.early_exit_depth": 2,
     "search.hard_cap_early": 10,
     "search.wall_none": 7,
     "search.dead_end_none": 10,
     "strategy.triage_adj_hp_frac": 0.4,
-    "strategy.survival_ac_target": 6,
-    "navigation.water_body_min_tiles": 3
+    "strategy.survival_ac_target": 6
   },
   "macros": [],
   "tactic_rules": [
@@ -166,6 +165,30 @@
       "do": "retreat_when_wounded",
       "note": "interlock: heavy hitter 'minotaur' \u2014 never trade blows when wounded",
       "interlock": true
+    },
+    {
+      "when": "(and (monster \"jackal\") (hp_frac \"<\" 0.6))",
+      "do": "retreat",
+      "unless": null,
+      "note": null
+    },
+    {
+      "when": "(and (monster \"giant rat\") (hp_frac \"<\" 0.6))",
+      "do": "retreat",
+      "unless": null,
+      "note": null
+    },
+    {
+      "when": "(and (monster \"giant bat\") (hp_frac \"<\" 0.6))",
+      "do": "retreat",
+      "unless": null,
+      "note": null
+    },
+    {
+      "when": "(and (monster \"garter snake\") (hp_frac \"<\" 0.6))",
+      "do": "retreat",
+      "unless": null,
+      "note": null
     }
   ],
   "nogoods": [],
@@ -173,9 +196,10 @@
   "domain_profiles": {},
   "strategy_plan": [
     {
-      "goal": "explore_floor",
-      "when": "(true)",
-      "until": "(or (xl_ge 4) (depth_ge 4))"
+      "goal": "descend",
+      "when": "(or (stairs_known) (turn_ge 3000))",
+      "until": "(depth_ge 14)",
+      "directive": "DESCEND"
     },
     {
       "goal": "early_survival_stack",
@@ -219,12 +243,6 @@
       "max_steps": 3000
     },
     {
-      "goal": "descend",
-      "when": "(true)",
-      "until": "(depth_ge 14)",
-      "directive": "DESCEND"
-    },
-    {
       "goal": "enter_gehennom",
       "when": "(and (in_dungeons) (depth_ge 14))",
       "until": "(or (depth_ge 22) (steps_in_goal_ge 5000))",
@@ -247,13 +265,18 @@
       "goal": "ascension_run",
       "when": "(has_amulet)",
       "until": "(false)"
+    },
+    {
+      "goal": "explore_floor",
+      "when": "(or (stairs_known) (turn_ge 3000))",
+      "until": "(or (xl_ge 4) (depth_ge 4))"
     }
   ],
   "provenance": {
     "author": "LOX-\u03c8",
     "note": "REVERT of 3 llm-authored combat rules: A/B on v5 (100 eps each, parallel runner) showed mean score 217.0 WITH rules vs 396.4 WITHOUT (median depth 2 vs 3). Rules engraved Elbereth while adjacent at <=40% HP and forced ranged_then_kill against everything \u2014 wrong response tier for DL1-3 melee deaths. Superseded by interlock-only rule set.",
-    "parent_version": 57,
-    "reason": "Severe starvation deaths on d1-d2 (6 deaths) and excessive turn counts on early floors (e.g., ep_valk_2b9746e2: 10k turns on d1) indicate that the agent is over-exploring while hungry. I am tightening the hunger threshold for the routine prayer to prevent fainting and increasing the food radius when hungry to prioritize sustenance over exploration.",
+    "parent_version": 58,
+    "reason": "Eliminate DL1-3 pacing loops and starvation by deprioritizing exploration once stairs are known or global turn count is excessive. Adding tactical retreats for high-attrition early-game monsters.",
     "parent_author": "gemma-4-26b@ablation"
   }
 }

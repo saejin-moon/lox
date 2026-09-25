@@ -187,7 +187,7 @@ def _parse_goal_file(path: str, text: str) -> dict:
 
 
 def _parse_macro_file(path: str, text: str) -> dict:
-    """(defmacro <name> <expr>) → {"name", "body"} (body = ORIGINAL text)."""
+    """(defmacro <name> <expr>) or (defmacro <name> (<params>) <expr>) → {"name", "body", ["params"]}."""
     ctx = os.path.basename(path)
     forms = _parse_forms(text, ctx)
     if len(forms) != 1:
@@ -198,6 +198,17 @@ def _parse_macro_file(path: str, text: str) -> dict:
     name = node[2][0]
     if not isinstance(name, str):
         raise ValueError(f"ERR_PARSE: {ctx}: macro name must be a symbol")
+    if len(node[2]) >= 3:
+        pnode = node[2][1]
+        params: list[str] = []
+        if dsl._is_expr_node(pnode):
+            params = [pnode[1]] + [a for a in pnode[2] if isinstance(a, str)]
+        elif isinstance(pnode, str):
+            params = [pnode]
+        res = {"name": name, "body": dsl.render_node(node[2][2])}
+        if params:
+            res["params"] = params
+        return res
     return {"name": name, "body": dsl.render_node(node[2][1])}
 
 
@@ -331,7 +342,11 @@ def write_authoring_tree(program: PolicyProgram, tree_dir: str) -> list[str]:
                 os.unlink(os.path.join(d, fn))
 
     for i, m in enumerate(program.macros):
-        text = f"(defmacro {m['name']} {m['body']})"
+        if m.get("params"):
+            params_str = " ".join(m["params"])
+            text = f"(defmacro {m['name']} ({params_str}) {m['body']})"
+        else:
+            text = f"(defmacro {m['name']} {m['body']})"
         written.append(_write(os.path.join(tree_dir, "macros", f"{i:02d}_{_slug(m['name'])}.sexpr"), text))
 
     for i, r in enumerate(program.tactic_rules):

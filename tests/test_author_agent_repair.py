@@ -176,3 +176,28 @@ goal prioritize descend: when stairs_known
     repair_prompt = provider.last_prompts[1][1]
     assert "FIX COMPILATION FAILURE" in repair_prompt
     assert "unknown_magic_predicate" in repair_prompt
+
+
+def test_repair_callable_comparisons_and_header_keywords():
+    prog = PolicyProgram.from_dict(DEFAULT_PROGRAM)
+    prog.version = 58
+
+    diff_text = """
+revision: 59, parent: 58, author: "LOX-ψ", reason: "Deprioritizing the explore_floor goal because of starvation and adding retreat rule for jackals"
+rule add tactic_rules: when monster == "jackal" and hp_frac('<', 0.6) do retreat note "Avoid jackal attrition"
+rule add tactic_rules: when monster == "giant rat" and hp_frac(le, 0.5) do retreat_when_wounded note 'Avoid rat attrition'
+goal prioritize descend: when stairs_known and count_hostiles(==, 0)
+"""
+    repaired = repair_diff_text(diff_text, prog, MANIFEST)
+    assert "hp_frac < 0.6" in repaired
+    assert "hp_frac <= 0.5" in repaired
+    assert "count_hostiles == 0" in repaired
+    assert 'reason: "Deprioritizing the explore_floor goal because of starvation and adding retreat rule for jackals"' in repaired
+
+    from lox.policy.infix import parse_pythonic_diff
+    parsed = parse_pythonic_diff(repaired)
+    assert parsed.header.revision == 59
+    assert len(parsed.rules) == 2
+    assert parsed.rules[0].rule["note"] == "Avoid jackal attrition"
+    assert parsed.rules[1].rule["note"] == "Avoid rat attrition"
+    assert len(parsed.goals) == 1
