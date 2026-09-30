@@ -1,7 +1,8 @@
 """
-LOX 2.0 DuckDB Analytical Tooling for LLM Policy Authoring.
-Provides safe, read-only analytical functions allowing the LLM to inspect historical
-gameplay data, test failure hypotheses, and query death/action statistics.
+LOX 2.0 DuckDB Analytical Tooling and Knowledge Retrieval for LLM Policy Authoring.
+Provides safe analytical functions (DuckDB SQL, death taxonomy, pacing stats),
+offline NetHack 3.6.6 Wiki retrieval (BM25 search), and a macro request queue
+for human post-run implementation.
 """
 from __future__ import annotations
 
@@ -9,6 +10,9 @@ import os
 import re
 from typing import Any
 import duckdb
+
+from lox.author.wiki import WikiEngine
+from lox.author.requests import queue_macro_request
 
 
 def _format_table(cursor) -> str:
@@ -26,10 +30,11 @@ def _format_table(cursor) -> str:
 
 
 class DuckDBToolRegistry:
-    """Registry of safe, read-only analytical tools for the Author Agent."""
+    """Registry of analytical tools, wiki retrieval, and macro requests for the Author Agent."""
 
-    def __init__(self, db_path: str = "data/lox.duckdb"):
+    def __init__(self, db_path: str = "data/lox.duckdb", wiki_db_path: str = "data/wiki_index.db"):
         self.db_path = db_path
+        self.wiki = WikiEngine(db_path=wiki_db_path)
 
     def get_duckdb_schema(self) -> str:
         """
@@ -159,6 +164,35 @@ class DuckDBToolRegistry:
             con.close()
             return f"Error querying action distribution: {e}"
 
+    def query_wiki(self, query: str, top_k: int = 2) -> str:
+        """
+        Performs sub-5ms BM25 full-text search across the offline NetHack 3.6.6 encyclopedia.
+        Use to research monster traits, corpses conveying intrinsics, item properties, or dungeon mechanics.
+        """
+        return self.wiki.query(query, top_k=top_k)
+
+    def request_macro(
+        self,
+        macro_name: str,
+        rationale: str,
+        proposed_interface: str = "",
+        priority: str = "medium",
+        run_id: str = "synth_session",
+    ) -> str:
+        """
+        Queues an unimplemented action or macro request for human developers to build post-run.
+        Returns confirmation message.
+        """
+        res = queue_macro_request(
+            macro_name=macro_name,
+            rationale=rationale,
+            proposed_interface=proposed_interface,
+            priority=priority,
+            run_id=run_id,
+            db_path=self.db_path,
+        )
+        return res["message"]
+
 
 # Tool Schema for OpenAI / OpenRouter function calling
 OPENAI_TOOL_SPECS = [
@@ -235,6 +269,57 @@ OPENAI_TOOL_SPECS = [
                         "description": "Dungeon depth (default 1).",
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_wiki",
+            "description": "Search the offline NetHack 3.6.6 knowledge base (monsters, items, intrinsics, rituals).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search term, e.g. 'floating eye', 'poison resistance corpse', 'Excalibur'",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of articles to return (default 2).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_macro",
+            "description": "Queue an unimplemented macro or primitive for human developers to build post-run.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "macro_name": {
+                        "type": "string",
+                        "description": "Identifier name for the desired macro or primitive.",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this capability is needed to progress or survive.",
+                    },
+                    "proposed_interface": {
+                        "type": "string",
+                        "description": "Optional Python signature or pseudo-code.",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["critical", "high", "medium", "low"],
+                        "description": "Priority level.",
+                    },
+                },
+                "required": ["macro_name", "rationale"],
             },
         },
     },

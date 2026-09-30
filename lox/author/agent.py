@@ -50,6 +50,17 @@ class AuthorAgent:
             return self.tools.get_floor_pacing_stats(depth=args.get("depth", 1))
         elif tool_name == "get_action_distribution":
             return self.tools.get_action_distribution(run_id=args.get("run_id", ""))
+        elif tool_name == "query_wiki":
+            return self.tools.query_wiki(args.get("query", ""), top_k=args.get("top_k", 2))
+        elif tool_name == "request_macro":
+            run_id = getattr(self, "_current_run_id", "synth_session")
+            return self.tools.request_macro(
+                macro_name=args.get("macro_name", ""),
+                rationale=args.get("rationale", ""),
+                proposed_interface=args.get("proposed_interface", ""),
+                priority=args.get("priority", "medium"),
+                run_id=run_id,
+            )
         return f"Unknown tool '{tool_name}'."
 
     def _call_mock(
@@ -61,8 +72,9 @@ class AuthorAgent:
     ) -> str:
         """Deterministic mock provider with token tracking and tool simulation."""
         # Simulate tool execution for testing
-        tools_called = ["query_duckdb"]
+        tools_called = ["query_duckdb", "query_wiki"]
         self._execute_tool("get_duckdb_schema", {})
+        self._execute_tool("query_wiki", {"query": "Excalibur"})
 
         log_token_usage(
             run_id=run_id,
@@ -126,6 +138,8 @@ plan = [
             self.tools.get_death_taxonomy,
             self.tools.get_floor_pacing_stats,
             self.tools.get_action_distribution,
+            self.tools.query_wiki,
+            self.tools.request_macro,
         ]
 
         # Use chats for automatic multi-turn tool calling
@@ -250,6 +264,7 @@ plan = [
         Returns (new_code, compiled_tree_or_None, error_message_or_None).
         """
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
+        self._current_run_id = run_id
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(current_policy, trigger_reason, status_report)
 

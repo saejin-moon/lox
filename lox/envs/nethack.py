@@ -235,6 +235,74 @@ class NetHackAdapter(EnvironmentAdapter):
             raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
             obs = self._extract_obs(raw_obs)
             return obs, float(reward + r2), bool(term), bool(trunc), info
+        elif action.name == "kick_closed_door" and action.direction:
+            dir_char = DIR_CHARS.get(action.direction, "l")
+            raw_obs, reward, term, trunc, info = self.env.step(48)  # Command.KICK
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            act_dir = self.char_to_act.get(dir_char, 0)
+            raw_obs, r2, term, trunc, info = self.env.step(act_dir)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            obs = self._extract_obs(raw_obs)
+            return obs, float(reward + r2), bool(term), bool(trunc), info
+        elif action.name == "open_door" and action.direction:
+            dir_char = DIR_CHARS.get(action.direction, "l")
+            raw_obs, reward, term, trunc, info = self.env.step(57)  # Command.OPEN
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            act_dir = self.char_to_act.get(dir_char, 0)
+            raw_obs, r2, term, trunc, info = self.env.step(act_dir)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            obs = self._extract_obs(raw_obs)
+            return obs, float(reward + r2), bool(term), bool(trunc), info
+        elif action.name == "engrave_elbereth":
+            # Command.ENGRAVE (36) -> fingertip '-' (106) -> space -> letters -> enter (19)
+            raw_obs, reward, term, trunc, info = self.env.step(36)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            raw_obs, r2, term, trunc, info = self.env.step(106)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get(" ", 107))
+            for c in "Elbereth":
+                raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get(c, 19))
+            raw_obs, _, term, trunc, info = self.env.step(19)  # ENTER
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            obs = self._extract_obs(raw_obs)
+            return obs, float(reward + r2), bool(term), bool(trunc), info
+        elif action.name == "eat_floor_corpse":
+            # Command.EAT (35) -> 'y' to confirm eating from floor
+            raw_obs, reward, term, trunc, info = self.env.step(35)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            raw_obs, r2, term, trunc, info = self.env.step(self.char_to_act.get("y", 0))
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            obs = self._extract_obs(raw_obs)
+            return obs, float(reward + r2), bool(term), bool(trunc), info
+        elif action.name == "dip_excalibur" and action.direction:
+            # Command.DIP (32) -> longsword slot -> fountain direction
+            dir_char = DIR_CHARS.get(action.direction, "l")
+            raw_obs, reward, term, trunc, info = self.env.step(32)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            slot_act = self.char_to_act.get(action.slot or "a", 0)
+            raw_obs, r2, term, trunc, info = self.env.step(slot_act)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            act_dir = self.char_to_act.get(dir_char, 0)
+            raw_obs, r3, term, trunc, info = self.env.step(act_dir)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            obs = self._extract_obs(raw_obs)
+            return obs, float(reward + r2 + r3), bool(term), bool(trunc), info
+        elif action.name == "wield_weapon" and action.slot:
+            # Command.WIELD (102) -> item slot
+            raw_obs, reward, term, trunc, info = self.env.step(102)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            raw_obs, r2, term, trunc, info = self.env.step(self.char_to_act.get(action.slot, 0))
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            obs = self._extract_obs(raw_obs)
+            return obs, float(reward + r2), bool(term), bool(trunc), info
+        elif action.name == "wear_armor" and action.slot:
+            # Command.WEAR (99) -> item slot
+            raw_obs, reward, term, trunc, info = self.env.step(99)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            raw_obs, r2, term, trunc, info = self.env.step(self.char_to_act.get(action.slot, 0))
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            obs = self._extract_obs(raw_obs)
+            return obs, float(reward + r2), bool(term), bool(trunc), info
         elif action.name == "quaff_healing" and action.slot:
             act_q = self.char_to_act.get("q", 0)
             raw_obs, reward, term, trunc, info = self.env.step(act_q)

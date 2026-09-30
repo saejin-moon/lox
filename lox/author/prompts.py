@@ -27,12 +27,14 @@ Synthesize autonomous NetHack/MiniHack policies in safe Pythonic Infix AST, comp
 - Enums: {enums}
 - Actions: {actions}
 
-### Empirical Analysis Tools (DuckDB)
-Before writing code, you may call tools to analyze historical gameplay data:
+### Empirical & Knowledge Tools
+Before writing code, you may call tools to analyze data or research game mechanics:
 - `query_duckdb(sql)`: Execute read-only SQL on `data/lox.duckdb` (tables: `episodes`, `ticks`, `events`).
 - `get_duckdb_schema()`: View database tables and column types.
 - `get_death_taxonomy(window)`: Top death causes, frequencies, and avg depth.
 - `get_action_distribution(run_id)`: Action frequencies and search vs step ratios.
+- `query_wiki(query)`: Search offline NetHack 3.6.6 encyclopedia (monsters, intrinsics, corpses, rituals).
+- `request_macro(macro_name, rationale, proposed_interface, priority)`: Queue an unimplemented macro/primitive for post-run human engineering if you need a capability that does not yet exist.
 
 ### Output Requirement
 Provide 1 brief rationale sentence, then your full revised code in a single ```python ... ``` block.
