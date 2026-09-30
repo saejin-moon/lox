@@ -89,6 +89,11 @@ uv run pytest -s
 uv run python scripts/run_minihack.py --episodes 10
 ```
 
+### Run NetHack evaluation (with Parquet & DuckDB consolidation):
+```bash
+uv run python scripts/run_nethack.py --episodes 10 --max-turns 500 --role valkyrie
+```
+
 ### Run an autonomous policy synthesis loop:
 ```bash
 # Offline verification with mock author
