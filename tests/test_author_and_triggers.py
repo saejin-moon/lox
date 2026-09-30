@@ -9,13 +9,18 @@ def test_dynamic_triggers():
     recorder = FlightRecorder()
 
     # Normal turn -> no trigger
-    trig, msg = engine.check_turn(turns_on_level=50, depth=1)
+    trig, msg = engine.check_turn(turns_on_level=50, depth=1, has_frontier=True)
     assert trig == TriggerType.NONE
 
     # Stall turn -> STALL trigger fires
-    trig, msg = engine.check_turn(turns_on_level=155, depth=1)
+    trig, msg = engine.check_turn(turns_on_level=155, depth=1, has_frontier=False)
     assert trig == TriggerType.STALL
     assert "pacing stall" in msg
+
+    # Starvation crisis -> STARVATION trigger fires
+    trig, msg = engine.check_turn(turns_on_level=10, depth=1, hunger_state="WEAK", food_count=0)
+    assert trig == TriggerType.STARVATION
+    assert "Starvation crisis" in msg
 
     # Depth breakthrough -> MILESTONE trigger fires
     trig, msg = engine.check_turn(turns_on_level=10, depth=2)
@@ -47,5 +52,5 @@ plan = [explore]
     new_code, tree, error = agent.synthesize_policy(current_code, trigger_reason, autopsy)
     assert error is None
     assert tree is not None
-    assert "emergency_survival" in new_code
-    assert "handle_nutrition" in new_code
+    assert "emergency_recovery" in new_code
+    assert "combat" in new_code

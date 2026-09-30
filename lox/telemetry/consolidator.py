@@ -12,24 +12,11 @@ from typing import Any
 import duckdb
 
 
-def consolidate_run(
-    run_id: str,
-    db_path: str = "data/lox.duckdb",
-    telemetry_dir: str = "data/telemetry",
-    cleanup: bool = True,
-) -> dict[str, Any]:
-    """
-    Consolidates ticks and episode records for a given run_id into DuckDB.
-    Deletes the raw parquet partition directory if cleanup=True.
-    """
-    run_dir = os.path.join(telemetry_dir, run_id)
-    if not os.path.exists(run_dir):
-        return {"run_id": run_id, "ticks_added": 0, "episodes_added": 0, "cleaned_up": False}
-
+def init_db(db_path: str = "data/lox.duckdb") -> duckdb.DuckDBPyConnection:
+    """Initializes DuckDB tables and runs migrations if needed."""
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     con = duckdb.connect(db_path)
 
-    # Initialize tables if they do not exist
     con.execute("""
         CREATE TABLE IF NOT EXISTS ticks (
             run_id VARCHAR,
@@ -53,9 +40,81 @@ def consolidate_run(
             turns INTEGER,
             death_reason VARCHAR,
             solved BOOLEAN,
-            wall_sec FLOAT
+            wall_sec FLOAT,
+            role VARCHAR,
+            gold INTEGER,
+            max_depth INTEGER,
+            steps INTEGER,
+            attacks INTEGER,
+            descents INTEGER,
+            searches INTEGER,
+            eats INTEGER,
+            prayers INTEGER,
+            death_category VARCHAR
+        );
+        CREATE TABLE IF NOT EXISTS events (
+            run_id VARCHAR,
+            episode_id VARCHAR,
+            turn INTEGER,
+            depth INTEGER,
+            event_type VARCHAR,
+            message VARCHAR,
+            details VARCHAR
+        );
+        CREATE TABLE IF NOT EXISTS token_usage (
+            run_id VARCHAR,
+            session_id VARCHAR,
+            timestamp TIMESTAMP,
+            provider VARCHAR,
+            model VARCHAR,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
+            estimated_cost_usd FLOAT,
+            trigger_reason VARCHAR,
+            tools_called VARCHAR
         );
     """)
+
+    # Check and add any missing columns in episodes table if upgraded from earlier schema
+    for col, col_type in [
+        ("role", "VARCHAR"),
+        ("gold", "INTEGER"),
+        ("max_depth", "INTEGER"),
+        ("steps", "INTEGER"),
+        ("attacks", "INTEGER"),
+        ("descents", "INTEGER"),
+        ("searches", "INTEGER"),
+        ("eats", "INTEGER"),
+        ("prayers", "INTEGER"),
+        ("death_category", "VARCHAR"),
+    ]:
+        con.execute(f"ALTER TABLE episodes ADD COLUMN IF NOT EXISTS {col} {col_type};")
+
+    return con
+
+
+def consolidate_run(
+    run_id: str,
+    db_path: str = "data/lox.duckdb",
+    telemetry_dir: str = "data/telemetry",
+    cleanup: bool = True,
+) -> dict[str, Any]:
+    """
+    Consolidates ticks, episode records, and events for a given run_id into DuckDB.
+    Deletes the raw parquet partition directory if cleanup=True.
+    """
+    run_dir = os.path.join(telemetry_dir, run_id)
+    if not os.path.exists(run_dir):
+        return {
+            "run_id": run_id,
+            "ticks_added": 0,
+            "episodes_added": 0,
+            "events_added": 0,
+            "cleaned_up": False,
+        }
+
+    con = init_db(db_path)
 
     # Vectorized SQL merge for ticks
     ticks_pattern = os.path.join(run_dir, "ticks_part_*.parquet")
@@ -74,6 +133,14 @@ def consolidate_run(
         res = con.execute("SELECT COUNT(*) FROM episodes WHERE run_id = ?", [run_id]).fetchone()
         episodes_added = res[0] if res else 0
 
+    # Vectorized SQL merge for events
+    ev_file = os.path.join(run_dir, "events.parquet")
+    events_added = 0
+    if os.path.exists(ev_file):
+        con.execute(f"INSERT INTO events SELECT * FROM read_parquet('{ev_file}')")
+        res = con.execute("SELECT COUNT(*) FROM events WHERE run_id = ?", [run_id]).fetchone()
+        events_added = res[0] if res else 0
+
     con.close()
 
     # Cleanup raw parquet directory
@@ -84,5 +151,6 @@ def consolidate_run(
         "run_id": run_id,
         "ticks_added": ticks_added,
         "episodes_added": episodes_added,
+        "events_added": events_added,
         "cleaned_up": cleanup,
     }

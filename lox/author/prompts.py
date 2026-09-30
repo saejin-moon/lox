@@ -1,5 +1,6 @@
 """
-LOX 2.0 Author Prompts: High-signal system prompts for LLM policy synthesis.
+LOX 2.0 Author Prompts: Ultra-compact, token-frugal prompts for LLM policy synthesis (<450 tokens total).
+Maximizes signal-to-token ratio and equips the agent with DuckDB analytical tooling.
 """
 from __future__ import annotations
 
@@ -7,49 +8,46 @@ from lox.dsl.schema import ALLOWED_PREDICATES, ALLOWED_ACTIONS, ENUM_CONSTANTS
 
 
 def build_system_prompt() -> str:
-    predicates_list = "\n".join(f"  - `{k}` ({v})" for k, v in ALLOWED_PREDICATES.items())
-    actions_list = "\n".join(f"  - `{a}()`" for a in sorted(ALLOWED_ACTIONS))
-    enums_list = ", ".join(f"`{k}`" for k in ENUM_CONSTANTS.keys())
+    """Ultra-dense system prompt (~220 tokens) defining syntax, schema, and DuckDB analytical tools."""
+    preds = ", ".join(ALLOWED_PREDICATES.keys())
+    actions = ", ".join(f"{a}()" for a in sorted(ALLOWED_ACTIONS))
+    enums = ", ".join(f"{k}={v}" for k, v in ENUM_CONSTANTS.items())
 
     return f"""You are the LOX Policy Synthesizer.
-Your goal is to author or revise an autonomous, safety-bounded game policy program written in pure Pythonic Infix AST.
-The program is compiled into a high-performance Hierarchical Behavior Tree executed at microsecond CPU speeds.
+Synthesize autonomous NetHack/MiniHack policies in safe Pythonic Infix AST, compiled into microsecond CPU Behavior Trees.
 
-### Language Syntax & Grammar Rules
-1. Define named behaviors using either `def name():` or `macro name:`.
-2. Use Python `if`, `elif`, and `else` statements with standard boolean infix logic:
-   - Supported operators: `and`, `or`, `not`, `<`, `<=`, `>`, `>=`, `==`, `!=`
-3. Action calls are simple function calls, e.g. `descend()`, `step_to_frontier()`.
-4. Define the execution priority order with `plan = [macro1, macro2, ...]` or `plan:` followed by macro names.
-   The plan executes as a Priority Selector (evaluating from top to bottom on every turn).
-5. STRICT SAFETY RULES:
-   - NEVER use while loops, for loops, imports, or arbitrary Python expressions.
-   - ONLY reference allowed predicates, action primitives, and enum constants listed below.
+### Syntax Rules
+1. Define behaviors: `def name(): if cond: act() else: act()`
+2. Infix operators: `and`, `or`, `not`, `<`, `<=`, `>`, `>=`, `==`, `!=`
+3. Plan priority: `plan = [fn1, fn2, ...]` (evaluates top-to-bottom as a priority Selector).
+4. Safety: No loops, no imports, no arbitrary expressions. Use ONLY approved identifiers.
 
-### Approved Predicates:
-{predicates_list}
+### Approved Vocabulary
+- Predicates: {preds}
+- Enums: {enums}
+- Actions: {actions}
 
-### Enum Constants:
-{enums_list}
+### Empirical Analysis Tools (DuckDB)
+Before writing code, you may call tools to analyze historical gameplay data:
+- `query_duckdb(sql)`: Execute read-only SQL on `data/lox.duckdb` (tables: `episodes`, `ticks`, `events`).
+- `get_duckdb_schema()`: View database tables and column types.
+- `get_death_taxonomy(window)`: Top death causes, frequencies, and avg depth.
+- `get_action_distribution(run_id)`: Action frequencies and search vs step ratios.
 
-### Approved Action Primitives:
-{actions_list}
-
-### Output Format:
-Wrap your policy code in a single ```python ... ``` block. Include a brief 1-2 sentence rationale before the code.
+### Output Requirement
+Provide 1 brief rationale sentence, then your full revised code in a single ```python ... ``` block.
 """
 
 
-def build_user_prompt(current_policy: str, trigger_reason: str, autopsy_report: str) -> str:
-    return f"""### Synthesis Trigger:
-{trigger_reason}
+def build_user_prompt(current_policy: str, trigger_reason: str, status_report: str) -> str:
+    """Compact user prompt (<200 tokens) presenting the incident report and current policy."""
+    return f"""### Status Report:
+{status_report}
 
-{autopsy_report}
-
-### Current Policy Program:
+### Current Policy:
 ```python
-{current_policy}
+{current_policy.strip()}
 ```
 
-Please revise the policy program to eliminate this failure mode, prevent stalls, and improve survival and floor progression.
+Diagnose the failure mode (query DuckDB if needed) and synthesize the updated policy program to resolve it.
 """

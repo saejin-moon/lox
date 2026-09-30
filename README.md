@@ -57,12 +57,14 @@ lox/
 │   └── nethack.py           # Clean NLE NetHack wrapper (structured inventory, safety interlocks)
 ├── telemetry/
 │   ├── recorder.py          # Circular flight recorder & markdown autopsy generator
-│   ├── triggers.py          # Dynamic synthesis triggers (floor pacing stalls, cluster deaths)
-│   ├── parquet.py           # Streaming PyArrow Parquet partition logger
-│   └── consolidator.py      # Vectorized SQL DuckDB consolidation & auto-cleanup
+│   ├── triggers.py          # Optimal 2-tier dynamic triggers (stalls, starvation, cluster deaths)
+│   ├── parquet.py           # Streaming PyArrow Parquet partition logger (ticks, episodes, events)
+│   ├── consolidator.py      # Vectorized SQL DuckDB consolidation & auto-cleanup
+│   └── tokens.py            # Token usage & cost tracking directly into DuckDB
 └── author/
-    ├── prompts.py           # System and user prompts for policy authoring
-    └── agent.py             # Author agent supporting Gemini, OpenRouter, local vLLM, and Mock
+    ├── prompts.py           # Token-frugal system prompts (<250 tok) & compact status reports
+    ├── tools.py             # DuckDB analytical tools (query_duckdb, get_death_taxonomy, etc.)
+    └── agent.py             # Author agent with ReAct tool execution (Gemini, OpenRouter, Mock)
 ```
 
 ---
@@ -70,10 +72,12 @@ lox/
 ## 3. Telemetry Pipeline: Streaming Parquet to Consolidated DuckDB
 
 1. **During Run Execution**:
-   - Each tick and episode record is streamed to partitioned Parquet files under `data/telemetry/<run_id>/ticks_part_*.parquet` with zero database lock contention.
+   - Each tick, episode, and discrete event is streamed to partitioned Parquet files under `data/telemetry/<run_id>/` with zero database lock contention.
 2. **Post-Run Consolidation**:
    - `consolidate_run(run_id, db_path="data/lox.duckdb", cleanup=True)` executes a vectorized SQL merge using DuckDB's `read_parquet()`.
    - Raw parquet partition directories are automatically deleted upon successful consolidation, leaving a clean, single `data/lox.duckdb` file for SQL queries.
+3. **Token Usage Accounting**:
+   - Every LLM synthesis session automatically records prompt tokens, completion tokens, total tokens, tools called, and estimated dollar costs directly into the `token_usage` table in `data/lox.duckdb`.
 
 ---
 
@@ -94,7 +98,12 @@ uv run python scripts/run_minihack.py --episodes 10
 uv run python scripts/run_nethack.py --episodes 10 --max-turns 500 --role valkyrie
 ```
 
-### Run an autonomous policy synthesis loop:
+### Run high-volume data collection across character roles:
+```bash
+uv run python scripts/collect_telemetry.py --roles valkyrie,barbarian --episodes 10 --max-turns 400
+```
+
+### Run an autonomous policy synthesis loop (with DuckDB ReAct tools & token tracking):
 ```bash
 # Offline verification with mock author
 uv run python scripts/run_synthesis.py --provider mock

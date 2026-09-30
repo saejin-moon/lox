@@ -257,6 +257,14 @@ plan = [
         last_valid_hp = obs.hero.hp
         last_valid_max_hp = obs.hero.max_hp
 
+        # Action and event counters
+        total_steps = 0
+        total_attacks = 0
+        total_descents = 0
+        total_searches = 0
+        total_eats = 0
+        total_prayers = 0
+
         for turn_idx in range(max_turns):
             hero = obs.hero
             hy, hx = hero.y, hero.x
@@ -313,6 +321,26 @@ plan = [
                 action = Action(name="search")
             last_action_name = action.name
 
+            # Track action metrics
+            if action.name == "step":
+                total_steps += 1
+            elif action.name == "melee_attack_hostile":
+                total_attacks += 1
+            elif action.name == "descend":
+                total_descents += 1
+                if logger is not None:
+                    logger.log_event(ep_id, hero.turn, hero.depth, "descend", message="Hero descended stairs")
+            elif action.name == "search":
+                total_searches += 1
+            elif action.name == "eat_carried_food":
+                total_eats += 1
+                if logger is not None:
+                    logger.log_event(ep_id, hero.turn, hero.depth, "eat", message="Hero ate food")
+            elif action.name == "pray":
+                total_prayers += 1
+                if logger is not None:
+                    logger.log_event(ep_id, hero.turn, hero.depth, "pray", message="Hero prayed")
+
             flight_recorder.record_turn(
                 turn=hero.turn,
                 depth=hero.depth,
@@ -324,10 +352,20 @@ plan = [
                 message=obs.message,
             )
 
-            # Dynamic trigger check
-            trig, trig_reason = trigger_engine.check_turn(turns_on_level=hero.turns_on_level, depth=hero.depth)
-            if trig == TriggerType.STALL and hero.turns_on_level == 80:
-                print(f"  [Notice: Floor Stagnation Trigger] {trig_reason} at turn {hero.turn}")
+            # Check dynamic triggers
+            food_items = sum(1 for it in obs.inventory if it.category == "food")
+            trig, trig_reason = trigger_engine.check_turn(
+                turns_on_level=hero.turns_on_level,
+                depth=hero.depth,
+                hunger_state=hero.hunger_state.name,
+                food_count=food_items,
+                has_frontier=has_frontier,
+            )
+            if trig in (TriggerType.STALL, TriggerType.STARVATION):
+                if logger is not None:
+                    logger.log_event(ep_id, hero.turn, hero.depth, "trigger", message=trig_reason)
+                if hero.turns_on_level % 80 == 0:
+                    print(f"  [Dynamic Trigger: {trig.name}] {trig_reason} at turn {hero.turn}")
 
             # Telemetry tick logging
             if logger is not None:
@@ -347,6 +385,11 @@ plan = [
 
             # Step environment
             obs, reward, term, trunc, info = adapter.step(action)
+
+            # Check for kill event
+            if "you kill" in obs.message.lower() or "you destroy" in obs.message.lower():
+                if logger is not None:
+                    logger.log_event(ep_id, hero.turn, hero.depth, "combat_kill", message=obs.message)
 
             if term or trunc:
                 end_msg = obs.message.lower()
@@ -371,6 +414,19 @@ plan = [
         final_max_hp = obs.hero.max_hp if obs.hero.max_hp > 0 else last_valid_max_hp
         score = obs.hero.gold + (final_depth * 100)
 
+        # Categorize death reason
+        low_death = death_reason.lower()
+        if "maxturns" in low_death or "timeout" in low_death:
+            death_cat = "timeout"
+        elif "starv" in low_death or "faint" in low_death or "choke" in low_death:
+            death_cat = "starvation"
+        elif "kill" in low_death or "died" in low_death or "zerohp" in low_death:
+            death_cat = "combat"
+        elif solved:
+            death_cat = "survived"
+        else:
+            death_cat = "other"
+
         if logger is not None:
             logger.log_episode(
                 episode_id=ep_id,
@@ -380,6 +436,16 @@ plan = [
                 death_reason=death_reason,
                 solved=solved,
                 wall_sec=ep_wall,
+                role=role,
+                gold=obs.hero.gold,
+                max_depth=max_depth_reached,
+                steps=total_steps,
+                attacks=total_attacks,
+                descents=total_descents,
+                searches=total_searches,
+                eats=total_eats,
+                prayers=total_prayers,
+                death_category=death_cat,
             )
 
         episode_summaries.append({

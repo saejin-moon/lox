@@ -39,6 +39,16 @@ def test_parquet_and_duckdb_consolidation(tmp_path):
         wall_sec=0.15,
     )
 
+    # Log an event
+    logger.log_event(
+        episode_id="ep_01",
+        turn=10,
+        depth=1,
+        event_type="combat_kill",
+        message="You kill the jackal!",
+        details="jackal",
+    )
+
     logger.close()
 
     # Raw parquet directory should exist
@@ -49,6 +59,7 @@ def test_parquet_and_duckdb_consolidation(tmp_path):
     stats = consolidate_run(run_id=run_id, db_path=db_path, telemetry_dir=telem_dir, cleanup=True)
     assert stats["ticks_added"] == 25
     assert stats["episodes_added"] == 1
+    assert stats["events_added"] == 1
     assert stats["cleaned_up"] is True
 
     # Raw parquet directory should be deleted
@@ -58,7 +69,9 @@ def test_parquet_and_duckdb_consolidation(tmp_path):
     con = duckdb.connect(db_path, read_only=True)
     ticks_count = con.execute("SELECT COUNT(*) FROM ticks WHERE run_id = ?", [run_id]).fetchone()[0]
     ep_count = con.execute("SELECT COUNT(*) FROM episodes WHERE run_id = ?", [run_id]).fetchone()[0]
+    ev_count = con.execute("SELECT COUNT(*) FROM events WHERE run_id = ?", [run_id]).fetchone()[0]
     con.close()
 
     assert ticks_count == 25
     assert ep_count == 1
+    assert ev_count == 1

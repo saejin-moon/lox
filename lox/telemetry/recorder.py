@@ -63,26 +63,36 @@ class FlightRecorder:
             counts[d] = counts.get(d, 0) + 1
         return counts
 
-    def generate_autopsy_report(self, death_reason: str) -> str:
-        """Generates a compact, high-signal markdown autopsy report for the LLM author."""
+    def generate_compact_status_report(self, trigger_reason: str, cluster_note: str = "") -> str:
+        """
+        Generates an ultra-compact status report (<180 tokens) with high signal density:
+        - Incident header
+        - Last 5 steps transition table
+        - Historical cluster note
+        """
         if not self.buffer:
-            return f"### Episode Autopsy\n- **Death Reason**: {death_reason}\n- No turn telemetry recorded.\n"
+            return f"[INCIDENT: {trigger_reason}]\nNo turn telemetry recorded."
 
-        last_snap = self.buffer[-1]
+        last = self.buffer[-1]
         lines = [
-            "### Episode Autopsy",
-            f"- **Fatal Outcome**: `{death_reason}`",
-            f"- **Dungeon Depth**: {last_snap.depth} | **Total Turns**: {last_snap.turn}",
-            f"- **Final HP**: {last_snap.hp}/{last_snap.max_hp} | **Hunger**: {last_snap.hunger}",
+            f"[INCIDENT: {trigger_reason}]",
+            f"State: Depth {last.depth} | Turn {last.turn} | HP {last.hp}/{last.max_hp} | Hunger {last.hunger}",
             "",
-            "#### Last 8 Steps Before Termination:",
-            "| Turn | HP | Action | In-Game Message |",
+            "Recent Steps (Last 5):",
+            "| T | HP | Action | Message |",
             "| :--- | :--- | :--- | :--- |",
         ]
 
-        recent_snaps = list(self.buffer)[-8:]
+        recent_snaps = list(self.buffer)[-5:]
         for s in recent_snaps:
             msg = s.message.replace("|", "/") if s.message else "-"
             lines.append(f"| {s.turn} | {s.hp}/{s.max_hp} | `{s.action_name}` | {msg} |")
 
+        if cluster_note:
+            lines.append(f"\n{cluster_note}")
+
         return "\n".join(lines)
+
+    def generate_autopsy_report(self, death_reason: str) -> str:
+        """Legacy alias pointing to compact status report."""
+        return self.generate_compact_status_report(trigger_reason=death_reason)

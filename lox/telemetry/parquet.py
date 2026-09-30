@@ -1,6 +1,6 @@
 """
 LOX 2.0 Parquet Telemetry Logger.
-Streaming, zero-lock PyArrow Parquet writer for per-tick and per-episode telemetry.
+Streaming, zero-lock PyArrow Parquet writer for per-tick, per-episode, and per-event telemetry.
 """
 from __future__ import annotations
 
@@ -34,6 +34,26 @@ EPISODE_SCHEMA = pa.schema([
     ("death_reason", pa.string()),
     ("solved", pa.bool_()),
     ("wall_sec", pa.float32()),
+    ("role", pa.string()),
+    ("gold", pa.int32()),
+    ("max_depth", pa.int32()),
+    ("steps", pa.int32()),
+    ("attacks", pa.int32()),
+    ("descents", pa.int32()),
+    ("searches", pa.int32()),
+    ("eats", pa.int32()),
+    ("prayers", pa.int32()),
+    ("death_category", pa.string()),
+])
+
+EVENT_SCHEMA = pa.schema([
+    ("run_id", pa.string()),
+    ("episode_id", pa.string()),
+    ("turn", pa.int32()),
+    ("depth", pa.int32()),
+    ("event_type", pa.string()),
+    ("message", pa.string()),
+    ("details", pa.string()),
 ])
 
 
@@ -48,6 +68,7 @@ class ParquetLogger:
 
         self.tick_buffer: list[dict[str, Any]] = []
         self.episode_buffer: list[dict[str, Any]] = []
+        self.event_buffer: list[dict[str, Any]] = []
         self.tick_part_count = 0
 
     def log_tick(
@@ -91,6 +112,16 @@ class ParquetLogger:
         death_reason: str,
         solved: bool,
         wall_sec: float,
+        role: str = "valkyrie",
+        gold: int = 0,
+        max_depth: int = 1,
+        steps: int = 0,
+        attacks: int = 0,
+        descents: int = 0,
+        searches: int = 0,
+        eats: int = 0,
+        prayers: int = 0,
+        death_category: str = "unknown",
     ) -> None:
         self.episode_buffer.append({
             "run_id": self.run_id,
@@ -101,6 +132,35 @@ class ParquetLogger:
             "death_reason": str(death_reason),
             "solved": bool(solved),
             "wall_sec": float(wall_sec),
+            "role": str(role),
+            "gold": int(gold),
+            "max_depth": int(max_depth),
+            "steps": int(steps),
+            "attacks": int(attacks),
+            "descents": int(descents),
+            "searches": int(searches),
+            "eats": int(eats),
+            "prayers": int(prayers),
+            "death_category": str(death_category),
+        })
+
+    def log_event(
+        self,
+        episode_id: str,
+        turn: int,
+        depth: int,
+        event_type: str,
+        message: str = "",
+        details: str = "",
+    ) -> None:
+        self.event_buffer.append({
+            "run_id": self.run_id,
+            "episode_id": episode_id,
+            "turn": int(turn),
+            "depth": int(depth),
+            "event_type": str(event_type),
+            "message": str(message)[:100],
+            "details": str(details)[:150],
         })
 
     def flush_ticks(self) -> None:
@@ -120,6 +180,15 @@ class ParquetLogger:
         pq.write_table(table, ep_path)
         self.episode_buffer.clear()
 
+    def flush_events(self) -> None:
+        if not self.event_buffer:
+            return
+        table = pa.Table.from_pylist(self.event_buffer, schema=EVENT_SCHEMA)
+        ev_path = os.path.join(self.run_dir, "events.parquet")
+        pq.write_table(table, ev_path)
+        self.event_buffer.clear()
+
     def close(self) -> None:
         self.flush_ticks()
         self.flush_episodes()
+        self.flush_events()
