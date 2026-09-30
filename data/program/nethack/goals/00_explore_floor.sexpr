@@ -1,1 +1,0 @@
-(goal explore_floor (when (true)) (until (or (xl_ge 4) (depth_ge 4))))

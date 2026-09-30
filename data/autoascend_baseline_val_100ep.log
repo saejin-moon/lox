@@ -1,5 +1,0 @@
-Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
-Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
-See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
-/home/bae/autoascend/autoascend/agent.py:377: RuntimeWarning: overflow encountered in scalar subtract
-  self.cursor_pos = (observation['tty_cursor'][0] - 1, observation['tty_cursor'][1])

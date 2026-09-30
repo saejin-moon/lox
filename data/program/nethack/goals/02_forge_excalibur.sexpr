@@ -1,1 +1,0 @@
-(goal forge_excalibur (when (and (lawful) (xl_ge 5) (not has_excalibur))) (until (has_excalibur)) (max_steps 2000))

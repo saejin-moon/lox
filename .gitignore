@@ -1,3 +1,6 @@
+# Quarantined legacy archive (strictly excluded from git)
+archive/
+
 # Virtual environment & uv
 .venv/
 
@@ -15,46 +18,7 @@ htmlcov/
 .env.*
 !.env.example
 
-# Large database & telemetry data
-data/raw/
-data/*.db
-data/*.db-journal
-data/*.duckdb
-data/*.duckdb.wal
-data/*.parquet
+# Telemetry data & ephemeral databases (consolidated locally)
+data/
 logs/
-
-# Ephemeral experiment & evaluation JSON/log dumps
 *.log
-data/*.log
-data/ablation_*.json
-data/*_100ep.json
-data/postR4_*.json
-data/arm*.json
-data/ab_*.json
-data/batch_*.json
-data/benchmark_results.json
-data/domain_eval.json
-data/r4_smoke_*.json
-data/prompt_ab_live_partial.json
-data/trajectory.png
-data/ablation_work/
-data/campaign_*.json
-
-# Preserve first-class policy artifacts and program trees
-!data/.gitkeep
-!data/policy_program.json
-!data/policy_program/
-!data/revision_ledger.jsonl
-!data/nogoods.json
-!data/trajectory.csv
-!data/compiled/
-!data/compiled/**
-!data/program/
-!data/program/**
-!data/programs/
-!data/programs/**
-!data/prompts/
-!data/prompts/**
-!data/corpus/
-!data/corpus/**

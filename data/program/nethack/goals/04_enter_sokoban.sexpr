@@ -1,1 +1,0 @@
-(goal enter_sokoban (when (true)) (until (or (has_reflection) (depth_ge 9) (sokoban_completed))) (directive "ENTER_SOKOBAN"))

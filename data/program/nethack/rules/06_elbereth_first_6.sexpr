@@ -1,1 +1,0 @@
-(rule add tactic_rules (when (and (monster "water moccasin") (not has_poison_res))) (do elbereth_first) (note "interlock: lethal poison biter 'water moccasin' — engrave/ward, never melee") (interlock true))

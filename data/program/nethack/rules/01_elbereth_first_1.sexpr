@@ -1,1 +1,0 @@
-(rule add tactic_rules (when (and (monster "killer bee") (not has_poison_res))) (do elbereth_first) (note "interlock: lethal poison biter 'killer bee' — engrave/ward, never melee") (interlock true))

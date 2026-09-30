@@ -1,1 +1,0 @@
-(goal hunt_poison_res (when (true)) (until (or (has_poison_res) (depth_ge 6))))

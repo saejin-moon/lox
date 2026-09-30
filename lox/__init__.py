@@ -1,5 +1,4 @@
 """
-LOX-ψ: the LOX-ψ reference instantiation — LLM-Oriented Creation of Symbolic policies for NLE.
+LOX 2.0: Neuro-Symbolic Policy Synthesis Engine.
 """
-
-__version__ = "0.1.0"
+__version__ = "2.0.0"

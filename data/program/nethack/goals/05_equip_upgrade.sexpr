@@ -1,1 +1,0 @@
-(goal equip_upgrade (when (or (has_reflection) (depth_ge 6))) (until (or (ac_le -10) (depth_ge 8) (steps_in_goal_ge 2500))) (max_steps 2500))
