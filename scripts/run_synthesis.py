@@ -13,6 +13,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from lox.author.agent import AuthorAgent
 from lox.telemetry.recorder import FlightRecorder
 from lox.telemetry.triggers import DynamicTriggerEngine, TriggerType
@@ -23,6 +29,7 @@ from lox.envs.minihack import MiniHackAdapter
 def run_synthesis_loop(
     provider: str = "mock",
     model: str | None = None,
+    api_key: str | None = None,
     task: str = "MiniHack-ExploreMaze-Easy-Mapped-v0",
     max_generations: int = 2,
     db_path: str = "data/lox.duckdb",
@@ -34,7 +41,7 @@ def run_synthesis_loop(
     print("=" * 65)
 
     run_id = f"synth_{provider}_{int(time.time())}"
-    author = AuthorAgent(provider=provider, model=model, db_path=db_path)
+    author = AuthorAgent(provider=provider, model=model, api_key=api_key, db_path=db_path)
     trigger_engine = DynamicTriggerEngine(stall_threshold=25, cluster_threshold=2)
     recorder = FlightRecorder(capacity=50)
 
@@ -113,6 +120,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", default="mock", choices=["mock", "gemini", "openrouter"])
     parser.add_argument("--model", default=None)
+    parser.add_argument("--api-key", default=None, help="Explicit API key (overrides environment and .env)")
     parser.add_argument("--task", default="MiniHack-ExploreMaze-Easy-Mapped-v0")
     parser.add_argument("--generations", type=int, default=2)
     parser.add_argument("--db-path", default="data/lox.duckdb")
@@ -121,6 +129,7 @@ if __name__ == "__main__":
     run_synthesis_loop(
         provider=args.provider,
         model=args.model,
+        api_key=args.api_key,
         task=args.task,
         max_generations=args.generations,
         db_path=args.db_path,

@@ -13,6 +13,12 @@ import uuid
 from typing import Any
 import httpx
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.tools import DuckDBToolRegistry, OPENAI_TOOL_SPECS
 from lox.telemetry.tokens import log_token_usage
@@ -33,7 +39,14 @@ class AuthorAgent:
     ):
         self.provider = provider
         self.model = model
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+        if api_key:
+            self.api_key = api_key
+        elif provider == "openrouter":
+            self.api_key = os.environ.get("OPENROUTER_API_KEY")
+        elif provider == "gemini":
+            self.api_key = os.environ.get("GEMINI_API_KEY")
+        else:
+            self.api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY")
         self.base_url = base_url
         self.db_path = db_path
         self.tools = DuckDBToolRegistry(db_path=db_path)
@@ -180,8 +193,18 @@ plan = [
         session_id: str,
         trigger_reason: str,
     ) -> str:
+        if not self.api_key:
+            raise ValueError(
+                f"Missing API key for provider '{self.provider}'. "
+                f"Please pass --api-key or set {self.provider.upper()}_API_KEY in your environment or .env file."
+            )
+
         url = (self.base_url or "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {
+            "Authorization": f"Bearer {self.api_key.strip()}",
+            "HTTP-Referer": "https://github.com/saejin-moon/lox",
+            "X-Title": "LOX 2.0 Policy Synthesis",
+        }
         model_name = self.model or "google/gemini-2.5-flash"
 
         messages: list[dict[str, Any]] = [
@@ -194,15 +217,39 @@ plan = [
         tools_invoked = []
 
         with httpx.Client(timeout=120.0) as client:
+            use_tools = True
             for _ in range(5):  # Max 5 tool turns
-                payload = {
+                payload: dict[str, Any] = {
                     "model": model_name,
                     "messages": messages,
-                    "tools": OPENAI_TOOL_SPECS,
                     "temperature": 0.2,
                 }
+                if use_tools:
+                    payload["tools"] = OPENAI_TOOL_SPECS
+
                 resp = client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
+                if resp.is_error:
+                    err_msg = resp.text
+                    try:
+                        err_json = resp.json()
+                        if "error" in err_json:
+                            err_info = err_json["error"]
+                            if isinstance(err_info, dict):
+                                err_msg = err_info.get("message", err_msg)
+                            else:
+                                err_msg = str(err_info)
+                    except Exception:
+                        pass
+
+                    # If model doesn't support tools, fallback to no-tools
+                    if use_tools and resp.status_code == 400 and ("tool" in err_msg.lower() or "not supported" in err_msg.lower()):
+                        use_tools = False
+                        continue
+
+                    raise RuntimeError(
+                        f"OpenRouter API error ({resp.status_code}): {err_msg}"
+                    )
+
                 data = resp.json()
 
                 usage = data.get("usage", {})

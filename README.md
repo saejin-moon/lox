@@ -143,23 +143,23 @@ The compiler ([`lox/dsl/compiler.py`](file:///home/bae/lox/lox/dsl/compiler.py))
 ### Example Valid Policy
 ```python
 def emergency():
-    if hp < 6 and has_elbereth_engraved is False:
+    if hp_frac < 0.25 and standing_on_elbereth is False:
         engrave_elbereth()
-    elif hp < 8 and has_adjacent_monster:
-        flee()
+    elif hp_frac < 0.35 and can_retreat:
+        step_away_from_hostile()
 
 def sustenance():
-    if is_starving and has_edible_corpse:
+    if hunger_state >= HUNGRY and floor_corpse_adjacent and corpse_is_safe:
         eat_floor_corpse()
-    elif is_hungry and has_food:
-        eat_inventory_food()
+    elif hunger_state >= WEAK and has_carried_food:
+        eat_carried_food()
 
 def combat():
-    if has_adjacent_monster:
-        melee_attack_adjacent()
+    if adjacent_hostile:
+        melee_attack_hostile()
 
 def explore():
-    if has_frontier:
+    if has_unvisited_frontier:
         step_to_frontier()
     else:
         search()
@@ -175,15 +175,18 @@ plan = [
 ### Whitelisted DSL Primitives
 
 #### Sensory Predicates
-- **Vitals & Status**: `hp`, `max_hp`, `depth`, `turn`, `is_hungry`, `is_starving`, `is_blind`, `is_confused`, `is_stunned`, `is_hallucinating`, `can_pray`
-- **Spatial & Navigation**: `has_frontier`, `has_adjacent_monster`, `has_stairs_down`, `has_stairs_up`, `has_adjacent_door`, `has_adjacent_chest`
-- **Tactical & Items**: `has_food`, `has_edible_corpse`, `has_ranged_weapon`, `has_elbereth_engraved`, `monster_distance`
+- **Hero Vitals & Stats**: `hp_frac`, `energy_frac`, `depth`, `turn`, `turns_on_level`, `experience_level`, `gold`, `hunger_state`
+- **Status Effects**: `is_blind`, `is_poisoned`
+- **Tactical Combat**: `adjacent_hostile`, `hostile_count_fov`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`
+- **Divine & Recovery**: `can_safely_pray`, `has_healing`
+- **Physical / Environmental**: `adjacent_closed_door`, `adjacent_fountain`, `stairs_down_known`, `stairs_up_known`, `standing_on_stairs_down`, `standing_on_stairs_up`, `floor_explored`, `has_unvisited_frontier`, `has_unsearched_dead_end`
+- **Nutrition & Intrinsics**: `has_carried_food`, `floor_corpse_adjacent`, `corpse_is_fresh`, `corpse_is_safe`, `has_poison_res`, `can_forge_excalibur`
 
 #### Action Primitives
-- **Movement & Spatial**: `step_to_frontier()`, `step_to_stairs_down()`, `step_to_stairs_up()`, `flee()`, `search()`, `rest()`
-- **Combat & Tactics**: `melee_attack_adjacent()`, `fire_missile()`, `engrave_elbereth()`, `pray()`
-- **Item & World Interaction**: `eat_floor_corpse()`, `eat_inventory_food()`, `open_door()`, `kick_closed_door()`, `dip_excalibur()`, `pickup()`
-- **Equipment Management**: `wield_weapon()`, `wear_armor()`
+- **Movement & Spatial**: `step_to_frontier()`, `step_to_stairs_down()`, `step_to_stairs_up()`, `step_to_dead_end()`, `step_away_from_hostile()`, `step_to_chokepoint()`, `step_to_fountain()`, `descend()`, `ascend()`
+- **Tactical Combat**: `melee_attack_hostile()`, `engrave_elbereth()`
+- **Physical Environment**: `open_door()`, `kick_closed_door()`, `search()`, `wait()`
+- **Nutrition & Items**: `eat_carried_food()`, `eat_floor_corpse()`, `pray()`, `dip_excalibur()`, `quaff_healing()`, `wield_weapon()`, `wear_armor()`
 
 ---
 
