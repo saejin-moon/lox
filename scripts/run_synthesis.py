@@ -62,6 +62,7 @@ def run_synthesis_loop(
     stall_threshold: int = 80,
     cluster_threshold: int = 2,
     db_path: str = "data/lox.duckdb",
+    target_depth: float | None = None,
 ):
     print("=" * 65)
     print("LOX 2.0 Embodied Batched Empirical Policy Synthesis Engine")
@@ -69,6 +70,8 @@ def run_synthesis_loop(
     print(f"Environment: {env_type.upper()} ({role if env_type == 'nethack' else task})")
     print(f"Database:    {db_path}")
     print(f"Config:      {max_generations} gens | {eval_episodes} eps/gen | {max_turns} max turns")
+    if target_depth is not None:
+        print(f"Target:      Avg Depth >= {target_depth:.1f}")
     print(f"Policy Path: {policy_path} (fresh={fresh})")
     print("=" * 65)
 
@@ -326,6 +329,13 @@ class Agent:
         print(f"\n[Gen {gen} Batch Metrics ({eval_episodes} eps)] Avg Depth: {avg_d:.2f} | Max Depth: {max_d} | Avg Turns: {avg_t:.1f}")
         print(f"[Gen {gen} Ranked Fatalities] {death_summary_str}")
 
+        if target_depth is not None and avg_d >= target_depth:
+            print("\n" + "=" * 65)
+            print(f"[CAMPAIGN GOAL ACHIEVED] Generation {gen} reached target average depth {avg_d:.2f} >= {target_depth:.2f}!")
+            print(f"Max Depth: {max_d} | Average Turns: {avg_t:.1f}")
+            print("=" * 65)
+            break
+
         trigger_reason = (
             f"Generation {gen} Empirical Incident Autopsy ({eval_episodes} episodes): "
             f"Avg Depth {avg_d:.2f}, Max Depth {max_d}, Avg Turns {avg_t:.1f}. "
@@ -422,6 +432,7 @@ if __name__ == "__main__":
     parser.add_argument("--stall-threshold", type=int, default=80, help="Turns without progress to trigger stall autopsy")
     parser.add_argument("--cluster-threshold", type=int, default=2, help="Deaths of same cause to trigger cluster autopsy")
     parser.add_argument("--db-path", default="data/lox.duckdb")
+    parser.add_argument("--target-depth", type=float, default=None, help="Target average depth to reach before stopping")
     args = parser.parse_args()
 
     run_synthesis_loop(
@@ -439,4 +450,5 @@ if __name__ == "__main__":
         stall_threshold=args.stall_threshold,
         cluster_threshold=args.cluster_threshold,
         db_path=args.db_path,
+        target_depth=args.target_depth,
     )
