@@ -54,3 +54,53 @@ plan = [explore]
     assert tree is not None
     assert "emergency_recovery" in new_code
     assert "combat" in new_code
+
+
+def test_extract_code_unclosed_block():
+    agent = AuthorAgent(provider="mock")
+    # Truncated response with no closing backticks
+    raw_unclosed = """Here is the evolved policy:
+```python
+def combat():
+    if adjacent_hostile:
+        melee_attack_hostile()
+
+plan = [combat]
+"""
+    extracted = agent.extract_code(raw_unclosed)
+    assert "plan = [combat]" in extracted
+    assert "Here is the evolved policy" not in extracted
+
+
+def test_tool_type_coercion_and_shielding(tmp_path):
+    from lox.author.tools import DuckDBToolRegistry
+    import duckdb
+
+    db_path = str(tmp_path / "test.duckdb")
+    con = duckdb.connect(db_path)
+    con.execute("""
+        CREATE TABLE episodes (
+            run_id VARCHAR, episode_id VARCHAR, depth INTEGER, score INTEGER,
+            turns INTEGER, death_reason VARCHAR, solved BOOLEAN, wall_sec FLOAT,
+            role VARCHAR, gold INTEGER, max_depth INTEGER, steps INTEGER,
+            attacks INTEGER, descents INTEGER, searches INTEGER, eats INTEGER,
+            prayers INTEGER, death_category VARCHAR
+        )
+    """)
+    con.execute("INSERT INTO episodes VALUES ('r1', 'e1', 1, 10, 50, 'starved', false, 1.0, 'valkyrie', 0, 1, 50, 0, 0, 0, 0, 0, 'hunger')")
+    con.close()
+
+    tools = DuckDBToolRegistry(db_path=db_path)
+    # Passing string window should not raise TypeError
+    tax = tools.get_death_taxonomy(window="10")  # type: ignore
+    assert "Top Fatalities" in tax
+    assert "starved" in tax
+
+    # Passing string depth should not raise TypeError
+    pacing = tools.get_floor_pacing_stats(depth="1")  # type: ignore
+    assert "Floor Pacing Stats" in pacing
+
+    # Shielded tool execution in AuthorAgent
+    agent = AuthorAgent(provider="mock", db_path=db_path)
+    res = agent._execute_tool("get_death_taxonomy", {"window": "5"})
+    assert "Top Fatalities" in res

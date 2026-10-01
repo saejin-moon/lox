@@ -52,29 +52,32 @@ class AuthorAgent:
         self.tools = DuckDBToolRegistry(db_path=db_path)
 
     def _execute_tool(self, tool_name: str, args: dict[str, Any]) -> str:
-        """Dispatches tool execution against the DuckDBToolRegistry."""
-        if tool_name == "query_duckdb":
-            return self.tools.query_duckdb(args.get("sql", ""))
-        elif tool_name == "get_duckdb_schema":
-            return self.tools.get_duckdb_schema()
-        elif tool_name == "get_death_taxonomy":
-            return self.tools.get_death_taxonomy(window=args.get("window", 20))
-        elif tool_name == "get_floor_pacing_stats":
-            return self.tools.get_floor_pacing_stats(depth=args.get("depth", 1))
-        elif tool_name == "get_action_distribution":
-            return self.tools.get_action_distribution(run_id=args.get("run_id", ""))
-        elif tool_name == "query_wiki":
-            return self.tools.query_wiki(args.get("query", ""), top_k=args.get("top_k", 2))
-        elif tool_name == "request_macro":
-            run_id = getattr(self, "_current_run_id", "synth_session")
-            return self.tools.request_macro(
-                macro_name=args.get("macro_name", ""),
-                rationale=args.get("rationale", ""),
-                proposed_interface=args.get("proposed_interface", ""),
-                priority=args.get("priority", "medium"),
-                run_id=run_id,
-            )
-        return f"Unknown tool '{tool_name}'."
+        """Dispatches tool execution against the DuckDBToolRegistry with robust error shielding."""
+        try:
+            if tool_name == "query_duckdb":
+                return self.tools.query_duckdb(args.get("sql", ""))
+            elif tool_name == "get_duckdb_schema":
+                return self.tools.get_duckdb_schema()
+            elif tool_name == "get_death_taxonomy":
+                return self.tools.get_death_taxonomy(window=args.get("window", 20))
+            elif tool_name == "get_floor_pacing_stats":
+                return self.tools.get_floor_pacing_stats(depth=args.get("depth", 1))
+            elif tool_name == "get_action_distribution":
+                return self.tools.get_action_distribution(run_id=args.get("run_id", ""))
+            elif tool_name == "query_wiki":
+                return self.tools.query_wiki(args.get("query", ""), top_k=args.get("top_k", 2))
+            elif tool_name == "request_macro":
+                run_id = getattr(self, "_current_run_id", "synth_session")
+                return self.tools.request_macro(
+                    macro_name=args.get("macro_name", ""),
+                    rationale=args.get("rationale", ""),
+                    proposed_interface=args.get("proposed_interface", ""),
+                    priority=args.get("priority", "medium"),
+                    run_id=run_id,
+                )
+            return f"Unknown tool '{tool_name}'."
+        except Exception as e:
+            return f"Tool execution error for '{tool_name}': {e}"
 
     def _call_mock(
         self,
@@ -292,10 +295,23 @@ plan = [
         return str(final_content)
 
     def extract_code(self, response_text: str) -> str:
-        """Extracts the Python code block from markdown."""
+        """Robustly extracts the Python code block from markdown."""
+        # 1. Closed code block: ```python ... ```
         match = re.search(r"```(?:python)?\s*\n(.*?)\n```", response_text, re.DOTALL)
         if match:
             return match.group(1).strip()
+
+        # 2. Unclosed code block (e.g. truncated generation)
+        match_unclosed = re.search(r"```(?:python)?\s*\n(.*)", response_text, re.DOTALL)
+        if match_unclosed:
+            code = match_unclosed.group(1).strip()
+            return re.sub(r"```+$", "", code).strip()
+
+        # 3. No backticks: find from first 'def ' to end of 'plan = [...]'
+        match_def = re.search(r"(def \w+\(.*)", response_text, re.DOTALL)
+        if match_def:
+            return match_def.group(1).strip()
+
         return response_text.strip()
 
     def synthesize_policy(

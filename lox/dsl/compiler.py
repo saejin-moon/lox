@@ -130,6 +130,9 @@ def _compile_statements(
             else:
                 nodes.append(seq)
 
+        elif isinstance(stmt, ast.Pass):
+            nodes.append(ActionNode(lambda bb: Status.SUCCESS, name="pass"))
+
     return nodes
 
 

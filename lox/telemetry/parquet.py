@@ -166,6 +166,7 @@ class ParquetLogger:
     def flush_ticks(self) -> None:
         if not self.tick_buffer:
             return
+        os.makedirs(self.run_dir, exist_ok=True)
         table = pa.Table.from_pylist(self.tick_buffer, schema=TICK_SCHEMA)
         part_path = os.path.join(self.run_dir, f"ticks_part_{self.tick_part_count:04d}.parquet")
         pq.write_table(table, part_path)
@@ -175,6 +176,7 @@ class ParquetLogger:
     def flush_episodes(self) -> None:
         if not self.episode_buffer:
             return
+        os.makedirs(self.run_dir, exist_ok=True)
         table = pa.Table.from_pylist(self.episode_buffer, schema=EPISODE_SCHEMA)
         ep_path = os.path.join(self.run_dir, "episodes.parquet")
         pq.write_table(table, ep_path)
@@ -183,12 +185,16 @@ class ParquetLogger:
     def flush_events(self) -> None:
         if not self.event_buffer:
             return
+        os.makedirs(self.run_dir, exist_ok=True)
         table = pa.Table.from_pylist(self.event_buffer, schema=EVENT_SCHEMA)
         ev_path = os.path.join(self.run_dir, "events.parquet")
         pq.write_table(table, ev_path)
         self.event_buffer.clear()
 
-    def close(self) -> None:
+    def flush(self) -> None:
         self.flush_ticks()
         self.flush_episodes()
         self.flush_events()
+
+    def close(self) -> None:
+        self.flush()

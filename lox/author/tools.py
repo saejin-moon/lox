@@ -92,13 +92,18 @@ class DuckDBToolRegistry:
         if not os.path.exists(self.db_path):
             return "No database found."
 
+        try:
+            window_int = int(window)
+        except Exception:
+            window_int = 20
+
         con = duckdb.connect(self.db_path, read_only=True)
         query = f"""
             SELECT death_reason, COUNT(*) as fatalities, ROUND(AVG(depth), 2) as avg_depth, ROUND(AVG(turns), 1) as avg_turns
             FROM episodes
             GROUP BY death_reason
             ORDER BY fatalities DESC
-            LIMIT {max(1, window)}
+            LIMIT {max(1, window_int)}
         """
         try:
             cur = con.execute(query)
@@ -116,22 +121,27 @@ class DuckDBToolRegistry:
         if not os.path.exists(self.db_path):
             return "No database found."
 
+        try:
+            depth_int = int(depth)
+        except Exception:
+            depth_int = 1
+
         con = duckdb.connect(self.db_path, read_only=True)
         query = f"""
             SELECT 
                 COUNT(*) as total_episodes,
                 ROUND(AVG(turns), 1) as avg_total_turns,
                 MAX(turns) as max_turns,
-                SUM(CASE WHEN depth > {depth} THEN 1 ELSE 0 END) as descended_past_floor,
+                SUM(CASE WHEN depth > {depth_int} THEN 1 ELSE 0 END) as descended_past_floor,
                 ROUND(AVG(score), 1) as avg_score
             FROM episodes
-            WHERE max_depth >= {depth}
+            WHERE max_depth >= {depth_int}
         """
         try:
             cur = con.execute(query)
             res = _format_table(cur)
             con.close()
-            return f"### Floor Pacing Stats (Depth >= {depth}):\n" + res
+            return f"### Floor Pacing Stats (Depth >= {depth_int}):\n" + res
         except Exception as e:
             con.close()
             return f"Error querying pacing stats: {e}"
@@ -169,7 +179,11 @@ class DuckDBToolRegistry:
         Performs sub-5ms BM25 full-text search across the offline NetHack 3.6.6 encyclopedia.
         Use to research monster traits, corpses conveying intrinsics, item properties, or dungeon mechanics.
         """
-        return self.wiki.query(query, top_k=top_k)
+        try:
+            top_k_int = int(top_k)
+        except Exception:
+            top_k_int = 2
+        return self.wiki.query(query, top_k=top_k_int)
 
     def request_macro(
         self,

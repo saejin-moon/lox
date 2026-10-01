@@ -48,6 +48,7 @@ class SafeASTVisitor(ast.NodeVisitor):
         ast.Expr,
         ast.Assign,
         ast.List,
+        ast.Pass,
         ast.keyword,
         ast.Load,
         ast.Store,

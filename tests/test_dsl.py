@@ -97,3 +97,17 @@ def hack():
 """
     with pytest.raises(DSLValidationError):
         compile_policy(bad_func)
+
+
+def test_dsl_pass_statement_allowed():
+    code_with_pass = """
+def fallback():
+    if hp_frac < 0.2:
+        pray()
+    else:
+        pass
+
+plan = [fallback]
+"""
+    tree = compile_policy(code_with_pass)
+    assert tree is not None
