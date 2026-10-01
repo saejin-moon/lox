@@ -412,7 +412,7 @@ plan = [
         logger = ParquetLogger(run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=100)
 
         for ep_idx in range(eval_episodes):
-            ep_id = f"g{gen:03d}_e{ep_idx+1}"
+            ep_id = f"{gen_dir_id}_e{ep_idx+1:03d}"
             obs = adapter.reset(seed=(gen * 1000 + ep_idx))
             known_stairs_down = None
             known_stairs_up = None
@@ -420,6 +420,8 @@ plan = [
             stuck_counter = 0
             ep_turns = 0
             death_reason = "active"
+            max_depth_reached = obs.hero.depth if obs.hero.depth > 0 else 1
+            last_valid_gold = obs.hero.gold if hasattr(obs.hero, "gold") else 0
 
             has_healing = any(
                 it.category == "potion" and any(k in it.name.lower() for k in ["heal", "extra heal"])
@@ -431,6 +433,8 @@ plan = [
                 ep_turns += 1
                 hero = obs.hero
                 hy, hx = hero.y, hero.x
+                max_depth_reached = max(max_depth_reached, hero.depth)
+                last_valid_gold = hero.gold if hasattr(hero, "gold") else last_valid_gold
 
                 # Stairs detection
                 stairs_down_loc = np.argwhere(obs.chars == ord(">"))
@@ -561,20 +565,22 @@ plan = [
                         recorder.record_death(death_reason)
                     break
 
-            gen_depths.append(obs.hero.depth)
+            final_depth = max_depth_reached
+            final_score = last_valid_gold + (final_depth * 100)
+            gen_depths.append(final_depth)
             gen_turns.append(ep_turns)
 
             logger.log_episode(
                 episode_id=ep_id,
-                depth=obs.hero.depth,
-                score=obs.hero.score if hasattr(obs.hero, "score") else 0,
+                depth=final_depth,
+                score=final_score,
                 turns=ep_turns,
                 death_reason=death_reason,
                 solved=False,
                 wall_sec=time.perf_counter() - gen_start_t,
                 role=role if env_type == "nethack" else "minihack",
-                gold=obs.hero.gold if hasattr(obs.hero, "gold") else 0,
-                max_depth=obs.hero.depth,
+                gold=last_valid_gold,
+                max_depth=final_depth,
                 steps=ep_turns,
             )
 
