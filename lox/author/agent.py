@@ -221,13 +221,15 @@ plan = [
 
         with httpx.Client(timeout=120.0) as client:
             use_tools = True
-            for _ in range(5):  # Max 5 tool turns
+            max_turns = 6
+            for turn in range(max_turns):
                 payload: dict[str, Any] = {
                     "model": model_name,
                     "messages": messages,
                     "temperature": 0.2,
                 }
-                if use_tools:
+                # Do not supply tools on the final turn so model must produce final code answer
+                if use_tools and turn < max_turns - 1:
                     payload["tools"] = OPENAI_TOOL_SPECS
 
                 resp = client.post(url, headers=headers, json=payload)
@@ -265,7 +267,7 @@ plan = [
 
                 # Check if tool was called
                 tool_calls = msg.get("tool_calls")
-                if tool_calls:
+                if tool_calls and turn < max_turns - 1:
                     for tc in tool_calls:
                         fn_name = tc["function"]["name"]
                         fn_args = json.loads(tc["function"].get("arguments", "{}"))
@@ -291,7 +293,11 @@ plan = [
             db_path=self.db_path,
         )
 
-        final_content = messages[-1].get("content") or ""
+        final_content = ""
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and m.get("content"):
+                final_content = m["content"]
+                break
         return str(final_content)
 
     def extract_code(self, response_text: str) -> str:
@@ -348,6 +354,8 @@ plan = [
             raw_response = self._call_mock(current_policy, trigger_reason, run_id, session_id)
 
         new_code = self.extract_code(raw_response)
+        if "def " not in new_code or "plan" not in new_code:
+            return new_code, None, f"Policy compilation failed: Extracted response does not contain valid policy code structure ('def' and 'plan' missing)."
         try:
             tree = compile_policy(new_code, action_handlers=action_handlers)
             return new_code, tree, None

@@ -29,7 +29,9 @@ Synthesize autonomous NetHack/MiniHack policies in safe Pythonic Infix AST, comp
 
 ### Empirical & Knowledge Tools
 Before writing code, you may call tools to analyze data or research game mechanics:
-- `query_duckdb(sql)`: Execute read-only SQL on `data/lox.duckdb` (tables: `episodes`, `ticks`, `events`).
+- `query_duckdb(sql)`: Execute read-only SQL on `data/lox.duckdb`.
+  * Table `episodes`: (run_id, episode_id, depth, score, turns, death_reason, death_category, steps, attacks, descents, eats, prayers, gold)
+  * Table `ticks`: (run_id, episode_id, turn, depth, hp, max_hp, hunger, y, x, action, message, reward)
 - `get_duckdb_schema()`: View database tables and column types.
 - `get_death_taxonomy(window)`: Top death causes, frequencies, and avg depth.
 - `get_action_distribution(run_id)`: Action frequencies and search vs step ratios.
