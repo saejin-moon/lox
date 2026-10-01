@@ -52,6 +52,7 @@ class SafeASTVisitor(ast.NodeVisitor):
         ast.While,
         ast.For,
         ast.If,
+        ast.IfExp,
         ast.Compare,
         ast.BoolOp,
         ast.UnaryOp,
