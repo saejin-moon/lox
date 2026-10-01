@@ -115,7 +115,7 @@ def test_openrouter_tool_calling_and_code_synthesis():
 
 def test_openrouter_tool_ceiling_wrap_up():
     """Verifies that hitting the tool ceiling triggers the wrap-up prompt with tools disabled."""
-    agent = AuthorAgent(provider="openrouter", api_key="sk-test-key")
+    agent = AuthorAgent(provider="openrouter", api_key="sk-test-key", max_tool_turns=15)
 
     def make_tool_resp(call_id):
         r = MagicMock(spec=httpx.Response)

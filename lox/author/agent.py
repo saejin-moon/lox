@@ -36,6 +36,7 @@ class AuthorAgent:
         api_key: str | None = None,
         base_url: str | None = None,
         db_path: str = "data/lox.duckdb",
+        max_tool_turns: int = 50,
     ):
         self.provider = provider
         self.model = model
@@ -49,6 +50,7 @@ class AuthorAgent:
             self.api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY")
         self.base_url = base_url
         self.db_path = db_path
+        self.max_tool_turns = max_tool_turns
         self.tools = DuckDBToolRegistry(db_path=db_path)
 
     def _execute_tool(self, tool_name: str, args: dict[str, Any]) -> str:
@@ -221,7 +223,7 @@ plan = [
 
         with httpx.Client(timeout=120.0) as client:
             use_tools = True
-            max_tool_turns = 15  # Generous ceiling allowing extensive empirical exploration
+            max_tool_turns = self.max_tool_turns  # Configurable ceiling (default 50) allowing extensive empirical exploration
             for turn in range(max_tool_turns):
                 payload: dict[str, Any] = {
                     "model": model_name,
