@@ -61,6 +61,11 @@ class Agent:
         return obs
 ```
 
+### Critical Generator Subroutine Rules:
+1. Always maintain `obs` as the Observation object:
+   - When calling a helper generator subroutine using `obs = yield from self.my_subroutine(obs)`, the subroutine MUST conclude with `return obs`. NEVER return a boolean (`return True` / `return False`) from a generator subroutine! Returning a boolean will overwrite `obs = True`, causing an immediate crash on the next turn.
+2. Do not check generator truthiness with `if self.my_routine(obs):` because calling a generator function always returns a truthy generator object. Instead, inspect predicates on `obs` directly in `run()` (e.g. `if obs.combat.adjacent_hostile:`), and then do `obs = yield from self.handle_combat(obs)`.
+
 ### Observation Interface (`obs`)
 Every turn, `obs` provides rich sub-namespaces:
 - `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state` (SATIATED, NORMAL, HUNGRY, WEAK, FAINTING), `dungeon_branch`

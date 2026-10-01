@@ -23,6 +23,8 @@ from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.tools import DuckDBToolRegistry, OPENAI_TOOL_SPECS
 from lox.telemetry.tokens import log_token_usage
 from lox.dsl.compiler import compile_policy
+from lox.core.types import Observation, HeroState, Action
+import numpy as np
 
 
 class AuthorAgent:
@@ -481,9 +483,20 @@ class Agent:
             if is_valid_structure:
                 try:
                     tree = compile_policy(candidate_code, action_handlers=action_handlers)
+                    # Dry-run validation: execute 2 test steps with a mock observation
+                    dummy_obs = Observation(
+                        chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                        glyphs=np.zeros((21, 79), dtype=np.int16),
+                        hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
+                    )
+                    runner = tree.create_runner(dummy_obs)
+                    for _ in range(2):
+                        act = runner.send(dummy_obs)
+                        if not isinstance(act, Action):
+                            raise ValueError(f"Policy runner produced non-Action: {act}")
                     return candidate_code, tree, None
                 except Exception as e:
-                    last_error = f"Policy compilation failed: {e}"
+                    last_error = f"Policy compilation/validation failed: {e}"
             else:
                 last_error = "Policy compilation failed: Extracted response does not contain valid policy code structure ('class Agent:' or 'def' missing)."
 

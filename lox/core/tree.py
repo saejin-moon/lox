@@ -133,3 +133,13 @@ class BehaviorTree:
         bb = Blackboard(obs=obs, memory=memory or {})
         self.root.tick(bb)
         return bb.selected_action
+
+    def create_runner(self, initial_obs: Observation | None = None) -> Any:
+        """Provides a runner interface matching PolicyRunner for generator compatibility."""
+        class BTRunner:
+            def __init__(self, tree):
+                self.tree = tree
+            def send(self, obs: Observation | None = None) -> Action:
+                act = self.tree.execute(obs)
+                return act if act is not None else Action(name="wait")
+        return BTRunner(self)

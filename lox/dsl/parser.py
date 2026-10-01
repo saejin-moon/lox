@@ -132,6 +132,18 @@ class SafeASTVisitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         self.functions[node.name] = node
+        # Check if function is a generator subroutine (contains yield/yield from)
+        has_yield = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node))
+        if has_yield:
+            for n in ast.walk(node):
+                if isinstance(n, ast.Return) and n.value is not None:
+                    if isinstance(n.value, ast.Constant) and isinstance(n.value.value, bool):
+                        raise DSLValidationError(
+                            f"Generator subroutine '{node.name}' contains 'return {n.value.value}'. "
+                            f"Generator subroutines called via 'obs = yield from self.{node.name}(obs)' must 'return obs' "
+                            f"so the Observation object is not overwritten with a boolean."
+                        )
+
         # Add function arguments to local scope
         old_scope = self.local_scope.copy()
         for arg in node.args.args:
