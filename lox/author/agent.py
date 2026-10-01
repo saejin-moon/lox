@@ -499,6 +499,12 @@ class Agent:
                             hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=750, hunger_state=HungerState.HUNGRY),
                             corpses=[FloorCorpse(name="kobold corpse", y=11, x=11, drop_turn=10, age_turns=100, is_poisonous=True, is_deadly=True, is_fresh=False)],
                         )),
+                        ("floating_eye_combat", Observation(
+                            chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                            glyphs=np.zeros((21, 79), dtype=np.int16),
+                            hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
+                            combat=CombatView(hostile_count_fov=1, adjacent_hostile=True, closest_hostile_name="floating eye"),
+                        )),
                         ("combat", Observation(
                             chars=np.full((21, 79), ord("."), dtype=np.uint8),
                             glyphs=np.zeros((21, 79), dtype=np.int16),
@@ -522,6 +528,10 @@ class Agent:
                                     act = future.result(timeout=1.0)
                                     if not isinstance(act, Action):
                                         raise ValueError(f"Policy runner produced non-Action under {s_name} state: {act}")
+                                    if s_name == "hungry_unsafe_corpse" and act.name == "eat_floor_corpse":
+                                        raise ValueError("Invariant regression: Policy attempted to eat unsafe/poisonous corpse! Check corpse.is_safe first.")
+                                    if s_name == "floating_eye_combat" and act.name == "melee_attack_hostile":
+                                        raise ValueError("Invariant regression: Policy attempted melee attack against floating eye! Gaze will paralyze hero.")
                                 except concurrent.futures.TimeoutError:
                                     raise ValueError(
                                         f"Policy entered an infinite loop without yielding under {s_name} scenario (step {step_i+1}). "
