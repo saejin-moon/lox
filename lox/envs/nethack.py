@@ -87,6 +87,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.searched_count = np.zeros((21, 79), dtype=np.int32)
         self.peaceful_positions: set[tuple[int, int]] = set()
         self.blocked_tiles: set[tuple[int, int]] = set()
+        self.non_door_tiles: set[tuple[int, int]] = set()
 
         # Build ASCII char -> action index map
         unwrapped = getattr(self.env, "unwrapped", self.env)
@@ -103,6 +104,14 @@ class NetHackAdapter(EnvironmentAdapter):
         # Command.PRAY index in standard NLE actions is 62
         self.pray_action_idx = 62 if len(self.actions) > 62 else self.char_to_act.get("#", 0)
         self.last_prayer_turn: int = -1000
+
+    def _get_doors_mask(self, glyphs: np.ndarray) -> np.ndarray:
+        """Returns boolean mask of real closed doors using NLE CMAP glyphs."""
+        doors_mask = (glyphs == (nethack.GLYPH_CMAP_OFF + 15)) | (glyphs == (nethack.GLYPH_CMAP_OFF + 16))
+        for dy, dx in self.non_door_tiles:
+            if 0 <= dy < 21 and 0 <= dx < 79:
+                doors_mask[dy, dx] = False
+        return doors_mask
 
     def is_target_floating_eye(self, glyphs: np.ndarray, y: int, x: int) -> bool:
         """Informational check: returns True if monster at (y, x) is a floating eye."""
@@ -157,6 +166,7 @@ class NetHackAdapter(EnvironmentAdapter):
             self.searched_count.fill(0)
             self.peaceful_positions.clear()
             self.blocked_tiles.clear()
+            self.non_door_tiles.clear()
             self.floor_corpses.clear()
             self.known_stairs_down = None
             self.known_stairs_up = None
@@ -288,7 +298,7 @@ class NetHackAdapter(EnvironmentAdapter):
         # Spatial topology & navigation analysis
         walkable = build_walkable_mask(raw_obs)
         walkable_ex = walkable.copy()
-        doors_mask = (chars == ord("+"))
+        doors_mask = self._get_doors_mask(glyphs)
         walkable_ex[doors_mask] = True
         if self.known_stairs_down:
             walkable_ex[self.known_stairs_down[0], self.known_stairs_down[1]] = True
@@ -348,16 +358,17 @@ class NetHackAdapter(EnvironmentAdapter):
 
         # Dungeon tile type
         curr_char = chr(chars[y, x])
+        curr_glyph = int(glyphs[y, x])
         tile_type = "room"
         if curr_char == "#":
             tile_type = "corridor"
-        elif curr_char == "+":
+        elif nethack.glyph_is_cmap(curr_glyph) and nethack.glyph_to_cmap(curr_glyph) in (12, 13, 14, 15, 16):
             tile_type = "doorway"
-        elif curr_char == "{":
+        elif nethack.glyph_is_cmap(curr_glyph) and nethack.glyph_to_cmap(curr_glyph) == 31:
             tile_type = "fountain"
-        elif curr_char == "_":
+        elif nethack.glyph_is_cmap(curr_glyph) and nethack.glyph_to_cmap(curr_glyph) == 27:
             tile_type = "altar"
-        elif curr_char == "^":
+        elif nethack.glyph_is_trap(curr_glyph):
             tile_type = "trap"
         elif curr_char == ">":
             tile_type = "stairs_down"
@@ -369,7 +380,7 @@ class NetHackAdapter(EnvironmentAdapter):
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             ny, nx = y + dy, x + dx
             if 0 <= ny < 21 and 0 <= nx < 79:
-                if chr(chars[ny, nx]) == "+":
+                if doors_mask[ny, nx]:
                     adj_door = True
                     break
 
@@ -500,6 +511,11 @@ class NetHackAdapter(EnvironmentAdapter):
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
                 dy, dx = self._last_attempted_dir
                 self.blocked_tiles.add((py + dy, px + dx))
+        if "you see no door there" in msg or "cannot open that" in msg:
+            if getattr(self, "_last_attempted_dir", None) is not None:
+                py, px = getattr(self, "_prev_hero_pos", (0, 0))
+                dy, dx = self._last_attempted_dir
+                self.non_door_tiles.add((py + dy, px + dx))
 
         return obs, total_reward, bool(term), bool(trunc), info
 
@@ -508,6 +524,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.searched_count.fill(0)
         self.peaceful_positions.clear()
         self.blocked_tiles.clear()
+        self.non_door_tiles.clear()
         self.turns_on_level = 0
         self.last_depth = 1
         self.last_dnum = 0
@@ -534,13 +551,12 @@ class NetHackAdapter(EnvironmentAdapter):
         # Handle composite navigation actions
         if action.name == "step_to_frontier" and obs_prev is not None:
             hero = obs_prev.hero
-            chars = obs_prev.chars
             walkable = build_walkable_mask(obs_prev.raw_obs)
             walkable_nav = walkable.copy()
             for by, bx in self.blocked_tiles:
                 if 0 <= by < 21 and 0 <= bx < 79:
                     walkable_nav[by, bx] = False
-            doors_mask = (chars == ord("+"))
+            doors_mask = self._get_doors_mask(obs_prev.glyphs)
             walkable_nav[doors_mask] = True
             if self.known_stairs_down:
                 walkable_nav[self.known_stairs_down[0], self.known_stairs_down[1]] = True
@@ -554,13 +570,13 @@ class NetHackAdapter(EnvironmentAdapter):
 
         elif action.name == "step_to_stairs_down" and obs_prev is not None and self.known_stairs_down:
             hero = obs_prev.hero
-            chars = obs_prev.chars
             walkable = build_walkable_mask(obs_prev.raw_obs)
             walkable_nav = walkable.copy()
             for by, bx in self.blocked_tiles:
                 if 0 <= by < 21 and 0 <= bx < 79:
                     walkable_nav[by, bx] = False
-            walkable_nav[chars == ord("+")] = True
+            doors_mask = self._get_doors_mask(obs_prev.glyphs)
+            walkable_nav[doors_mask] = True
             walkable_nav[self.known_stairs_down[0], self.known_stairs_down[1]] = True
             path = SpatialEngine.find_path((hero.y, hero.x), self.known_stairs_down, walkable_nav)
             if path:
@@ -569,13 +585,13 @@ class NetHackAdapter(EnvironmentAdapter):
 
         elif action.name == "step_to_stairs_up" and obs_prev is not None and self.known_stairs_up:
             hero = obs_prev.hero
-            chars = obs_prev.chars
             walkable = build_walkable_mask(obs_prev.raw_obs)
             walkable_nav = walkable.copy()
             for by, bx in self.blocked_tiles:
                 if 0 <= by < 21 and 0 <= bx < 79:
                     walkable_nav[by, bx] = False
-            walkable_nav[chars == ord("+")] = True
+            doors_mask = self._get_doors_mask(obs_prev.glyphs)
+            walkable_nav[doors_mask] = True
             walkable_nav[self.known_stairs_up[0], self.known_stairs_up[1]] = True
             path = SpatialEngine.find_path((hero.y, hero.x), self.known_stairs_up, walkable_nav)
             if path:
@@ -618,8 +634,8 @@ class NetHackAdapter(EnvironmentAdapter):
                 for by, bx in self.blocked_tiles:
                     if 0 <= by < 21 and 0 <= bx < 79:
                         walkable_nav[by, bx] = False
-                chars = obs_prev.chars
-                walkable_nav[chars == ord("+")] = True
+                doors_mask = self._get_doors_mask(obs_prev.glyphs)
+                walkable_nav[doors_mask] = True
                 walkable_nav[ty, tx] = True
                 path = SpatialEngine.find_path((hero.y, hero.x), (ty, tx), walkable_nav)
                 if path:
@@ -725,29 +741,41 @@ class NetHackAdapter(EnvironmentAdapter):
             return self._step_sequence([self.char_to_act.get("z", 0), self.char_to_act.get(slot, 0), self.char_to_act.get(dir_char, 0)])
         elif action.name == "open_door":
             dir_char = "l"
+            found = False
             if action.direction:
                 dir_char = DIR_CHARS.get(action.direction, "l")
+                found = True
             elif obs_prev:
                 hero = obs_prev.hero
-                chars = obs_prev.chars
+                glyphs = obs_prev.glyphs
+                doors_mask = self._get_doors_mask(glyphs)
                 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                     if 0 <= hero.y + dy < 21 and 0 <= hero.x + dx < 79:
-                        if chr(chars[hero.y + dy, hero.x + dx]) == "+":
+                        if doors_mask[hero.y + dy, hero.x + dx]:
                             dir_char = DIR_CHARS[(dy, dx)]
+                            found = True
                             break
+            if not found:
+                return self.step(Action(name="wait"))
             return self._step_sequence([57, self.char_to_act.get(dir_char, 0)])
         elif action.name == "kick_closed_door":
             dir_char = "l"
+            found = False
             if action.direction:
                 dir_char = DIR_CHARS.get(action.direction, "l")
+                found = True
             elif obs_prev:
                 hero = obs_prev.hero
-                chars = obs_prev.chars
+                glyphs = obs_prev.glyphs
+                doors_mask = self._get_doors_mask(glyphs)
                 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                     if 0 <= hero.y + dy < 21 and 0 <= hero.x + dx < 79:
-                        if chr(chars[hero.y + dy, hero.x + dx]) == "+":
+                        if doors_mask[hero.y + dy, hero.x + dx]:
                             dir_char = DIR_CHARS[(dy, dx)]
+                            found = True
                             break
+            if not found:
+                return self.step(Action(name="wait"))
             return self._step_sequence([48, self.char_to_act.get(dir_char, 0)])
         elif action.name == "pickup":
             target_char = ","

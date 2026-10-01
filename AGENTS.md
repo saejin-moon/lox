@@ -80,8 +80,10 @@ lox/
 5. **Coordinate Navigation (`step_to(y, x)`)**:
    - `step_to(y, x)` accepts coordinate integers or tuples and executes A* pathfinding via `SpatialEngine.find_path`.
 
-6. **Door Navigation**:
+6. **Door Navigation & Glyph Discrimination**:
    - NetHack strictly forbids diagonal door opening or kicking (`"You see no door there"`). `NetHackAdapter` restricts door actions to cardinal directions `((-1, 0), (1, 0), (0, -1), (0, 1))`.
+   - In NetHack ASCII, spellbooks on the floor also display as `+`. Using raw character matching `chars == ord("+")` mistakenly treats spellbooks as doors, causing 2,500 consecutive invalid `open_door` commands until NLE aborts the episode (`StepStatus.ABORTED`).
+   - `NetHackAdapter` strictly discriminates real closed doors using NLE CMAP glyphs (`nh.GLYPH_CMAP_OFF + 15` and `+ 16`), dynamically marks phantom door coordinates in `self.non_door_tiles` upon receiving `"You see no door there"`, and safely falls back to `wait()` if no valid door is adjacent.
 
 7. **Corpse Safety & Nutrition**:
    - Eating floor corpses without standing on them causes invalid prompts. `NetHackAdapter.step(Action(name="eat_floor_corpse"))` automatically steps towards the nearest floor corpse if not currently standing on one.
