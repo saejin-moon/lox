@@ -140,60 +140,47 @@ def run_synthesis_loop(
         print(f"\n[Resumed Policy from {policy_path}]")
     else:
         current_policy = """
-def emergency():
-    if hp_frac < 0.25 and can_safely_pray:
-        pray()
-    elif hp_frac < 0.50 and has_healing:
-        quaff_healing()
-    elif hunger_state >= HUNGRY and has_carried_food:
-        eat_carried_food()
+class Agent:
+    def __init__(self):
+        self.last_prayer_turn = -1000
 
-def combat():
-    if adjacent_hostile:
-        melee_attack_hostile()
-    elif hostile_count_fov > 0:
-        step_to_chokepoint()
+    def run(self, obs):
+        while True:
+            # Emergency: self-monitored prayer and healing
+            if obs.hero.hp_frac < 0.15 and (obs.hero.turn - self.last_prayer_turn >= 350):
+                self.last_prayer_turn = obs.hero.turn
+                obs = yield pray()
+                continue
+            elif obs.hero.hp_frac < 0.30 and obs.inventory.has_healing:
+                obs = yield quaff_healing()
+                continue
+            elif obs.hero.hunger_state >= HUNGRY and obs.inventory.has_food:
+                obs = yield eat_carried_food()
+                continue
 
-def navigation():
-    if standing_on_stairs_down:
-        descend()
-    elif stairs_down_known:
-        step_to_stairs_down()
-    elif standing_on_stairs_up:
-        ascend()
-    elif stairs_up_known:
-        step_to_stairs_up()
+            # Tactical combat
+            if obs.combat.adjacent_hostile:
+                if obs.combat.closest_hostile_name == "floating eye":
+                    obs = yield step_away_from_hostile()
+                elif obs.hero.hp_frac < 0.35 and obs.combat.can_retreat:
+                    obs = yield step_to_chokepoint()
+                else:
+                    obs = yield melee_attack_hostile()
+                continue
 
-def maintenance():
-    if adjacent_closed_door:
-        open_door()
-    elif floor_corpse_adjacent and corpse_is_safe:
-        eat_floor_corpse()
-
-def explore():
-    if has_unvisited_frontier:
-        step_to_frontier()
-    elif has_unsearched_dead_end:
-        search()
-    elif stairs_down_known:
-        step_to_stairs_down()
-    else:
-        wait()
-
-def recovery():
-    if adjacent_hostile and can_retreat:
-        step_away_from_hostile()
-    else:
-        wait()
-
-plan = [
-    emergency,
-    combat,
-    navigation,
-    maintenance,
-    explore,
-    recovery,
-]
+            # Navigation & Exploration
+            if obs.spatial.standing_on_stairs_down:
+                obs = yield descend()
+            elif obs.dungeon.adjacent_closed_door:
+                obs = yield open_door()
+            elif obs.spatial.stairs_down_known:
+                obs = yield step_to_stairs_down()
+            elif obs.spatial.has_unvisited_frontier:
+                obs = yield step_to_frontier()
+            elif obs.spatial.has_unsearched_dead_end:
+                obs = yield search()
+            else:
+                obs = yield wait()
 """
         with open(policy_path, "w") as f:
             f.write(current_policy.strip() + "\n")
@@ -422,6 +409,13 @@ plan = [
             death_reason = "active"
             max_depth_reached = obs.hero.depth if obs.hero.depth > 0 else 1
             last_valid_gold = obs.hero.gold if hasattr(obs.hero, "gold") else 0
+            last_5_actions: list[str] = []
+            turns_dl1 = 0
+            turns_dl2 = 0
+            turns_mines = 0
+            inventory_at_death_str = ""
+
+            policy_runner = current_tree.create_runner(obs) if hasattr(current_tree, "create_runner") else None
 
             has_healing = any(
                 it.category == "potion" and any(k in it.name.lower() for k in ["heal", "extra heal"])
@@ -435,6 +429,13 @@ plan = [
                 hy, hx = hero.y, hero.x
                 max_depth_reached = max(max_depth_reached, hero.depth)
                 last_valid_gold = hero.gold if hasattr(hero, "gold") else last_valid_gold
+
+                if hero.depth == 1:
+                    turns_dl1 += 1
+                elif hero.depth == 2:
+                    turns_dl2 += 1
+                if getattr(hero, "dungeon_branch", "") == "mines":
+                    turns_mines += 1
 
                 # Stairs detection
                 stairs_down_loc = np.argwhere(obs.chars == ord(">"))
@@ -525,9 +526,22 @@ plan = [
                     "can_forge_excalibur": (hero.experience_level >= 5) if hasattr(hero, "experience_level") else False,
                 }
 
-                action = current_tree.execute(obs, memory=memory)
+                if policy_runner is not None:
+                    action = policy_runner.send(obs)
+                else:
+                    action = current_tree.execute(obs, memory=memory)
                 if action is None:
                     action = Action(name="search")
+
+                last_5_actions.append(action.name)
+                if len(last_5_actions) > 5:
+                    last_5_actions.pop(0)
+
+                tile_type = getattr(obs.dungeon, "tile_type", "room") if hasattr(obs, "dungeon") else "room"
+                closest_name = getattr(obs.combat, "closest_hostile_name", "") if hasattr(obs, "combat") else ""
+                closest_dist = getattr(obs.combat, "closest_hostile_dist", 99.0) if hasattr(obs, "combat") else 99.0
+                hostiles_fov = getattr(obs.combat, "hostile_count_fov", hostile_count_fov) if hasattr(obs, "combat") else hostile_count_fov
+                dungeon_branch = getattr(obs.hero, "dungeon_branch", "dungeon") if hasattr(obs, "hero") else "dungeon"
 
                 recorder.record_turn(
                     turn=hero.turn,
@@ -538,6 +552,11 @@ plan = [
                     pos=(hy, hx),
                     action_name=action.name,
                     message=obs.message,
+                    closest_hostile_name=closest_name,
+                    closest_hostile_dist=closest_dist,
+                    hostiles_in_fov=hostiles_fov,
+                    tile_type=tile_type,
+                    dungeon_branch=dungeon_branch,
                 )
 
                 logger.log_tick(
@@ -550,6 +569,13 @@ plan = [
                     y=hy,
                     x=hx,
                     action=action.name,
+                    message=obs.message,
+                    reward=0.0,
+                    closest_hostile_name=closest_name,
+                    closest_hostile_dist=closest_dist,
+                    hostiles_in_fov=hostiles_fov,
+                    tile_type=tile_type,
+                    dungeon_branch=dungeon_branch,
                 )
 
                 step_res = adapter.step(action)
@@ -561,7 +587,9 @@ plan = [
 
                 if done:
                     death_reason = info.get("death_reason", "died") if hasattr(info, "get") else "ended"
-                    if "death" in death_reason.lower() or "killed" in death_reason.lower() or "starv" in death_reason.lower():
+                    if "death" in death_reason.lower() or "killed" in death_reason.lower() or "starv" in death_reason.lower() or hero.hp <= 0:
+                        inventory_items = [f"{it.name} ({it.category})" for it in obs.inventory] if hasattr(obs, "inventory") else []
+                        inventory_at_death_str = ", ".join(inventory_items[:10])
                         recorder.record_death(death_reason)
                     break
 
@@ -582,6 +610,12 @@ plan = [
                 gold=last_valid_gold,
                 max_depth=final_depth,
                 steps=ep_turns,
+                death_category=death_reason[:30],
+                inventory_at_death=inventory_at_death_str,
+                last_5_actions=" -> ".join(last_5_actions),
+                turns_dl1=turns_dl1,
+                turns_dl2=turns_dl2,
+                turns_mines=turns_mines,
             )
 
         # Consolidate raw telemetry into DuckDB so LLM tools query live empirical state
@@ -606,7 +640,7 @@ plan = [
                 LIMIT 5
             """).fetchall()
             recent_fatal_samples = con.execute(f"""
-                SELECT death_reason, depth, turns
+                SELECT death_reason, depth, turns, inventory_at_death, last_5_actions
                 FROM episodes
                 WHERE episode_id LIKE '{gen_dir_id}_%' AND death_reason NOT IN ('active', 'MaxTurnsReached')
                 ORDER BY rowid DESC
@@ -643,8 +677,15 @@ plan = [
             + ("\n".join(mortality_lines) if mortality_lines else "  - None recorded")
         )
         if recent_fatal_samples:
-            sample_lines = [f"  - Depth {s[1]}, Turn {s[2]}: \"{s[0]}\"" for s in recent_fatal_samples]
+            sample_lines = [
+                f"  - Incident: \"{s[0]}\" at Depth {s[1]}, Turn {s[2]}\n    Inventory at Death: {s[3] or 'Empty'}\n    Action Sequence: {s[4] or 'N/A'}"
+                for s in recent_fatal_samples
+            ]
             status_rep += "\n\nRecent Fatal Incident Logs:\n" + "\n".join(sample_lines)
+
+        recent_trajectory = recorder.get_last_10_turns_trajectory()
+        if recent_trajectory:
+            status_rep += f"\n\nPre-Death Diagnostic Trace:\n{recent_trajectory}"
 
         print(f"\n[Author Agent] Initiating empirical synthesis session (querying DuckDB & evaluating)...")
         new_code, tree, error = author.synthesize_policy(

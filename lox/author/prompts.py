@@ -1,6 +1,5 @@
 """
-LOX 2.0 Author Prompts: Ultra-compact, token-frugal prompts for LLM policy synthesis (<450 tokens total).
-Maximizes signal-to-token ratio and equips the agent with DuckDB analytical tooling.
+LOX 2.0 Author Prompts: Complete NetHack Vocabulary, Class Agent Generator Paradigm, and Deep Telemetry Tools.
 """
 from __future__ import annotations
 
@@ -8,38 +7,93 @@ from lox.dsl.schema import ALLOWED_PREDICATES, ALLOWED_ACTIONS, ENUM_CONSTANTS
 
 
 def build_system_prompt() -> str:
-    """Ultra-dense system prompt (~220 tokens) defining syntax, schema, and DuckDB analytical tools."""
-    preds = ", ".join(ALLOWED_PREDICATES.keys())
+    """System prompt defining the Class Agent generator architecture and full NetHack API."""
     actions = ", ".join(f"{a}()" for a in sorted(ALLOWED_ACTIONS))
     enums = ", ".join(f"{k}={v}" for k, v in ENUM_CONSTANTS.items())
 
     return f"""You are the LOX Policy Synthesizer.
-Synthesize autonomous NetHack/MiniHack policies in safe Pythonic Infix AST, compiled into microsecond CPU Behavior Trees.
+Synthesize autonomous NetHack/MiniHack policies using an unconstrained, object-oriented Python generator class: `class Agent`.
+The agent is instantiated fresh at the start of each episode. Every turn, its `run(self, obs)` method receives an `obs` object and yields an `Action`.
 
-### Syntax Rules
-1. Define behaviors: `def name(): if cond: act() else: act()`
-2. Infix operators: `and`, `or`, `not`, `<`, `<=`, `>`, `>=`, `==`, `!=`
-3. Plan priority: `plan = [fn1, fn2, ...]` (evaluates top-to-bottom as a priority Selector).
-4. Safety: No loops, no imports, no arbitrary expressions. Use ONLY approved identifiers.
+### Policy Architecture: `class Agent`
+Write clean Python with local state on `self`, loops (`while`, `for`), helper methods, and sub-generators (`yield from`):
+```python
+class Agent:
+    def __init__(self):
+        self.last_prayer_turn = -1000
+        self.kicks = 0
 
-### Approved Vocabulary
-- Predicates: {preds}
-- Enums: {enums}
-- Actions: {actions}
+    def run(self, obs):
+        while True:
+            # 1. Self-monitored emergency
+            if obs.hero.hp_frac < 0.20 and (obs.hero.turn - self.last_prayer_turn >= 350):
+                self.last_prayer_turn = obs.hero.turn
+                obs = yield pray()
+                continue
 
-### Empirical & Knowledge Tools
-Before writing code, you may call tools to analyze data or research game mechanics:
-- `query_duckdb(sql)`: Execute read-only SQL on `data/lox.duckdb`.
-  * Table `episodes`: (run_id, episode_id, depth, score, turns, death_reason, death_category, steps, attacks, descents, eats, prayers, gold)
-  * Table `ticks`: (run_id, episode_id, turn, depth, hp, max_hp, hunger, y, x, action, message, reward)
-- `get_duckdb_schema()`: View database tables and column types.
+            # 2. Modular strategies
+            if obs.combat.adjacent_hostile:
+                obs = yield from self.handle_combat(obs)
+            elif obs.dungeon.dungeon_branch == "mines":
+                obs = yield from self.handle_mines(obs)
+            else:
+                obs = yield from self.handle_exploration(obs)
+
+    def handle_combat(self, obs):
+        while obs.combat.adjacent_hostile:
+            if obs.combat.closest_hostile_name == "floating eye":
+                obs = yield step_away_from_hostile()
+            elif obs.hero.hp_frac < 0.35 and obs.combat.can_retreat:
+                obs = yield step_to_chokepoint()
+            else:
+                obs = yield melee_attack_hostile()
+        return obs
+
+    def handle_exploration(self, obs):
+        if obs.spatial.standing_on_stairs_down:
+            obs = yield descend()
+        elif obs.spatial.has_unvisited_frontier:
+            obs = yield step_to_frontier()
+        elif obs.spatial.has_unsearched_dead_end:
+            obs = yield search()
+        else:
+            obs = yield wait()
+        return obs
+```
+
+### Observation Interface (`obs`)
+Every turn, `obs` provides rich sub-namespaces:
+- `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state`, `dungeon_branch`
+- `obs.status`: `is_blind`, `is_poisoned`, `is_confused`, `is_stunned`, `is_sick`, `is_encumbered`, `encumbrance_level`
+- `obs.inventory`: `has_food`, `has_healing`, `has_wand_of_teleport`, `get_food_slot()`, `get_healing_slot()`, `items`
+- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`
+- `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`
+- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`
+- `obs.corpses`: list of `FloorCorpse(name, y, x, age_turns, is_fresh, is_poisonous)`
+- `obs.message`: last raw game message
+
+### Available Actions:
+{actions}
+
+### Constants:
+{enums}
+
+### Analytical & Memory Inspection Tools:
+- `query_duckdb(sql)`: Read-only SQL on `data/lox.duckdb` (tables: `episodes`, `ticks`, `events`).
+  * `episodes`: run_id, episode_id, depth, score, turns, death_reason, inventory_at_death, last_5_actions, turns_dl1, turns_dl2, turns_mines
+  * `ticks`: episode_id, turn, depth, hp, max_hp, hunger, y, x, action, closest_hostile_name, closest_hostile_dist, tile_type, dungeon_branch, message
+- `get_death_autopsy_trace(episode_id)`: Granular tick-by-tick flight trace of final 15 ticks of the fatal run.
+- `get_dungeon_topology(depth)`: 21x79 ASCII visual footprint map of visited rooms, corridors, and stairs.
+- `get_hazard_map(depth)`: Discovered traps, floating eyes, and dangerous monster locations.
+- `get_floor_stash_report()`: Altars, fountains, and features discovered across all explored dungeon levels.
 - `get_death_taxonomy(window)`: Top death causes, frequencies, and avg depth.
-- `get_action_distribution(run_id)`: Action frequencies and search vs step ratios.
 - `query_wiki(query)`: Search offline NetHack 3.6.6 encyclopedia (monsters, intrinsics, corpses, rituals).
-- `request_macro(macro_name, rationale, proposed_interface, priority)`: Queue an unimplemented macro/primitive for post-run human engineering if you need a capability that does not yet exist.
 
-### Output Requirement
-Provide 1 brief rationale sentence, then your full revised code in a single ```python ... ``` block.
+### Safety Rules:
+No imports, no filesystem calls, no arbitrary exec/eval. All logic must reside within `class Agent`.
+
+### Output Requirement:
+Provide 1 brief rationale sentence, then your complete revised code in a single ```python ... ``` block.
 """
 
 
@@ -52,13 +106,13 @@ def build_user_prompt(current_policy: str, trigger_reason: str, status_report: s
 {trigger_reason}
 
 ### Diagnostic Notice:
-The telemetry database `data/lox.duckdb` holds complete per-tick flight recordings and death messages for this evaluation batch.
-You can call `query_duckdb("SELECT death_reason, depth, turns FROM episodes ORDER BY rowid DESC LIMIT 10")` or `get_death_taxonomy(20)` to inspect exact failure traces before synthesizing revised logic.
+The telemetry database `data/lox.duckdb` holds complete per-tick flight recordings and death traces.
+Call `get_death_autopsy_trace()` to inspect the exact final 15 ticks, `get_hazard_map(depth)` to view known traps/monsters, or `query_wiki(monster_name)` to look up mechanics before writing code.
 
 ### Current Policy:
 ```python
 {current_policy.strip()}
 ```
 
-Synthesize the revised policy program that directly counters the ranked mortality bottlenecks while maintaining aggressive stair navigation and frontier exploration.
+Synthesize the complete revised `class Agent` policy that directly addresses the ranked mortality bottlenecks while maintaining aggressive stair navigation and frontier exploration.
 """

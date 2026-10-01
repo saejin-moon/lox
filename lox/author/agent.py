@@ -77,6 +77,14 @@ class AuthorAgent:
                     priority=args.get("priority", "medium"),
                     run_id=run_id,
                 )
+            elif tool_name == "get_dungeon_topology":
+                return self.tools.get_dungeon_topology(depth=args.get("depth", 1))
+            elif tool_name == "get_hazard_map":
+                return self.tools.get_hazard_map(depth=args.get("depth", 1))
+            elif tool_name == "get_floor_stash_report":
+                return self.tools.get_floor_stash_report()
+            elif tool_name == "get_death_autopsy_trace":
+                return self.tools.get_death_autopsy_trace(episode_id=args.get("episode_id", ""))
             return f"Unknown tool '{tool_name}'."
         except Exception as e:
             return f"Tool execution error for '{tool_name}': {e}"
@@ -385,31 +393,36 @@ plan = [
         return candidate_code
 
     def extract_code(self, response_text: str) -> str:
-        """Robustly extracts the Python policy code block from markdown."""
-        # 1. Search all code blocks, prioritizing the ones containing policy structure
+        """Robustly extracts Python policy code block (classes, generators, or behavior trees) from markdown."""
+        if not response_text:
+            return ""
+
+        # 1. Search all code blocks, prioritizing class definitions or generator/plan structures
         blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", response_text, re.DOTALL)
         for block in reversed(blocks):
-            if "def " in block and "plan" in block:
+            if "class " in block and ("run" in block or "def " in block):
+                return block.strip()
+            if "def " in block and ("yield" in block or "plan" in block):
                 return block.strip()
         for block in blocks:
-            if "def " in block:
+            if "class " in block or "def " in block:
                 return block.strip()
 
         # 2. Unclosed python code block containing policy code
         match_unclosed = re.search(r"```(?:python)?\s*\n(.*?)(?:```|$)", response_text, re.DOTALL)
         if match_unclosed:
             code = match_unclosed.group(1).strip()
-            if "def " in code:
+            if "class " in code or "def " in code:
                 return re.sub(r"```+$", "", code).strip()
 
-        # 3. No backticks: find from first 'def ' to end of 'plan = [...]'
-        match_def = re.search(r"(def \w+\(.*?\nplan\s*=\s*\[.*?\])", response_text, re.DOTALL)
+        # 3. No backticks: find from first 'class ' or 'def '
+        match_class = re.search(r"(class \w+.*)", response_text, re.DOTALL)
+        if match_class:
+            return match_class.group(1).strip()
+
+        match_def = re.search(r"(def \w+\(.*)", response_text, re.DOTALL)
         if match_def:
             return match_def.group(1).strip()
-
-        match_any_def = re.search(r"(def \w+\(.*)", response_text, re.DOTALL)
-        if match_any_def:
-            return match_any_def.group(1).strip()
 
         return response_text.strip()
 
@@ -421,10 +434,10 @@ plan = [
         run_id: str = "synth_run",
         action_handlers: dict | None = None,
         max_repairs: int = 2,
-    ) -> tuple[str, BehaviorTree | None, str | None]:
+    ) -> tuple[str, Any, str | None]:
         """
         Runs one authoring session with tool calling, AST compilation, and self-repair retries.
-        Returns (new_code, compiled_tree_or_None, error_message_or_None).
+        Returns (new_code, compiled_executable_or_None, error_message_or_None).
         """
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
         self._current_run_id = run_id
@@ -443,14 +456,18 @@ plan = [
         last_error = None
 
         for attempt in range(max_repairs + 1):
-            if "def " in candidate_code and "plan" in candidate_code:
+            is_valid_structure = (
+                ("class " in candidate_code and ("def " in candidate_code or "run" in candidate_code))
+                or ("def " in candidate_code and ("yield" in candidate_code or "plan" in candidate_code or "return" in candidate_code))
+            )
+            if is_valid_structure:
                 try:
                     tree = compile_policy(candidate_code, action_handlers=action_handlers)
                     return candidate_code, tree, None
                 except Exception as e:
                     last_error = f"Policy compilation failed: {e}"
             else:
-                last_error = "Policy compilation failed: Extracted response does not contain valid policy code structure ('def' and 'plan' missing)."
+                last_error = "Policy compilation failed: Extracted response does not contain valid policy code structure ('class Agent:' or 'def' missing)."
 
             # If compilation failed and repair attempts remain, ask the model to self-correct
             if attempt < max_repairs and self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):

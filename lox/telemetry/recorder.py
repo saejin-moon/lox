@@ -1,6 +1,6 @@
 """
 LOX 2.0 Flight Recorder: Lightweight in-memory circular telemetry.
-Stores the last 100 turns of execution state to generate high-signal autopsies for the LLM.
+Stores the last 100 turns of execution state to generate high-signal tactical autopsies for the LLM.
 """
 from __future__ import annotations
 
@@ -19,6 +19,11 @@ class TurnSnapshot:
     pos: tuple[int, int]
     action_name: str
     message: str
+    tile_type: str = "room"
+    closest_hostile_name: str = ""
+    closest_hostile_dist: float = 999.0
+    hostiles_in_fov: int = 0
+    dungeon_branch: str = "dungeon"
 
 
 class FlightRecorder:
@@ -39,6 +44,11 @@ class FlightRecorder:
         pos: tuple[int, int],
         action_name: str,
         message: str = "",
+        tile_type: str = "room",
+        closest_hostile_name: str = "",
+        closest_hostile_dist: float = 999.0,
+        hostiles_in_fov: int = 0,
+        dungeon_branch: str = "dungeon",
     ) -> None:
         self.buffer.append(
             TurnSnapshot(
@@ -50,6 +60,11 @@ class FlightRecorder:
                 pos=pos,
                 action_name=action_name,
                 message=message[:80],
+                tile_type=tile_type,
+                closest_hostile_name=closest_hostile_name,
+                closest_hostile_dist=closest_hostile_dist,
+                hostiles_in_fov=hostiles_in_fov,
+                dungeon_branch=dungeon_branch,
             )
         )
 
@@ -63,30 +78,41 @@ class FlightRecorder:
             counts[d] = counts.get(d, 0) + 1
         return counts
 
+    def get_last_10_turns_trajectory(self) -> str:
+        """Returns readable trajectory of HP progression and actions over the last 10 ticks."""
+        if not self.buffer:
+            return "No ticks recorded."
+        recent = list(self.buffer)[-10:]
+        hp_traj = " -> ".join(f"{s.hp}" for s in recent)
+        last_s = recent[-1]
+        threat_desc = f"{last_s.closest_hostile_name} (dist {last_s.closest_hostile_dist:.1f})" if last_s.closest_hostile_name else "none in FOV"
+        return (
+            f"Pre-Death HP Trajectory (last 10 ticks): {hp_traj}\n"
+            f"Action at Death: `{last_s.action_name}` on tile type `{last_s.tile_type}` in branch `{last_s.dungeon_branch}`\n"
+            f"Closest Threat at Death: {threat_desc}\n"
+            f"Last Game Message: \"{last_s.message or 'None'}\""
+        )
+
     def generate_compact_status_report(self, trigger_reason: str, cluster_note: str = "") -> str:
-        """
-        Generates an ultra-compact status report (<180 tokens) with high signal density:
-        - Incident header
-        - Last 5 steps transition table
-        - Historical cluster note
-        """
+        """Generates compact status report with recent steps and tactical details."""
         if not self.buffer:
             return f"[INCIDENT: {trigger_reason}]\nNo turn telemetry recorded."
 
         last = self.buffer[-1]
         lines = [
             f"[INCIDENT: {trigger_reason}]",
-            f"State: Depth {last.depth} | Turn {last.turn} | HP {last.hp}/{last.max_hp} | Hunger {last.hunger}",
+            f"State: Depth {last.depth} ({last.dungeon_branch}) | Turn {last.turn} | HP {last.hp}/{last.max_hp} | Hunger {last.hunger}",
             "",
             "Recent Steps (Last 5):",
-            "| T | HP | Action | Message |",
-            "| :--- | :--- | :--- | :--- |",
+            "| T | HP | Action | Threat | Message |",
+            "| :--- | :--- | :--- | :--- | :--- |",
         ]
 
         recent_snaps = list(self.buffer)[-5:]
         for s in recent_snaps:
             msg = s.message.replace("|", "/") if s.message else "-"
-            lines.append(f"| {s.turn} | {s.hp}/{s.max_hp} | `{s.action_name}` | {msg} |")
+            threat = f"{s.closest_hostile_name[:10]} ({s.closest_hostile_dist:.1f})" if s.closest_hostile_name else "-"
+            lines.append(f"| {s.turn} | {s.hp}/{s.max_hp} | `{s.action_name}` | {threat} | {msg} |")
 
         if cluster_note:
             lines.append(f"\n{cluster_note}")

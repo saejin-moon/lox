@@ -207,6 +207,119 @@ class DuckDBToolRegistry:
         )
         return res["message"]
 
+    def get_dungeon_topology(self, depth: int = 1) -> str:
+        """
+        Renders a visual 21x79 ASCII map of visited tiles for a given dungeon level
+        showing corridors (#), rooms (.), doors (+), stairs (> <), fountains ({), and traps (^).
+        """
+        if not os.path.exists(self.db_path):
+            return "No database found."
+        try:
+            depth_int = int(depth)
+        except Exception:
+            depth_int = 1
+
+        con = duckdb.connect(self.db_path, read_only=True)
+        try:
+            rows = con.execute(f"""
+                SELECT DISTINCT y, x, tile_type
+                FROM ticks
+                WHERE depth = {depth_int} AND y >= 0 AND y < 21 AND x >= 0 AND x < 79
+            """).fetchall()
+            con.close()
+        except Exception as e:
+            con.close()
+            return f"Error retrieving dungeon topology: {e}"
+
+        if not rows:
+            return f"No visited tiles found for depth {depth_int}."
+
+        char_map = {"room": ".", "corridor": "#", "doorway": "+", "fountain": "{", "altar": "_", "trap": "^", "stairs_down": ">", "stairs_up": "<"}
+        grid = [[" " for _ in range(79)] for _ in range(21)]
+        for y, x, ttype in rows:
+            grid[y][x] = char_map.get(ttype, ".")
+
+        lines = [f"### Dungeon Topology for Depth {depth_int} (Visited Footprint):", "```"]
+        for row in grid:
+            lines.append("".join(row).rstrip())
+        lines.append("```")
+        return "\n".join(lines)
+
+    def get_hazard_map(self, depth: int = 1) -> str:
+        """
+        Returns coordinates and details of discovered traps, sleeping hostiles, and floating eyes.
+        """
+        if not os.path.exists(self.db_path):
+            return "No database found."
+        try:
+            depth_int = int(depth)
+        except Exception:
+            depth_int = 1
+
+        con = duckdb.connect(self.db_path, read_only=True)
+        try:
+            cur = con.execute(f"""
+                SELECT y, x, tile_type, closest_hostile_name, COUNT(*) as occurrences
+                FROM ticks
+                WHERE depth = {depth_int} AND (tile_type = 'trap' OR closest_hostile_name IN ('floating eye', 'soldier ant', 'mimic'))
+                GROUP BY y, x, tile_type, closest_hostile_name
+                ORDER BY occurrences DESC
+                LIMIT 20
+            """)
+            res = _format_table(cur)
+            con.close()
+            return f"### Hazard Map (Depth {depth_int}):\n" + res
+        except Exception as e:
+            con.close()
+            return f"Error retrieving hazard map: {e}"
+
+    def get_floor_stash_report(self) -> str:
+        """
+        Returns list of fountains, altars, and items discovered across all explored dungeon levels.
+        """
+        if not os.path.exists(self.db_path):
+            return "No database found."
+
+        con = duckdb.connect(self.db_path, read_only=True)
+        try:
+            cur = con.execute("""
+                SELECT depth, tile_type, COUNT(DISTINCT (y || ',' || x)) as distinct_features
+                FROM ticks
+                WHERE tile_type IN ('fountain', 'altar', 'doorway')
+                GROUP BY depth, tile_type
+                ORDER BY depth ASC, tile_type ASC
+            """)
+            res = _format_table(cur)
+            con.close()
+            return "### Dungeon Stash & Features Report:\n" + res
+        except Exception as e:
+            con.close()
+            return f"Error querying floor stash report: {e}"
+
+    def get_death_autopsy_trace(self, episode_id: str = "") -> str:
+        """
+        Returns the granular tick-by-tick flight trace of the final 15 ticks of an episode.
+        """
+        if not os.path.exists(self.db_path):
+            return "No database found."
+
+        con = duckdb.connect(self.db_path, read_only=True)
+        try:
+            where = f"WHERE episode_id = '{episode_id}'" if episode_id else "WHERE episode_id = (SELECT episode_id FROM episodes ORDER BY rowid DESC LIMIT 1)"
+            cur = con.execute(f"""
+                SELECT turn, depth, hp, max_hp, hunger, tile_type, action, closest_hostile_name, closest_hostile_dist, message
+                FROM ticks
+                {where}
+                ORDER BY turn DESC
+                LIMIT 15
+            """)
+            res = _format_table(cur)
+            con.close()
+            return f"### Final 15 Ticks Autopsy Trace:\n" + res
+        except Exception as e:
+            con.close()
+            return f"Error querying autopsy trace: {e}"
+
 
 # Tool Schema for OpenAI / OpenRouter function calling
 OPENAI_TOOL_SPECS = [
@@ -334,6 +447,65 @@ OPENAI_TOOL_SPECS = [
                     },
                 },
                 "required": ["macro_name", "rationale"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dungeon_topology",
+            "description": "Renders visual 21x79 ASCII map of visited tiles for a given dungeon level showing rooms (.), corridors (#), doors (+), and stairs (> <).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "depth": {
+                        "type": "integer",
+                        "description": "Dungeon depth (default 1).",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_hazard_map",
+            "description": "Returns coordinates and occurrences of traps, floating eyes, and dangerous monsters on that level.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "depth": {
+                        "type": "integer",
+                        "description": "Dungeon depth (default 1).",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_floor_stash_report",
+            "description": "Returns summary of altars, fountains, and features discovered across all explored dungeon levels.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_death_autopsy_trace",
+            "description": "Returns granular tick-by-tick flight trace of the final 15 ticks leading up to fatal termination.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "episode_id": {
+                        "type": "string",
+                        "description": "Optional episode ID. If omitted, returns trace of the most recent death.",
+                    }
+                },
             },
         },
     },

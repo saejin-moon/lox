@@ -5,6 +5,7 @@ Achieves <15 µs latency for pathfinding and frontier discovery.
 """
 from __future__ import annotations
 
+from typing import Any
 import numpy as np
 
 try:
@@ -258,3 +259,32 @@ class SpatialEngine:
         frontier_mask = w & (~v)
         ty, tx = _find_nearest_target(int(start[0]), int(start[1]), w, frontier_mask)
         return (ty, tx) if ty >= 0 else None
+
+
+def build_walkable_mask(obs_or_chars: Any) -> np.ndarray:
+    """
+    Extracts a boolean 2D mask of walkable tiles from raw observation, chars array, or Observation.
+    Walkable tiles include floor (.), corridors (#), open doors (.), stairs (<, >),
+    fountains ({), altars (_), sinks, traps (^), items, and empty walkable spaces.
+    Non-walkable tiles include solid rock / stone (' ' or 0), walls (-, |), and closed doors (+).
+    """
+    if hasattr(obs_or_chars, "chars"):
+        chars = obs_or_chars.chars
+    elif isinstance(obs_or_chars, dict) and "chars" in obs_or_chars:
+        chars = obs_or_chars["chars"]
+    elif isinstance(obs_or_chars, np.ndarray):
+        chars = obs_or_chars
+    else:
+        return np.zeros((21, 79), dtype=np.bool_)
+
+    if chars is None:
+        return np.zeros((21, 79), dtype=np.bool_)
+
+    non_walkable = (
+        (chars == ord(" "))
+        | (chars == 0)
+        | (chars == ord("|"))
+        | (chars == ord("-"))
+        | (chars == ord("+"))
+    )
+    return (~non_walkable).astype(np.bool_)

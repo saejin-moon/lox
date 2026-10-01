@@ -412,6 +412,12 @@ plan = [
         last_valid_turns = obs.hero.turn
         last_valid_hp = obs.hero.hp
         last_valid_max_hp = obs.hero.max_hp
+        policy_runner = tree.create_runner(obs) if hasattr(tree, "create_runner") else None
+        last_5_actions: list[str] = []
+        turns_dl1 = 0
+        turns_dl2 = 0
+        turns_mines = 0
+        inventory_at_death_str = ""
 
         # Action and event counters
         total_steps = 0
@@ -530,11 +536,31 @@ plan = [
                 "can_forge_excalibur": (hero.experience_level >= 5) if hasattr(hero, "experience_level") else False,
             }
 
-            # Execute behavior tree
-            action = tree.execute(obs, memory=memory)
+            if hero.depth == 1:
+                turns_dl1 += 1
+            elif hero.depth == 2:
+                turns_dl2 += 1
+            if getattr(hero, "dungeon_branch", "") == "mines":
+                turns_mines += 1
+
+            # Execute policy runner or behavior tree
+            if policy_runner is not None:
+                action = policy_runner.send(obs)
+            else:
+                action = tree.execute(obs, memory=memory)
             if action is None:
                 action = Action(name="search")
             last_action_name = action.name
+
+            last_5_actions.append(action.name)
+            if len(last_5_actions) > 5:
+                last_5_actions.pop(0)
+
+            tile_type = getattr(obs.dungeon, "tile_type", "room") if hasattr(obs, "dungeon") else "room"
+            closest_name = getattr(obs.combat, "closest_hostile_name", "") if hasattr(obs, "combat") else ""
+            closest_dist = getattr(obs.combat, "closest_hostile_dist", 99.0) if hasattr(obs, "combat") else 99.0
+            hostiles_fov = getattr(obs.combat, "hostile_count_fov", hostile_count_fov) if hasattr(obs, "combat") else hostile_count_fov
+            dungeon_branch = getattr(obs.hero, "dungeon_branch", "dungeon") if hasattr(obs, "hero") else "dungeon"
 
             # Track action metrics
             if action.name == "step":
@@ -565,6 +591,11 @@ plan = [
                 pos=(hy, hx),
                 action_name=action.name,
                 message=obs.message,
+                closest_hostile_name=closest_name,
+                closest_hostile_dist=closest_dist,
+                hostiles_in_fov=hostiles_fov,
+                tile_type=tile_type,
+                dungeon_branch=dungeon_branch,
             )
 
             # Check dynamic triggers
@@ -596,6 +627,11 @@ plan = [
                     action=action.name,
                     message=obs.message,
                     reward=0.0,
+                    closest_hostile_name=closest_name,
+                    closest_hostile_dist=closest_dist,
+                    hostiles_in_fov=hostiles_fov,
+                    tile_type=tile_type,
+                    dungeon_branch=dungeon_branch,
                 )
 
             # Step environment
@@ -614,6 +650,9 @@ plan = [
                     death_reason = "ZeroHP (Killed)"
                 else:
                     death_reason = "Terminated"
+
+                inventory_items = [f"{it.name} ({it.category})" for it in obs.inventory] if hasattr(obs, "inventory") else []
+                inventory_at_death_str = ", ".join(inventory_items[:10])
 
                 # Check cluster fatality trigger
                 flight_recorder.record_death(death_reason)
@@ -661,6 +700,11 @@ plan = [
                 eats=total_eats,
                 prayers=total_prayers,
                 death_category=death_cat,
+                inventory_at_death=inventory_at_death_str,
+                last_5_actions=" -> ".join(last_5_actions),
+                turns_dl1=turns_dl1,
+                turns_dl2=turns_dl2,
+                turns_mines=turns_mines,
             )
 
         episode_summaries.append({

@@ -81,11 +81,11 @@ plan:
 
 
 def test_dsl_disallowed_syntax_rejected():
-    # Attempting to use a while loop
+    # Attempting to use an import
     bad_code = """
-def infinite():
-    while True:
-        wait()
+import os
+def exploit():
+    wait()
 """
     with pytest.raises(DSLValidationError):
         compile_policy(bad_code)
@@ -97,6 +97,40 @@ def hack():
 """
     with pytest.raises(DSLValidationError):
         compile_policy(bad_func)
+
+    # Attempting to access dunder attribute
+    bad_dunder = """
+class ExploitAgent:
+    def run(self, obs):
+        x = self.__class__
+        yield wait()
+"""
+    with pytest.raises(DSLValidationError):
+        compile_policy(bad_dunder)
+
+
+def test_dsl_generator_and_while_loop_allowed():
+    code = """
+class Agent:
+    def __init__(self):
+        self.step_count = 0
+
+    def run(self, obs):
+        while True:
+            self.step_count += 1
+            if obs.hero.hp_frac < 0.2:
+                obs = yield pray()
+            else:
+                obs = yield wait()
+"""
+    executor = compile_policy(code)
+    assert executor is not None
+    obs = Observation(chars=None, glyphs=None, hero=HeroState(hp=5, max_hp=50))
+    runner = executor.create_runner(obs)
+    # Prime / run
+    act = runner.send(obs) if hasattr(runner, "send") else next(runner)
+    assert act is not None
+    assert act.name == "pray"
 
 
 def test_dsl_pass_statement_allowed():

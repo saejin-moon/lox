@@ -1,11 +1,14 @@
 """
-LOX 2.0 DSL Compiler: Compiles AST into an Executable Behavior Tree.
-Transforms parsed Pythonic Infix AST into a high-performance DAG of BehaviorNodes.
-Inner evaluation executes in <20 µs per turn.
+LOX 2.0 DSL Compiler: Compiles AST into an Executable Policy.
+Supports:
+1. Object-Oriented Classes (`class Agent:` with generator methods)
+2. Functional Generators (`def episode_policy(obs): ... yield action`)
+3. High-Performance microsecond Behavior Trees (`plan = [...]`)
 """
 from __future__ import annotations
 
 import ast
+import inspect
 from typing import Any, Callable
 
 from lox.core.types import Status, Action, Observation, HeroState, HungerState
@@ -18,8 +21,8 @@ from lox.core.tree import (
     ActionNode,
     Blackboard,
 )
-from lox.dsl.parser import parse_and_validate
-from lox.dsl.schema import ENUM_CONSTANTS
+from lox.dsl.parser import parse_and_validate, normalize_code
+from lox.dsl.schema import ENUM_CONSTANTS, ALLOWED_ACTIONS
 
 
 # Map AST comparison operators to python functions
@@ -31,6 +34,23 @@ _CMP_OPS = {
     ast.Eq: lambda a, b: a == b,
     ast.NotEq: lambda a, b: a != b,
 }
+
+
+def _create_action_builder(name: str) -> Callable[..., Action]:
+    """Creates an Action factory for policy scripts."""
+    def action_fn(*args, **kwargs) -> Action:
+        direction = kwargs.get("direction")
+        slot = kwargs.get("slot")
+        if args and isinstance(args[0], tuple):
+            direction = args[0]
+        elif args and isinstance(args[0], str):
+            slot = args[0]
+        return Action(name=name, direction=direction, slot=slot, extra=kwargs)
+    return action_fn
+
+
+# Default action constructors available inside policy scripts
+DEFAULT_ACTION_BUILDERS = {act_name: _create_action_builder(act_name) for act_name in ALLOWED_ACTIONS}
 
 
 def _extract_val(node: ast.AST, bb: Blackboard) -> Any:
@@ -58,6 +78,7 @@ def _extract_val(node: ast.AST, bb: Blackboard) -> Any:
 def _compile_condition_node(node: ast.AST) -> Callable[[Blackboard], bool]:
     """Recursively compiles an AST expression into a fast boolean evaluator."""
     if isinstance(node, ast.Name):
+        name = node.id
         return lambda bb: bool(_extract_val(node, bb))
 
     elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
@@ -65,17 +86,18 @@ def _compile_condition_node(node: ast.AST) -> Callable[[Blackboard], bool]:
         return lambda bb: not operand_fn(bb)
 
     elif isinstance(node, ast.BoolOp):
-        fns = [_compile_condition_node(val) for val in node.values]
+        child_fns = [_compile_condition_node(val) for val in node.values]
         if isinstance(node.op, ast.And):
-            return lambda bb: all(fn(bb) for fn in fns)
+            return lambda bb: all(fn(bb) for fn in child_fns)
         elif isinstance(node.op, ast.Or):
-            return lambda bb: any(fn(bb) for fn in fns)
+            return lambda bb: any(fn(bb) for fn in child_fns)
 
-    elif isinstance(node, ast.Compare):
-        left_node = node.left
-        # Only single comparison supported: left op comparator
+    elif isinstance(node, ast.Compare) and len(node.ops) == 1:
         op_type = type(node.ops[0])
-        op_fn = _CMP_OPS.get(op_type, lambda a, b: False)
+        op_fn = _CMP_OPS.get(op_type)
+        if op_fn is None:
+            return lambda bb: False
+        left_node = node.left
         right_node = node.comparators[0]
         return lambda bb: op_fn(_extract_val(left_node, bb), _extract_val(right_node, bb))
 
@@ -87,7 +109,7 @@ def _compile_action_call(
     action_handlers: dict[str, Callable[[Blackboard, dict[str, Any]], Status | Action | None]],
 ) -> ActionNode:
     """Compiles a function call into an ActionNode."""
-    action_name = call_node.func.id  # type: ignore
+    action_name = call_node.func.id if isinstance(call_node.func, ast.Name) else "wait"
     kwargs = {}
     for kw in call_node.keywords:
         if isinstance(kw.value, ast.Constant):
@@ -125,7 +147,6 @@ def _compile_statements(
 
             if stmt.orelse:
                 else_nodes = _compile_statements(stmt.orelse, action_handlers)
-                # Selector between if-branch and else-branch
                 nodes.append(Selector([seq] + else_nodes))
             else:
                 nodes.append(seq)
@@ -136,26 +157,147 @@ def _compile_statements(
     return nodes
 
 
+class PolicyRunner:
+    """Wrapper that smoothly drives Python generators, classes, or trees with .send(obs) or next()."""
+
+    def __init__(self, gen_or_callable: Any):
+        self.gen = gen_or_callable
+        self.is_generator = inspect.isgenerator(gen_or_callable)
+        self.started = False
+
+    def send(self, obs: Observation | None = None) -> Action:
+        if not self.is_generator:
+            if callable(self.gen):
+                res = self.gen(obs)
+                return res if isinstance(res, Action) else Action(name="wait")
+            return Action(name="wait")
+
+        try:
+            if not self.started:
+                self.started = True
+                act = next(self.gen)
+            else:
+                act = self.gen.send(obs)
+            return act if isinstance(act, Action) else Action(name="wait")
+        except StopIteration:
+            return Action(name="wait")
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> Action:
+        return self.send(None)
+
+
+class PolicyExecutor:
+    """Unified wrapper around classes, generators, and behavior trees."""
+
+    def __init__(self, target_callable: Any, is_class: bool = False, is_tree: bool = False):
+        self.target_callable = target_callable
+        self.is_class = is_class
+        self.is_tree = is_tree
+        self._default_runner: PolicyRunner | None = None
+
+    def create_runner(self, initial_obs: Observation | None = None) -> PolicyRunner:
+        """Instantiates a fresh agent / generator for an episode."""
+        if self.is_tree:
+            tree = self.target_callable
+            bb = Blackboard(initial_obs or Observation(chars=None, glyphs=None, hero=HeroState()))
+            def tree_generator(obs):
+                while True:
+                    bb.obs = obs
+                    status = tree.tick(bb)
+                    act = bb.last_action or Action(name="wait")
+                    obs = yield act
+            gen = tree_generator(initial_obs)
+            return PolicyRunner(gen)
+
+        elif self.is_class:
+            agent = self.target_callable()
+            if hasattr(agent, "run"):
+                gen = agent.run(initial_obs)
+            elif hasattr(agent, "episode_policy"):
+                gen = agent.episode_policy(initial_obs)
+            else:
+                gen = agent(initial_obs)
+            return PolicyRunner(gen)
+
+        else:
+            gen = self.target_callable(initial_obs)
+            return PolicyRunner(gen)
+
+    def execute(self, obs: Observation, memory: dict[str, Any] | None = None) -> Action:
+        """Ticking interface for single-step execution."""
+        if self._default_runner is None:
+            self._default_runner = self.create_runner(obs)
+        return self._default_runner.send(obs)
+
+
 def compile_policy(
     policy_code: str,
     action_handlers: dict[str, Callable] | None = None,
     tree_name: str = "LOXPolicyTree",
-) -> BehaviorTree:
+) -> Any:
     """
-    Parses, validates, and compiles policy code into an executable BehaviorTree.
+    Parses, validates, and compiles policy code.
+    Seamlessly handles Class-based agents, Generator functions, and legacy Behavior Trees.
     """
-    _, plan_order, functions = parse_and_validate(policy_code)
-    handlers = action_handlers or {}
+    tree_ast, plan_order, functions, visitor = parse_and_validate(policy_code)
+    clean_code = normalize_code(policy_code)
 
+    # 1. If policy defines classes or generators, compile into sandbox namespace
+    if visitor.classes or visitor.has_generator:
+        sandbox: dict[str, Any] = {
+            "Action": Action,
+            **ENUM_CONSTANTS,
+            **DEFAULT_ACTION_BUILDERS,
+        }
+
+        compiled_code = compile(tree_ast, "<policy>", "exec")
+        exec(compiled_code, sandbox)
+
+        # Look for primary agent class (e.g. Agent, Policy, or first defined class)
+        target_cls = None
+        for preferred in ("Agent", "Policy"):
+            if preferred in sandbox and isinstance(sandbox[preferred], type):
+                target_cls = sandbox[preferred]
+                break
+        if target_cls is None:
+            for val in sandbox.values():
+                if isinstance(val, type) and val.__module__ == "<policy>":
+                    target_cls = val
+                    break
+
+        if target_cls is not None:
+            return PolicyExecutor(target_cls, is_class=True)
+
+        # Look for generator function
+        target_fn = None
+        for preferred in ("episode_policy", "run"):
+            if preferred in sandbox and inspect.isgeneratorfunction(sandbox[preferred]):
+                target_fn = sandbox[preferred]
+                break
+        if target_fn is None:
+            for val in sandbox.values():
+                if inspect.isgeneratorfunction(val):
+                    target_fn = val
+                    break
+
+        if target_fn is not None:
+            return PolicyExecutor(target_fn, is_class=False)
+
+    # 2. Legacy Behavior Tree compilation
+    handlers = action_handlers or {}
     macro_nodes: list[BehaviorNode] = []
     for macro_name in plan_order:
-        fn_def = functions[macro_name]
-        body_nodes = _compile_statements(fn_def.body, handlers)
-        if len(body_nodes) == 1:
-            macro_nodes.append(body_nodes[0])
-        else:
-            macro_nodes.append(Sequence(body_nodes, name=macro_name))
+        fn_def = functions.get(macro_name)
+        if fn_def is not None:
+            body_nodes = _compile_statements(fn_def.body, handlers)
+            if len(body_nodes) == 1:
+                macro_nodes.append(body_nodes[0])
+            else:
+                macro_nodes.append(Sequence(body_nodes, name=macro_name))
 
-    # Root priority selector
     root = Selector(macro_nodes, name=f"{tree_name}_Root")
-    return BehaviorTree(root=root, name=tree_name)
+    btree = BehaviorTree(root=root, name=tree_name)
+    return btree

@@ -88,8 +88,23 @@ def init_db(db_path: str = "data/lox.duckdb") -> duckdb.DuckDBPyConnection:
         ("eats", "INTEGER"),
         ("prayers", "INTEGER"),
         ("death_category", "VARCHAR"),
+        ("inventory_at_death", "VARCHAR"),
+        ("last_5_actions", "VARCHAR"),
+        ("turns_dl1", "INTEGER"),
+        ("turns_dl2", "INTEGER"),
+        ("turns_mines", "INTEGER"),
     ]:
         con.execute(f"ALTER TABLE episodes ADD COLUMN IF NOT EXISTS {col} {col_type};")
+
+    # Check and add any missing columns in ticks table
+    for col, col_type in [
+        ("closest_hostile_name", "VARCHAR"),
+        ("closest_hostile_dist", "FLOAT"),
+        ("hostiles_in_fov", "INTEGER"),
+        ("tile_type", "VARCHAR"),
+        ("dungeon_branch", "VARCHAR"),
+    ]:
+        con.execute(f"ALTER TABLE ticks ADD COLUMN IF NOT EXISTS {col} {col_type};")
 
     return con
 
