@@ -37,7 +37,7 @@ class Agent:
                 obs = yield wear_armor()
                 continue
 
-            # 6. Navigation & Exploration
+            # 6. Navigation & Exploration (Optimized for Depth Progression)
             # Priority: Descend > Known Stairs > Doors > Frontier > Dead Ends > Search
             if obs.spatial.standing_on_stairs_down:
                 obs = yield descend()
@@ -52,23 +52,19 @@ class Agent:
                 self.search_count = 0 
                 obs = yield step_to_frontier()
             elif obs.spatial.has_unsearched_dead_end:
-                # Only attempt dead-end search if we are not in a room to avoid turn-waste
-                if obs.dungeon.tile_type != "room":
-                    obs = yield from self.handle_dead_end(obs)
-                else:
-                    # If in a room but dead ends exist, move toward them
-                    obs = yield step_to_dead_end()
+                # Dead ends are high-probability locations for secret stairs
+                obs = yield from self.handle_dead_end(obs)
             else:
                 # Exhaustive search for secret doors/stairs at corridors
-                if obs.dungeon.tile_type == "corridor" and self.search_count < 10:
+                if obs.dungeon.tile_type == "corridor" and self.search_count < 5:
                     obs = yield search()
                     self.search_count += 1
                 else:
-                    # Reset search count and try to find a new frontier or wait
                     self.search_count = 0
                     if obs.spatial.has_unvisited_frontier:
                         obs = yield step_to_frontier()
                     else:
+                        # Last resort: try to find a way out or wait
                         obs = yield wait()
             
             # Final safety check: if stairs were found during any of the above, go there immediately
@@ -104,7 +100,8 @@ class Agent:
 
             # Survival Logic: Prevent the "Retreat Loop"
             if obs.hero.hp_frac < 0.35 or obs.status.is_blind:
-                if self.retreat_streak > 8:
+                if self.retreat_streak > 5:
+                    # If we've retreated too much, we must fight or pray to break the loop
                     if obs.hero.turn - self.last_prayer_turn >= 150:
                         self.last_prayer_turn = obs.hero.turn
                         obs = yield pray()
@@ -166,7 +163,7 @@ class Agent:
         """Systematically searches dead ends, but breaks immediately if combat starts."""
         obs = yield step_to_dead_end()
         
-        for _ in range(8):
+        for _ in range(5):
             if obs.combat.hostile_count_fov > 0:
                 return obs
             if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
