@@ -170,6 +170,16 @@ class InventoryView(list):
     def find_items_by_category(self, cat: str) -> list[Item]:
         return [it for it in self if it.category == cat]
 
+    @property
+    def has_unworn_armor(self) -> bool:
+        return any(it.category == "armor" and not it.is_equipped for it in self)
+
+    def get_unworn_armor_slot(self) -> str | None:
+        for it in self:
+            if it.category == "armor" and not it.is_equipped:
+                return it.slot
+        return None
+
 
 @dataclass(slots=True)
 class CombatView:
@@ -186,6 +196,7 @@ class CombatView:
     floating_eye_in_fov: bool = False
     adjacent_pet: bool = False
     adjacent_peaceful: bool = False
+    is_fast_dangerous: bool = False
 
 
 @dataclass(slots=True)

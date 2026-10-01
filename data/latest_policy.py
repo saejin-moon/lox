@@ -2,23 +2,30 @@ class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
         self.search_count = 0
+        self.retreat_streak = 0
 
     def run(self, obs):
         while True:
             # 1. Absolute Emergency Survival (Major Trouble)
-            # Prayer is a lifeline for HP < 15%, Fainting, or Blindness in combat.
-            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4 or (obs.status.is_blind and obs.combat.hostile_count_fov > 0)) and (obs.hero.turn - self.last_prayer_turn >= 150):
-                self.last_prayer_turn = obs.hero.turn
-                obs = yield pray()
-                continue
+            # Prayer is a powerful reset; use it during critical HP or fainting hunger.
+            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
+                if obs.hero.turn - self.last_prayer_turn >= 150:
+                    self.last_prayer_turn = obs.hero.turn
+                    obs = yield pray()
+                    continue
 
-            # 2. Immediate Combat Reaction
+            # 2. Combat Logic (Highest Priority)
+            # Immediate interrupt: if anything is in FOV, we stop everything else.
             if obs.combat.hostile_count_fov > 0:
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 3. Critical Maintenance (Hunger & Health)
-            # Only perform multi-turn actions (eating/healing) when no enemies are in FOV
+            # 3. Immediate Health Recovery (Only if safe)
+            if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:
+                obs = yield quaff_healing()
+                continue
+
+            # 4. Hunger Prevention (Only when safe)
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -27,11 +34,13 @@ class Agent:
                     obs = yield from self.handle_corpse_consumption(obs)
                     continue
 
-            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
-                obs = yield quaff_healing()
+            # 5. Equipment Optimization (Equip picked-up armor when area is peaceful)
+            if obs.inventory.has_unworn_armor:
+                obs = yield wear_armor()
                 continue
 
-            # 4. Navigation & Exploration
+            # 6. Navigation & Exploration
+            # Priority: Descend > Known Stairs > Doors > Frontier > Dead Ends > Search
             if obs.spatial.standing_on_stairs_down:
                 obs = yield descend()
             elif obs.spatial.stairs_down_known:
@@ -47,99 +56,117 @@ class Agent:
             elif obs.spatial.has_unsearched_dead_end:
                 obs = yield from self.handle_dead_end(obs)
             else:
-                # Exhaustive search for secret doors/stairs to prevent MaxTurnsReached
-                if self.search_count < 20:
+                # Exhaustive search for secret doors/stairs at dead ends
+                if obs.dungeon.tile_type == "corridor" and self.search_count < 15:
                     obs = yield search()
                     self.search_count += 1
                 else:
-                    # If we've searched everything, try to find a new frontier or wait
-                    if obs.spatial.has_unvisited_frontier:
-                        obs = yield step_to_frontier()
-                    else:
-                        obs = yield wait()
                     self.search_count = 0
-                
-                if obs.spatial.stairs_down_known:
-                    obs = yield step_to_stairs_down()
+                    obs = yield wait()
+            
+            # Final check to ensure we don't waste turns if stairs were discovered
+            if obs.spatial.stairs_down_known and not obs.spatial.standing_on_stairs_down:
+                obs = yield step_to_stairs_down()
 
     def handle_combat(self, obs):
-        """Tactical combat handler with strict retreat and gaze mitigation."""
+        """Tactical combat handler with anti-pinning, gaze mitigation, and emergency healing."""
         while obs.combat.hostile_count_fov > 0:
-            # Blindness/Panic State: Retreat immediately.
-            if obs.status.is_blind or obs.hero.hp_frac < 0.30:
+            # Gaze Mitigation: Floating Eyes are NEVER attacked in melee.
+            if obs.combat.closest_hostile_name == "floating eye":
                 if obs.combat.adjacent_hostile:
                     obs = yield step_away_from_hostile()
-                elif obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint()
                 else:
-                    # Trapped and desperate
-                    if (obs.hero.turn - self.last_prayer_turn >= 150):
-                        self.last_prayer_turn = obs.hero.turn
-                        obs = yield pray()
-                    else:
-                        obs = yield melee_attack_hostile()
+                    obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # In-Combat Emergency Healing
+            # Shopkeeper Protection
+            if obs.combat.closest_hostile_name == "shopkeeper" or obs.dungeon.in_shop:
+                obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
+                continue
+
+            # Tactical In-Combat Emergency Healing
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # Shopkeeper and Shop Protection: Never fight shopkeepers
-            if obs.combat.closest_hostile_name == "shopkeeper" or obs.dungeon.in_shop:
-                if obs.combat.can_retreat:
+            # Fast & Dangerous Monster Handling (Soldier Ants, Killer Bees)
+            if obs.combat.is_fast_dangerous:
+                if not obs.combat.in_corridor and obs.combat.can_retreat:
                     obs = yield step_to_chokepoint()
+                    continue
+
+            # Survival Logic: Prevent the "Retreat Loop" and "Wall Pinning"
+            if obs.hero.hp_frac < 0.35 or obs.status.is_blind:
+                if self.retreat_streak > 10:
+                    if obs.hero.turn - self.last_prayer_turn >= 150:
+                        self.last_prayer_turn = obs.hero.turn
+                        obs = yield pray()
+                    else:
+                        obs = yield melee_attack_hostile()
+                    self.retreat_streak = 0
+                    continue
+
+                if obs.combat.adjacent_hostile:
+                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
+                    self.retreat_streak += 1
+                elif obs.combat.can_retreat:
+                    obs = yield retreat()
+                    self.retreat_streak += 1
                 else:
-                    obs = yield step_away_from_hostile()
+                    obs = yield melee_attack_hostile()
+                    self.retreat_streak = 0
                 continue
 
-            # Gaze Mitigation: Floating Eyes are never attacked in melee
-            if obs.combat.closest_hostile_name == "floating eye":
-                obs = yield step_away_from_hostile()
-                continue
-
-            # Standard Combat Logic
+            # Standard Combat Logic: Be more cautious with HP < 60%
             if obs.combat.adjacent_hostile:
-                # Retreat if outnumbered or wounded to a chokepoint to force 1v1s
-                if (obs.hero.hp_frac < 0.60 or obs.combat.hostile_count_fov > 1) and obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint()
-                else:
+                if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
+                    self.retreat_streak = 0
+                else:
+                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
+                    self.retreat_streak += 1
             else:
-                # Close gap if safe, otherwise maintain tactical position
-                if obs.combat.in_corridor:
+                if obs.hero.hp_frac > 0.50:
                     obs = yield melee_attack_hostile()
-                elif obs.combat.hostile_count_fov > 1:
-                    obs = yield step_to_chokepoint()
+                    self.retreat_streak = 0
                 else:
-                    obs = yield melee_attack_hostile()
+                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
+                    self.retreat_streak += 1
             
             if obs.combat.hostile_count_fov == 0:
+                self.retreat_streak = 0
                 break
         return obs
 
     def handle_corpse_consumption(self, obs):
-        """Safely consumes corpses only when the area is clear."""
+        """Safely consumes corpses only when the area is completely clear."""
+        # Check for hostiles before starting the sequence
         if obs.combat.hostile_count_fov > 0:
             obs = yield wait()
             return obs
 
         for corpse in obs.corpses:
             if corpse.is_safe:
+                # Move to corpse
                 obs = yield step_to(corpse.y, corpse.x)
-                # Re-verify safety before the multi-turn eating action
-                if obs.combat.hostile_count_fov == 0:
-                    obs = yield eat_floor_corpse()
+                # CRITICAL: Re-verify safety after moving and before eating
+                # Eating takes multiple turns; we must be absolutely sure.
+                if obs.combat.hostile_count_fov > 0:
+                    return obs
+                obs = yield eat_floor_corpse()
                 return obs
         
         obs = yield wait()
         return obs
 
     def handle_dead_end(self, obs):
-        """Systematically searches dead ends for secret doors to find stairs."""
+        """Systematically searches dead ends, but breaks immediately if combat starts."""
+        # Move to dead end
         obs = yield step_to_dead_end()
-        # Search up to 15 times at the dead end to find hidden doors
-        for _ in range(15):
+        
+        # Search loop
+        for _ in range(12):
+            # CRITICAL: Check for hostiles every single search turn
             if obs.combat.hostile_count_fov > 0:
                 return obs
             if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:

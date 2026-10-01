@@ -6,16 +6,19 @@ This plan guides the incoming agent step-by-step from the current checkpoint to 
 
 ## Current State & Baseline
 
-- **Current Checkpoint**: [`data/latest_policy.py`](file:///home/bae/lox/data/latest_policy.py) (from Generation 35).
-- **Recent Performance**: Generation 34 reached **Average Depth 2.60** and **Max Depth 6**; episode survival up to 20,738 turns.
+- **Current Checkpoint**: [`data/latest_policy.py`](file:///home/bae/lox/data/latest_policy.py).
+- **Recent Performance**: Reached **Depth 8** (7 consecutive staircases descended, 6,372 turns survived). 100% of episodes now clear Depth 1.
 - **Recent Platform Hardening**:
   1. *Peaceful Creature Trapping Resolved*: Adapter tracks `peaceful_positions`, auto-dismisses `[yn]` prompts with `'n'`, and ignores peaceful monsters in combat selection.
   2. *Coordinate Navigation (`step_to(y, x)`)*: Fully supported in compiler and adapter with A* pathfinding.
   3. *Dynamic Obstacle Learning*: Blocked tiles (iron bars, walls) are dynamically detected from in-game messages and excluded from navigation masks.
   4. *Corpse Eating Safety*: `eat_floor_corpse` automatically steps toward floor corpses if the hero is not standing on one.
-  5. *Dead-End Secret Door Invariant*: Added Invariant #6 to `lox/author/prompts.py` guiding the LLM to use `step_to_dead_end()` and `search()` when frontiers are exhausted.
+  5. *Dead-End & Room Perimeter Secret Door Invariants*: Guided LLM to use `step_to_dead_end()` and `search()` on corridor dead ends and room perimeter walls when frontiers are exhausted.
   6. *Granular Telemetry & Timeout Reporting*: `scripts/run_synthesis.py` extracts real causes of death (starvation, poison, combat strikes) and identifies `MaxTurnsReached`, while tracking `descents`, `attacks`, `searches`, `eats`, and `prayers`.
-  7. *Test Suite*: All 32 unit tests pass (`uv run pytest -v`).
+  7. *Minetown Dialog Auto-Dismissal (`ESC`)*: Automatically cancels text-entry prompts (`"who are you"`, `"what is your name"`, `"call this"`, `"hello stranger"`) with ESC (`\x1b`) and registers guards as peaceful, avoiding 2,500-keystroke timeouts at Depths 5–8.
+  8. *Autopickup & Armor Equipping*: NLE configured with `options=("autopickup", "pickup_types:?!/%=[$")`. Added `has_unworn_armor` and `wear_armor()` to lower AC and survive deep monsters.
+  9. *In-Combat Emergency Healing & Fast Monster Chokepoint Retreat*: In-combat healing triggered at `< 50% HP` inside `handle_combat()`. Soldier ants/killer bees (`is_fast_dangerous`) trigger immediate retreat to corridor chokepoints.
+  10. *Test Suite*: All 33 unit tests pass (`uv run pytest -v`).
 
 ---
 

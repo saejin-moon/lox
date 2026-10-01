@@ -73,7 +73,7 @@ class NetHackAdapter(EnvironmentAdapter):
     def __init__(self, env_id: str = "NetHackChallenge-v0", role: str = "valkyrie"):
         self.env_id = env_id
         self.role = role
-        self.env = gym.make(env_id, character=role)
+        self.env = gym.make(env_id, character=role, options=("autopickup", "pickup_types:?!/%=[$"))
         self.visited = np.zeros((21, 79), dtype=bool)
         self.turns_on_level = 0
         self.last_depth = 1
@@ -316,6 +316,7 @@ class NetHackAdapter(EnvironmentAdapter):
         )
         in_corridor = (walkable_adj <= 2 and chr(chars[y, x]) == "#")
 
+        is_fast_dangerous = closest_name in ("soldier ant", "killer bee", "giant spider", "centipede")
         combat = CombatView(
             adjacent_hostile=adjacent_hostile,
             hostile_count_fov=hostile_count,
@@ -328,6 +329,7 @@ class NetHackAdapter(EnvironmentAdapter):
             standing_on_elbereth=("Elbereth" in message),
             floating_eye_in_fov=floating_eye_fov,
             adjacent_peaceful=adjacent_peaceful,
+            is_fast_dangerous=is_fast_dangerous,
         )
 
         # Check for unsearched corridor dead ends or room perimeter tiles across the entire floor
@@ -488,6 +490,9 @@ class NetHackAdapter(EnvironmentAdapter):
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("y", space_idx))
             elif "(y/n)" in msg or "[yn]" in msg or "really attack" in msg.lower() or "Really quit?" in msg:
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("n", space_idx))
+            elif "who are you" in msg.lower() or "what is your name" in msg.lower() or "call this" in msg.lower() or "hello stranger" in msg.lower():
+                esc_idx = self.char_to_act.get("\x1b", 38)
+                raw_obs, _, term, trunc, _ = self.env.step(esc_idx)
             else:
                 break
             if term or trunc:
@@ -513,7 +518,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self._last_obs = obs
 
         msg = obs.message.lower()
-        if "really attack" in msg or "who are you" in msg:
+        if "really attack" in msg or "who are you" in msg or "hello stranger" in msg:
             if getattr(self, "_last_attempted_dir", None) is not None:
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
                 dy, dx = self._last_attempted_dir
@@ -801,6 +806,11 @@ class NetHackAdapter(EnvironmentAdapter):
             if not found:
                 return self.step(Action(name="wait"))
             return self._step_sequence([48, self.char_to_act.get(dir_char, 0)])
+        elif action.name == "wear_armor":
+            slot = action.slot or (obs_prev.inventory.get_unworn_armor_slot() if obs_prev else None)
+            if slot:
+                return self._step_sequence([self.char_to_act.get("W", 0), self.char_to_act.get(slot, 0)])
+            return self.step(Action(name="wait"))
         elif action.name == "pickup":
             target_char = ","
         elif action.name == "pay":

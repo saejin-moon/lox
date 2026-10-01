@@ -51,6 +51,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "adjacent_pet": "bool",
     "adjacent_peaceful": "bool",
     "can_safely_pray": "bool",
+    "is_fast_dangerous": "bool",
 
     # Spatial Topology & Navigation
     "stairs_down_known": "bool",
@@ -95,6 +96,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "has_scroll_of_teleport": "bool",
     "has_pick_axe": "bool",
     "has_lamp": "bool",
+    "has_unworn_armor": "bool",
     "weapon_is_cursed": "bool",
     "can_forge_excalibur": "bool",
 }

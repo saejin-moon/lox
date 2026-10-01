@@ -88,6 +88,25 @@ lox/
 7. **Corpse Safety & Nutrition**:
    - Eating floor corpses without standing on them causes invalid prompts. `NetHackAdapter.step(Action(name="eat_floor_corpse"))` automatically steps towards the nearest floor corpse if not currently standing on one.
 
+8. **Minetown & Text-Entry Dialog Auto-Dismissal (`ESC`)**:
+   - In Minetown (Depths 5–9), guards and temple priests greet the hero with `"Hello stranger, who are you?"` or `"what is your name"`.
+   - Directional keys enter characters into the text-entry buffer instead of moving, consuming 0 turns and leading to NLE aborting at 2,500 consecutive 0-turn steps.
+   - `NetHackAdapter._dismiss_more()` automatically intercepts text-entry dialogs (`"who are you"`, `"what is your name"`, `"call this"`, `"hello stranger"`) and dismisses them with ESC (`\x1b`, action index 38), and registers the position in `self.peaceful_positions`. This leaves guards peaceful without provoking them.
+
+9. **Autopickup & Equipment Acquisition (`wear_armor`)**:
+   - By default, characters remained naked (AC 7–10) throughout the dungeon.
+   - `NetHackAdapter` initializes NLE with `options=("autopickup", "pickup_types:?!/%=[$")`, automatically collecting armor, scrolls, potions, wands, and food as the hero steps over tiles.
+   - `obs.inventory.has_unworn_armor` and `wear_armor()` allow the policy to equip dropped helmets, mail, cloaks, and boots during peaceful exploration, driving Armor Class down towards negative values (vastly reducing monster hit chances).
+
+10. **Tactical In-Combat Healing & High-Speed Attackers (`is_fast_dangerous`)**:
+    - Soldier ants and killer bees move at speed 18 (nearly 2x hero speed) and deliver lethal poison stings. Engaging them in open rooms is fatal.
+    - `obs.combat.is_fast_dangerous` flags lethal speedsters, triggering immediate retreat into 1-tile corridor chokepoints (`step_to_chokepoint()`) to force 1v1 fights.
+    - In-combat emergency healing: Quaffing healing potions takes 1 turn and restores 10–20 HP. `handle_combat` checks `if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing: yield quaff_healing()` immediately.
+
+11. **Room Wall Perimeter Secret Door Navigation**:
+    - Procedural generation often conceals doors along room perimeter walls (`-`, `|`).
+    - When visible corridor dead ends are searched or absent, `step_to_dead_end()` targets floor tiles adjacent to unexplored room perimeter walls, breaking the Depth 1–2 exploration stall permanently.
+
 ---
 
 ## 4. Key CLI Commands

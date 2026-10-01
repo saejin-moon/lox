@@ -19,6 +19,7 @@ htmlcov/
 !.env.example
 
 # Telemetry data & ephemeral databases (consolidated locally)
-data/
+data/*
+!data/latest_policy.py
 logs/
 *.log
