@@ -485,7 +485,7 @@ class Agent:
                     tree = compile_policy(candidate_code, action_handlers=action_handlers)
                     # Multi-scenario dry-run validation: execute test steps across scenarios with timeout shield
                     import concurrent.futures
-                    from lox.core.types import HungerState, CombatView
+                    from lox.core.types import HungerState, CombatView, FloorCorpse, SpatialView
 
                     test_scenarios = [
                         ("normal", Observation(
@@ -493,10 +493,11 @@ class Agent:
                             glyphs=np.zeros((21, 79), dtype=np.int16),
                             hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
                         )),
-                        ("hungry", Observation(
+                        ("hungry_unsafe_corpse", Observation(
                             chars=np.full((21, 79), ord("."), dtype=np.uint8),
                             glyphs=np.zeros((21, 79), dtype=np.int16),
                             hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=750, hunger_state=HungerState.HUNGRY),
+                            corpses=[FloorCorpse(name="kobold corpse", y=11, x=11, drop_turn=10, age_turns=100, is_poisonous=True, is_deadly=True, is_fresh=False)],
                         )),
                         ("combat", Observation(
                             chars=np.full((21, 79), ord("."), dtype=np.uint8),
@@ -504,21 +505,28 @@ class Agent:
                             hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
                             combat=CombatView(hostile_count_fov=1, adjacent_hostile=True),
                         )),
+                        ("dead_end", Observation(
+                            chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                            glyphs=np.zeros((21, 79), dtype=np.int16),
+                            hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
+                            spatial=SpatialView(has_unsearched_dead_end=True),
+                        )),
                     ]
 
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                         for s_name, s_obs in test_scenarios:
                             runner = tree.create_runner(s_obs)
-                            future = executor.submit(runner.send, s_obs)
-                            try:
-                                act = future.result(timeout=1.0)
-                                if not isinstance(act, Action):
-                                    raise ValueError(f"Policy runner produced non-Action under {s_name} state: {act}")
-                            except concurrent.futures.TimeoutError:
-                                raise ValueError(
-                                    f"Policy entered an infinite loop without yielding under {s_name} scenario. "
-                                    f"Ensure all generator subroutines yield an action (e.g. obs = yield wait()) on all execution paths."
-                                )
+                            for step_i in range(3):
+                                future = executor.submit(runner.send, s_obs)
+                                try:
+                                    act = future.result(timeout=1.0)
+                                    if not isinstance(act, Action):
+                                        raise ValueError(f"Policy runner produced non-Action under {s_name} state: {act}")
+                                except concurrent.futures.TimeoutError:
+                                    raise ValueError(
+                                        f"Policy entered an infinite loop without yielding under {s_name} scenario (step {step_i+1}). "
+                                        f"Ensure all generator subroutines yield an action (e.g. obs = yield wait()) on all execution paths."
+                                    )
                     return candidate_code, tree, None
                 except Exception as e:
                     last_error = f"Policy compilation/validation failed: {e}"

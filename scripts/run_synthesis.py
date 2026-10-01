@@ -20,6 +20,15 @@ import nle.nethack as nh
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import resource
+import signal
+
+def _sigalrm_policy_timeout_handler(signum, frame):
+    raise TimeoutError("Policy execution timed out (infinite zero-yield generator loop detected)")
+
+try:
+    signal.signal(signal.SIGALRM, _sigalrm_policy_timeout_handler)
+except Exception:
+    pass
 
 # Expand stack allocation to 256MB and recursion limit to 100k
 try:
@@ -206,7 +215,15 @@ class Agent:
                 if getattr(hero, "dungeon_branch", "") == "mines":
                     turns_mines += 1
 
-                action = policy_runner.send(obs)
+                try:
+                    signal.alarm(2)
+                    action = policy_runner.send(obs)
+                except TimeoutError:
+                    print(f"\n[Warning] Policy hung in zero-yield loop on ep {ep_id}, turn {hero.turn}. Auto-recovering via wait().")
+                    action = Action(name="wait")
+                finally:
+                    signal.alarm(0)
+
                 if action is None:
                     action = Action(name="search")
 
