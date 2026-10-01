@@ -1,9 +1,9 @@
 def emergency():
     if hunger_state >= WEAK and has_carried_food:
         eat_carried_food()
-    elif hp_frac < 0.15 and can_safely_pray:
+    elif hp_frac < 0.10 and can_safely_pray:
         pray()
-    elif hp_frac < 0.30 and has_healing:
+    elif hp_frac < 0.25 and has_healing:
         quaff_healing()
     elif hunger_state >= HUNGRY and has_carried_food:
         eat_carried_food()
@@ -11,7 +11,7 @@ def emergency():
 def recovery():
     if is_surrounded:
         step_away_from_hostile()
-    elif adjacent_hostile and hp_frac < 0.50:
+    elif adjacent_hostile and hp_frac < 0.40:
         step_away_from_hostile()
     elif standing_on_elbereth and hostile_count_fov > 0:
         wait()
@@ -26,7 +26,7 @@ def combat():
         if in_corridor:
             step_to_chokepoint()
         else:
-            step_away_from_hostile()
+            step_to_frontier()
 
 def navigation():
     if standing_on_stairs_down:
@@ -55,8 +55,8 @@ def explore():
 plan = [
     emergency,
     recovery,
-    navigation,
     combat,
+    navigation,
     maintenance,
     explore,
 ]

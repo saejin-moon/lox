@@ -221,15 +221,14 @@ plan = [
 
         with httpx.Client(timeout=120.0) as client:
             use_tools = True
-            max_turns = 6
-            for turn in range(max_turns):
+            max_tool_turns = 15  # Generous ceiling allowing extensive empirical exploration
+            for turn in range(max_tool_turns):
                 payload: dict[str, Any] = {
                     "model": model_name,
                     "messages": messages,
                     "temperature": 0.2,
                 }
-                # Do not supply tools on the final turn so model must produce final code answer
-                if use_tools and turn < max_turns - 1:
+                if use_tools:
                     payload["tools"] = OPENAI_TOOL_SPECS
 
                 resp = client.post(url, headers=headers, json=payload)
@@ -267,7 +266,7 @@ plan = [
 
                 # Check if tool was called
                 tool_calls = msg.get("tool_calls")
-                if tool_calls and turn < max_turns - 1:
+                if tool_calls:
                     for tc in tool_calls:
                         fn_name = tc["function"]["name"]
                         fn_args = json.loads(tc["function"].get("arguments", "{}"))
@@ -279,7 +278,32 @@ plan = [
                             "content": result_text,
                         })
                 else:
+                    # Model provided text/code without requesting more tools
                     break
+            else:
+                # If tool budget ceiling was reached without dynamic exit, prompt for final code synthesis
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have concluded your empirical tool investigation. "
+                        "Based on all telemetry, incident logs, and knowledge retrieved above, "
+                        "synthesize your complete revised policy program now in a single ```python ... ``` block."
+                    ),
+                })
+                payload = {
+                    "model": model_name,
+                    "messages": messages,
+                    "temperature": 0.2,
+                }
+                resp = client.post(url, headers=headers, json=payload)
+                if not resp.is_error:
+                    data = resp.json()
+                    usage = data.get("usage", {})
+                    total_prompt_tokens += usage.get("prompt_tokens", 0)
+                    total_completion_tokens += usage.get("completion_tokens", 0)
+                    choice = data["choices"][0]
+                    msg = choice["message"]
+                    messages.append(msg)
 
         log_token_usage(
             run_id=run_id,
@@ -293,12 +317,70 @@ plan = [
             db_path=self.db_path,
         )
 
+        # Store context messages for potential repair turns
+        self._last_messages = messages
+        self._last_model_name = model_name
+
         final_content = ""
         for m in reversed(messages):
             if m.get("role") == "assistant" and m.get("content"):
                 final_content = m["content"]
                 break
         return str(final_content)
+
+    def _repair_code(
+        self,
+        candidate_code: str,
+        compile_err: str,
+        run_id: str,
+        session_id: str,
+        trigger_reason: str,
+    ) -> str:
+        """Prompts the LLM to fix syntax or vocabulary violations with AST feedback."""
+        repair_user_msg = (
+            f"The candidate policy program failed AST validation and compilation with error:\n"
+            f"{compile_err}\n\n"
+            f"Candidate Code:\n```python\n{candidate_code.strip()}\n```\n\n"
+            "Please fix all syntax and vocabulary violations to adhere strictly to the Approved Vocabulary and grammar rules. "
+            "Output ONLY the complete corrected policy code in a single ```python ... ``` block."
+        )
+
+        if self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):
+            url = (self.base_url or "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.api_key.strip()}",
+                "HTTP-Referer": "https://github.com/saejin-moon/lox",
+                "X-Title": "LOX 2.0 Policy Synthesis",
+            }
+            messages = getattr(self, "_last_messages", [])
+            messages.append({"role": "user", "content": repair_user_msg})
+            model_name = getattr(self, "_last_model_name", self.model or "google/gemini-2.5-flash")
+
+            with httpx.Client(timeout=120.0) as client:
+                payload = {
+                    "model": model_name,
+                    "messages": messages,
+                    "temperature": 0.1,
+                }
+                resp = client.post(url, headers=headers, json=payload)
+                if not resp.is_error:
+                    data = resp.json()
+                    usage = data.get("usage", {})
+                    log_token_usage(
+                        run_id=run_id,
+                        session_id=session_id,
+                        provider="openrouter",
+                        model=model_name,
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        trigger_reason=f"repair: {trigger_reason}",
+                        db_path=self.db_path,
+                    )
+                    choice = data["choices"][0]
+                    msg = choice["message"]
+                    messages.append(msg)
+                    return str(msg.get("content") or "")
+        return candidate_code
 
     def extract_code(self, response_text: str) -> str:
         """Robustly extracts the Python policy code block from markdown."""
@@ -336,9 +418,10 @@ plan = [
         status_report: str = "",
         run_id: str = "synth_run",
         action_handlers: dict | None = None,
+        max_repairs: int = 2,
     ) -> tuple[str, BehaviorTree | None, str | None]:
         """
-        Runs one authoring session with tool calling and token logging.
+        Runs one authoring session with tool calling, AST compilation, and self-repair retries.
         Returns (new_code, compiled_tree_or_None, error_message_or_None).
         """
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
@@ -353,11 +436,30 @@ plan = [
         else:
             raw_response = self._call_mock(current_policy, trigger_reason, run_id, session_id)
 
-        new_code = self.extract_code(raw_response)
-        if "def " not in new_code or "plan" not in new_code:
-            return new_code, None, f"Policy compilation failed: Extracted response does not contain valid policy code structure ('def' and 'plan' missing)."
-        try:
-            tree = compile_policy(new_code, action_handlers=action_handlers)
-            return new_code, tree, None
-        except Exception as e:
-            return new_code, None, f"Policy compilation failed: {e}"
+        # Compilation and Self-Repair Loop
+        candidate_code = self.extract_code(raw_response)
+        last_error = None
+
+        for attempt in range(max_repairs + 1):
+            if "def " in candidate_code and "plan" in candidate_code:
+                try:
+                    tree = compile_policy(candidate_code, action_handlers=action_handlers)
+                    return candidate_code, tree, None
+                except Exception as e:
+                    last_error = f"Policy compilation failed: {e}"
+            else:
+                last_error = "Policy compilation failed: Extracted response does not contain valid policy code structure ('def' and 'plan' missing)."
+
+            # If compilation failed and repair attempts remain, ask the model to self-correct
+            if attempt < max_repairs and self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):
+                print(f"[Author Agent] Compilation issue detected ({last_error}). Triggering self-repair turn {attempt + 1}/{max_repairs}...")
+                repaired_response = self._repair_code(
+                    candidate_code=candidate_code,
+                    compile_err=last_error,
+                    run_id=run_id,
+                    session_id=session_id,
+                    trigger_reason=trigger_reason,
+                )
+                candidate_code = self.extract_code(repaired_response)
+
+        return candidate_code, None, last_error

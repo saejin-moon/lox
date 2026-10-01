@@ -111,3 +111,101 @@ def test_openrouter_tool_calling_and_code_synthesis():
     assert error is None
     assert tree is not None
     assert "melee_attack_hostile" in code
+
+
+def test_openrouter_tool_ceiling_wrap_up():
+    """Verifies that hitting the tool ceiling triggers the wrap-up prompt with tools disabled."""
+    agent = AuthorAgent(provider="openrouter", api_key="sk-test-key")
+
+    def make_tool_resp(call_id):
+        r = MagicMock(spec=httpx.Response)
+        r.is_error = False
+        r.json.return_value = {
+            "usage": {"prompt_tokens": 50, "completion_tokens": 10},
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": f"call_{call_id}",
+                        "type": "function",
+                        "function": {"name": "get_death_taxonomy", "arguments": "{}"}
+                    }]
+                }
+            }]
+        }
+        return r
+
+    tool_responses = [make_tool_resp(i) for i in range(15)]
+    final_resp = MagicMock(spec=httpx.Response)
+    final_resp.is_error = False
+    final_resp.json.return_value = {
+        "usage": {"prompt_tokens": 200, "completion_tokens": 40},
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "```python\ndef explore():\n    step_to_frontier()\n\nplan = [explore]\n```"
+            }
+        }]
+    }
+
+    with patch("httpx.Client.post", side_effect=tool_responses + [final_resp]) as mock_post:
+        code, tree, error = agent.synthesize_policy(
+            current_policy="plan = []",
+            trigger_reason="Stall",
+            status_report="Status",
+            run_id="test_ceiling",
+        )
+
+    assert error is None
+    assert tree is not None
+    assert "step_to_frontier" in code
+    # Ensure 15 tool turns + 1 final wrap-up turn were executed
+    assert mock_post.call_count == 16
+    # Verify tools were omitted on the 16th turn
+    last_call_payload = mock_post.call_args_list[-1][1]["json"]
+    assert "tools" not in last_call_payload
+
+
+def test_openrouter_ast_self_repair():
+    """Verifies that an AST syntax error triggers self-repair feedback to the model."""
+    agent = AuthorAgent(provider="openrouter", api_key="sk-test-key")
+
+    # Turn 1: Model outputs code with an illegal predicate 'invalid_pred_xyz'
+    bad_resp = MagicMock(spec=httpx.Response)
+    bad_resp.is_error = False
+    bad_resp.json.return_value = {
+        "usage": {"prompt_tokens": 100, "completion_tokens": 30},
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "```python\ndef combat():\n    if invalid_pred_xyz:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
+            }
+        }]
+    }
+
+    # Repair Turn: Model receives AST validation feedback and fixes the predicate
+    repair_resp = MagicMock(spec=httpx.Response)
+    repair_resp.is_error = False
+    repair_resp.json.return_value = {
+        "usage": {"prompt_tokens": 150, "completion_tokens": 30},
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "```python\ndef combat():\n    if adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
+            }
+        }]
+    }
+
+    with patch("httpx.Client.post", side_effect=[bad_resp, repair_resp]) as mock_post:
+        code, tree, error = agent.synthesize_policy(
+            current_policy="plan = []",
+            trigger_reason="Fix bug",
+            status_report="Status",
+            run_id="test_repair",
+        )
+
+    assert error is None
+    assert tree is not None
+    assert "adjacent_hostile" in code
+    assert mock_post.call_count == 2
