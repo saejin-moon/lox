@@ -163,6 +163,7 @@ plan = [
 
     # Shared action handlers
     known_stairs_down: tuple[int, int] | None = None
+    known_stairs_up: tuple[int, int] | None = None
 
     def handle_quaff_healing(bb: Blackboard, args):
         for it in bb.obs.inventory:
@@ -208,6 +209,22 @@ plan = [
             walkable = build_walkable_mask(bb.obs)
             walkable[known_stairs_down[0], known_stairs_down[1]] = True
             path = SpatialEngine.find_path(hero_pos, known_stairs_down, walkable)
+            if path:
+                dy = path[0][0] - hy
+                dx = path[0][1] - hx
+                return Action(name="step", direction=(dy, dx))
+        return Status.FAILURE
+
+    def handle_step_to_stairs_up(bb: Blackboard, args):
+        nonlocal known_stairs_up
+        hy, hx = bb.obs.hero.y, bb.obs.hero.x
+        hero_pos = (hy, hx)
+        if known_stairs_up is not None and hero_pos == known_stairs_up:
+            return Action(name="ascend")
+        if known_stairs_up is not None:
+            walkable = build_walkable_mask(bb.obs)
+            walkable[known_stairs_up[0], known_stairs_up[1]] = True
+            path = SpatialEngine.find_path(hero_pos, known_stairs_up, walkable)
             if path:
                 dy = path[0][0] - hy
                 dx = path[0][1] - hx
@@ -284,6 +301,8 @@ plan = [
         "eat_carried_food": handle_eat_food,
         "melee_attack_hostile": handle_melee_attack,
         "step_to_stairs_down": handle_step_to_stairs,
+        "step_to_stairs_up": handle_step_to_stairs_up,
+        "step_to_stairs": handle_step_to_stairs,
         "step_to_frontier": handle_step_to_frontier,
         "search": handle_search,
         "descend": handle_descend,
@@ -294,8 +313,11 @@ plan = [
         "kick_closed_door": handle_kick_closed_door,
         "eat_floor_corpse": handle_eat_floor_corpse,
         "step_away_from_hostile": handle_step_away_from_hostile,
+        "retreat": handle_step_away_from_hostile,
         "step_to_chokepoint": handle_step_away_from_hostile,
         "step_to_dead_end": handle_search,
+        "rest": handle_wait,
+        "idle": handle_wait,
     }
 
     current_tree = compile_policy(current_policy, action_handlers=action_handlers)
@@ -314,6 +336,7 @@ plan = [
             ep_id = f"g{gen:03d}_e{ep_idx+1}"
             obs = adapter.reset(seed=(gen * 1000 + ep_idx))
             known_stairs_down = None
+            known_stairs_up = None
             last_position = (-1, -1)
             stuck_counter = 0
             ep_turns = 0
@@ -331,9 +354,12 @@ plan = [
                 hy, hx = hero.y, hero.x
 
                 # Stairs detection
-                stairs_loc = np.argwhere(obs.chars == ord(">"))
-                if len(stairs_loc) > 0:
-                    known_stairs_down = (int(stairs_loc[0, 0]), int(stairs_loc[0, 1]))
+                stairs_down_loc = np.argwhere(obs.chars == ord(">"))
+                if len(stairs_down_loc) > 0:
+                    known_stairs_down = (int(stairs_down_loc[0, 0]), int(stairs_down_loc[0, 1]))
+                stairs_up_loc = np.argwhere(obs.chars == ord("<"))
+                if len(stairs_up_loc) > 0:
+                    known_stairs_up = (int(stairs_up_loc[0, 0]), int(stairs_up_loc[0, 1]))
 
                 # Stuck / frontier detection
                 if (hy, hx) == last_position:
