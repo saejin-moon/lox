@@ -510,7 +510,7 @@ class NetHackAdapter(EnvironmentAdapter):
                 raw_obs, _, term, trunc, _ = self.env.step(space_idx)
             elif "Are you sure you want to pray?" in msg:
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("y", space_idx))
-            elif "(y/n)" in msg or "[yn]" in msg or "[ynq]" in msg or "really attack" in msg.lower() or "really quit" in msg.lower() or "possessions identified" in msg.lower():
+            elif "(y/n)" in msg or "[yn" in msg or "creatures vanquished" in msg.lower() or "really attack" in msg.lower() or "really quit" in msg.lower() or "possessions identified" in msg.lower():
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("n", space_idx))
             elif "who are you" in msg.lower() or "what is your name" in msg.lower() or "call this" in msg.lower() or "hello stranger" in msg.lower():
                 esc_idx = self.char_to_act.get("\x1b", 38)

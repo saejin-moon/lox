@@ -126,5 +126,10 @@ def test_dismiss_more_ynq_prompts():
     cleaned_obs, term, trunc = adapter._dismiss_more(fake_obs, False, False)
     assert cleaned_obs is not None
 
+    # Test that [ynaq] post-death prompts are auto-dismissed with 'n'
+    fake_obs2 = {"message": "Do you want an account of creatures vanquished? [ynaq] (n)", "misc": [0, 0, 0]}
+    cleaned_obs2, term2, trunc2 = adapter._dismiss_more(fake_obs2, False, False)
+    assert cleaned_obs2 is not None
+
     adapter.close()
 
