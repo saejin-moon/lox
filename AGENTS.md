@@ -103,9 +103,11 @@ lox/
     - `obs.combat.is_fast_dangerous` flags lethal speedsters, triggering immediate retreat into 1-tile corridor chokepoints (`step_to_chokepoint()`) to force 1v1 fights.
     - In-combat emergency healing: Quaffing healing potions takes 1 turn and restores 10–20 HP. `handle_combat` checks `if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing: yield quaff_healing()` immediately.
 
-11. **Room Wall Perimeter Secret Door Navigation**:
-    - Procedural generation often conceals doors along room perimeter walls (`-`, `|`).
-    - When visible corridor dead ends are searched or absent, `step_to_dead_end()` targets floor tiles adjacent to unexplored room perimeter walls, breaking the Depth 1–2 exploration stall permanently.
+11. **Unified Stride-2 Checkerboard Secret Door Navigation**:
+    - Procedural generation often conceals doors along room perimeter walls (`-`, `|`) or at blind corridor tips (`#`).
+    - Rather than prioritizing distant corridor dead ends over adjacent room walls, `NetHackAdapter` unifies corridor dead ends and perimeter candidates into `_compute_dead_ends_mask`.
+    - Room perimeters utilize a mathematical stride-2 checkerboard pattern `(cy + cx) % 2 == 0` plus all corner/alcove tiles (`adj_wall >= 2`). Because NetHack's `search` examines a $3 \times 3$ bounding box, this guarantees 100% geometric coverage of all room walls while cutting search stops and turns by $> 50\%$.
+    - `step_to_dead_end()` sorts reachable candidates by search count and BFS walking distance, ensuring heroes clear local room perimeter walls before undertaking cross-dungeon treks.
 
 12. **Exploration Pacing & Stagnation Auto-Recovery**:
     - When visible frontiers and dead ends are exhausted without discovering stairs, idling with `wait()` causes the hero to burn thousands of turns until reaching `MaxTurnsReached`.

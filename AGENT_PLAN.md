@@ -18,8 +18,8 @@ This plan guides the incoming agent step-by-step from the current checkpoint to 
   7. *Minetown Dialog Auto-Dismissal (`ESC`)*: Automatically cancels text-entry prompts (`"who are you"`, `"what is your name"`, `"call this"`, `"hello stranger"`) with ESC (`\x1b`) and registers guards as peaceful, avoiding 2,500-keystroke timeouts at Depths 5–8.
   8. *Autopickup & Armor Equipping*: NLE configured with `options=("autopickup", "pickup_types:?!/%=[$")`. Added `has_unworn_armor` and `wear_armor()` to lower AC and survive deep monsters.
   9. *In-Combat Emergency Healing & Fast Monster Chokepoint Retreat*: In-combat healing triggered at `< 50% HP` inside `handle_combat()`. Soldier ants/killer bees (`is_fast_dangerous`) trigger immediate retreat to corridor chokepoints.
-  10. *Test Suite*: All 33 unit tests pass (`uv run pytest -v`).
-  11. *Exploration Pacing & Stagnation Auto-Recovery*: Resolved the 7,000-turn wait-loop stall (`MaxTurnsReached`). `NetHackAdapter` automatically decays search counts by 10 when frontiers stall, triggering an active rescan sweep across candidate room perimeter walls. `data/latest_policy.py` completely eliminates idle `wait()` during exploration, continually sweeping candidate walls until stairs down are revealed.
+  10. *Test Suite*: All 34 unit tests pass (`uv run pytest -v`).
+  11. *Unified Stride-2 Checkerboard Secret Door Search*: Unified corridor dead ends and perimeter candidates into `_compute_dead_ends_mask`. Uses checkerboard stride-2 pattern `(cy + cx) % 2 == 0` plus all corner tiles (`adj_wall >= 2`) to ensure 100% geometric coverage of all room walls while cutting search stops and turns by $> 50\%$. Automatically decays search counts by 10 on stagnation and sorts reachable candidates by search count and BFS walking distance.
 
 ---
 

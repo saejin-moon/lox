@@ -113,6 +113,40 @@ class NetHackAdapter(EnvironmentAdapter):
                 doors_mask[dy, dx] = False
         return doors_mask
 
+    def _compute_dead_ends_mask(
+        self, chars: np.ndarray, walkable: np.ndarray, max_corridor: int = 15, max_perimeter: int = 10
+    ) -> np.ndarray:
+        """Unified dead end and perimeter secret door candidate mask.
+
+        Finds:
+        1. Corridor dead ends ('#' with <= 1 cardinal walkable neighbor and < max_corridor searches).
+        2. Room perimeter candidates ('.' adjacent to wall/stone, using checkerboard stride-2 pattern
+           along straight walls and all corner/alcove positions, with < max_perimeter searches).
+        """
+        dead_ends_mask = np.zeros((21, 79), dtype=bool)
+        for cy in range(21):
+            for cx in range(79):
+                if not walkable[cy, cx]:
+                    continue
+                ch = chr(chars[cy, cx])
+                if ch == "#" and self.searched_count[cy, cx] < max_corridor:
+                    adj = sum(
+                        1
+                        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                        if 0 <= cy + dy < 21 and 0 <= cx + dx < 79 and walkable[cy + dy, cx + dx]
+                    )
+                    if adj <= 1:
+                        dead_ends_mask[cy, cx] = True
+                elif ch == "." and self.searched_count[cy, cx] < max_perimeter:
+                    adj_wall = sum(
+                        1
+                        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                        if 0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
+                    )
+                    if adj_wall > 0 and ((cy + cx) % 2 == 0 or adj_wall >= 2):
+                        dead_ends_mask[cy, cx] = True
+        return dead_ends_mask
+
     def is_target_floating_eye(self, glyphs: np.ndarray, y: int, x: int) -> bool:
         """Informational check: returns True if monster at (y, x) is a floating eye."""
         if not (0 <= y < 21 and 0 <= x < 79):
@@ -333,44 +367,15 @@ class NetHackAdapter(EnvironmentAdapter):
         )
 
         # Check for unsearched corridor dead ends or room perimeter tiles across the entire floor
-        has_dead_ends = False
-        for cy in range(21):
-            for cx in range(79):
-                if walkable[cy, cx] and chr(chars[cy, cx]) == "#" and self.searched_count[cy, cx] < 15:
-                    adj = sum(1 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
-                              if 0 <= cy + dy < 21 and 0 <= cx + dx < 79 and walkable[cy + dy, cx + dx])
-                    if adj <= 1:
-                        has_dead_ends = True
-                        break
-            if has_dead_ends:
-                break
-
-        # If all corridor dead ends searched, check unsearched room perimeter tiles adjacent to walls
-        if not has_dead_ends:
-            for cy in range(21):
-                for cx in range(79):
-                    if walkable[cy, cx] and chr(chars[cy, cx]) == "." and self.searched_count[cy, cx] < 10:
-                        if any(0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
-                               for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))):
-                            has_dead_ends = True
-                            break
-                if has_dead_ends:
-                    break
+        dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
+        has_dead_ends = bool(np.any(dead_ends_mask))
 
         # Stagnation Auto-Recovery: If no visible frontiers or dead ends remain and stairs are unknown,
-        # reset search counts so the hero performs a fresh search sweep instead of freezing in place.
+        # decay search counts so the hero performs a fresh search sweep instead of freezing in place.
         if not has_frontier and not has_dead_ends and self.known_stairs_down is None:
             self.searched_count = np.maximum(0, self.searched_count - 10)
-            for cy in range(21):
-                for cx in range(79):
-                    if walkable[cy, cx] and chr(chars[cy, cx]) in ("#", "."):
-                        adj_wall = any(0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
-                                       for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)))
-                        if adj_wall:
-                            has_dead_ends = True
-                            break
-                if has_dead_ends:
-                    break
+            dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
+            has_dead_ends = bool(np.any(dead_ends_mask))
 
         spatial = SpatialView(
             stairs_down_known=(self.known_stairs_down is not None),
@@ -637,43 +642,22 @@ class NetHackAdapter(EnvironmentAdapter):
             for by, bx in self.blocked_tiles:
                 if 0 <= by < 21 and 0 <= bx < 79:
                     walkable[by, bx] = False
-            dead_ends_mask = np.zeros((21, 79), dtype=bool)
-            for cy in range(21):
-                for cx in range(79):
-                    if walkable[cy, cx] and chr(chars[cy, cx]) == "#" and self.searched_count[cy, cx] < 15:
-                        adj = sum(1 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
-                                  if 0 <= cy + dy < 21 and 0 <= cx + dx < 79 and walkable[cy + dy, cx + dx])
-                        if adj <= 1:
-                            dead_ends_mask[cy, cx] = True
-
-            # If no unsearched corridor dead ends remain, search room perimeter tiles adjacent to walls
-            if not np.any(dead_ends_mask):
-                for cy in range(21):
-                    for cx in range(79):
-                        if walkable[cy, cx] and chr(chars[cy, cx]) == "." and self.searched_count[cy, cx] < 10:
-                            if any(0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
-                                   for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))):
-                                dead_ends_mask[cy, cx] = True
-
-            # If still none, decay search counters to force a fresh rescan sweep across candidates
+            dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
             if not np.any(dead_ends_mask):
                 self.searched_count = np.maximum(0, self.searched_count - 10)
-                for cy in range(21):
-                    for cx in range(79):
-                        if walkable[cy, cx] and chr(chars[cy, cx]) in ("#", "."):
-                            if any(0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
-                                   for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))):
-                                dead_ends_mask[cy, cx] = True
+                dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
 
             if np.any(dead_ends_mask):
                 if dead_ends_mask[hero.y, hero.x]:
                     action = Action(name="search")
                 else:
-                    # Prioritize least-searched candidates to explore all candidate walls uniformly
+                    # Prioritize least-searched candidates to explore candidate walls uniformly
                     candidates = np.argwhere(dead_ends_mask)
                     min_searches = min(self.searched_count[cy, cx] for cy, cx in candidates)
                     min_mask = dead_ends_mask & (self.searched_count <= min_searches + 2)
                     target = SpatialEngine.find_nearest_frontier((hero.y, hero.x), walkable, self.visited, target_mask=min_mask)
+                    if not target or target == (-1, -1):
+                        target = SpatialEngine.find_nearest_frontier((hero.y, hero.x), walkable, self.visited, target_mask=dead_ends_mask)
                     if target and target != (-1, -1):
                         path = SpatialEngine.find_path((hero.y, hero.x), target, walkable)
                         if path:

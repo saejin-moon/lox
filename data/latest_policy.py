@@ -1,9 +1,8 @@
 class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
-        self.search_count = 0
         self.combat_turn_count = 0
-        self.max_combat_turns = 40
+        self.max_combat_turns = 30
 
     def run(self, obs):
         while True:
@@ -14,11 +13,12 @@ class Agent:
                     obs = yield pray()
                     continue
 
-            # 2. Immediate Depth Progression (Critical to prevent MaxTurnsReached)
+            # 2. Immediate Depth Progression (Highest Priority to avoid MaxTurns)
             if obs.spatial.standing_on_stairs_down:
                 obs = yield descend()
                 continue
-            if obs.spatial.stairs_down_known:
+            
+            if obs.spatial.stairs_down_known and obs.combat.hostile_count_fov == 0:
                 obs = yield step_to_stairs_down()
                 continue
 
@@ -27,7 +27,7 @@ class Agent:
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 4. Hunger Prevention (Only when safe)
+            # 4. Hunger Prevention
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -47,27 +47,34 @@ class Agent:
                     obs = yield kick_closed_door()
                 else:
                     obs = yield open_door()
-            elif obs.spatial.has_unvisited_frontier:
+                continue
+
+            if obs.spatial.has_unvisited_frontier:
                 obs = yield step_to_frontier()
-            elif obs.spatial.has_unsearched_dead_end:
+                continue
+            
+            if obs.spatial.has_unsearched_dead_end:
                 obs = yield from self.handle_dead_end(obs)
-            else:
-                # When frontiers are clear, we must search perimeter walls for secret doors/stairs
-                obs = yield from self.handle_dead_end(obs)
+                continue
+            
+            # Critical: If no frontiers and no known stairs, we MUST search 
+            # perimeter walls/dead ends to find secret doors.
+            obs = yield from self.handle_dead_end(obs)
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
             self.combat_turn_count += 1
             
-            # Combat Timeout: Prevent infinite kiting
+            # Combat Timeout: Prevent infinite kiting/stalling (MaxTurnsReached mitigation)
             if self.combat_turn_count > self.max_combat_turns:
                 if obs.combat.can_retreat:
                     obs = yield retreat()
                     self.combat_turn_count = 0
                     return obs
-                if not obs.combat.adjacent_hostile:
-                    obs = yield melee_attack_hostile()
-                    continue
+                # If we can't retreat, we must fight to clear the path
+                obs = yield melee_attack_hostile()
+                self.combat_turn_count = 0
+                continue
 
             # Floating Eye Gaze Mitigation
             if obs.combat.closest_hostile_name == "floating eye":
@@ -121,9 +128,7 @@ class Agent:
         return obs
 
     def handle_dead_end(self, obs):
-        # Move to a dead end or perimeter wall
         obs = yield step_to_dead_end()
-        # Search multiple times to uncover secret doors/stairs
         for _ in range(10):
             if obs.combat.hostile_count_fov > 0:
                 return obs

@@ -43,7 +43,7 @@ uv sync
 ```bash
 uv run pytest -v
 ```
-All 33 test suites should pass cleanly in ~4 seconds.
+All 34 test suites should pass cleanly in ~4 seconds.
 
 ---
 
