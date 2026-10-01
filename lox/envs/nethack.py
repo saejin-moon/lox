@@ -429,7 +429,28 @@ class NetHackAdapter(EnvironmentAdapter):
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("n", space_idx))
             else:
                 break
+            if term or trunc:
+                break
         return raw_obs, term, trunc
+
+    def _step_sequence(self, action_indices: list[int]) -> tuple[Observation, float, bool, bool, dict[str, Any]]:
+        total_reward = 0.0
+        term = False
+        trunc = False
+        info: dict[str, Any] = {}
+        raw_obs = getattr(self, "_last_raw_obs", {})
+        for act in action_indices:
+            if term or trunc:
+                break
+            raw_obs, r, term, trunc, info = self.env.step(act)
+            total_reward += float(r)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            if term or trunc:
+                break
+        self._last_raw_obs = raw_obs
+        obs = self._extract_obs(raw_obs)
+        self._last_obs = obs
+        return obs, total_reward, bool(term), bool(trunc), info
 
     def reset(self, seed: int | None = None) -> Observation:
         self.visited.fill(False)
@@ -534,70 +555,25 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name in ("wait", "rest"):
             target_char = "."
         elif action.name == "pray":
-            raw_obs, reward, term, trunc, info = self.env.step(self.pray_action_idx)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            obs = self._extract_obs(raw_obs)
-            self._last_obs = obs
+            obs, r, term, trunc, info = self._step_sequence([self.pray_action_idx])
             self.last_prayer_turn = obs.hero.turn
-            return obs, float(reward), bool(term), bool(trunc), info
+            return obs, r, term, trunc, info
         elif action.name in ("eat_carried_food", "eat_food"):
             slot = action.slot or (obs_prev.inventory.get_food_slot() if obs_prev else "a")
-            act_e = self.char_to_act.get("e", 0)
-            raw_obs, reward, term, trunc, info = self.env.step(act_e)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            act_slot = self.char_to_act.get(slot or "a", 0)
-            raw_obs, r2, term, trunc, info = self.env.step(act_slot)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            obs = self._extract_obs(raw_obs)
-            self._last_obs = obs
-            return obs, float(reward + r2), bool(term), bool(trunc), info
+            return self._step_sequence([self.char_to_act.get("e", 0), self.char_to_act.get(slot or "a", 0)])
         elif action.name == "eat_floor_corpse":
-            raw_obs, reward, term, trunc, info = self.env.step(35)  # Command.EAT
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            raw_obs, r2, term, trunc, info = self.env.step(self.char_to_act.get("y", 0))
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            obs = self._extract_obs(raw_obs)
-            self._last_obs = obs
-            return obs, float(reward + r2), bool(term), bool(trunc), info
+            return self._step_sequence([35, self.char_to_act.get("y", 0)])
         elif action.name in ("quaff_healing", "quaff"):
             slot = action.slot or (obs_prev.inventory.get_healing_slot() if obs_prev else "a")
-            act_q = self.char_to_act.get("q", 0)
-            raw_obs, reward, term, trunc, info = self.env.step(act_q)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            act_slot = self.char_to_act.get(slot or "a", 0)
-            raw_obs, r2, term, trunc, info = self.env.step(act_slot)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            obs = self._extract_obs(raw_obs)
-            self._last_obs = obs
-            return obs, float(reward + r2), bool(term), bool(trunc), info
+            return self._step_sequence([self.char_to_act.get("q", 0), self.char_to_act.get(slot or "a", 0)])
         elif action.name == "read_scroll":
             slot = action.slot or "a"
-            act_r = self.char_to_act.get("r", 0)
-            raw_obs, reward, term, trunc, info = self.env.step(act_r)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            act_slot = self.char_to_act.get(slot, 0)
-            raw_obs, r2, term, trunc, info = self.env.step(act_slot)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            obs = self._extract_obs(raw_obs)
-            self._last_obs = obs
-            return obs, float(reward + r2), bool(term), bool(trunc), info
+            return self._step_sequence([self.char_to_act.get("r", 0), self.char_to_act.get(slot, 0)])
         elif action.name == "zap_wand":
             slot = action.slot or "a"
             dir_char = DIR_CHARS.get(action.direction, ".") if action.direction else "."
-            act_z = self.char_to_act.get("z", 0)
-            raw_obs, reward, term, trunc, info = self.env.step(act_z)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            act_slot = self.char_to_act.get(slot, 0)
-            raw_obs, r2, term, trunc, info = self.env.step(act_slot)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            act_dir = self.char_to_act.get(dir_char, 0)
-            raw_obs, r3, term, trunc, info = self.env.step(act_dir)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            obs = self._extract_obs(raw_obs)
-            self._last_obs = obs
-            return obs, float(reward + r2 + r3), bool(term), bool(trunc), info
+            return self._step_sequence([self.char_to_act.get("z", 0), self.char_to_act.get(slot, 0), self.char_to_act.get(dir_char, 0)])
         elif action.name == "open_door":
-            # Find adjacent closed door if direction not given
             dir_char = "l"
             if action.direction:
                 dir_char = DIR_CHARS.get(action.direction, "l")
@@ -609,14 +585,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         if chr(chars[hero.y + dy, hero.x + dx]) == "+":
                             dir_char = DIR_CHARS[(dy, dx)]
                             break
-            raw_obs, reward, term, trunc, info = self.env.step(57)  # Command.OPEN
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            act_dir = self.char_to_act.get(dir_char, 0)
-            raw_obs, r2, term, trunc, info = self.env.step(act_dir)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            obs = self._extract_obs(raw_obs)
-            self._last_obs = obs
-            return obs, float(reward + r2), bool(term), bool(trunc), info
+            return self._step_sequence([57, self.char_to_act.get(dir_char, 0)])
         elif action.name == "kick_closed_door":
             dir_char = "l"
             if action.direction:
@@ -629,25 +598,14 @@ class NetHackAdapter(EnvironmentAdapter):
                         if chr(chars[hero.y + dy, hero.x + dx]) == "+":
                             dir_char = DIR_CHARS[(dy, dx)]
                             break
-            raw_obs, reward, term, trunc, info = self.env.step(48)  # Command.KICK
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            act_dir = self.char_to_act.get(dir_char, 0)
-            raw_obs, r2, term, trunc, info = self.env.step(act_dir)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-            obs = self._extract_obs(raw_obs)
-            self._last_obs = obs
-            return obs, float(reward + r2), bool(term), bool(trunc), info
+            return self._step_sequence([48, self.char_to_act.get(dir_char, 0)])
         elif action.name == "pickup":
             target_char = ","
         elif action.name == "pay":
             target_char = "p"
 
         act_idx = self.char_to_act.get(target_char, self.char_to_act.get(".", 0))
-        raw_obs, reward, term, trunc, info = self.env.step(act_idx)
-        raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
-        obs = self._extract_obs(raw_obs)
-        self._last_obs = obs
-        return obs, float(reward), bool(term), bool(trunc), info
+        return self._step_sequence([act_idx])
 
     def close(self) -> None:
         self.env.close()
