@@ -1,25 +1,41 @@
 def emergency():
-    if hp_frac < 0.25 and can_safely_pray:
+    if hunger_state >= WEAK and has_carried_food:
+        eat_carried_food()
+    elif hp_frac < 0.15 and can_safely_pray:
         pray()
-    elif hp_frac < 0.50 and has_healing:
+    elif hp_frac < 0.30 and has_healing:
         quaff_healing()
     elif hunger_state >= HUNGRY and has_carried_food:
         eat_carried_food()
 
+def recovery():
+    if is_surrounded:
+        step_away_from_hostile()
+    elif adjacent_hostile and hp_frac < 0.50:
+        step_away_from_hostile()
+    elif standing_on_elbereth and hostile_count_fov > 0:
+        wait()
+
 def combat():
     if adjacent_hostile:
-        melee_attack_hostile()
+        if hp_frac < 0.30:
+            step_away_from_hostile()
+        else:
+            melee_attack_hostile()
     elif hostile_count_fov > 0:
-        step_to_chokepoint()
+        if in_corridor:
+            step_to_chokepoint()
+        else:
+            step_away_from_hostile()
 
 def navigation():
     if standing_on_stairs_down:
         descend()
     elif stairs_down_known:
         step_to_stairs_down()
-    elif standing_on_stairs_up:
+    elif depth > 1 and hp_frac < 0.20 and standing_on_stairs_up:
         ascend()
-    elif stairs_up_known:
+    elif depth > 1 and hp_frac < 0.20 and stairs_up_known:
         step_to_stairs_up()
 
 def maintenance():
@@ -31,24 +47,16 @@ def maintenance():
 def explore():
     if has_unvisited_frontier:
         step_to_frontier()
-    elif has_unsearched_dead_end:
+    elif has_unsearched_dead_end and hostile_count_fov == 0:
         search()
-    elif stairs_down_known:
-        step_to_stairs_down()
-    else:
-        wait()
-
-def recovery():
-    if adjacent_hostile and can_retreat:
-        step_away_from_hostile()
     else:
         wait()
 
 plan = [
     emergency,
-    combat,
+    recovery,
     navigation,
+    combat,
     maintenance,
     explore,
-    recovery,
 ]

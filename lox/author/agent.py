@@ -295,22 +295,31 @@ plan = [
         return str(final_content)
 
     def extract_code(self, response_text: str) -> str:
-        """Robustly extracts the Python code block from markdown."""
-        # 1. Closed code block: ```python ... ```
-        match = re.search(r"```(?:python)?\s*\n(.*?)\n```", response_text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
+        """Robustly extracts the Python policy code block from markdown."""
+        # 1. Search all code blocks, prioritizing the ones containing policy structure
+        blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", response_text, re.DOTALL)
+        for block in reversed(blocks):
+            if "def " in block and "plan" in block:
+                return block.strip()
+        for block in blocks:
+            if "def " in block:
+                return block.strip()
 
-        # 2. Unclosed code block (e.g. truncated generation)
-        match_unclosed = re.search(r"```(?:python)?\s*\n(.*)", response_text, re.DOTALL)
+        # 2. Unclosed python code block containing policy code
+        match_unclosed = re.search(r"```(?:python)?\s*\n(.*?)(?:```|$)", response_text, re.DOTALL)
         if match_unclosed:
             code = match_unclosed.group(1).strip()
-            return re.sub(r"```+$", "", code).strip()
+            if "def " in code:
+                return re.sub(r"```+$", "", code).strip()
 
         # 3. No backticks: find from first 'def ' to end of 'plan = [...]'
-        match_def = re.search(r"(def \w+\(.*)", response_text, re.DOTALL)
+        match_def = re.search(r"(def \w+\(.*?\nplan\s*=\s*\[.*?\])", response_text, re.DOTALL)
         if match_def:
             return match_def.group(1).strip()
+
+        match_any_def = re.search(r"(def \w+\(.*)", response_text, re.DOTALL)
+        if match_any_def:
+            return match_any_def.group(1).strip()
 
         return response_text.strip()
 
