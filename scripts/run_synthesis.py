@@ -183,6 +183,11 @@ class Agent:
             turns_dl1 = 0
             turns_dl2 = 0
             turns_mines = 0
+            ep_descents = 0
+            ep_attacks = 0
+            ep_searches = 0
+            ep_eats = 0
+            ep_prayers = 0
             inventory_at_death_str = ""
 
             policy_runner = current_tree.create_runner(obs)
@@ -204,6 +209,17 @@ class Agent:
                 action = policy_runner.send(obs)
                 if action is None:
                     action = Action(name="search")
+
+                if action.name == "descend":
+                    ep_descents += 1
+                elif "attack" in action.name:
+                    ep_attacks += 1
+                elif action.name == "search":
+                    ep_searches += 1
+                elif "eat" in action.name:
+                    ep_eats += 1
+                elif action.name == "pray":
+                    ep_prayers += 1
 
                 last_5_actions.append(action.name)
                 if len(last_5_actions) > 5:
@@ -256,13 +272,35 @@ class Agent:
                     done = bool(term or trunc)
                 else:
                     obs, reward, done, info = step_res
+                    trunc = (step >= max_turns - 1)
+                    term = done and not trunc
 
                 if done:
-                    death_reason = info.get("death_reason", "died") if hasattr(info, "get") else "ended"
-                    if "death" in death_reason.lower() or "killed" in death_reason.lower() or "starv" in death_reason.lower() or hero.hp <= 0:
-                        inventory_items = [f"{it.name} ({it.category})" for it in obs.inventory] if hasattr(obs, "inventory") else []
-                        inventory_at_death_str = ", ".join(inventory_items[:10])
-                        recorder.record_death(death_reason)
+                    if trunc or step >= max_turns - 1:
+                        death_reason = f"MaxTurnsReached (Depth {max_depth_reached})"
+                    elif getattr(obs.hero, "hp", 0) <= 0 or term:
+                        msg = getattr(obs, "message", "").strip()
+                        msg_l = msg.lower()
+                        if "starv" in msg_l:
+                            death_reason = "Starvation"
+                        elif "chok" in msg_l:
+                            death_reason = "Choked on food"
+                        elif "poison" in msg_l:
+                            death_reason = "Poison"
+                        elif "petrif" in msg_l:
+                            death_reason = "Petrification"
+                        elif any(k in msg_l for k in ("bites", "stings", "hits", "kills", "killed", "claws", "shoots", "strikes")):
+                            death_reason = msg.split(".")[0][:45] if msg else "Combat fatality"
+                        elif msg:
+                            death_reason = msg[:45]
+                        else:
+                            death_reason = "Killed in combat"
+                    else:
+                        death_reason = info.get("death_reason", "died") if hasattr(info, "get") else "ended"
+
+                    inventory_items = [f"{it.name} ({it.category})" for it in obs.inventory] if hasattr(obs, "inventory") else []
+                    inventory_at_death_str = ", ".join(inventory_items[:10])
+                    recorder.record_death(death_reason)
                     break
 
             final_depth = max_depth_reached
@@ -282,6 +320,11 @@ class Agent:
                 gold=last_valid_gold,
                 max_depth=final_depth,
                 steps=ep_turns,
+                attacks=ep_attacks,
+                descents=ep_descents,
+                searches=ep_searches,
+                eats=ep_eats,
+                prayers=ep_prayers,
                 death_category=death_reason[:30],
                 inventory_at_death=inventory_at_death_str,
                 last_5_actions=" -> ".join(last_5_actions),

@@ -41,11 +41,16 @@ def _create_action_builder(name: str) -> Callable[..., Action]:
     def action_fn(*args, **kwargs) -> Action:
         direction = kwargs.get("direction")
         slot = kwargs.get("slot")
-        if args and isinstance(args[0], tuple):
-            direction = args[0]
+        target_pos = kwargs.get("target_pos")
+        if len(args) == 2 and isinstance(args[0], int) and isinstance(args[1], int):
+            target_pos = (args[0], args[1])
+        elif args and isinstance(args[0], tuple):
+            if len(args[0]) == 2:
+                target_pos = args[0]
+                direction = args[0]
         elif args and isinstance(args[0], str):
             slot = args[0]
-        return Action(name=name, direction=direction, slot=slot, extra=kwargs)
+        return Action(name=name, direction=direction, slot=slot, target_pos=target_pos, extra=kwargs)
     return action_fn
 
 

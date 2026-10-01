@@ -65,6 +65,7 @@ class Agent:
 1. Always maintain `obs` as the Observation object:
    - When calling a helper generator subroutine using `obs = yield from self.my_subroutine(obs)`, the subroutine MUST conclude with `return obs`. NEVER return a boolean (`return True` / `return False`) from a generator subroutine! Returning a boolean will overwrite `obs = True`, causing an immediate crash on the next turn.
 2. Do not check generator truthiness with `if self.my_routine(obs):` because calling a generator function always returns a truthy generator object. Instead, inspect predicates on `obs` directly in `run()` (e.g. `if obs.combat.adjacent_hostile:`), and then do `obs = yield from self.handle_combat(obs)`.
+3. Every execution path through a generator subroutine MUST yield at least one action (e.g. `obs = yield wait()`) before returning! If a subroutine returns without yielding and the caller continues, the generator enters an infinite busy loop at 100% CPU.
 
 ### Observation Interface (`obs`)
 Every turn, `obs` provides rich sub-namespaces:
@@ -83,6 +84,7 @@ Every turn, `obs` provides rich sub-namespaces:
 3. **Corpse Consumption Hazards**: Eating a corpse takes multiple turns (`weight / 64 + 3`), leaving the hero completely helpless and vulnerable. NEVER eat a corpse if enemies are in FOV. Corpses older than 50 turns cause food poisoning and 1d8 damage; kobolds are poisonous; cockatrices cause lethal petrification without gloves. Check `corpse.is_safe` before eating!
 4. **Door Breaching**: Always try `open_door()` first on closed doors. Only use `kick_closed_door()` if `obs.dungeon.door_is_locked` is True (kicking unlocked doors can hurt your leg and immobilize you for 5-20 turns).
 5. **Excalibur Dipping**: Dipping a long sword into a fountain has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`).
+6. **Secret Doors & Corridor Dead Ends**: NetHack procedural generation regularly seals off deeper dungeon sections and staircases behind hidden secret doors located at dead-end corridors (`#`). When visible room and corridor frontiers are fully explored (`obs.spatial.has_unvisited_frontier == False`), call `step_to_dead_end()` to navigate to dead-end corridor segments and `search()` repeatedly (10-20 times) until the secret door is exposed. Searching repeatedly inside open rooms will NOT find the stairs.
 
 ### Available Actions:
 {actions}

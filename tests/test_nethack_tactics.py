@@ -26,4 +26,15 @@ def test_tactical_primitives_execution():
     obs, reward, term, trunc, _ = adapter.step(Action(name="eat_floor_corpse"))
     assert obs is not None
 
+    # 5. Test step_to coordinate navigation
+    obs, reward, term, trunc, _ = adapter.step(Action(name="step_to", target_pos=(obs.hero.y, obs.hero.x + 1)))
+    assert obs is not None
+
+    # 6. Test peaceful positions and blocked tiles memory tracking
+    adapter.peaceful_positions.add((obs.hero.y, obs.hero.x + 1))
+    adapter.blocked_tiles.add((obs.hero.y, obs.hero.x - 1))
+    obs_test = adapter._extract_obs(adapter._last_raw_obs)
+    assert obs_test.combat.adjacent_peaceful is True
+    assert (obs.hero.y, obs.hero.x - 1) in adapter.blocked_tiles
+
     adapter.close()

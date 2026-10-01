@@ -251,12 +251,15 @@ class SpatialEngine:
         start: tuple[int, int],
         walkable: np.ndarray,
         visited: np.ndarray,
+        target_mask: np.ndarray | None = None,
     ) -> tuple[int, int] | None:
         """Finds closest walkable tile adjacent to unvisited floor or unexplored space."""
         w = walkable.astype(np.bool_)
-        v = visited.astype(np.bool_)
-        # Unvisited reachable floor tiles
-        frontier_mask = w & (~v)
+        if target_mask is not None:
+            frontier_mask = target_mask.astype(np.bool_)
+        else:
+            v = visited.astype(np.bool_)
+            frontier_mask = w & (~v)
         ty, tx = _find_nearest_target(int(start[0]), int(start[1]), w, frontier_mask)
         return (ty, tx) if ty >= 0 else None
 
@@ -286,5 +289,7 @@ def build_walkable_mask(obs_or_chars: Any) -> np.ndarray:
         | (chars == ord("|"))
         | (chars == ord("-"))
         | (chars == ord("+"))
+        | (chars == ord("0"))  # Boulders
+        | (chars == ord("`"))  # Statues
     )
     return (~non_walkable).astype(np.bool_)

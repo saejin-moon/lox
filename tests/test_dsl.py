@@ -145,3 +145,18 @@ plan = [fallback]
 """
     tree = compile_policy(code_with_pass)
     assert tree is not None
+
+
+def test_dsl_step_to_coordinate_args():
+    code = """
+class Agent:
+    def run(self, obs):
+        while True:
+            obs = yield step_to(12, 34)
+"""
+    executor = compile_policy(code)
+    obs = Observation(chars=None, glyphs=None, hero=HeroState())
+    runner = executor.create_runner(obs)
+    act = runner.send(obs) if hasattr(runner, "send") else next(runner)
+    assert act.name == "step_to"
+    assert act.target_pos == (12, 34)

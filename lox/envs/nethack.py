@@ -84,6 +84,9 @@ class NetHackAdapter(EnvironmentAdapter):
         self.floor_corpses: dict[tuple[int, int], tuple[str, int, bool]] = {}  # (y, x) -> (name, drop_turn, is_poisonous)
         self.known_stairs_down: tuple[int, int] | None = None
         self.known_stairs_up: tuple[int, int] | None = None
+        self.searched_count = np.zeros((21, 79), dtype=np.int32)
+        self.peaceful_positions: set[tuple[int, int]] = set()
+        self.blocked_tiles: set[tuple[int, int]] = set()
 
         # Build ASCII char -> action index map
         unwrapped = getattr(self.env, "unwrapped", self.env)
@@ -151,6 +154,9 @@ class NetHackAdapter(EnvironmentAdapter):
         if depth != self.last_depth or dnum != self.last_dnum:
             self.turns_on_level = 0
             self.visited.fill(False)
+            self.searched_count.fill(0)
+            self.peaceful_positions.clear()
+            self.blocked_tiles.clear()
             self.floor_corpses.clear()
             self.known_stairs_down = None
             self.known_stairs_up = None
@@ -240,6 +246,10 @@ class NetHackAdapter(EnvironmentAdapter):
         if glyphs is not None:
             for gy in range(max(0, y - 8), min(21, y + 9)):
                 for gx in range(max(0, x - 8), min(79, x + 9)):
+                    if gy == y and gx == x:
+                        continue
+                    if (gy, gx) in self.peaceful_positions:
+                        continue
                     g = int(glyphs[gy, gx])
                     if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
                         hostile_count += 1
@@ -258,26 +268,35 @@ class NetHackAdapter(EnvironmentAdapter):
                             closest_name = mname
                             closest_pos = (gy, gx)
 
-                        if abs(gy - y) <= 1 and abs(gx - x) <= 1 and not (gy == y and gx == x):
+                        if abs(gy - y) <= 1 and abs(gx - x) <= 1:
                             adjacent_hostile = True
                             adjacent_hostiles_count += 1
 
-                    # Track stairs coordinates from glyphs or chars
-                    c = chr(chars[gy, gx])
-                    if c == ">":
-                        self.known_stairs_down = (gy, gx)
-                    elif c == "<":
-                        self.known_stairs_up = (gy, gx)
+        adjacent_peaceful = any(
+            abs(py - y) <= 1 and abs(px - x) <= 1
+            for py, px in self.peaceful_positions
+        )
+
+        # Track stairs coordinates anywhere on the revealed map
+        stairs_down = np.argwhere(chars == ord(">"))
+        if len(stairs_down) > 0:
+            self.known_stairs_down = (int(stairs_down[0][0]), int(stairs_down[0][1]))
+        stairs_up = np.argwhere(chars == ord("<"))
+        if len(stairs_up) > 0:
+            self.known_stairs_up = (int(stairs_up[0][0]), int(stairs_up[0][1]))
 
         # Spatial topology & navigation analysis
         walkable = build_walkable_mask(raw_obs)
         walkable_ex = walkable.copy()
+        doors_mask = (chars == ord("+"))
+        walkable_ex[doors_mask] = True
         if self.known_stairs_down:
             walkable_ex[self.known_stairs_down[0], self.known_stairs_down[1]] = True
         if self.known_stairs_up:
             walkable_ex[self.known_stairs_up[0], self.known_stairs_up[1]] = True
 
-        frontier_tile = SpatialEngine.find_nearest_frontier((y, x), walkable_ex, self.visited)
+        target_frontier_mask = (walkable & (~self.visited)) | doors_mask
+        frontier_tile = SpatialEngine.find_nearest_frontier((y, x), walkable_ex, self.visited, target_mask=target_frontier_mask)
         has_frontier = frontier_tile is not None
 
         # Corridor detection
@@ -298,7 +317,21 @@ class NetHackAdapter(EnvironmentAdapter):
             can_retreat=(walkable_adj > adjacent_hostiles_count),
             standing_on_elbereth=("Elbereth" in message),
             floating_eye_in_fov=floating_eye_fov,
+            adjacent_peaceful=adjacent_peaceful,
         )
+
+        # Check for unsearched corridor dead ends across the entire floor
+        has_dead_ends = False
+        for cy in range(21):
+            for cx in range(79):
+                if walkable[cy, cx] and chr(chars[cy, cx]) == "#" and self.searched_count[cy, cx] < 15:
+                    adj = sum(1 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                              if 0 <= cy + dy < 21 and 0 <= cx + dx < 79 and walkable[cy + dy, cx + dx])
+                    if adj <= 1:
+                        has_dead_ends = True
+                        break
+            if has_dead_ends:
+                break
 
         spatial = SpatialView(
             stairs_down_known=(self.known_stairs_down is not None),
@@ -308,7 +341,7 @@ class NetHackAdapter(EnvironmentAdapter):
             standing_on_stairs_down=(self.known_stairs_down == (y, x) or chr(chars[y, x]) == ">"),
             standing_on_stairs_up=(self.known_stairs_up == (y, x) or chr(chars[y, x]) == "<"),
             has_unvisited_frontier=has_frontier,
-            has_unsearched_dead_end=in_corridor and walkable_adj == 1,
+            has_unsearched_dead_end=has_dead_ends,
             unvisited_frontier_count=int(np.sum(walkable_ex & (~self.visited))),
             floor_explored=(not has_frontier and self.known_stairs_down is not None),
         )
@@ -331,8 +364,15 @@ class NetHackAdapter(EnvironmentAdapter):
         elif curr_char == "<":
             tile_type = "stairs_up"
 
-        # Check adjacent features
+        # Check adjacent features (doors can only be interacted with cardinally)
         adj_door = False
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < 21 and 0 <= nx < 79:
+                if chr(chars[ny, nx]) == "+":
+                    adj_door = True
+                    break
+
         adj_fountain = False
         adj_altar = False
         adj_trap = False
@@ -343,9 +383,7 @@ class NetHackAdapter(EnvironmentAdapter):
                 ny, nx = y + dy, x + dx
                 if 0 <= ny < 21 and 0 <= nx < 79:
                     ac_char = chr(chars[ny, nx])
-                    if ac_char == "+":
-                        adj_door = True
-                    elif ac_char == "{":
+                    if ac_char == "{":
                         adj_fountain = True
                     elif ac_char == "_":
                         adj_altar = True
@@ -425,7 +463,7 @@ class NetHackAdapter(EnvironmentAdapter):
                 raw_obs, _, term, trunc, _ = self.env.step(space_idx)
             elif "Are you sure you want to pray?" in msg:
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("y", space_idx))
-            elif "(y/n)" in msg or "Really quit?" in msg:
+            elif "(y/n)" in msg or "[yn]" in msg or "really attack" in msg.lower() or "Really quit?" in msg:
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("n", space_idx))
             else:
                 break
@@ -450,10 +488,26 @@ class NetHackAdapter(EnvironmentAdapter):
         self._last_raw_obs = raw_obs
         obs = self._extract_obs(raw_obs)
         self._last_obs = obs
+
+        msg = obs.message.lower()
+        if "really attack" in msg or "who are you" in msg:
+            if getattr(self, "_last_attempted_dir", None) is not None:
+                py, px = getattr(self, "_prev_hero_pos", (0, 0))
+                dy, dx = self._last_attempted_dir
+                self.peaceful_positions.add((py + dy, px + dx))
+        if "cannot pass through the bars" in msg or "it's a wall" in msg or "it's solid stone" in msg:
+            if getattr(self, "_last_attempted_dir", None) is not None:
+                py, px = getattr(self, "_prev_hero_pos", (0, 0))
+                dy, dx = self._last_attempted_dir
+                self.blocked_tiles.add((py + dy, px + dx))
+
         return obs, total_reward, bool(term), bool(trunc), info
 
     def reset(self, seed: int | None = None) -> Observation:
         self.visited.fill(False)
+        self.searched_count.fill(0)
+        self.peaceful_positions.clear()
+        self.blocked_tiles.clear()
         self.turns_on_level = 0
         self.last_depth = 1
         self.last_dnum = 0
@@ -473,40 +527,106 @@ class NetHackAdapter(EnvironmentAdapter):
         Supports high-level navigation, combat, items, and atomic keyboard commands.
         """
         obs_prev = getattr(self, "_last_obs", None)
+        self._prev_hero_pos = (obs_prev.hero.y, obs_prev.hero.x) if obs_prev else (0, 0)
+        self._last_attempted_dir = action.direction
         target_char = "."
 
         # Handle composite navigation actions
         if action.name == "step_to_frontier" and obs_prev is not None:
             hero = obs_prev.hero
+            chars = obs_prev.chars
             walkable = build_walkable_mask(obs_prev.raw_obs)
+            walkable_nav = walkable.copy()
+            for by, bx in self.blocked_tiles:
+                if 0 <= by < 21 and 0 <= bx < 79:
+                    walkable_nav[by, bx] = False
+            doors_mask = (chars == ord("+"))
+            walkable_nav[doors_mask] = True
             if self.known_stairs_down:
-                walkable[self.known_stairs_down[0], self.known_stairs_down[1]] = True
-            frontier = SpatialEngine.find_nearest_frontier((hero.y, hero.x), walkable, self.visited)
+                walkable_nav[self.known_stairs_down[0], self.known_stairs_down[1]] = True
+            target_mask = (walkable & (~self.visited)) | doors_mask
+            frontier = SpatialEngine.find_nearest_frontier((hero.y, hero.x), walkable_nav, self.visited, target_mask=target_mask)
             if frontier:
-                path = SpatialEngine.find_path((hero.y, hero.x), frontier, walkable)
+                path = SpatialEngine.find_path((hero.y, hero.x), frontier, walkable_nav)
                 if path:
                     dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                     action = Action(name="step_direction", direction=(dy, dx))
 
         elif action.name == "step_to_stairs_down" and obs_prev is not None and self.known_stairs_down:
             hero = obs_prev.hero
+            chars = obs_prev.chars
             walkable = build_walkable_mask(obs_prev.raw_obs)
-            walkable[self.known_stairs_down[0], self.known_stairs_down[1]] = True
-            path = SpatialEngine.find_path((hero.y, hero.x), self.known_stairs_down, walkable)
+            walkable_nav = walkable.copy()
+            for by, bx in self.blocked_tiles:
+                if 0 <= by < 21 and 0 <= bx < 79:
+                    walkable_nav[by, bx] = False
+            walkable_nav[chars == ord("+")] = True
+            walkable_nav[self.known_stairs_down[0], self.known_stairs_down[1]] = True
+            path = SpatialEngine.find_path((hero.y, hero.x), self.known_stairs_down, walkable_nav)
             if path:
                 dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                 action = Action(name="step_direction", direction=(dy, dx))
 
         elif action.name == "step_to_stairs_up" and obs_prev is not None and self.known_stairs_up:
             hero = obs_prev.hero
+            chars = obs_prev.chars
             walkable = build_walkable_mask(obs_prev.raw_obs)
-            walkable[self.known_stairs_up[0], self.known_stairs_up[1]] = True
-            path = SpatialEngine.find_path((hero.y, hero.x), self.known_stairs_up, walkable)
+            walkable_nav = walkable.copy()
+            for by, bx in self.blocked_tiles:
+                if 0 <= by < 21 and 0 <= bx < 79:
+                    walkable_nav[by, bx] = False
+            walkable_nav[chars == ord("+")] = True
+            walkable_nav[self.known_stairs_up[0], self.known_stairs_up[1]] = True
+            path = SpatialEngine.find_path((hero.y, hero.x), self.known_stairs_up, walkable_nav)
             if path:
                 dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                 action = Action(name="step_direction", direction=(dy, dx))
 
-        elif action.name in ("step_away_from_hostile", "step_to_chokepoint") and obs_prev is not None:
+        elif action.name == "step_to_dead_end" and obs_prev is not None:
+            hero = obs_prev.hero
+            chars = obs_prev.chars
+            walkable = build_walkable_mask(obs_prev.raw_obs)
+            for by, bx in self.blocked_tiles:
+                if 0 <= by < 21 and 0 <= bx < 79:
+                    walkable[by, bx] = False
+            dead_ends_mask = np.zeros((21, 79), dtype=bool)
+            for cy in range(21):
+                for cx in range(79):
+                    if walkable[cy, cx] and chr(chars[cy, cx]) == "#" and self.searched_count[cy, cx] < 15:
+                        adj = sum(1 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                                  if 0 <= cy + dy < 21 and 0 <= cx + dx < 79 and walkable[cy + dy, cx + dx])
+                        if adj <= 1:
+                            dead_ends_mask[cy, cx] = True
+            if np.any(dead_ends_mask):
+                if dead_ends_mask[hero.y, hero.x]:
+                    action = Action(name="search")
+                else:
+                    target = SpatialEngine.find_nearest_frontier((hero.y, hero.x), walkable, self.visited, target_mask=dead_ends_mask)
+                    if target:
+                        path = SpatialEngine.find_path((hero.y, hero.x), target, walkable)
+                        if path:
+                            dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                            action = Action(name="step_direction", direction=(dy, dx))
+
+        elif action.name == "step_to" and obs_prev is not None:
+            hero = obs_prev.hero
+            target = action.target_pos or action.extra.get("target_pos") or action.direction
+            if target and isinstance(target, tuple) and len(target) == 2:
+                ty, tx = int(target[0]), int(target[1])
+                walkable = build_walkable_mask(obs_prev.raw_obs)
+                walkable_nav = walkable.copy()
+                for by, bx in self.blocked_tiles:
+                    if 0 <= by < 21 and 0 <= bx < 79:
+                        walkable_nav[by, bx] = False
+                chars = obs_prev.chars
+                walkable_nav[chars == ord("+")] = True
+                walkable_nav[ty, tx] = True
+                path = SpatialEngine.find_path((hero.y, hero.x), (ty, tx), walkable_nav)
+                if path:
+                    dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                    action = Action(name="step_direction", direction=(dy, dx))
+
+        elif action.name in ("step_away_from_hostile", "step_to_chokepoint", "retreat") and obs_prev is not None:
             hero = obs_prev.hero
             glyphs = obs_prev.glyphs
             # Find open tile away from hostile
@@ -536,13 +656,29 @@ class NetHackAdapter(EnvironmentAdapter):
                             continue
                         ty, tx = hero.y + dy, hero.x + dx
                         if 0 <= ty < 21 and 0 <= tx < 79:
+                            if (ty, tx) in self.peaceful_positions:
+                                continue
                             g = int(glyphs[ty, tx])
                             if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
                                 action = Action(name="melee_attack", direction=(dy, dx))
                                 break
+            # If no adjacent monster, approach closest hostile if known
+            if action.direction is None and obs_prev.combat.closest_hostile_pos:
+                hy, hx = obs_prev.combat.closest_hostile_pos
+                if (hy, hx) not in self.peaceful_positions:
+                    walkable = build_walkable_mask(obs_prev.raw_obs)
+                    for by, bx in self.blocked_tiles:
+                        if 0 <= by < 21 and 0 <= bx < 79:
+                            walkable[by, bx] = False
+                    walkable[hy, hx] = True
+                    path = SpatialEngine.find_path((hero.y, hero.x), (hy, hx), walkable)
+                    if path:
+                        dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                        action = Action(name="step_direction", direction=(dy, dx))
 
         # Translate direction or atomic action
         if action.direction is not None and action.direction in DIR_CHARS:
+            self._last_attempted_dir = action.direction
             target_char = DIR_CHARS[action.direction]
         elif action.char is not None:
             target_char = action.char
@@ -551,6 +687,9 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "ascend":
             target_char = "<"
         elif action.name == "search":
+            hero = obs_prev.hero if obs_prev else None
+            if hero is not None:
+                self.searched_count[hero.y, hero.x] += 1
             target_char = "s"
         elif action.name in ("wait", "rest"):
             target_char = "."
@@ -562,6 +701,17 @@ class NetHackAdapter(EnvironmentAdapter):
             slot = action.slot or (obs_prev.inventory.get_food_slot() if obs_prev else "a")
             return self._step_sequence([self.char_to_act.get("e", 0), self.char_to_act.get(slot or "a", 0)])
         elif action.name == "eat_floor_corpse":
+            if obs_prev and (obs_prev.hero.y, obs_prev.hero.x) not in self.floor_corpses and self.floor_corpses:
+                hero = obs_prev.hero
+                nearest_pos = min(self.floor_corpses.keys(), key=lambda p: math.hypot(p[0] - hero.y, p[1] - hero.x))
+                walkable = build_walkable_mask(obs_prev.raw_obs)
+                walkable[nearest_pos[0], nearest_pos[1]] = True
+                path = SpatialEngine.find_path((hero.y, hero.x), nearest_pos, walkable)
+                if path:
+                    dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                    target_char = DIR_CHARS.get((dy, dx), ".")
+                    self._last_attempted_dir = (dy, dx)
+                    return self._step_sequence([self.char_to_act.get(target_char, 0)])
             return self._step_sequence([35, self.char_to_act.get("y", 0)])
         elif action.name in ("quaff_healing", "quaff"):
             slot = action.slot or (obs_prev.inventory.get_healing_slot() if obs_prev else "a")
