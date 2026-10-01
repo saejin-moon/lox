@@ -357,6 +357,21 @@ class NetHackAdapter(EnvironmentAdapter):
                 if has_dead_ends:
                     break
 
+        # Stagnation Auto-Recovery: If no visible frontiers or dead ends remain and stairs are unknown,
+        # reset search counts so the hero performs a fresh search sweep instead of freezing in place.
+        if not has_frontier and not has_dead_ends and self.known_stairs_down is None:
+            self.searched_count = np.maximum(0, self.searched_count - 10)
+            for cy in range(21):
+                for cx in range(79):
+                    if walkable[cy, cx] and chr(chars[cy, cx]) in ("#", "."):
+                        adj_wall = any(0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
+                                       for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)))
+                        if adj_wall:
+                            has_dead_ends = True
+                            break
+                if has_dead_ends:
+                    break
+
         spatial = SpatialView(
             stairs_down_known=(self.known_stairs_down is not None),
             stairs_up_known=(self.known_stairs_up is not None),
@@ -640,17 +655,31 @@ class NetHackAdapter(EnvironmentAdapter):
                                    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))):
                                 dead_ends_mask[cy, cx] = True
 
+            # If still none, decay search counters to force a fresh rescan sweep across candidates
+            if not np.any(dead_ends_mask):
+                self.searched_count = np.maximum(0, self.searched_count - 10)
+                for cy in range(21):
+                    for cx in range(79):
+                        if walkable[cy, cx] and chr(chars[cy, cx]) in ("#", "."):
+                            if any(0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
+                                   for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))):
+                                dead_ends_mask[cy, cx] = True
+
             if np.any(dead_ends_mask):
                 if dead_ends_mask[hero.y, hero.x]:
                     action = Action(name="search")
                 else:
-                    target = SpatialEngine.find_nearest_frontier((hero.y, hero.x), walkable, self.visited, target_mask=dead_ends_mask)
-                    if target:
+                    # Prioritize least-searched candidates to explore all candidate walls uniformly
+                    candidates = np.argwhere(dead_ends_mask)
+                    min_searches = min(self.searched_count[cy, cx] for cy, cx in candidates)
+                    min_mask = dead_ends_mask & (self.searched_count <= min_searches + 2)
+                    target = SpatialEngine.find_nearest_frontier((hero.y, hero.x), walkable, self.visited, target_mask=min_mask)
+                    if target and target != (-1, -1):
                         path = SpatialEngine.find_path((hero.y, hero.x), target, walkable)
                         if path:
                             dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                             action = Action(name="step_direction", direction=(dy, dx))
-            else:
+            if action.name == "step_to_dead_end":
                 action = Action(name="search")
 
         elif action.name == "step_to" and obs_prev is not None:

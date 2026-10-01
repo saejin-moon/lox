@@ -68,12 +68,9 @@ class Agent:
             elif obs.spatial.has_unsearched_dead_end:
                 obs = yield from self.handle_dead_end(obs)
             else:
-                if obs.dungeon.tile_type == "corridor" and self.search_count < 10:
-                    obs = yield search()
-                    self.search_count += 1
-                else:
-                    self.search_count = 0
-                    obs = yield wait()
+                # When visible room and frontiers are cleared, never idle!
+                # Move to candidate perimeter walls and dead ends to find secret doors.
+                obs = yield from self.handle_dead_end(obs)
             
             if obs.spatial.stairs_down_known and not obs.spatial.standing_on_stairs_down:
                 obs = yield step_to_stairs_down()
@@ -160,6 +157,7 @@ Every turn, `obs` provides rich sub-namespaces:
 8. **Soldier Ants & High-Speed Attackers**: Soldier ants and killer bees move at speed 18 (nearly 2x the hero) and inflict lethal poison stings. If `obs.combat.is_fast_dangerous` is True or `obs.combat.closest_hostile_name in ("soldier ant", "killer bee")`, retreat immediately to a 1-tile corridor chokepoint (`step_to_chokepoint()`), quaff healing, or pray.
 9. **Equipment & Armor Optimization**: Defeated monsters drop helmets, boots, cloaks, and armor. When out of combat and `obs.inventory.has_unworn_armor` is True, yield `wear_armor()` to lower your Armor Class (AC). Lower AC drastically reduces damage from deep monsters.
 10. **Shopkeeper & Minetown Non-Aggression**: Never attack shopkeepers, priests, or town watchmen (`obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain")`), and never kick doors when `obs.dungeon.in_shop` is True. Killing or provoking them will instantly end your run.
+11. **Exploration Pacing & No Idle Waiting**: Waiting (`wait()`) during active exploration when seeking stairs is strictly forbidden. Never yield `wait()` when frontiers are clear; instead call `handle_dead_end(obs)` or `search()` to investigate room perimeter walls. Sitting in place produces 0 turns of progress and leads to `MaxTurnsReached`.
 
 ### Available Actions:
 {actions}

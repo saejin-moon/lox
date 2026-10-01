@@ -107,6 +107,11 @@ lox/
     - Procedural generation often conceals doors along room perimeter walls (`-`, `|`).
     - When visible corridor dead ends are searched or absent, `step_to_dead_end()` targets floor tiles adjacent to unexplored room perimeter walls, breaking the Depth 1–2 exploration stall permanently.
 
+12. **Exploration Pacing & Stagnation Auto-Recovery**:
+    - When visible frontiers and dead ends are exhausted without discovering stairs, idling with `wait()` causes the hero to burn thousands of turns until reaching `MaxTurnsReached`.
+    - `NetHackAdapter` automatically decays search counters by 10 (`self.searched_count = np.maximum(0, self.searched_count - 10)`) when frontiers stall, triggering an active second search sweep across candidate perimeter walls.
+    - Exploration policies must strictly avoid yielding `wait()`; they should continually call `handle_dead_end(obs)` or `search()` to investigate room perimeter walls.
+
 ---
 
 ## 4. Key CLI Commands
