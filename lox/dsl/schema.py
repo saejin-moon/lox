@@ -71,6 +71,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "is_dark_level": "bool",
     "adjacent_closed_door": "bool",
     "adjacent_open_door": "bool",
+    "door_is_locked": "bool",
     "adjacent_fountain": "bool",
     "adjacent_altar": "bool",
     "standing_on_altar": "bool",
@@ -85,6 +86,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "floor_corpse_adjacent": "bool",
     "corpse_is_fresh": "bool",
     "corpse_is_safe": "bool",
+    "corpse_is_deadly": "bool",
     "has_poison_res": "bool",
 
     # Equipment & Item Intrinsics

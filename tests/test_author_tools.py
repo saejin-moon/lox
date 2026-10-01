@@ -81,7 +81,8 @@ plan = [explore]
 
     assert error is None
     assert tree is not None
-    assert "def emergency_recovery():" in new_code
+    assert "class Agent:" in new_code
+    assert "yield pray()" in new_code
 
     # Verify token usage was recorded in DuckDB
     tokens = get_token_usage_summary(run_id="eval_run_99", db_path=populated_db)

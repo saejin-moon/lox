@@ -21,65 +21,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lox.core.types import Action, HeroState, HungerState, Item, Observation, Status
 from lox.core.spatial import SpatialEngine
-from lox.core.tree import Blackboard
 from lox.dsl.compiler import compile_policy
 from lox.envs.nethack import NetHackAdapter, DIR_CHARS
 from lox.telemetry.parquet import ParquetLogger
 from lox.telemetry.consolidator import consolidate_run
 from lox.telemetry.triggers import DynamicTriggerEngine, TriggerType
 from lox.telemetry.recorder import FlightRecorder
-
-
-# Passable NetHack ASCII characters for spatial navigation
-PASSABLE_CHARS = {
-    ord("."),  # Room floor
-    ord("#"),  # Corridor
-    ord("<"),  # Stairs up
-    ord(">"),  # Stairs down
-    ord("'"),  # Open door
-    ord("+"),  # Closed door (walkable to open)
-    ord("$"),  # Gold
-    ord("%"),  # Food / corpse
-    ord("!"),  # Potion
-    ord("?"),  # Scroll
-    ord("/"),  # Wand
-    ord("="),  # Ring
-    ord("*"),  # Gem
-    ord(")"),  # Weapon
-    ord("["),  # Armor
-    ord("("),  # Tool
-    ord("0"),  # Iron ball / boulder
-    ord("_"),  # Altar
-    ord("\\"), # Throne / sink
-    ord("^"),  # Trap
-    ord("@"),  # Player
-}
-
-
-def build_walkable_mask(obs: Observation) -> np.ndarray:
-    """Builds a 2D boolean mask of walkable tiles from chars and glyphs."""
-    chars = obs.chars
-    glyphs = obs.glyphs
-    mask = np.zeros(chars.shape, dtype=bool)
-
-    for c in PASSABLE_CHARS:
-        mask |= (chars == c)
-
-    # Exclude tiles with living monsters (path around them unless attacking)
-    # Do NOT exclude the hero themselves
-    hy, hx = obs.hero.y, obs.hero.x
-    if glyphs is not None:
-        for y in range(chars.shape[0]):
-            for x in range(chars.shape[1]):
-                if (y, x) == (hy, hx):
-                    continue
-                g = int(glyphs[y, x])
-                if nh.glyph_is_monster(g) and not nh.glyph_is_pet(g):
-                    mask[y, x] = False
-
-    # Hero position is unconditionally walkable
-    mask[hy, hx] = True
-    return mask
 
 
 def run_nethack_eval(
@@ -114,186 +61,6 @@ def run_nethack_eval(
     if record_telemetry:
         logger = ParquetLogger(run_id=run_id, base_dir=telemetry_dir, flush_interval=100)
 
-    # State tracking across actions
-    current_depth = 1
-    known_stairs_down: tuple[int, int] | None = None
-    known_stairs_up: tuple[int, int] | None = None
-    stuck_counter = 0
-    last_position = (-1, -1)
-
-    # --- Domain Action Handlers ---
-    def handle_quaff_healing(bb: Blackboard, args) -> Action | Status:
-        for it in bb.obs.inventory:
-            if it.category == "potion" and any(k in it.name.lower() for k in ["heal", "extra heal"]):
-                return Action(name="quaff_healing", slot=it.slot)
-        return Status.FAILURE
-
-    def handle_emergency_pray(bb: Blackboard, args) -> Action | Status:
-        if adapter.can_safely_pray(bb.obs.hero.turn):
-            return Action(name="pray")
-        return Status.FAILURE
-
-    def handle_eat_food(bb: Blackboard, args) -> Action | Status:
-        for it in bb.obs.inventory:
-            if it.category == "food":
-                return Action(name="eat_carried_food", slot=it.slot)
-        return Status.FAILURE
-
-    def handle_melee_attack(bb: Blackboard, args) -> Action | Status:
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        glyphs = bb.obs.glyphs
-        if glyphs is None:
-            return Status.FAILURE
-
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dy == 0 and dx == 0:
-                    continue
-                ty, tx = hy + dy, hx + dx
-                if 0 <= ty < 21 and 0 <= tx < 79:
-                    g = int(glyphs[ty, tx])
-                    if nh.glyph_is_monster(g) and not nh.glyph_is_pet(g):
-                        if not adapter.is_target_floating_eye(glyphs, ty, tx):
-                            return Action(name="melee_attack_hostile", direction=(dy, dx))
-        return Status.FAILURE
-
-    def handle_step_to_stairs(bb: Blackboard, args) -> Action | Status:
-        nonlocal known_stairs_down
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        hero_pos = (hy, hx)
-
-        if known_stairs_down is not None and hero_pos == known_stairs_down:
-            return Action(name="descend")
-
-        if known_stairs_down is not None:
-            walkable = build_walkable_mask(bb.obs)
-            walkable[known_stairs_down[0], known_stairs_down[1]] = True
-            path = SpatialEngine.find_path(hero_pos, known_stairs_down, walkable)
-            if path:
-                dy = path[0][0] - hy
-                dx = path[0][1] - hx
-                return Action(name="step", direction=(dy, dx))
-        return Status.FAILURE
-
-    def handle_step_to_stairs_up(bb: Blackboard, args) -> Action | Status:
-        nonlocal known_stairs_up
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        hero_pos = (hy, hx)
-
-        if known_stairs_up is not None and hero_pos == known_stairs_up:
-            return Action(name="ascend")
-
-        if known_stairs_up is not None:
-            walkable = build_walkable_mask(bb.obs)
-            walkable[known_stairs_up[0], known_stairs_up[1]] = True
-            path = SpatialEngine.find_path(hero_pos, known_stairs_up, walkable)
-            if path:
-                dy = path[0][0] - hy
-                dx = path[0][1] - hx
-                return Action(name="step", direction=(dy, dx))
-        return Status.FAILURE
-
-    def handle_step_to_frontier(bb: Blackboard, args) -> Action | Status:
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        hero_pos = (hy, hx)
-        walkable = build_walkable_mask(bb.obs)
-
-        frontier = SpatialEngine.find_nearest_frontier(hero_pos, walkable, adapter.visited)
-        if frontier is not None:
-            path = SpatialEngine.find_path(hero_pos, frontier, walkable)
-            if path:
-                dy = path[0][0] - hy
-                dx = path[0][1] - hx
-                return Action(name="step", direction=(dy, dx))
-        return Status.FAILURE
-
-    def handle_search(bb: Blackboard, args) -> Action | Status:
-        return Action(name="search")
-
-    def handle_descend(bb: Blackboard, args) -> Action | Status:
-        return Action(name="descend")
-
-    def handle_ascend(bb: Blackboard, args) -> Action | Status:
-        return Action(name="ascend")
-
-    def handle_wait(bb: Blackboard, args) -> Action | Status:
-        return Action(name="wait")
-
-    def handle_engrave_elbereth(bb: Blackboard, args) -> Action | Status:
-        if hasattr(adapter, "has_elbereth_at") and not adapter.has_elbereth_at(bb.obs.hero.y, bb.obs.hero.x):
-            return Action(name="engrave_elbereth")
-        return Status.FAILURE
-
-    def handle_open_door(bb: Blackboard, args) -> Action | Status:
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        chars = bb.obs.chars
-        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            ty, tx = hy + dy, hx + dx
-            if 0 <= ty < 21 and 0 <= tx < 79 and chars[ty, tx] == ord("+"):
-                return Action(name="open_door", direction=(dy, dx))
-        return Status.FAILURE
-
-    def handle_kick_closed_door(bb: Blackboard, args) -> Action | Status:
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        chars = bb.obs.chars
-        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            ty, tx = hy + dy, hx + dx
-            if 0 <= ty < 21 and 0 <= tx < 79 and chars[ty, tx] == ord("+"):
-                return Action(name="kick_closed_door", direction=(dy, dx))
-        return Status.FAILURE
-
-    def handle_eat_floor_corpse(bb: Blackboard, args) -> Action | Status:
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        chars = bb.obs.chars
-        if chars[hy, hx] == ord("%"):
-            return Action(name="eat_floor_corpse")
-        return Status.FAILURE
-
-    def handle_step_away_from_hostile(bb: Blackboard, args) -> Action | Status:
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        walkable = build_walkable_mask(bb.obs)
-        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
-            ty, tx = hy + dy, hx + dx
-            if 0 <= ty < 21 and 0 <= tx < 79 and walkable[ty, tx]:
-                return Action(name="step", direction=(dy, dx))
-        return Status.FAILURE
-
-    def handle_wield_weapon(bb: Blackboard, args) -> Action | Status:
-        for it in bb.obs.inventory:
-            if it.category == "weapon" and any(w in it.name.lower() for w in ["sword", "excalibur", "dagger", "spear"]):
-                return Action(name="wield_weapon", slot=it.slot)
-        return Status.FAILURE
-
-    def handle_wear_armor(bb: Blackboard, args) -> Action | Status:
-        for it in bb.obs.inventory:
-            if it.category == "armor":
-                return Action(name="wear_armor", slot=it.slot)
-        return Status.FAILURE
-
-    def handle_step_to_fountain(bb: Blackboard, args) -> Action | Status:
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        hero_pos = (hy, hx)
-        fountain_locs = np.argwhere(bb.obs.chars == ord("{"))
-        if len(fountain_locs) > 0:
-            target = (int(fountain_locs[0, 0]), int(fountain_locs[0, 1]))
-            walkable = build_walkable_mask(bb.obs)
-            walkable[target[0], target[1]] = True
-            path = SpatialEngine.find_path(hero_pos, target, walkable)
-            if path:
-                dy = path[0][0] - hy
-                dx = path[0][1] - hx
-                return Action(name="step", direction=(dy, dx))
-        return Status.FAILURE
-
-    def handle_dip_excalibur(bb: Blackboard, args) -> Action | Status:
-        hy, hx = bb.obs.hero.y, bb.obs.hero.x
-        chars = bb.obs.chars
-        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]:
-            ty, tx = hy + dy, hx + dx
-            if 0 <= ty < 21 and 0 <= tx < 79 and chars[ty, tx] == ord("{"):
-                return Action(name="dip_excalibur")
-        return Status.FAILURE
-
     # Load policy from policy_path or fallback to default
     if os.path.exists(policy_path):
         with open(policy_path, "r") as f:
@@ -301,94 +68,54 @@ def run_nethack_eval(
         print(f"[Loaded Benchmark Policy from {policy_path}]")
     else:
         policy_code = """
-def emergency():
-    if hp_frac < 0.25 and can_safely_pray:
-        pray()
-    elif hp_frac < 0.50 and has_healing:
-        quaff_healing()
-    elif hunger_state >= HUNGRY and has_carried_food:
-        eat_carried_food()
+class Agent:
+    def __init__(self):
+        self.last_prayer_turn = -1000
 
-def combat():
-    if adjacent_hostile:
-        melee_attack_hostile()
-    elif hostile_count_fov > 0:
-        step_to_chokepoint()
+    def run(self, obs):
+        while True:
+            # Emergency: prayer and healing
+            if obs.hero.hp_frac < 0.20 and (obs.hero.turn - self.last_prayer_turn >= 350):
+                self.last_prayer_turn = obs.hero.turn
+                obs = yield pray()
+                continue
+            elif obs.hero.hp_frac < 0.35 and obs.inventory.has_healing:
+                obs = yield quaff_healing()
+                continue
+            elif obs.hero.hunger_state >= HUNGRY and obs.inventory.has_food:
+                obs = yield eat_carried_food()
+                continue
 
-def navigation():
-    if standing_on_stairs_down:
-        descend()
-    elif stairs_down_known:
-        step_to_stairs_down()
-    elif standing_on_stairs_up:
-        ascend()
-    elif stairs_up_known:
-        step_to_stairs_up()
+            # Tactical combat & retreat
+            if obs.combat.adjacent_hostile:
+                if obs.combat.closest_hostile_name == "floating eye":
+                    obs = yield step_away_from_hostile()
+                elif obs.hero.hp_frac < 0.35 and obs.combat.can_retreat:
+                    obs = yield step_to_chokepoint()
+                else:
+                    obs = yield melee_attack_hostile()
+                continue
 
-def maintenance():
-    if adjacent_closed_door:
-        open_door()
-    elif floor_corpse_adjacent and corpse_is_safe:
-        eat_floor_corpse()
-
-def explore():
-    if has_unvisited_frontier:
-        step_to_frontier()
-    elif has_unsearched_dead_end:
-        search()
-    elif stairs_down_known:
-        step_to_stairs_down()
-    else:
-        wait()
-
-def recovery():
-    if adjacent_hostile and can_retreat:
-        step_away_from_hostile()
-    else:
-        wait()
-
-plan = [
-    emergency,
-    combat,
-    navigation,
-    maintenance,
-    explore,
-    recovery,
-]
+            # Environment & Navigation
+            if obs.spatial.standing_on_stairs_down:
+                obs = yield descend()
+            elif obs.dungeon.adjacent_closed_door:
+                if obs.dungeon.door_is_locked:
+                    obs = yield kick_closed_door()
+                else:
+                    obs = yield open_door()
+            elif obs.spatial.stairs_down_known and not obs.spatial.has_unvisited_frontier:
+                obs = yield step_to_stairs_down()
+            elif obs.spatial.has_unvisited_frontier:
+                obs = yield step_to_frontier()
+            elif obs.spatial.has_unsearched_dead_end:
+                obs = yield search()
+            else:
+                obs = yield wait()
 """
         print("[Using Default Policy]")
 
-    tree = compile_policy(
-        policy_code,
-        action_handlers={
-            "quaff_healing": handle_quaff_healing,
-            "pray": handle_emergency_pray,
-            "eat_carried_food": handle_eat_food,
-            "melee_attack_hostile": handle_melee_attack,
-            "step_to_stairs_down": handle_step_to_stairs,
-            "step_to_stairs_up": handle_step_to_stairs_up,
-            "step_to_stairs": handle_step_to_stairs,
-            "step_to_frontier": handle_step_to_frontier,
-            "search": handle_search,
-            "descend": handle_descend,
-            "ascend": handle_ascend,
-            "wait": handle_wait,
-            "engrave_elbereth": handle_engrave_elbereth,
-            "open_door": handle_open_door,
-            "kick_closed_door": handle_kick_closed_door,
-            "eat_floor_corpse": handle_eat_floor_corpse,
-            "step_away_from_hostile": handle_step_away_from_hostile,
-            "retreat": handle_step_away_from_hostile,
-            "step_to_chokepoint": handle_step_away_from_hostile,
-            "step_to_dead_end": handle_search,
-            "rest": handle_wait,
-            "idle": handle_wait,
-            "wield_weapon": handle_wield_weapon,
-            "wear_armor": handle_wear_armor,
-            "step_to_fountain": handle_step_to_fountain,
-            "dip_excalibur": handle_dip_excalibur,
-        },
-    )
+    tree = compile_policy(policy_code)
 
     episode_summaries = []
     t_start = time.perf_counter()
@@ -412,7 +139,7 @@ plan = [
         last_valid_turns = obs.hero.turn
         last_valid_hp = obs.hero.hp
         last_valid_max_hp = obs.hero.max_hp
-        policy_runner = tree.create_runner(obs) if hasattr(tree, "create_runner") else None
+        policy_runner = tree.create_runner(obs)
         last_5_actions: list[str] = []
         turns_dl1 = 0
         turns_dl2 = 0
@@ -427,12 +154,6 @@ plan = [
         total_eats = 0
         total_prayers = 0
 
-        has_healing = any(
-            it.category == "potion" and any(k in it.name.lower() for k in ["heal", "extra heal"])
-            for it in obs.inventory
-        )
-        has_food = any(it.category == "food" for it in obs.inventory)
-
         for turn_idx in range(max_turns):
             hero = obs.hero
             hy, hx = hero.y, hero.x
@@ -441,101 +162,6 @@ plan = [
             last_valid_hp = hero.hp
             last_valid_max_hp = hero.max_hp
 
-            # Detect new floor / depth change
-            if hero.depth != current_depth:
-                current_depth = hero.depth
-                known_stairs_down = None
-                known_stairs_up = None
-
-            # Detect stairs
-            stairs_down_loc = np.argwhere(obs.chars == ord(">"))
-            if len(stairs_down_loc) > 0:
-                known_stairs_down = (int(stairs_down_loc[0, 0]), int(stairs_down_loc[0, 1]))
-            stairs_up_loc = np.argwhere(obs.chars == ord("<"))
-            if len(stairs_up_loc) > 0:
-                known_stairs_up = (int(stairs_up_loc[0, 0]), int(stairs_up_loc[0, 1]))
-
-            # Check if movement is stuck (only when attempting to step)
-            if last_action_name == "step" and (hy, hx) == last_position:
-                stuck_counter += 1
-            else:
-                stuck_counter = 0
-            last_position = (hy, hx)
-
-            # Check for adjacent enemies
-            has_adj_enemy = False
-            hostile_count_fov = 0
-            if obs.glyphs is not None:
-                for dy in (-1, 0, 1):
-                    for dx in (-1, 0, 1):
-                        if dy == 0 and dx == 0:
-                            continue
-                        ty, tx = hy + dy, hx + dx
-                        if 0 <= ty < 21 and 0 <= tx < 79:
-                            g = int(obs.glyphs[ty, tx])
-                            if nh.glyph_is_monster(g) and not nh.glyph_is_pet(g):
-                                has_adj_enemy = True
-                                hostile_count_fov += 1
-
-            # Environmental detection
-            adj_closed_door = False
-            adj_fountain = False
-            chars = obs.chars
-            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                ty, tx = hy + dy, hx + dx
-                if 0 <= ty < 21 and 0 <= tx < 79:
-                    if chars[ty, tx] == ord("+"):
-                        adj_closed_door = True
-                    elif chars[ty, tx] == ord("{"):
-                        adj_fountain = True
-
-            is_blind = False
-            is_poisoned = False
-            if obs.message:
-                msg_low = obs.message.lower()
-                if "blind" in msg_low or "can't see" in msg_low:
-                    is_blind = True
-                if "poison" in msg_low or "faint" in msg_low:
-                    is_poisoned = True
-
-            has_frontier = bool(stuck_counter < 6)
-
-            memory = {
-                "hp_frac": hero.hp / max(1, hero.max_hp),
-                "energy_frac": hero.energy / max(1, hero.max_energy) if hasattr(hero, "energy") else 1.0,
-                "depth": hero.depth,
-                "turn": hero.turn,
-                "turns_on_level": hero.turns_on_level if hasattr(hero, "turns_on_level") else turn_idx,
-                "experience_level": hero.experience_level if hasattr(hero, "experience_level") else 1,
-                "gold": hero.gold if hasattr(hero, "gold") else 0,
-                "hunger_state": hero.hunger_state.value if hasattr(hero.hunger_state, "value") else 1,
-                "is_blind": is_blind,
-                "is_poisoned": is_poisoned,
-                "adjacent_hostile": has_adj_enemy,
-                "hostile_count_fov": hostile_count_fov,
-                "is_surrounded": hostile_count_fov >= 3,
-                "in_corridor": bool(obs.chars[hy, hx] == ord("#")),
-                "can_retreat": True,
-                "standing_on_elbereth": getattr(adapter, "has_elbereth_at", lambda y, x: False)(hy, hx),
-                "can_safely_pray": adapter.can_safely_pray(hero.turn),
-                "has_healing": has_healing,
-                "adjacent_closed_door": adj_closed_door,
-                "adjacent_fountain": adj_fountain,
-                "stairs_down_known": known_stairs_down is not None,
-                "stairs_up_known": known_stairs_up is not None or bool(np.any(obs.chars == ord("<"))),
-                "standing_on_stairs_down": bool(obs.chars[hy, hx] == ord(">")),
-                "standing_on_stairs_up": bool(obs.chars[hy, hx] == ord("<")),
-                "floor_explored": not has_frontier,
-                "has_unvisited_frontier": has_frontier,
-                "has_unsearched_dead_end": bool(stuck_counter >= 3 and not has_frontier),
-                "has_carried_food": has_food,
-                "floor_corpse_adjacent": bool(obs.chars[hy, hx] == ord("%")),
-                "corpse_is_fresh": True,
-                "corpse_is_safe": True,
-                "has_poison_res": getattr(adapter, "has_poison_res", False),
-                "can_forge_excalibur": (hero.experience_level >= 5) if hasattr(hero, "experience_level") else False,
-            }
-
             if hero.depth == 1:
                 turns_dl1 += 1
             elif hero.depth == 2:
@@ -543,11 +169,7 @@ plan = [
             if getattr(hero, "dungeon_branch", "") == "mines":
                 turns_mines += 1
 
-            # Execute policy runner or behavior tree
-            if policy_runner is not None:
-                action = policy_runner.send(obs)
-            else:
-                action = tree.execute(obs, memory=memory)
+            action = policy_runner.send(obs)
             if action is None:
                 action = Action(name="search")
             last_action_name = action.name
@@ -559,7 +181,7 @@ plan = [
             tile_type = getattr(obs.dungeon, "tile_type", "room") if hasattr(obs, "dungeon") else "room"
             closest_name = getattr(obs.combat, "closest_hostile_name", "") if hasattr(obs, "combat") else ""
             closest_dist = getattr(obs.combat, "closest_hostile_dist", 99.0) if hasattr(obs, "combat") else 99.0
-            hostiles_fov = getattr(obs.combat, "hostile_count_fov", hostile_count_fov) if hasattr(obs, "combat") else hostile_count_fov
+            hostiles_fov = getattr(obs.combat, "hostile_count_fov", 0) if hasattr(obs, "combat") else 0
             dungeon_branch = getattr(obs.hero, "dungeon_branch", "dungeon") if hasattr(obs, "hero") else "dungeon"
 
             # Track action metrics
@@ -600,6 +222,7 @@ plan = [
 
             # Check dynamic triggers
             food_items = sum(1 for it in obs.inventory if it.category == "food")
+            has_frontier = getattr(obs.spatial, "has_unvisited_frontier", True)
             trig, trig_reason = trigger_engine.check_turn(
                 turns_on_level=hero.turns_on_level,
                 depth=hero.depth,

@@ -213,6 +213,7 @@ class DungeonView:
     dungeon_branch: str = "dungeon"  # "dungeon", "mines", "sokoban", "quest"
     adjacent_closed_door: bool = False
     adjacent_open_door: bool = False
+    door_is_locked: bool = False
     adjacent_fountain: bool = False
     adjacent_altar: bool = False
     standing_on_altar: bool = False
@@ -231,7 +232,12 @@ class FloorCorpse:
     drop_turn: int = 0
     age_turns: int = 0
     is_poisonous: bool = False
+    is_deadly: bool = False
     is_fresh: bool = True
+
+    @property
+    def is_safe(self) -> bool:
+        return self.is_fresh and not self.is_poisonous and not self.is_deadly
 
 
 @dataclass

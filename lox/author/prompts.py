@@ -63,14 +63,21 @@ class Agent:
 
 ### Observation Interface (`obs`)
 Every turn, `obs` provides rich sub-namespaces:
-- `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state`, `dungeon_branch`
+- `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state` (SATIATED, NORMAL, HUNGRY, WEAK, FAINTING), `dungeon_branch`
 - `obs.status`: `is_blind`, `is_poisoned`, `is_confused`, `is_stunned`, `is_sick`, `is_encumbered`, `encumbrance_level`
 - `obs.inventory`: `has_food`, `has_healing`, `has_wand_of_teleport`, `get_food_slot()`, `get_healing_slot()`, `items`
 - `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`
 - `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`
-- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`
-- `obs.corpses`: list of `FloorCorpse(name, y, x, age_turns, is_fresh, is_poisonous)`
+- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `adjacent_altar`, `can_forge_excalibur`
+- `obs.corpses`: list of `FloorCorpse(name, y, x, age_turns, is_fresh, is_poisonous, is_deadly, is_safe)`
 - `obs.message`: last raw game message
+
+### Critical NetHack 3.6.6 Mechanics & Invariants:
+1. **Floating Eyes**: Attacking in melee triggers a passive gaze that paralyzes the hero for up to 70 turns (`0d70`). Ranged attacks, wands, and blindness completely bypass the gaze. Always step away or use ranged attacks!
+2. **Prayer & Major Trouble**: Safe prayer timeout is ~350 turns. However, during **major trouble** (fainting from hunger or HP < 15%), gods grant divine aid even with timeout as high as ~150–200 turns without divine wrath.
+3. **Corpse Consumption Hazards**: Eating a corpse takes multiple turns (`weight / 64 + 3`), leaving the hero completely helpless and vulnerable. NEVER eat a corpse if enemies are in FOV. Corpses older than 50 turns cause food poisoning and 1d8 damage; kobolds are poisonous; cockatrices cause lethal petrification without gloves. Check `corpse.is_safe` before eating!
+4. **Door Breaching**: Always try `open_door()` first on closed doors. Only use `kick_closed_door()` if `obs.dungeon.door_is_locked` is True (kicking unlocked doors can hurt your leg and immobilize you for 5-20 turns).
+5. **Excalibur Dipping**: Dipping a long sword into a fountain has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`).
 
 ### Available Actions:
 {actions}

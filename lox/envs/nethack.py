@@ -224,7 +224,9 @@ class NetHackAdapter(EnvironmentAdapter):
         # Track fresh corpses from message
         if "you kill the" in message.lower() or "you destroy the" in message.lower():
             m_killed = message.lower().replace("you kill the ", "").replace("you destroy the ", "").strip().rstrip("!.")
-            self.floor_corpses[(y, x)] = (m_killed, turn, "poison" in m_killed)
+            is_pois = any(k in m_killed for k in ("poison", "kobold", "snake", "spider", "viper", "beetle"))
+            is_deadly = any(k in m_killed for k in ("cockatrice", "chickatrice", "medusa"))
+            self.floor_corpses[(y, x)] = (m_killed, turn, is_pois, is_deadly)
 
         # Tactical combat analysis from glyphs
         adjacent_hostile = False
@@ -357,6 +359,8 @@ class NetHackAdapter(EnvironmentAdapter):
             and not any("excalibur" in it.name.lower() for it in inventory_items)
         )
 
+        door_is_locked = bool(adj_door and ("locked" in message.lower() or "won't open" in message.lower()))
+
         dungeon = DungeonView(
             tile_type=tile_type,
             in_shop=("shop" in message.lower()),
@@ -364,6 +368,8 @@ class NetHackAdapter(EnvironmentAdapter):
             is_dark_level=(branch_name == "mines"),
             dungeon_branch=branch_name,
             adjacent_closed_door=adj_door,
+            adjacent_open_door=False,
+            door_is_locked=door_is_locked,
             adjacent_fountain=adj_fountain,
             adjacent_altar=adj_altar,
             standing_on_altar=(curr_char == "_"),
@@ -374,7 +380,11 @@ class NetHackAdapter(EnvironmentAdapter):
 
         # Corpses
         corpse_list = []
-        for (cy, cx), (cname, dturn, is_pois) in self.floor_corpses.items():
+        for (cy, cx), corpse_data in self.floor_corpses.items():
+            cname = corpse_data[0]
+            dturn = corpse_data[1]
+            is_pois = corpse_data[2] if len(corpse_data) > 2 else False
+            is_deadly = corpse_data[3] if len(corpse_data) > 3 else False
             age = turn - dturn
             corpse_list.append(
                 FloorCorpse(
@@ -384,6 +394,7 @@ class NetHackAdapter(EnvironmentAdapter):
                     drop_turn=dturn,
                     age_turns=age,
                     is_poisonous=is_pois,
+                    is_deadly=is_deadly,
                     is_fresh=(age < 50),
                 )
             )

@@ -23,7 +23,6 @@ from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.tools import DuckDBToolRegistry, OPENAI_TOOL_SPECS
 from lox.telemetry.tokens import log_token_usage
 from lox.dsl.compiler import compile_policy
-from lox.core.tree import BehaviorTree
 
 
 class AuthorAgent:
@@ -115,34 +114,50 @@ class AuthorAgent:
         )
 
         return """```python
-def emergency_recovery():
-    if hp_frac < 0.25:
-        pray()
-    if hp_frac < 0.50:
-        quaff_healing()
-    if hunger_state >= HUNGRY:
-        eat_carried_food()
+class Agent:
+    def __init__(self):
+        self.last_prayer_turn = -1000
 
-def combat():
-    if adjacent_hostile:
-        melee_attack_hostile()
+    def run(self, obs):
+        while True:
+            # Emergency: self-monitored prayer and healing
+            if obs.hero.hp_frac < 0.20 and (obs.hero.turn - self.last_prayer_turn >= 350):
+                self.last_prayer_turn = obs.hero.turn
+                obs = yield pray()
+                continue
+            elif obs.hero.hp_frac < 0.35 and obs.inventory.has_healing:
+                obs = yield quaff_healing()
+                continue
+            elif obs.hero.hunger_state >= HUNGRY and obs.inventory.has_food:
+                obs = yield eat_carried_food()
+                continue
 
-def descend():
-    if stairs_down_known:
-        step_to_stairs_down()
+            # Tactical combat & retreat
+            if obs.combat.adjacent_hostile:
+                if obs.combat.closest_hostile_name == "floating eye":
+                    obs = yield step_away_from_hostile()
+                elif obs.hero.hp_frac < 0.35 and obs.combat.can_retreat:
+                    obs = yield step_to_chokepoint()
+                else:
+                    obs = yield melee_attack_hostile()
+                continue
 
-def explore():
-    if has_unvisited_frontier:
-        step_to_frontier()
-    else:
-        search()
-
-plan = [
-    emergency_recovery,
-    combat,
-    descend,
-    explore,
-]
+            # Environment & Navigation
+            if obs.spatial.standing_on_stairs_down:
+                obs = yield descend()
+            elif obs.dungeon.adjacent_closed_door:
+                if obs.dungeon.door_is_locked:
+                    obs = yield kick_closed_door()
+                else:
+                    obs = yield open_door()
+            elif obs.spatial.stairs_down_known and not obs.spatial.has_unvisited_frontier:
+                obs = yield step_to_stairs_down()
+            elif obs.spatial.has_unvisited_frontier:
+                obs = yield step_to_frontier()
+            elif obs.spatial.has_unsearched_dead_end:
+                obs = yield search()
+            else:
+                obs = yield wait()
 ```"""
 
     def _call_gemini(
@@ -165,7 +180,10 @@ plan = [
             self.tools.get_floor_pacing_stats,
             self.tools.get_action_distribution,
             self.tools.query_wiki,
-            self.tools.request_macro,
+            self.tools.get_dungeon_topology,
+            self.tools.get_hazard_map,
+            self.tools.get_floor_stash_report,
+            self.tools.get_death_autopsy_trace,
         ]
 
         # Use chats for automatic multi-turn tool calling
@@ -393,7 +411,7 @@ plan = [
         return candidate_code
 
     def extract_code(self, response_text: str) -> str:
-        """Robustly extracts Python policy code block (classes, generators, or behavior trees) from markdown."""
+        """Robustly extracts Python policy code block (classes or generators) from markdown."""
         if not response_text:
             return ""
 

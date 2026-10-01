@@ -52,8 +52,9 @@ plan = [explore]
     new_code, tree, error = agent.synthesize_policy(current_code, trigger_reason, autopsy)
     assert error is None
     assert tree is not None
-    assert "emergency_recovery" in new_code
-    assert "combat" in new_code
+    assert "class Agent:" in new_code
+    assert "yield pray()" in new_code
+    assert "yield melee_attack_hostile()" in new_code
 
 
 def test_extract_code_unclosed_block():
