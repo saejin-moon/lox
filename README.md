@@ -43,7 +43,7 @@ uv sync
 ```bash
 uv run pytest -v
 ```
-All 32 test suites should pass cleanly in ~4 seconds.
+All 33 test suites should pass cleanly in ~4 seconds.
 
 ---
 
@@ -89,6 +89,28 @@ nohup uv run python -u -m scripts.run_synthesis \
 # Monitor live generation progress
 tail -f campaign.log
 ```
+
+---
+
+### Step 4: Transferring Historical DuckDB Data Across Machines (Optional)
+
+Git tracks all source code and the latest evolved policy checkpoint ([`data/latest_policy.py`](file:///home/bae/lox/data/latest_policy.py)).
+The DuckDB database (`data/lox.duckdb`) and archived generation snapshots (`data/policies/`) are excluded by `.gitignore` to keep git operations fast and prevent repository bloat.
+
+To carry over historical episode telemetry, incident logs, token accounting, and generation archives when moving to another machine:
+
+```bash
+# 1. From the source machine (push to target):
+scp data/lox.duckdb user@remote-machine:/path/to/lox/data/lox.duckdb
+scp -r data/policies user@remote-machine:/path/to/lox/data/
+
+# 2. Or, from the new machine (pull from source):
+mkdir -p data
+scp user@source-machine:/path/to/lox/data/lox.duckdb ./data/lox.duckdb
+scp -r user@source-machine:/path/to/lox/data/policies ./data/
+```
+
+When you run `scripts.run_synthesis` on the new machine, it will automatically connect to `data/lox.duckdb`, inspect past episodes and death traces for synthesis, and continue incremental logging without data loss.
 
 ---
 
@@ -199,7 +221,19 @@ lox/
    Obstacles such as iron bars, locked iron doors, boulders, and solid walls that reject movement are dynamically recorded in `self.blocked_tiles` per floor depth and immediately pruned from all future navigation graphs (`step_to_frontier`, `step_to_dead_end`, `step_to`, `step_to_stairs_down`).
 
 5. **Floor-Wide Dead-End Secret Door Navigation**:
-   NetHack procedural generation blocks access to deeper dungeon levels behind hidden secret doors located at dead-end corridors (`#`). When visible frontiers are exhausted (`obs.spatial.has_unvisited_frontier == False`), `obs.spatial.has_unsearched_dead_end` evaluates floor-wide, allowing the hero to call `step_to_dead_end()` to pathfind to corridor dead-ends and `search()` repeatedly until the secret door is exposed.
+   NetHack procedural generation blocks access to deeper dungeon levels behind hidden secret doors located at dead-end corridors (`#`) and room perimeter walls (`-`, `|`). When visible frontiers are exhausted (`obs.spatial.has_unvisited_frontier == False`), `obs.spatial.has_unsearched_dead_end` evaluates floor-wide, allowing the hero to call `step_to_dead_end()` to pathfind to corridor dead-ends or room walls and `search()` repeatedly until the secret door is exposed.
+
+6. **Minetown & Dialog Auto-Dismissal (`ESC`)**:
+   Watchmen and temple priests in Minetown (Depths 5–9) greet the hero with text-entry dialogs (`"who are you"`, `"what is your name"`). `NetHackAdapter` intercepts these prompts and auto-dismisses them with ESC (`\x1b`), registering guards as peaceful and avoiding 2,500-keystroke timeout abortions.
+
+7. **Autopickup & Equipment Optimization (`wear_armor`)**:
+   NLE is configured with `options=("autopickup", "pickup_types:?!/%=[$")`, automatically collecting armor, potions, scrolls, and food as the hero steps over tiles. The policy executes `wear_armor()` during peaceful exploration to equip helmets, body armor, cloaks, and boots, driving Armor Class (AC) down and deflecting monster attacks.
+
+8. **In-Combat Emergency Healing & High-Speed Attackers (`is_fast_dangerous`)**:
+   Soldier ants and killer bees move at speed 18 with lethal poison stings. `obs.combat.is_fast_dangerous` flags lethal speedsters, triggering immediate retreat into 1-tile corridor chokepoints (`step_to_chokepoint()`). In-combat emergency healing (`quaff_healing()`) triggers at `< 50% HP` before trading further hits.
+
+9. **Exploration Pacing & Stagnation Auto-Recovery**:
+   To prevent heroes from burning thousands of turns in idle `wait()` loops (`MaxTurnsReached`), `NetHackAdapter` automatically decays search counters by 10 when frontiers stall, triggering an active second search sweep across candidate perimeter walls. Exploration policies banish idle `wait()`, continuously patrolling and searching candidate walls until stairs down are found.
 
 ---
 
