@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from typing import Any
+import duckdb
 import numpy as np
 import nle.nethack as nh
 
@@ -84,18 +85,21 @@ def run_synthesis_loop(
     role: str = "valkyrie",
     task: str = "MiniHack-ExploreMaze-Easy-Mapped-v0",
     max_generations: int = 500,
-    eval_episodes: int = 2,
-    max_turns: int = 300,
+    eval_episodes: int = 50,
+    max_turns: int = 10000,
+    policy_path: str = "data/latest_policy.py",
+    fresh: bool = False,
     stall_threshold: int = 80,
     cluster_threshold: int = 2,
     db_path: str = "data/lox.duckdb",
 ):
     print("=" * 65)
-    print("LOX 2.0 Embodied Dynamic Policy Synthesis Engine")
+    print("LOX 2.0 Embodied Batched Empirical Policy Synthesis Engine")
     print(f"Provider:    {provider} | Model: {model or 'default'}")
     print(f"Environment: {env_type.upper()} ({role if env_type == 'nethack' else task})")
     print(f"Database:    {db_path}")
     print(f"Config:      {max_generations} gens | {eval_episodes} eps/gen | {max_turns} max turns")
+    print(f"Policy Path: {policy_path} (fresh={fresh})")
     print("=" * 65)
 
     run_id = f"synth_{provider}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -103,14 +107,39 @@ def run_synthesis_loop(
     trigger_engine = DynamicTriggerEngine(stall_threshold=stall_threshold, cluster_threshold=cluster_threshold)
     recorder = FlightRecorder(capacity=100)
 
+    # Initialize DuckDB evolved_policies table
+    try:
+        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+        con = duckdb.connect(db_path)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS evolved_policies (
+                generation INTEGER,
+                run_id VARCHAR,
+                avg_depth DOUBLE,
+                max_depth INTEGER,
+                avg_turns DOUBLE,
+                code TEXT,
+                timestamp TIMESTAMP
+            )
+        """)
+        con.close()
+    except Exception as e:
+        print(f"[Warning] Failed to initialize evolved_policies table: {e}")
+
     # Initialize Environment
     if env_type == "nethack":
         adapter = NetHackAdapter(env_id="NetHackChallenge-v0", role=role)
     else:
         adapter = MiniHackAdapter(task=task)
 
-    # Seed policy initialized with high-performing Gen 22 tactical policy
-    current_policy = """
+    # Load or Seed policy
+    os.makedirs("data/policies", exist_ok=True)
+    if not fresh and os.path.exists(policy_path):
+        with open(policy_path, "r") as f:
+            current_policy = f.read().strip()
+        print(f"\n[Resumed Policy from {policy_path}]")
+    else:
+        current_policy = """
 def emergency():
     if hp_frac < 0.25 and can_safely_pray:
         pray()
@@ -119,46 +148,56 @@ def emergency():
     elif hunger_state >= HUNGRY and has_carried_food:
         eat_carried_food()
 
-def navigation():
-    if standing_on_stairs_down:
-        descend()
-    elif standing_on_stairs_up:
-        ascend()
-    elif stairs_down_known:
-        step_to_stairs_down()
-
 def combat():
     if adjacent_hostile:
         melee_attack_hostile()
     elif hostile_count_fov > 0:
         step_to_chokepoint()
 
+def navigation():
+    if standing_on_stairs_down:
+        descend()
+    elif stairs_down_known:
+        step_to_stairs_down()
+    elif standing_on_stairs_up:
+        ascend()
+    elif stairs_up_known:
+        step_to_stairs_up()
+
+def maintenance():
+    if adjacent_closed_door:
+        open_door()
+    elif floor_corpse_adjacent and corpse_is_safe:
+        eat_floor_corpse()
+
 def explore():
     if has_unvisited_frontier:
         step_to_frontier()
     elif has_unsearched_dead_end:
-        step_to_dead_end()
-        search()
-    elif not in_corridor and not floor_explored:
         search()
     elif stairs_down_known:
         step_to_stairs_down()
     else:
         wait()
 
-def maintenance():
-    if not has_poison_res and floor_corpse_adjacent and corpse_is_safe:
-        eat_floor_corpse()
+def recovery():
+    if adjacent_hostile and can_retreat:
+        step_away_from_hostile()
+    else:
+        wait()
 
 plan = [
     emergency,
-    navigation,
     combat,
-    explore,
+    navigation,
     maintenance,
+    explore,
+    recovery,
 ]
 """
-    print("\n[Generation 0] Initial Seed Policy:")
+        with open(policy_path, "w") as f:
+            f.write(current_policy.strip() + "\n")
+        print("\n[Initialized Seed Policy]:")
     print(current_policy.strip())
 
     # Shared action handlers
@@ -295,6 +334,42 @@ plan = [
                 return Action(name="step", direction=(dy, dx))
         return Status.FAILURE
 
+    def handle_wield_weapon(bb: Blackboard, args):
+        for it in bb.obs.inventory:
+            if it.category == "weapon" and any(w in it.name.lower() for w in ["sword", "excalibur", "dagger", "spear"]):
+                return Action(name="wield_weapon", slot=it.slot)
+        return Status.FAILURE
+
+    def handle_wear_armor(bb: Blackboard, args):
+        for it in bb.obs.inventory:
+            if it.category == "armor":
+                return Action(name="wear_armor", slot=it.slot)
+        return Status.FAILURE
+
+    def handle_step_to_fountain(bb: Blackboard, args):
+        hy, hx = bb.obs.hero.y, bb.obs.hero.x
+        hero_pos = (hy, hx)
+        fountain_locs = np.argwhere(bb.obs.chars == ord("{"))
+        if len(fountain_locs) > 0:
+            target = (int(fountain_locs[0, 0]), int(fountain_locs[0, 1]))
+            walkable = build_walkable_mask(bb.obs)
+            walkable[target[0], target[1]] = True
+            path = SpatialEngine.find_path(hero_pos, target, walkable)
+            if path:
+                dy = path[0][0] - hy
+                dx = path[0][1] - hx
+                return Action(name="step", direction=(dy, dx))
+        return Status.FAILURE
+
+    def handle_dip_excalibur(bb: Blackboard, args):
+        hy, hx = bb.obs.hero.y, bb.obs.hero.x
+        chars = bb.obs.chars
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]:
+            ty, tx = hy + dy, hx + dx
+            if 0 <= ty < 21 and 0 <= tx < 79 and chars[ty, tx] == ord("{"):
+                return Action(name="dip_excalibur")
+        return Status.FAILURE
+
     action_handlers = {
         "quaff_healing": handle_quaff_healing,
         "pray": handle_emergency_pray,
@@ -318,6 +393,10 @@ plan = [
         "step_to_dead_end": handle_search,
         "rest": handle_wait,
         "idle": handle_wait,
+        "wield_weapon": handle_wield_weapon,
+        "wear_armor": handle_wear_armor,
+        "step_to_fountain": handle_step_to_fountain,
+        "dip_excalibur": handle_dip_excalibur,
     }
 
     current_tree = compile_policy(current_policy, action_handlers=action_handlers)
@@ -370,6 +449,7 @@ plan = [
 
                 # Adjacent hostiles
                 has_adj_hostile = False
+                hostile_count_fov = 0
                 if obs.glyphs is not None:
                     for dy in (-1, 0, 1):
                         for dx in (-1, 0, 1):
@@ -380,34 +460,65 @@ plan = [
                                 g = int(obs.glyphs[ty, tx])
                                 if nh.glyph_is_monster(g) and not nh.glyph_is_pet(g):
                                     has_adj_hostile = True
-                                    break
-                        if has_adj_hostile:
-                            break
+                                    hostile_count_fov += 1
+
+                # Environmental detection
+                adj_closed_door = False
+                adj_fountain = False
+                chars = obs.chars
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ty, tx = hy + dy, hx + dx
+                    if 0 <= ty < 21 and 0 <= tx < 79:
+                        if chars[ty, tx] == ord("+"):
+                            adj_closed_door = True
+                        elif chars[ty, tx] == ord("{"):
+                            adj_fountain = True
+
+                is_blind = False
+                is_poisoned = False
+                if obs.message:
+                    msg_low = obs.message.lower()
+                    if "blind" in msg_low or "can't see" in msg_low:
+                        is_blind = True
+                    if "poison" in msg_low or "faint" in msg_low:
+                        is_poisoned = True
 
                 has_frontier = bool(stuck_counter < 6)
 
                 memory = {
+                    "hp_frac": hero.hp / max(1, hero.max_hp),
+                    "energy_frac": hero.energy / max(1, hero.max_energy) if hasattr(hero, "energy") else 1.0,
+                    "depth": hero.depth,
+                    "turn": hero.turn,
+                    "turns_on_level": step,
+                    "experience_level": hero.experience_level if hasattr(hero, "experience_level") else 1,
+                    "gold": hero.gold if hasattr(hero, "gold") else 0,
+                    "hunger_state": hero.hunger_state.value if hasattr(hero.hunger_state, "value") else 1,
+                    "is_blind": is_blind,
+                    "is_poisoned": is_poisoned,
                     "adjacent_hostile": has_adj_hostile,
-                    "hostile_count_fov": 1 if has_adj_hostile else 0,
-                    "is_surrounded": False,
+                    "hostile_count_fov": hostile_count_fov,
+                    "is_surrounded": hostile_count_fov >= 3,
                     "in_corridor": bool(obs.chars[hy, hx] == ord("#")),
                     "can_retreat": True,
-                    "standing_on_elbereth": False,
+                    "standing_on_elbereth": getattr(adapter, "has_elbereth_at", lambda y, x: False)(hy, hx),
+                    "can_safely_pray": getattr(adapter, "can_safely_pray", lambda t: True)(hero.turn),
+                    "has_healing": has_healing,
+                    "adjacent_closed_door": adj_closed_door,
+                    "adjacent_fountain": adj_fountain,
                     "stairs_down_known": known_stairs_down is not None,
-                    "stairs_up_known": bool(np.any(obs.chars == ord("<"))),
+                    "stairs_up_known": known_stairs_up is not None or bool(np.any(obs.chars == ord("<"))),
                     "standing_on_stairs_down": bool(obs.chars[hy, hx] == ord(">")),
                     "standing_on_stairs_up": bool(obs.chars[hy, hx] == ord("<")),
                     "floor_explored": not has_frontier,
                     "has_unvisited_frontier": has_frontier,
-                    "has_unsearched_dead_end": False,
+                    "has_unsearched_dead_end": bool(stuck_counter >= 3 and not has_frontier),
                     "has_carried_food": has_food,
                     "floor_corpse_adjacent": bool(obs.chars[hy, hx] == ord("%")),
                     "corpse_is_fresh": True,
                     "corpse_is_safe": True,
-                    "can_safely_pray": getattr(adapter, "can_safely_pray", lambda t: True)(hero.turn),
-                    "has_healing": has_healing,
-                    "can_forge_excalibur": False,
-                    "turns_on_level": step,
+                    "has_poison_res": getattr(adapter, "has_poison_res", False),
+                    "can_forge_excalibur": (hero.experience_level >= 5) if hasattr(hero, "experience_level") else False,
                 }
 
                 action = current_tree.execute(obs, memory=memory)
@@ -437,18 +548,6 @@ plan = [
                     action=action.name,
                 )
 
-                # Check turn trigger (real floor stall or starvation)
-                trig, reason = trigger_engine.check_turn(
-                    turns_on_level=step,
-                    depth=hero.depth,
-                    has_frontier=has_frontier,
-                    hunger_state=hero.hunger_state.name,
-                    food_count=1 if has_food else 0,
-                )
-                if trig in (TriggerType.STALL, TriggerType.STARVATION):
-                    trigger_fired = True
-                    trigger_reason = reason
-
                 step_res = adapter.step(action)
                 if len(step_res) == 5:
                     obs, reward, term, trunc, info = step_res
@@ -460,10 +559,6 @@ plan = [
                     death_reason = info.get("death_reason", "died") if hasattr(info, "get") else "ended"
                     if "death" in death_reason.lower() or "killed" in death_reason.lower() or "starv" in death_reason.lower():
                         recorder.record_death(death_reason)
-                        trig_c, r_c = trigger_engine.check_death_cluster(recorder)
-                        if trig_c == TriggerType.CLUSTER_DEATH:
-                            trigger_fired = True
-                            trigger_reason = r_c
                     break
 
             gen_depths.append(obs.hero.depth)
@@ -487,31 +582,84 @@ plan = [
         logger.flush()
         consolidate_run(run_id=gen_dir_id, db_path=db_path, telemetry_dir="data/telemetry", cleanup=True)
 
-        avg_d = np.mean(gen_depths)
-        avg_t = np.mean(gen_turns)
-        print(f"[Gen {gen} Summary] Avg Depth: {avg_d:.1f} | Avg Turns: {avg_t:.1f} | Trigger: {trigger_reason or 'None'}")
+        avg_d = float(np.mean(gen_depths))
+        max_d = int(np.max(gen_depths))
+        avg_t = float(np.mean(gen_turns))
 
-        if trigger_fired:
-            print(f"[Trigger Fired] {trigger_reason}")
-            print("\n[Author Agent] Initiating synthesis session (querying DuckDB & evaluating)...")
-            status_rep = recorder.generate_compact_status_report(trigger_reason=trigger_reason)
-            new_code, tree, error = author.synthesize_policy(
-                current_policy=current_policy,
-                trigger_reason=trigger_reason,
-                status_report=status_rep,
-                run_id=run_id,
-                action_handlers=action_handlers,
-            )
+        # Query DuckDB for empirical mortality taxonomy across the generation batch
+        top_deaths = []
+        try:
+            con = duckdb.connect(db_path, read_only=True)
+            top_deaths = con.execute(f"""
+                SELECT death_reason, count(*) as count, round(count(*) * 100.0 / {eval_episodes}, 1) as pct
+                FROM episodes
+                WHERE episode_id LIKE '{gen_dir_id}_%'
+                GROUP BY death_reason
+                ORDER BY count DESC
+                LIMIT 5
+            """).fetchall()
+            con.close()
+        except Exception:
+            pass
 
-            if error:
-                print(f"[Validation Failed] {error}")
-                print(f"[Rejected Candidate Code]:\n{new_code.strip()}\n")
-            else:
-                print(f"[Policy Verified & Compiled! Generation {gen} accepted]")
-                current_policy = new_code
-                current_tree = tree
-                print("\nEvolved Policy Program:")
-                print(new_code.strip())
+        death_summary_str = ", ".join(f"{r[0]} ({r[2]}%)" for r in top_deaths) if top_deaths else "None"
+        primary_cause = top_deaths[0][0] if top_deaths else "Floor Stagnation"
+        primary_pct = top_deaths[0][2] if top_deaths else 0.0
+
+        print(f"\n[Gen {gen} Batch Metrics ({eval_episodes} eps)] Avg Depth: {avg_d:.2f} | Max Depth: {max_d} | Avg Turns: {avg_t:.1f}")
+        print(f"[Gen {gen} Mortality Breakdown] {death_summary_str}")
+
+        trigger_reason = (
+            f"Generation {gen} Batched Empirical Autopsy ({eval_episodes} episodes): "
+            f"Avg Depth {avg_d:.2f}, Max Depth {max_d}, Avg Turns {avg_t:.1f}. "
+            f"Primary mortality bottleneck: '{primary_cause}' ({primary_pct}%). "
+            f"Synthesize an evolved policy program that mitigates this primary cause of death, optimizes stair navigation, and breaks through deeper dungeon levels."
+        )
+
+        status_rep = (
+            f"Batch Size: {eval_episodes} episodes\n"
+            f"Average Depth: {avg_d:.2f}\n"
+            f"Max Depth: {max_d}\n"
+            f"Average Turns Survived: {avg_t:.1f}\n"
+            f"Mortality Taxonomy:\n" + ("\n".join(f"  - {r[0]}: {r[1]} episodes ({r[2]}%)" for r in top_deaths) if top_deaths else "  - None")
+        )
+
+        print(f"\n[Author Agent] Initiating empirical synthesis session (querying DuckDB & evaluating)...")
+        new_code, tree, error = author.synthesize_policy(
+            current_policy=current_policy,
+            trigger_reason=trigger_reason,
+            status_report=status_rep,
+            run_id=run_id,
+            action_handlers=action_handlers,
+        )
+
+        if error:
+            print(f"[Validation Failed] {error}")
+            print(f"[Rejected Candidate Code]:\n{new_code.strip()}\n")
+        else:
+            print(f"[Policy Verified & Compiled! Generation {gen} accepted]")
+            current_policy = new_code
+            current_tree = tree
+            print("\nEvolved Policy Program:")
+            print(new_code.strip())
+
+            # Persist latest policy and archive checkpoint
+            try:
+                with open(policy_path, "w") as f:
+                    f.write(new_code.strip() + "\n")
+                ckpt_path = f"data/policies/gen_{gen:04d}.py"
+                with open(ckpt_path, "w") as f:
+                    f.write(new_code.strip() + "\n")
+
+                con = duckdb.connect(db_path)
+                con.execute(
+                    "INSERT INTO evolved_policies VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [gen, run_id, float(avg_d), int(max_d), float(avg_t), new_code.strip(), datetime.datetime.now()],
+                )
+                con.close()
+                print(f"[Checkpoint Saved] -> {policy_path} & {ckpt_path}")
+            except Exception as e:
+                print(f"[Warning] Failed to save policy checkpoint: {e}")
 
     adapter.close()
 
@@ -536,8 +684,10 @@ if __name__ == "__main__":
     parser.add_argument("--role", default="valkyrie", help="Hero role for NetHack")
     parser.add_argument("--task", default="MiniHack-ExploreMaze-Easy-Mapped-v0", help="Task for MiniHack")
     parser.add_argument("--generations", type=int, default=500, help="Total synthesis generations")
-    parser.add_argument("--eval-episodes", type=int, default=2, help="Real evaluation episodes per generation")
-    parser.add_argument("--max-turns", type=int, default=300, help="Max turns per episode")
+    parser.add_argument("--eval-episodes", type=int, default=50, help="Real evaluation episodes per generation batch")
+    parser.add_argument("--max-turns", type=int, default=10000, help="Max turns per episode")
+    parser.add_argument("--policy-path", default="data/latest_policy.py", help="Path to persisted latest policy")
+    parser.add_argument("--fresh", action="store_true", help="Force fresh start instead of resuming latest policy")
     parser.add_argument("--stall-threshold", type=int, default=80, help="Turns without progress to trigger stall autopsy")
     parser.add_argument("--cluster-threshold", type=int, default=2, help="Deaths of same cause to trigger cluster autopsy")
     parser.add_argument("--db-path", default="data/lox.duckdb")
@@ -553,6 +703,8 @@ if __name__ == "__main__":
         max_generations=args.generations,
         eval_episodes=args.eval_episodes,
         max_turns=args.max_turns,
+        policy_path=args.policy_path,
+        fresh=args.fresh,
         stall_threshold=args.stall_threshold,
         cluster_threshold=args.cluster_threshold,
         db_path=args.db_path,
