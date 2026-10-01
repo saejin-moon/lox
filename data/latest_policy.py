@@ -2,27 +2,28 @@ class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
         self.search_count = 0
+        self.retreat_streak = 0
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
+            # 1. Absolute Emergency Survival
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
                 if obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
 
-            # 2. Combat Logic (Highest Priority)
-            if obs.combat.hostile_count_fov > 0:
-                obs = yield from self.handle_combat(obs)
-                continue
-
-            # 3. Immediate Depth Progression (Prevent MaxTurnsReached)
+            # 2. Immediate Depth Progression (Highest Priority to prevent MaxTurnsReached)
             if obs.spatial.standing_on_stairs_down:
                 obs = yield descend()
                 continue
-            if obs.spatial.stairs_down_known:
+            elif obs.spatial.stairs_down_known:
                 obs = yield step_to_stairs_down()
+                continue
+
+            # 3. Combat Logic
+            if obs.combat.hostile_count_fov > 0:
+                obs = yield from self.handle_combat(obs)
                 continue
 
             # 4. Hunger Prevention (Only when safe)
@@ -48,7 +49,6 @@ class Agent:
                 continue
 
             if obs.spatial.has_unvisited_frontier:
-                self.search_count = 0 
                 obs = yield step_to_frontier()
                 continue
             
@@ -56,8 +56,8 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             
-            # Final fallback: Search perimeter walls/dead ends to find secret doors/stairs
-            obs = yield from self.handle_dead_end(obs)
+            # Final fallback: If we are here, we are stuck. Search the current tile.
+            obs = yield search()
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
@@ -82,17 +82,19 @@ class Agent:
                     obs = yield step_to_chokepoint()
                     continue
 
-            # Combat Engagement
+            # Combat Engagement with "Resolve" to prevent infinite kiting
+            # If we are healthy or the enemy is very close, we MUST attack to clear the path
             if obs.combat.adjacent_hostile:
-                if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
                 else:
                     obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
             else:
-                if obs.hero.hp_frac > 0.50:
-                    obs = yield melee_attack_hostile()
+                # If the enemy is not adjacent, move toward them to engage unless we are dying
+                if obs.hero.hp_frac > 0.30:
+                    obs = yield melee_attack_hostile() # This will move toward the target
                 else:
-                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
+                    obs = yield step_away_from_hostile()
             
             if obs.combat.hostile_count_fov == 0:
                 break
@@ -112,9 +114,10 @@ class Agent:
         return obs
 
     def handle_dead_end(self, obs):
+        # Move to a dead end or perimeter wall
         obs = yield step_to_dead_end()
-        # Search up to 8 times at a dead end to find secret doors
-        for _ in range(8):
+        # Search a limited number of times to avoid MaxTurnsReached
+        for _ in range(5):
             if obs.combat.hostile_count_fov > 0:
                 return obs
             if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:

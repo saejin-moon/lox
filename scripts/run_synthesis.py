@@ -445,22 +445,28 @@ class Agent:
             print(new_code.strip())
 
             # Persist latest policy and archive checkpoint
-            try:
-                with open(policy_path, "w") as f:
-                    f.write(new_code.strip() + "\n")
-                ckpt_path = f"data/policies/gen_{gen:04d}.py"
-                with open(ckpt_path, "w") as f:
-                    f.write(new_code.strip() + "\n")
+            # Persist latest policy and archive checkpoint
+            with open(policy_path, "w") as f:
+                f.write(new_code.strip() + "\n")
+            ckpt_path = f"data/policies/gen_{gen:04d}.py"
+            with open(ckpt_path, "w") as f:
+                f.write(new_code.strip() + "\n")
+            print(f"[Checkpoint Saved] -> {policy_path} & {ckpt_path}")
 
-                con = duckdb.connect(db_path)
-                con.execute(
-                    "INSERT INTO evolved_policies VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [gen, run_id, float(avg_d), int(max_d), float(avg_t), new_code.strip(), datetime.datetime.now()],
-                )
-                con.close()
-                print(f"[Checkpoint Saved] -> {policy_path} & {ckpt_path}")
-            except Exception as e:
-                print(f"[Warning] Failed to save policy checkpoint: {e}")
+            # Log to DuckDB evolved_policies table with retry shield
+            for attempt in range(3):
+                try:
+                    con = duckdb.connect(db_path)
+                    con.execute(
+                        "INSERT INTO evolved_policies VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        [gen, run_id, float(avg_d), int(max_d), float(avg_t), new_code.strip(), datetime.datetime.now()],
+                    )
+                    con.close()
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        print(f"[Warning] Could not record evolved policy in DuckDB: {e}")
+                    time.sleep(0.5)
 
     adapter.close()
 

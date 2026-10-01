@@ -18,8 +18,9 @@ This plan guides the incoming agent step-by-step from the current checkpoint to 
   7. *Minetown Dialog Auto-Dismissal (`ESC`)*: Automatically cancels text-entry prompts (`"who are you"`, `"what is your name"`, `"call this"`, `"hello stranger"`) with ESC (`\x1b`) and registers guards as peaceful, avoiding 2,500-keystroke timeouts at Depths 5–8.
   8. *Autopickup & Armor Equipping (`wear_armor`)*: NLE configured with `options=("autopickup", "pickup_types:?!/%=[$")`. Added `has_unworn_armor` and `wear_armor()` with Redundant Armor Slot Shield (automatically tracks failed armor slots and prunes them from `has_unworn_armor`, preventing 17,000-turn loops).
   9. *In-Combat Emergency Healing & Fast Monster Chokepoint Retreat*: In-combat healing triggered at `< 50% HP` inside `handle_combat()`. Soldier ants/killer bees (`is_fast_dangerous`) trigger immediate retreat to corridor chokepoints.
-  10. *Test Suite*: All 35 unit tests pass (`uv run pytest -v`).
+  10. *Test Suite*: All 36 unit tests pass (`uv run pytest -v`).
   11. *Unified Stride-2 Checkerboard Secret Door Search*: Unified corridor dead ends and perimeter candidates into `_compute_dead_ends_mask`. Uses checkerboard stride-2 pattern `(cy + cx) % 2 == 0` plus all corner tiles (`adj_wall >= 2`) to ensure 100% geometric coverage of all room walls while cutting search stops and turns by $> 50\%$. Automatically decays search counts by 10 on stagnation and sorts reachable candidates by search count and BFS walking distance.
+  12. *Prompt Auto-Dismissal (`[ynq]` Post-Death / Identification Shield)*: Auto-dismisses `[ynq]` prompts (`"Do you want your possessions identified?"`, creatures slaughtered, etc.) with `'n'`, preventing NLE smooth-quit aborts and 5,000-turn dead stalls.
 
 ---
 

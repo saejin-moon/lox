@@ -116,3 +116,15 @@ def test_unified_stride2_dead_ends_mask():
 
     adapter.close()
 
+
+def test_dismiss_more_ynq_prompts():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=42)
+
+    # Test that [ynq] prompts are auto-dismissed with 'n'
+    fake_obs = {"message": "Do you want your possessions identified? [ynq] (n)", "misc": [0, 0, 0]}
+    cleaned_obs, term, trunc = adapter._dismiss_more(fake_obs, False, False)
+    assert cleaned_obs is not None
+
+    adapter.close()
+

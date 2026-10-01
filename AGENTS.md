@@ -64,12 +64,12 @@ lox/
    - If a subroutine returns without yielding (e.g. `return obs`) and the caller loop does `continue`, the Python generator spins at 100% CPU without stepping the game environment, hanging execution.
    - **Safety Shield**: [`AuthorAgent.synthesize_policy`](file:///home/bae/lox/lox/author/agent.py) features a timeout-shielded multi-scenario dry-run validator (`normal`, `hungry`, `combat` states with a 1.0s hard timeout) that catches and auto-repairs any non-yielding policy before evaluation.
 
-3. **Peaceful Creature Prompt Immunity**:
-   - Attacking peaceful or passive creatures (hobbits, gnomes, acid blobs, peaceful humans) triggers NetHack confirmation prompts: `"Really attack the ...? [yn] (n)"` or `"Hello stranger..."`.
-   - In NetHack, directional keys answer `n` (No) to prompts and consume 0 turns. If the policy attempts `melee_attack_hostile` again, it enters an infinite 0-turn prompt loop.
+3. **Prompt Auto-Dismissal (`[yn]` and `[ynq]` Confirmation Shields)**:
+   - NetHack frequently triggers confirmation prompts: `"Really attack the ...? [yn] (n)"`, `"Really quit?"`, or post-game identification prompts `"Do you want your possessions identified? [ynq] (n)"`.
+   - In NetHack, directional keys answer `n` (No) to prompts and consume 0 turns. If prompts are not answered, NLE enters an infinite loop, aborts with `"Warning: smooth quitting of game failed"`, or exhausts the turn cap.
    - [`NetHackAdapter`](file:///home/bae/lox/lox/envs/nethack.py) automatically:
-     - Tracks `self.peaceful_positions` per dungeon level.
-     - Auto-dismisses `[yn]` prompts with `'n'`.
+     - Auto-dismisses all `(y/n)`, `[yn]`, and `[ynq]` prompts with `'n'`.
+     - Tracks `self.peaceful_positions` per dungeon level upon peaceful encounter prompts.
      - Excludes peaceful positions from `hostile_count`, `adjacent_hostiles_count`, and `melee_attack_hostile`.
      - Exposes `obs.combat.adjacent_peaceful`.
 
