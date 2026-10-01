@@ -594,6 +594,7 @@ plan = [
 
         # Query DuckDB for empirical mortality taxonomy across the generation batch
         top_deaths = []
+        recent_fatal_samples = []
         try:
             con = duckdb.connect(db_path, read_only=True)
             top_deaths = con.execute(f"""
@@ -604,6 +605,13 @@ plan = [
                 ORDER BY count DESC
                 LIMIT 5
             """).fetchall()
+            recent_fatal_samples = con.execute(f"""
+                SELECT death_reason, depth, turns
+                FROM episodes
+                WHERE episode_id LIKE '{gen_dir_id}_%' AND death_reason NOT IN ('active', 'MaxTurnsReached')
+                ORDER BY rowid DESC
+                LIMIT 3
+            """).fetchall()
             con.close()
         except Exception:
             pass
@@ -613,22 +621,30 @@ plan = [
         primary_pct = top_deaths[0][2] if top_deaths else 0.0
 
         print(f"\n[Gen {gen} Batch Metrics ({eval_episodes} eps)] Avg Depth: {avg_d:.2f} | Max Depth: {max_d} | Avg Turns: {avg_t:.1f}")
-        print(f"[Gen {gen} Mortality Breakdown] {death_summary_str}")
+        print(f"[Gen {gen} Ranked Fatalities] {death_summary_str}")
 
         trigger_reason = (
-            f"Generation {gen} Batched Empirical Autopsy ({eval_episodes} episodes): "
+            f"Generation {gen} Empirical Incident Autopsy ({eval_episodes} episodes): "
             f"Avg Depth {avg_d:.2f}, Max Depth {max_d}, Avg Turns {avg_t:.1f}. "
-            f"Primary mortality bottleneck: '{primary_cause}' ({primary_pct}%). "
-            f"Synthesize an evolved policy program that mitigates this primary cause of death, optimizes stair navigation, and breaks through deeper dungeon levels."
+            f"#1 Mortality Bottleneck: '{primary_cause}' ({primary_pct}% of runs). "
+            f"Synthesize an evolved policy program that directly mitigates this #1 cause of death, optimizes stair navigation, and breaks through deeper dungeon levels."
         )
 
+        mortality_lines = [
+            f"  {idx}. {r[0]}: {r[1]}/{eval_episodes} runs ({r[2]}%)"
+            for idx, r in enumerate(top_deaths, 1)
+        ]
         status_rep = (
-            f"Batch Size: {eval_episodes} episodes\n"
+            f"Batch Size: {eval_episodes} real episodes\n"
             f"Average Depth: {avg_d:.2f}\n"
             f"Max Depth: {max_d}\n"
-            f"Average Turns Survived: {avg_t:.1f}\n"
-            f"Mortality Taxonomy:\n" + ("\n".join(f"  - {r[0]}: {r[1]} episodes ({r[2]}%)" for r in top_deaths) if top_deaths else "  - None")
+            f"Average Turns Survived: {avg_t:.1f}\n\n"
+            f"Ranked Causes of Death (Ranked by Popularity/Frequency):\n"
+            + ("\n".join(mortality_lines) if mortality_lines else "  - None recorded")
         )
+        if recent_fatal_samples:
+            sample_lines = [f"  - Depth {s[1]}, Turn {s[2]}: \"{s[0]}\"" for s in recent_fatal_samples]
+            status_rep += "\n\nRecent Fatal Incident Logs:\n" + "\n".join(sample_lines)
 
         print(f"\n[Author Agent] Initiating empirical synthesis session (querying DuckDB & evaluating)...")
         new_code, tree, error = author.synthesize_policy(

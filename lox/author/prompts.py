@@ -42,14 +42,21 @@ Provide 1 brief rationale sentence, then your full revised code in a single ```p
 
 
 def build_user_prompt(current_policy: str, trigger_reason: str, status_report: str) -> str:
-    """Compact user prompt (<200 tokens) presenting the incident report and current policy."""
-    return f"""### Status Report:
+    """User prompt presenting the empirical autopsy, ranked mortality causes, and current policy."""
+    return f"""### Empirical Incident Report:
 {status_report}
+
+### Synthesis Objective:
+{trigger_reason}
+
+### Diagnostic Notice:
+The telemetry database `data/lox.duckdb` holds complete per-tick flight recordings and death messages for this evaluation batch.
+You can call `query_duckdb("SELECT death_reason, depth, turns FROM episodes ORDER BY rowid DESC LIMIT 10")` or `get_death_taxonomy(20)` to inspect exact failure traces before synthesizing revised logic.
 
 ### Current Policy:
 ```python
 {current_policy.strip()}
 ```
 
-Diagnose the failure mode (query DuckDB if needed) and synthesize the updated policy program to resolve it.
+Synthesize the revised policy program that directly counters the ranked mortality bottlenecks while maintaining aggressive stair navigation and frontier exploration.
 """
