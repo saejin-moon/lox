@@ -198,6 +198,30 @@ class SafeASTVisitor(ast.NodeVisitor):
                     self.local_scope.add(elt.id)
         self.generic_visit(node)
 
+    def visit_comprehension(self, node: ast.comprehension):
+        if isinstance(node.target, ast.Name):
+            self.local_scope.add(node.target.id)
+        elif isinstance(node.target, ast.Tuple):
+            for elt in node.target.elts:
+                if isinstance(elt, ast.Name):
+                    self.local_scope.add(elt.id)
+        self.generic_visit(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp):
+        for gen in node.generators:
+            self.visit(gen)
+        self.visit(node.elt)
+
+    def visit_ListComp(self, node: ast.ListComp):
+        for gen in node.generators:
+            self.visit(gen)
+        self.visit(node.elt)
+
+    def visit_SetComp(self, node: ast.SetComp):
+        for gen in node.generators:
+            self.visit(gen)
+        self.visit(node.elt)
+
     def pre_scan(self, tree: ast.AST):
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
