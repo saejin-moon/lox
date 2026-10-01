@@ -97,6 +97,7 @@ lox/
    - By default, characters remained naked (AC 7–10) throughout the dungeon.
    - `NetHackAdapter` initializes NLE with `options=("autopickup", "pickup_types:?!/%=[$")`, automatically collecting armor, scrolls, potions, wands, and food as the hero steps over tiles.
    - `obs.inventory.has_unworn_armor` and `wear_armor()` allow the policy to equip dropped helmets, mail, cloaks, and boots during peaceful exploration, driving Armor Class down towards negative values (vastly reducing monster hit chances).
+   - **Redundant Armor Slot Shield**: When autopickup grabs extra armor of an already-occupied slot (e.g. ring mail when wearing scale mail), NetHack rejects wearing it. `NetHackAdapter` tracks failed armor slots and automatically excludes them from `obs.inventory.has_unworn_armor` and `get_unworn_armor_slot()`, completely preventing the 17,000-turn `wear_armor` infinite loop.
 
 10. **Tactical In-Combat Healing & High-Speed Attackers (`is_fast_dangerous`)**:
     - Soldier ants and killer bees move at speed 18 (nearly 2x hero speed) and deliver lethal poison stings. Engaging them in open rooms is fatal.

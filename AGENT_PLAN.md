@@ -16,9 +16,9 @@ This plan guides the incoming agent step-by-step from the current checkpoint to 
   5. *Dead-End & Room Perimeter Secret Door Invariants*: Guided LLM to use `step_to_dead_end()` and `search()` on corridor dead ends and room perimeter walls when frontiers are exhausted.
   6. *Granular Telemetry & Timeout Reporting*: `scripts/run_synthesis.py` extracts real causes of death (starvation, poison, combat strikes) and identifies `MaxTurnsReached`, while tracking `descents`, `attacks`, `searches`, `eats`, and `prayers`.
   7. *Minetown Dialog Auto-Dismissal (`ESC`)*: Automatically cancels text-entry prompts (`"who are you"`, `"what is your name"`, `"call this"`, `"hello stranger"`) with ESC (`\x1b`) and registers guards as peaceful, avoiding 2,500-keystroke timeouts at Depths 5–8.
-  8. *Autopickup & Armor Equipping*: NLE configured with `options=("autopickup", "pickup_types:?!/%=[$")`. Added `has_unworn_armor` and `wear_armor()` to lower AC and survive deep monsters.
+  8. *Autopickup & Armor Equipping (`wear_armor`)*: NLE configured with `options=("autopickup", "pickup_types:?!/%=[$")`. Added `has_unworn_armor` and `wear_armor()` with Redundant Armor Slot Shield (automatically tracks failed armor slots and prunes them from `has_unworn_armor`, preventing 17,000-turn loops).
   9. *In-Combat Emergency Healing & Fast Monster Chokepoint Retreat*: In-combat healing triggered at `< 50% HP` inside `handle_combat()`. Soldier ants/killer bees (`is_fast_dangerous`) trigger immediate retreat to corridor chokepoints.
-  10. *Test Suite*: All 34 unit tests pass (`uv run pytest -v`).
+  10. *Test Suite*: All 35 unit tests pass (`uv run pytest -v`).
   11. *Unified Stride-2 Checkerboard Secret Door Search*: Unified corridor dead ends and perimeter candidates into `_compute_dead_ends_mask`. Uses checkerboard stride-2 pattern `(cy + cx) % 2 == 0` plus all corner tiles (`adj_wall >= 2`) to ensure 100% geometric coverage of all room walls while cutting search stops and turns by $> 50\%$. Automatically decays search counts by 10 on stagnation and sorts reachable candidates by search count and BFS walking distance.
 
 ---

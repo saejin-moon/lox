@@ -38,3 +38,25 @@ def test_tactical_primitives_execution():
     assert (obs.hero.y, obs.hero.x - 1) in adapter.blocked_tiles
 
     adapter.close()
+
+
+def test_wear_armor_failed_slot_tracking():
+    from lox.core.types import Item, InventoryView
+
+    item1 = Item(slot="b", name="scale mail", category="armor", is_equipped=True)
+    item2 = Item(slot="f", name="ring mail", category="armor", is_equipped=False)
+    item3 = Item(slot="g", name="helmet", category="armor", is_equipped=False)
+
+    inv = InventoryView([item1, item2, item3])
+    assert inv.has_unworn_armor is True
+    assert inv.get_unworn_armor_slot() == "f"
+
+    # Simulate slot "f" failing to be worn (e.g. redundant body armor)
+    inv.failed_armor_slots.add("f")
+    assert inv.has_unworn_armor is True
+    assert inv.get_unworn_armor_slot() == "g"  # Falls back to helmet!
+
+    # Simulate slot "g" failing too
+    inv.failed_armor_slots.add("g")
+    assert inv.has_unworn_armor is False
+    assert inv.get_unworn_armor_slot() is None

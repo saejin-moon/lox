@@ -107,6 +107,10 @@ class Item:
 class InventoryView(list):
     """List-compatible inventory with fast query helpers for policies."""
 
+    def __init__(self, items: list[Item] | None = None, failed_armor_slots: set[str] | None = None):
+        super().__init__(items or [])
+        self.failed_armor_slots: set[str] = set(failed_armor_slots or [])
+
     @property
     def items(self) -> list[Item]:
         return list(self)
@@ -172,11 +176,14 @@ class InventoryView(list):
 
     @property
     def has_unworn_armor(self) -> bool:
-        return any(it.category == "armor" and not it.is_equipped for it in self)
+        return any(
+            it.category == "armor" and not it.is_equipped and it.slot not in self.failed_armor_slots
+            for it in self
+        )
 
     def get_unworn_armor_slot(self) -> str | None:
         for it in self:
-            if it.category == "armor" and not it.is_equipped:
+            if it.category == "armor" and not it.is_equipped and it.slot not in self.failed_armor_slots:
                 return it.slot
         return None
 

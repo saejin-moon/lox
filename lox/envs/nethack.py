@@ -88,6 +88,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.peaceful_positions: set[tuple[int, int]] = set()
         self.blocked_tiles: set[tuple[int, int]] = set()
         self.non_door_tiles: set[tuple[int, int]] = set()
+        self.failed_wear_slots: set[str] = set()
 
         # Build ASCII char -> action index map
         unwrapped = getattr(self.env, "unwrapped", self.env)
@@ -266,7 +267,8 @@ class NetHackAdapter(EnvironmentAdapter):
                     Item(slot=slot, name=desc, category=cat, is_equipped=is_equipped, buc=buc)
                 )
 
-        inv_view = InventoryView(inventory_items)
+        self.failed_wear_slots = {s for s in self.failed_wear_slots if any(it.slot == s for it in inventory_items)}
+        inv_view = InventoryView(inventory_items, failed_armor_slots=self.failed_wear_slots)
         message = self._decode_message(raw_obs.get("message", ""))
         chars = raw_obs["chars"]
         glyphs = raw_obs["glyphs"]
@@ -562,6 +564,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.peaceful_positions.clear()
         self.blocked_tiles.clear()
         self.non_door_tiles.clear()
+        self.failed_wear_slots.clear()
         self.turns_on_level = 0
         self.last_depth = 1
         self.last_dnum = 0
@@ -822,7 +825,12 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "wear_armor":
             slot = action.slot or (obs_prev.inventory.get_unworn_armor_slot() if obs_prev else None)
             if slot:
-                return self._step_sequence([self.char_to_act.get("W", 0), self.char_to_act.get(slot, 0)])
+                obs, reward, term, trunc, info = self._step_sequence([self.char_to_act.get("W", 0), self.char_to_act.get(slot, 0)])
+                item = next((it for it in obs.inventory if it.slot == slot), None)
+                if item is not None and not item.is_equipped:
+                    self.failed_wear_slots.add(slot)
+                    obs.inventory.failed_armor_slots.add(slot)
+                return obs, reward, term, trunc, info
             return self.step(Action(name="wait"))
         elif action.name == "pickup":
             target_char = ","
