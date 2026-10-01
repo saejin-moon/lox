@@ -145,6 +145,35 @@ def normalize_code(code_str: str) -> str:
     return "\n".join(normalized)
 
 
+import threading
+
+
+def _parse_with_expanded_stack(code: str) -> ast.Module:
+    """Parses code, falling back to a dedicated 64MB stack thread if C stack margin is exceeded."""
+    try:
+        return ast.parse(code)
+    except (MemoryError, RecursionError):
+        result: list[Any] = [None, None]
+
+        def worker():
+            try:
+                result[0] = ast.parse(code)
+            except Exception as e:
+                result[1] = e
+
+        old_size = threading.stack_size(64 * 1024 * 1024)
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        threading.stack_size(old_size)
+
+        if result[1]:
+            raise result[1]
+        if result[0] is None:
+            raise MemoryError("Parser stack overflowed - Python source too complex to parse")
+        return result[0]
+
+
 def parse_and_validate(code_str: str) -> tuple[ast.Module, list[str], dict[str, ast.FunctionDef]]:
     """
     Parses policy string and executes strict AST validation.
@@ -152,9 +181,11 @@ def parse_and_validate(code_str: str) -> tuple[ast.Module, list[str], dict[str, 
     """
     clean_code = normalize_code(code_str)
     try:
-        tree = ast.parse(clean_code)
+        tree = _parse_with_expanded_stack(clean_code)
     except SyntaxError as e:
         raise DSLValidationError(f"Syntax error in policy program: {e}") from e
+    except MemoryError as e:
+        raise DSLValidationError(f"Parser stack overflowed: {e}") from e
 
     visitor = SafeASTVisitor()
     visitor.visit(tree)

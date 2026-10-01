@@ -18,6 +18,15 @@ import nle.nethack as nh
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import resource
+
+# Expand stack allocation to 256MB and recursion limit to 100k
+try:
+    resource.setrlimit(resource.RLIMIT_STACK, (256 * 1024 * 1024, resource.RLIM_INFINITY))
+except Exception:
+    pass
+sys.setrecursionlimit(100000)
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -100,7 +109,7 @@ def run_synthesis_loop(
     else:
         adapter = MiniHackAdapter(task=task)
 
-    # Initial minimal baseline policy
+    # Seed policy initialized with high-performing Gen 22 tactical policy
     current_policy = """
 def emergency():
     if hp_frac < 0.25 and can_safely_pray:
@@ -110,22 +119,43 @@ def emergency():
     elif hunger_state >= HUNGRY and has_carried_food:
         eat_carried_food()
 
+def navigation():
+    if standing_on_stairs_down:
+        descend()
+    elif standing_on_stairs_up:
+        ascend()
+    elif stairs_down_known:
+        step_to_stairs_down()
+
 def combat():
     if adjacent_hostile:
         melee_attack_hostile()
+    elif hostile_count_fov > 0:
+        step_to_chokepoint()
 
 def explore():
-    if stairs_down_known:
-        step_to_stairs_down()
-    elif has_unvisited_frontier:
+    if has_unvisited_frontier:
         step_to_frontier()
-    else:
+    elif has_unsearched_dead_end:
+        step_to_dead_end()
         search()
+    elif not in_corridor and not floor_explored:
+        search()
+    elif stairs_down_known:
+        step_to_stairs_down()
+    else:
+        wait()
+
+def maintenance():
+    if not has_poison_res and floor_corpse_adjacent and corpse_is_safe:
+        eat_floor_corpse()
 
 plan = [
     emergency,
+    navigation,
     combat,
     explore,
+    maintenance,
 ]
 """
     print("\n[Generation 0] Initial Seed Policy:")
@@ -449,6 +479,7 @@ plan = [
 
             if error:
                 print(f"[Validation Failed] {error}")
+                print(f"[Rejected Candidate Code]:\n{new_code.strip()}\n")
             else:
                 print(f"[Policy Verified & Compiled! Generation {gen} accepted]")
                 current_policy = new_code
