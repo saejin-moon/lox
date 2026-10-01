@@ -330,7 +330,7 @@ class NetHackAdapter(EnvironmentAdapter):
             adjacent_peaceful=adjacent_peaceful,
         )
 
-        # Check for unsearched corridor dead ends across the entire floor
+        # Check for unsearched corridor dead ends or room perimeter tiles across the entire floor
         has_dead_ends = False
         for cy in range(21):
             for cx in range(79):
@@ -342,6 +342,18 @@ class NetHackAdapter(EnvironmentAdapter):
                         break
             if has_dead_ends:
                 break
+
+        # If all corridor dead ends searched, check unsearched room perimeter tiles adjacent to walls
+        if not has_dead_ends:
+            for cy in range(21):
+                for cx in range(79):
+                    if walkable[cy, cx] and chr(chars[cy, cx]) == "." and self.searched_count[cy, cx] < 10:
+                        if any(0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
+                               for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))):
+                            has_dead_ends = True
+                            break
+                if has_dead_ends:
+                    break
 
         spatial = SpatialView(
             stairs_down_known=(self.known_stairs_down is not None),
@@ -613,6 +625,16 @@ class NetHackAdapter(EnvironmentAdapter):
                                   if 0 <= cy + dy < 21 and 0 <= cx + dx < 79 and walkable[cy + dy, cx + dx])
                         if adj <= 1:
                             dead_ends_mask[cy, cx] = True
+
+            # If no unsearched corridor dead ends remain, search room perimeter tiles adjacent to walls
+            if not np.any(dead_ends_mask):
+                for cy in range(21):
+                    for cx in range(79):
+                        if walkable[cy, cx] and chr(chars[cy, cx]) == "." and self.searched_count[cy, cx] < 10:
+                            if any(0 <= cy + dy < 21 and 0 <= cx + dx < 79 and chr(chars[cy + dy, cx + dx]) in ("-", "|", " ")
+                                   for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))):
+                                dead_ends_mask[cy, cx] = True
+
             if np.any(dead_ends_mask):
                 if dead_ends_mask[hero.y, hero.x]:
                     action = Action(name="search")
@@ -623,6 +645,8 @@ class NetHackAdapter(EnvironmentAdapter):
                         if path:
                             dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                             action = Action(name="step_direction", direction=(dy, dx))
+            else:
+                action = Action(name="search")
 
         elif action.name == "step_to" and obs_prev is not None:
             hero = obs_prev.hero
