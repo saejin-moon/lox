@@ -39,6 +39,6 @@ class Agent:
             elif obs.spatial.has_unvisited_frontier:
                 obs = yield step_to_frontier()
             elif obs.spatial.has_unsearched_dead_end:
-                obs = yield search()
+                obs = yield step_to_dead_end()
             else:
                 obs = yield wait()
