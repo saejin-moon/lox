@@ -393,6 +393,7 @@ class NetHackAdapter(EnvironmentAdapter):
             stairs_up_pos=self.known_stairs_up,
             standing_on_stairs_down=(self.known_stairs_down == (y, x) or chr(chars[y, x]) == ">"),
             standing_on_stairs_up=(self.known_stairs_up == (y, x) or chr(chars[y, x]) == "<"),
+            standing_on_elbereth=("Elbereth" in message or (y, x) in self.elbereth_positions),
             has_unvisited_frontier=has_frontier,
             has_unsearched_dead_end=has_dead_ends,
             unvisited_frontier_count=int(np.sum(walkable_ex & (~self.visited))),
@@ -788,7 +789,7 @@ class NetHackAdapter(EnvironmentAdapter):
             else:
                 # Trapped or cornered: cannot gain distance.
                 # Fallback to Dust Elbereth sanctuary if not already standing on one, else fight!
-                is_on_elbereth = (hero.y, hero.x) in self.elbereth_positions or obs_prev.spatial.standing_on_elbereth
+                is_on_elbereth = (hero.y, hero.x) in self.elbereth_positions or getattr(obs_prev.combat, "standing_on_elbereth", False) or getattr(obs_prev.spatial, "standing_on_elbereth", False)
                 if not is_on_elbereth:
                     return self.step(Action(name="engrave_dust_elbereth"))
                 else:

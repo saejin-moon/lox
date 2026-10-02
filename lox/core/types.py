@@ -225,6 +225,7 @@ class SpatialView:
     stairs_up_pos: tuple[int, int] | None = None
     standing_on_stairs_down: bool = False
     standing_on_stairs_up: bool = False
+    standing_on_elbereth: bool = False
     has_unvisited_frontier: bool = False
     has_unsearched_dead_end: bool = False
     unvisited_frontier_count: int = 0
