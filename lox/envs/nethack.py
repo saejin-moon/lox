@@ -12,6 +12,7 @@ import numpy as np
 import gymnasium as gym
 import nle
 from nle import nethack
+from nle.nethack import permonst
 
 from lox.core.types import (
     Observation,
@@ -280,12 +281,25 @@ class NetHackAdapter(EnvironmentAdapter):
         chars = raw_obs["chars"]
         glyphs = raw_obs["glyphs"]
 
-        # Track fresh corpses from message
-        if "you kill the" in message.lower() or "you destroy the" in message.lower():
-            m_killed = message.lower().replace("you kill the ", "").replace("you destroy the ", "").strip().rstrip("!.")
-            is_pois = any(k in m_killed for k in ("poison", "kobold", "snake", "spider", "viper", "beetle"))
-            is_deadly = any(k in m_killed for k in ("cockatrice", "chickatrice", "medusa"))
-            self.floor_corpses[(y, x)] = (m_killed, turn, is_pois, is_deadly)
+        # Track corpses on the floor from visible glyphs
+        visible_corpse_positions = set()
+        if glyphs is not None:
+            for gy in range(21):
+                for gx in range(79):
+                    g = int(glyphs[gy, gx])
+                    if nethack.glyph_is_body(g):
+                        visible_corpse_positions.add((gy, gx))
+                        if (gy, gx) not in self.floor_corpses:
+                            m_idx = g - nethack.GLYPH_BODY_OFF
+                            mname = permonst(m_idx).mname.lower() if 0 <= m_idx < nethack.NUMMONS else "corpse"
+                            is_pois = any(k in mname for k in ("poison", "kobold", "snake", "spider", "viper", "beetle"))
+                            is_deadly = any(k in mname for k in ("cockatrice", "chickatrice", "medusa"))
+                            self.floor_corpses[(gy, gx)] = (mname, turn, is_pois, is_deadly)
+        # Prune corpses that have disappeared in hero's line of sight
+        for (cy, cx) in list(self.floor_corpses.keys()):
+            if (cy, cx) not in visible_corpse_positions:
+                if abs(cy - y) <= 8 and abs(cx - x) <= 8 and glyphs is not None and not nethack.glyph_is_body(int(glyphs[cy, cx])):
+                    del self.floor_corpses[(cy, cx)]
 
         # Tactical combat analysis from glyphs
         adjacent_hostile = False
@@ -533,6 +547,11 @@ class NetHackAdapter(EnvironmentAdapter):
                 raw_obs, _, term, trunc, _ = self.env.step(space_idx)
             elif "Are you sure you want to pray?" in msg:
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("y", space_idx))
+            elif any(phrase in msg.lower() for phrase in ("eat it?", "eat that?", "eat one?")):
+                raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("y", space_idx))
+            elif "eat what?" in msg.lower():
+                esc_idx = self.char_to_act.get("\x1b", 38)
+                raw_obs, _, term, trunc, _ = self.env.step(esc_idx)
             elif "(y/n)" in msg or "[yn" in msg or "creatures vanquished" in msg.lower() or "really attack" in msg.lower() or "really quit" in msg.lower() or "possessions identified" in msg.lower():
                 if "really attack" in msg.lower() or "peaceful" in msg.lower():
                     if getattr(self, "_last_attempted_dir", None) is not None:
@@ -854,8 +873,8 @@ class NetHackAdapter(EnvironmentAdapter):
             slot = action.slot or (obs_prev.inventory.get_food_slot() if obs_prev else "a")
             return self._step_sequence([self.char_to_act.get("e", 0), self.char_to_act.get(slot or "a", 0)])
         elif action.name == "eat_floor_corpse":
-            if obs_prev and (obs_prev.hero.y, obs_prev.hero.x) not in self.floor_corpses and self.floor_corpses:
-                hero = obs_prev.hero
+            hero = obs_prev.hero if obs_prev else None
+            if hero and (hero.y, hero.x) not in self.floor_corpses and self.floor_corpses:
                 nearest_pos = min(self.floor_corpses.keys(), key=lambda p: math.hypot(p[0] - hero.y, p[1] - hero.x))
                 walkable = build_walkable_mask(obs_prev.raw_obs)
                 walkable[nearest_pos[0], nearest_pos[1]] = True
@@ -865,7 +884,10 @@ class NetHackAdapter(EnvironmentAdapter):
                     target_char = DIR_CHARS.get((dy, dx), ".")
                     self._last_attempted_dir = (dy, dx)
                     return self._step_sequence([self.char_to_act.get(target_char, 0)])
-            return self._step_sequence([35, self.char_to_act.get("y", 0)])
+            obs, r, term, trunc, info = self._step_sequence([35])
+            if hero and (hero.y, hero.x) in self.floor_corpses:
+                self.floor_corpses.pop((hero.y, hero.x), None)
+            return obs, r, term, trunc, info
         elif action.name in ("quaff_healing", "quaff"):
             slot = action.slot or (obs_prev.inventory.get_healing_slot() if obs_prev else "a")
             return self._step_sequence([self.char_to_act.get("q", 0), self.char_to_act.get(slot or "a", 0)])

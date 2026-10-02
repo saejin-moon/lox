@@ -131,5 +131,15 @@ def test_dismiss_more_ynq_prompts():
     cleaned_obs2, term2, trunc2 = adapter._dismiss_more(fake_obs2, False, False)
     assert cleaned_obs2 is not None
 
+    # Test that floor corpse eating prompt is answered with 'y' (not rejected with 'n')
+    fake_obs3 = {"message": "There is a goblin corpse here; eat it? [ynq] (n)", "misc": [0, 0, 0]}
+    cleaned_obs3, term3, trunc3 = adapter._dismiss_more(fake_obs3, False, False)
+    assert cleaned_obs3 is not None
+
+    # Test that empty "Eat what?" prompt is cancelled with ESC
+    fake_obs4 = {"message": "Eat what? [a-z or ?*]", "misc": [0, 0, 0]}
+    cleaned_obs4, term4, trunc4 = adapter._dismiss_more(fake_obs4, False, False)
+    assert cleaned_obs4 is not None
+
     adapter.close()
 

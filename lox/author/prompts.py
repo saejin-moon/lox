@@ -154,9 +154,10 @@ class Agent:
             return obs
         for corpse in obs.corpses:
             if corpse.is_safe:
-                obs = yield step_to(corpse.y, corpse.x)
-                if obs.combat.hostile_count_fov == 0:
+                if (obs.hero.y, obs.hero.x) == (corpse.y, corpse.x):
                     obs = yield eat_floor_corpse()
+                else:
+                    obs = yield step_to(corpse.y, corpse.x)
                 return obs
         obs = yield wait()
         return obs
