@@ -765,14 +765,17 @@ class NetHackAdapter(EnvironmentAdapter):
 
         elif action.name in ("step_away_from_hostile", "step_to_chokepoint", "retreat") and obs_prev is not None:
             hero = obs_prev.hero
-            glyphs = obs_prev.glyphs
             # Find open tile away from hostile
             walkable = build_walkable_mask(obs_prev.raw_obs)
+            for by, bx in self.blocked_tiles:
+                if 0 <= by < 21 and 0 <= bx < 79:
+                    walkable[by, bx] = False
             best_tile = None
-            max_dist = -1.0
             closest_pos = obs_prev.combat.closest_hostile_pos
             if closest_pos:
                 hy, hx = closest_pos
+                curr_dist = math.hypot(hero.y - hy, hero.x - hx)
+                max_dist = curr_dist
                 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
                     ny, nx = hero.y + dy, hero.x + dx
                     if 0 <= ny < 21 and 0 <= nx < 79 and walkable[ny, nx]:
@@ -782,6 +785,14 @@ class NetHackAdapter(EnvironmentAdapter):
                             best_tile = (dy, dx)
             if best_tile:
                 action = Action(name="step_direction", direction=best_tile)
+            else:
+                # Trapped or cornered: cannot gain distance.
+                # Fallback to Dust Elbereth sanctuary if not already standing on one, else fight!
+                is_on_elbereth = (hero.y, hero.x) in self.elbereth_positions or obs_prev.spatial.standing_on_elbereth
+                if not is_on_elbereth:
+                    return self.step(Action(name="engrave_dust_elbereth"))
+                else:
+                    return self.step(Action(name="melee_attack_hostile"))
 
         elif action.name == "melee_attack_hostile" and obs_prev is not None:
             hero = obs_prev.hero
@@ -820,8 +831,12 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.char is not None:
             target_char = action.char
         elif action.name == "descend":
+            if obs_prev and getattr(obs_prev.status, "is_levitating", False):
+                return self.step(Action(name="wait"))
             target_char = ">"
         elif action.name == "ascend":
+            if obs_prev and getattr(obs_prev.status, "is_levitating", False):
+                return self.step(Action(name="wait"))
             target_char = "<"
         elif action.name == "search":
             hero = obs_prev.hero if obs_prev else None

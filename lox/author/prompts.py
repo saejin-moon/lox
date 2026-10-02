@@ -62,7 +62,7 @@ class Agent:
                     continue
 
             # 6. Navigation & Exploration
-            if obs.spatial.standing_on_stairs_down:
+            if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                 obs = yield descend()
             elif obs.spatial.stairs_down_known:
                 obs = yield step_to_stairs_down()
@@ -163,7 +163,7 @@ class Agent:
 
     def handle_dead_end(self, obs):
         obs = yield step_to_dead_end()
-        for _ in range(8):
+        for _ in range(15):
             if obs.combat.hostile_count_fov > 0:
                 return obs
             if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
