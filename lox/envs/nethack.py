@@ -90,6 +90,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.non_door_tiles: set[tuple[int, int]] = set()
         self.failed_wear_slots: set[str] = set()
         self.elbereth_positions: set[tuple[int, int]] = set()
+        self.locked_doors: set[tuple[int, int]] = set()
         self.consecutive_zero_turns: int = 0
         self._prev_turn: int = 0
 
@@ -166,8 +167,10 @@ class NetHackAdapter(EnvironmentAdapter):
         return (turn - self.last_prayer_turn) >= 350
 
     def _decode_message(self, msg_raw: Any) -> str:
-        if isinstance(msg_raw, (np.ndarray, list)):
-            return "".join(chr(c) if isinstance(c, int) else str(c) for c in msg_raw if (isinstance(c, int) and c > 0) or c).strip()
+        if isinstance(msg_raw, np.ndarray):
+            return "".join(chr(int(c)) for c in msg_raw if int(c) > 0).strip()
+        elif isinstance(msg_raw, list):
+            return "".join(chr(int(c)) if isinstance(c, (int, np.integer)) else str(c) for c in msg_raw if (isinstance(c, (int, np.integer)) and int(c) > 0) or c).strip()
         elif isinstance(msg_raw, bytes):
             return msg_raw.decode("ascii", errors="ignore").strip()
         return str(msg_raw).strip()
@@ -205,6 +208,7 @@ class NetHackAdapter(EnvironmentAdapter):
             self.peaceful_positions.clear()
             self.blocked_tiles.clear()
             self.non_door_tiles.clear()
+            self.locked_doors.clear()
             self.floor_corpses.clear()
             self.known_stairs_down = None
             self.known_stairs_up = None
@@ -447,7 +451,11 @@ class NetHackAdapter(EnvironmentAdapter):
             and not any("excalibur" in it.name.lower() for it in inventory_items)
         )
 
-        door_is_locked = bool(adj_door and ("locked" in message.lower() or "won't open" in message.lower()))
+        door_is_locked = bool(adj_door and (
+            any((y + dy, x + dx) in self.locked_doors for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)))
+            or "locked" in message.lower()
+            or "won't open" in message.lower()
+        ))
 
         dungeon = DungeonView(
             tile_type=tile_type,
@@ -567,6 +575,11 @@ class NetHackAdapter(EnvironmentAdapter):
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
                 dy, dx = self._last_attempted_dir
                 self.non_door_tiles.add((py + dy, px + dx))
+        if "locked" in msg or "won't open" in msg:
+            if getattr(self, "_last_attempted_dir", None) is not None:
+                py, px = getattr(self, "_prev_hero_pos", (0, 0))
+                dy, dx = self._last_attempted_dir
+                self.locked_doors.add((py + dy, px + dx))
 
         # Check turn advancement to shield against 0-turn infinite loops
         prev_turn = getattr(self, "_prev_turn", 0)
@@ -591,6 +604,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.non_door_tiles.clear()
         self.failed_wear_slots.clear()
         self.elbereth_positions.clear()
+        self.locked_doors.clear()
         self.turns_on_level = 0
         self.last_depth = 1
         self.last_dnum = 0
@@ -813,6 +827,7 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "open_door":
             dir_char = "l"
             found = False
+            target_door = None
             if action.direction:
                 dir_char = DIR_CHARS.get(action.direction, "l")
                 found = True
@@ -824,10 +839,14 @@ class NetHackAdapter(EnvironmentAdapter):
                     if 0 <= hero.y + dy < 21 and 0 <= hero.x + dx < 79:
                         if doors_mask[hero.y + dy, hero.x + dx]:
                             dir_char = DIR_CHARS[(dy, dx)]
+                            target_door = (hero.y + dy, hero.x + dx)
                             found = True
                             break
             if not found:
                 return self.step(Action(name="wait"))
+            # If the door is already known to be locked, automatically kick it to breach
+            if target_door and target_door in self.locked_doors and obs_prev and not obs_prev.dungeon.in_shop:
+                return self._step_sequence([48, self.char_to_act.get(dir_char, 0)])
             return self._step_sequence([57, self.char_to_act.get(dir_char, 0)])
         elif action.name == "kick_closed_door":
             dir_char = "l"

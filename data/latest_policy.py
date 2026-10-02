@@ -1,12 +1,34 @@
 class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
-        self.search_count = 0
-        self.retreat_streak = 0
+        self.last_pos = (None, None)
+        self.stuck_turns = 0
 
     def run(self, obs):
+        # --- Robust Stall Detection ---
+        current_pos = (obs.hero.y, obs.hero.x)
+        if current_pos == self.last_pos:
+            self.stuck_turns += 1
+        else:
+            self.last_pos = current_pos
+            self.stuck_turns = 0
+
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
+            # 0. Absolute Deadlock Breaker (Mitigate MaxTurnsReached)
+            # If we haven't moved in 5 turns, we are likely attempting an invalid action
+            if self.stuck_turns >= 5:
+                if obs.spatial.stairs_down_known:
+                    obs = yield step_to_stairs_down()
+                elif obs.spatial.has_unvisited_frontier:
+                    obs = yield step_to_frontier()
+                elif obs.spatial.has_unsearched_dead_end:
+                    obs = yield step_to_dead_end()
+                else:
+                    obs = yield search()
+                self.stuck_turns = 0
+                continue
+
+            # 1. Absolute Emergency Survival
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
                 if obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
@@ -38,30 +60,45 @@ class Agent:
                 continue
 
             # 6. Navigation & Exploration
+            # Priority 1: Descend immediately
             if obs.spatial.standing_on_stairs_down:
                 obs = yield descend()
-            elif obs.spatial.stairs_down_known:
+                continue
+            
+            # Priority 2: Move to known stairs (Absolute priority to prevent MaxTurns)
+            if obs.spatial.stairs_down_known:
                 obs = yield step_to_stairs_down()
-            elif obs.dungeon.adjacent_closed_door:
-                if obs.dungeon.door_is_locked and not obs.dungeon.in_shop:
+                continue
+
+            # Priority 3: Breach Doors (Only if not in shop)
+            if obs.dungeon.adjacent_closed_door:
+                if obs.dungeon.in_shop:
+                    # Avoid provoking shopkeepers; move around the door
+                    obs = yield step_to_frontier()
+                    continue
+                if obs.dungeon.door_is_locked:
                     obs = yield kick_closed_door()
                 else:
                     obs = yield open_door()
-            elif obs.spatial.has_unvisited_frontier:
-                self.search_count = 0 
+                continue
+
+            # Priority 4: Explore Frontiers
+            if obs.spatial.has_unvisited_frontier:
                 obs = yield step_to_frontier()
-            elif obs.spatial.has_unsearched_dead_end:
+                continue
+
+            # Priority 5: Exhaustive Search for Secret Doors/Stairs
+            # If no frontiers and no stairs, we MUST search dead ends.
+            if obs.spatial.has_unsearched_dead_end or not obs.spatial.has_unvisited_frontier:
                 obs = yield from self.handle_dead_end(obs)
-            else:
-                # Prevent MaxTurnsReached by aggressively searching perimeter/dead ends
-                obs = yield from self.handle_dead_end(obs)
+                continue
             
-            if obs.spatial.stairs_down_known and not obs.spatial.standing_on_stairs_down:
-                obs = yield step_to_stairs_down()
+            # Final fallback to prevent idle
+            obs = yield step_to_frontier()
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
-            # Floating Eye: Absolute melee prohibition
+            # Floating Eye: Never melee
             if obs.combat.closest_hostile_name == "floating eye":
                 if obs.combat.adjacent_hostile and not obs.combat.standing_on_elbereth:
                     obs = yield engrave_dust_elbereth()
@@ -72,22 +109,24 @@ class Agent:
                     obs = yield step_away_from_hostile()
                 continue
 
-            # Non-Aggression Pact
+            # Non-Aggression: Shopkeepers/Town Watch
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
+                if obs.combat.closest_hostile_dist > 3:
+                    break
                 continue
 
-            # Tactical In-Combat Emergency Healing
+            # Tactical Healing
             if obs.hero.hp_frac < 0.45 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # Panic Sanctuary: Engrave Elbereth immediately if low HP (< 35%) or surrounded
+            # Panic Sanctuary
             if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 obs = yield engrave_dust_elbereth()
                 continue
 
-            # Elbereth Logic: Recover while safe; do not idle forever on passive regeneration
+            # Elbereth Logic
             if obs.combat.standing_on_elbereth:
                 if obs.hero.hp_frac < 0.30 and obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
@@ -96,11 +135,7 @@ class Agent:
                 elif obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
                     obs = yield quaff_healing()
                     continue
-                elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
-                    obs = yield throw_dagger()
-                    continue
                 elif not obs.combat.adjacent_hostile:
-                    # Enemy has fled from Elbereth ward! Disengage to explore or descend
                     if obs.spatial.stairs_down_known:
                         obs = yield step_to_stairs_down()
                     elif obs.spatial.has_unvisited_frontier:
@@ -109,7 +144,6 @@ class Agent:
                         obs = yield step_away_from_hostile()
                     continue
                 else:
-                    # Hostile is adjacent and we cannot heal; fight back rather than idling
                     obs = yield melee_attack_hostile()
                     continue
 
@@ -124,19 +158,16 @@ class Agent:
                     obs = yield step_to_chokepoint()
                     continue
 
-            # Combat Engagement Logic - REMOVED 'wait' paths
+            # Combat Engagement
             if obs.combat.adjacent_hostile:
                 if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
                 else:
-                    # Retreating is only viable if we can actually move
                     obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
             else:
-                # If not adjacent, we MUST move toward the enemy or attack ranged
                 if obs.hero.hp_frac > 0.50:
                     obs = yield melee_attack_hostile()
                 else:
-                    # Even if low HP, we cannot just 'wait' if enemies are in FOV
                     obs = yield step_away_from_hostile()
             
             if obs.combat.hostile_count_fov == 0:
@@ -147,23 +178,31 @@ class Agent:
         if obs.combat.hostile_count_fov > 0:
             obs = yield step_away_from_hostile()
             return obs
-        
         for corpse in obs.corpses:
             if corpse.is_safe:
                 obs = yield step_to(corpse.y, corpse.x)
                 if obs.combat.hostile_count_fov == 0:
                     obs = yield eat_floor_corpse()
                 return obs
-        
         obs = yield wait()
         return obs
 
     def handle_dead_end(self, obs):
+        # Navigate to a dead end or perimeter wall
         obs = yield step_to_dead_end()
-        for _ in range(12):
+        
+        # Search repeatedly at the dead end to find secret doors
+        for _ in range(8):
             if obs.combat.hostile_count_fov > 0:
                 return obs
             if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
                 break
             obs = yield search()
+        
+        # After searching, if we still haven't found stairs, move to the next target
+        if not obs.spatial.stairs_down_known:
+            if obs.spatial.has_unvisited_frontier:
+                obs = yield step_to_frontier()
+            else:
+                obs = yield step_to_dead_end()
         return obs
