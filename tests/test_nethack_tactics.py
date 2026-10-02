@@ -88,3 +88,23 @@ def test_throw_dagger_and_elbereth_tactics():
     assert obs.hero.hp > 0
 
     adapter.close()
+
+
+def test_peaceful_prompt_recording_and_zero_turn_shield():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=106)
+
+    # Set up previous attempted direction
+    adapter._last_attempted_dir = (0, 1)
+    adapter._prev_hero_pos = (obs.hero.y, obs.hero.x)
+
+    # Simulate peaceful encounter prompt in _dismiss_more
+    raw_obs_mock = {"message": list(b"Really attack the hobbit? [yn] (n)")}
+    adapter._dismiss_more(raw_obs_mock, False, False)
+
+    # Verify peaceful position was immediately recorded
+    expected_pos = (obs.hero.y, obs.hero.x + 1)
+    assert expected_pos in adapter.peaceful_positions
+
+    adapter.close()
+

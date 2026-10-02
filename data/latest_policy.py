@@ -2,7 +2,7 @@ class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
         self.search_count = 0
-        self.combat_turn_start = 0
+        self.retreat_streak = 0
 
     def run(self, obs):
         while True:
@@ -18,12 +18,7 @@ class Agent:
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 3. Post-Combat Recovery (Heal before exploring further)
-            if obs.hero.hp_frac < 0.90 and obs.inventory.has_healing:
-                obs = yield quaff_healing()
-                continue
-
-            # 4. Hunger Prevention (Only when safe)
+            # 3. Hunger Prevention (Only when safe)
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -32,9 +27,14 @@ class Agent:
                     obs = yield from self.handle_corpse_consumption(obs)
                     continue
 
-            # 5. Equipment Optimization
+            # 4. Equipment Optimization
             if obs.inventory.has_unworn_armor:
                 obs = yield wear_armor()
+                continue
+
+            # 5. Weapon Scaling
+            if obs.dungeon.adjacent_fountain and obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
+                obs = yield dip_excalibur()
                 continue
 
             # 6. Navigation & Exploration
@@ -53,105 +53,117 @@ class Agent:
             elif obs.spatial.has_unsearched_dead_end:
                 obs = yield from self.handle_dead_end(obs)
             else:
-                # Prevent MaxTurnsReached: Search perimeter walls/dead ends for secret doors
+                # Prevent MaxTurnsReached by aggressively searching perimeter/dead ends
                 obs = yield from self.handle_dead_end(obs)
             
-            # Final safety check to ensure we are moving toward the exit
             if obs.spatial.stairs_down_known and not obs.spatial.standing_on_stairs_down:
                 obs = yield step_to_stairs_down()
 
     def handle_combat(self, obs):
-        if self.combat_turn_start == 0:
-            self.combat_turn_start = obs.hero.turn
-
         while obs.combat.hostile_count_fov > 0:
-            combat_duration = obs.hero.turn - self.combat_turn_start
-            
-            # Stalemate/Attrition Detection: Retreat if combat drags on too long
-            if combat_duration > 40:
-                if obs.combat.can_retreat:
-                    obs = yield retreat()
-                    self.combat_turn_start = 0
-                    return obs
-                elif obs.hero.turn - self.last_prayer_turn >= 200:
-                    self.last_prayer_turn = obs.hero.turn
-                    obs = yield pray()
-                    continue
-
             # Floating Eye: Absolute melee prohibition
             if obs.combat.closest_hostile_name == "floating eye":
-                obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
+                if obs.combat.adjacent_hostile and not obs.combat.standing_on_elbereth:
+                    obs = yield engrave_dust_elbereth()
+                    continue
+                if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
+                    obs = yield throw_dagger()
+                else:
+                    obs = yield step_away_from_hostile()
                 continue
-            
+
             # Non-Aggression Pact
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
-            
+
             # Tactical In-Combat Emergency Healing
-            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+            if obs.hero.hp_frac < 0.45 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
-            
-            # High-Speed Attackers (Bats, Ants, Bees)
-            if obs.combat.is_fast_dangerous or "bat" in obs.combat.closest_hostile_name:
-                if obs.combat.in_corridor:
-                    obs = yield step_to_chokepoint()
+
+            # Panic Sanctuary: Engrave Elbereth immediately if low HP (< 35%) or surrounded
+            if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+                obs = yield engrave_dust_elbereth()
+                continue
+
+            # Elbereth Logic: Recover while safe; do not idle forever on passive regeneration
+            if obs.combat.standing_on_elbereth:
+                if obs.hero.hp_frac < 0.30 and obs.hero.turn - self.last_prayer_turn >= 150:
+                    self.last_prayer_turn = obs.hero.turn
+                    obs = yield pray()
                     continue
-                elif obs.combat.can_retreat:
-                    obs = yield retreat()
+                elif obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
+                    obs = yield quaff_healing()
+                    continue
+                elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
+                    obs = yield throw_dagger()
+                    continue
+                elif not obs.combat.adjacent_hostile:
+                    # Enemy has fled from Elbereth ward! Disengage to explore or descend
+                    if obs.spatial.stairs_down_known:
+                        obs = yield step_to_stairs_down()
+                    elif obs.spatial.has_unvisited_frontier:
+                        obs = yield step_to_frontier()
+                    else:
+                        obs = yield step_away_from_hostile()
                     continue
                 else:
-                    obs = yield step_away_from_hostile()
+                    # Hostile is adjacent and we cannot heal; fight back rather than idling
+                    obs = yield melee_attack_hostile()
                     continue
 
-            # Combat Engagement Logic
+            # Ranged Harassment
+            if obs.combat.closest_hostile_dist >= 2 and obs.inventory.has_daggers:
+                obs = yield throw_dagger()
+                continue
+
+            # High-Speed Attackers
+            if obs.combat.is_fast_dangerous:
+                if not obs.combat.in_corridor and obs.combat.can_retreat:
+                    obs = yield step_to_chokepoint()
+                    continue
+
+            # Combat Engagement Logic - REMOVED 'wait' paths
             if obs.combat.adjacent_hostile:
-                # Retreat if surrounded or critically low HP
-                if obs.hero.hp_frac < 0.30 or obs.combat.is_surrounded:
-                    if obs.combat.in_corridor:
-                        obs = yield step_to_chokepoint()
-                    elif obs.combat.can_retreat:
-                        obs = yield retreat()
-                    else:
-                        obs = yield melee_attack_hostile()
-                else:
+                if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
+                else:
+                    # Retreating is only viable if we can actually move
+                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
             else:
-                # Close gap if healthy, otherwise maintain distance
-                if obs.hero.hp_frac > 0.60:
+                # If not adjacent, we MUST move toward the enemy or attack ranged
+                if obs.hero.hp_frac > 0.50:
                     obs = yield melee_attack_hostile()
                 else:
-                    if obs.combat.closest_hostile_dist > 2:
-                        obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
-                    else:
-                        obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
+                    # Even if low HP, we cannot just 'wait' if enemies are in FOV
+                    obs = yield step_away_from_hostile()
             
             if obs.combat.hostile_count_fov == 0:
-                self.combat_turn_start = 0
                 break
         return obs
 
     def handle_corpse_consumption(self, obs):
         if obs.combat.hostile_count_fov > 0:
-            obs = yield wait()
+            obs = yield step_away_from_hostile()
             return obs
+        
         for corpse in obs.corpses:
             if corpse.is_safe:
                 obs = yield step_to(corpse.y, corpse.x)
                 if obs.combat.hostile_count_fov == 0:
                     obs = yield eat_floor_corpse()
                 return obs
+        
         obs = yield wait()
         return obs
 
     def handle_dead_end(self, obs):
         obs = yield step_to_dead_end()
-        for _ in range(8):
+        for _ in range(12):
             if obs.combat.hostile_count_fov > 0:
                 return obs
             if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
                 break
             obs = yield search()
-            self.search_count += 1
         return obs

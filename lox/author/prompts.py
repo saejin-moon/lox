@@ -94,18 +94,33 @@ class Agent:
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
-            # Panic Sanctuary: Engrave Elbereth in the dust if cornered or low HP
-            if obs.hero.hp_frac < 0.35 and not obs.combat.standing_on_elbereth:
+            # Panic Sanctuary: Engrave Elbereth immediately if low HP (< 35%) or surrounded
+            if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 obs = yield engrave_dust_elbereth()
                 continue
-            # While standing on Elbereth at low HP, do not melee attack; regenerate or pray
-            if obs.combat.standing_on_elbereth and obs.hero.hp_frac < 0.60:
-                if obs.hero.turn - self.last_prayer_turn >= 150 and obs.hero.hp_frac < 0.20:
+            # While standing on Elbereth: heal, pray, or disengage if monsters fled (never wait forever for passive regeneration)
+            if obs.combat.standing_on_elbereth:
+                if obs.hero.hp_frac < 0.30 and obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
+                    continue
+                elif obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
+                    obs = yield quaff_healing()
+                    continue
+                elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
+                    obs = yield throw_dagger()
+                    continue
+                elif not obs.combat.adjacent_hostile:
+                    if obs.spatial.stairs_down_known:
+                        obs = yield step_to_stairs_down()
+                    elif obs.spatial.has_unvisited_frontier:
+                        obs = yield step_to_frontier()
+                    else:
+                        obs = yield step_away_from_hostile()
+                    continue
                 else:
-                    obs = yield wait()
-                continue
+                    obs = yield melee_attack_hostile()
+                    continue
             # Ranged Harassment: Throw daggers at distance >= 2 to kill fast pests before contact
             if obs.combat.closest_hostile_dist >= 2 and obs.inventory.has_daggers:
                 obs = yield throw_dagger()

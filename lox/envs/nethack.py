@@ -90,6 +90,8 @@ class NetHackAdapter(EnvironmentAdapter):
         self.non_door_tiles: set[tuple[int, int]] = set()
         self.failed_wear_slots: set[str] = set()
         self.elbereth_positions: set[tuple[int, int]] = set()
+        self.consecutive_zero_turns: int = 0
+        self._prev_turn: int = 0
 
         # Build ASCII char -> action index map
         unwrapped = getattr(self.env, "unwrapped", self.env)
@@ -164,8 +166,8 @@ class NetHackAdapter(EnvironmentAdapter):
         return (turn - self.last_prayer_turn) >= 350
 
     def _decode_message(self, msg_raw: Any) -> str:
-        if isinstance(msg_raw, np.ndarray):
-            return "".join(chr(c) for c in msg_raw if c > 0).strip()
+        if isinstance(msg_raw, (np.ndarray, list)):
+            return "".join(chr(c) if isinstance(c, int) else str(c) for c in msg_raw if (isinstance(c, int) and c > 0) or c).strip()
         elif isinstance(msg_raw, bytes):
             return msg_raw.decode("ascii", errors="ignore").strip()
         return str(msg_raw).strip()
@@ -512,8 +514,17 @@ class NetHackAdapter(EnvironmentAdapter):
             elif "Are you sure you want to pray?" in msg:
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("y", space_idx))
             elif "(y/n)" in msg or "[yn" in msg or "creatures vanquished" in msg.lower() or "really attack" in msg.lower() or "really quit" in msg.lower() or "possessions identified" in msg.lower():
+                if "really attack" in msg.lower() or "peaceful" in msg.lower():
+                    if getattr(self, "_last_attempted_dir", None) is not None:
+                        py, px = getattr(self, "_prev_hero_pos", (0, 0))
+                        dy, dx = self._last_attempted_dir
+                        self.peaceful_positions.add((py + dy, px + dx))
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("n", space_idx))
             elif "who are you" in msg.lower() or "what is your name" in msg.lower() or "call this" in msg.lower() or "hello stranger" in msg.lower():
+                if getattr(self, "_last_attempted_dir", None) is not None:
+                    py, px = getattr(self, "_prev_hero_pos", (0, 0))
+                    dy, dx = self._last_attempted_dir
+                    self.peaceful_positions.add((py + dy, px + dx))
                 esc_idx = self.char_to_act.get("\x1b", 38)
                 raw_obs, _, term, trunc, _ = self.env.step(esc_idx)
             else:
@@ -546,7 +557,7 @@ class NetHackAdapter(EnvironmentAdapter):
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
                 dy, dx = self._last_attempted_dir
                 self.peaceful_positions.add((py + dy, px + dx))
-        if "cannot pass through the bars" in msg or "it's a wall" in msg or "it's solid stone" in msg:
+        if "cannot pass through" in msg or "it's a wall" in msg or "it's solid stone" in msg or "cannot move there" in msg:
             if getattr(self, "_last_attempted_dir", None) is not None:
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
                 dy, dx = self._last_attempted_dir
@@ -556,6 +567,19 @@ class NetHackAdapter(EnvironmentAdapter):
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
                 dy, dx = self._last_attempted_dir
                 self.non_door_tiles.add((py + dy, px + dx))
+
+        # Check turn advancement to shield against 0-turn infinite loops
+        prev_turn = getattr(self, "_prev_turn", 0)
+        curr_turn = obs.hero.turn
+        self._prev_turn = curr_turn
+        if curr_turn == prev_turn:
+            self.consecutive_zero_turns += 1
+            if self.consecutive_zero_turns >= 2 and getattr(self, "_last_attempted_dir", None) is not None:
+                py, px = getattr(self, "_prev_hero_pos", (obs.hero.y, obs.hero.x))
+                dy, dx = self._last_attempted_dir
+                self.blocked_tiles.add((py + dy, px + dx))
+        else:
+            self.consecutive_zero_turns = 0
 
         return obs, total_reward, bool(term), bool(trunc), info
 
@@ -719,7 +743,7 @@ class NetHackAdapter(EnvironmentAdapter):
                             continue
                         ty, tx = hero.y + dy, hero.x + dx
                         if 0 <= ty < 21 and 0 <= tx < 79:
-                            if (ty, tx) in self.peaceful_positions:
+                            if (ty, tx) in self.peaceful_positions or (ty, tx) in self.blocked_tiles:
                                 continue
                             g = int(glyphs[ty, tx])
                             if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
