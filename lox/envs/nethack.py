@@ -457,6 +457,15 @@ class NetHackAdapter(EnvironmentAdapter):
             or "won't open" in message.lower()
         ))
 
+        # Fountains in FOV
+        fountain_in_fov = False
+        closest_fountain_pos = None
+        fountain_coords = np.argwhere(chars == ord("{"))
+        if len(fountain_coords) > 0:
+            fountain_in_fov = True
+            closest_idx = int(np.argmin([math.hypot(fy - y, fx - x) for fy, fx in fountain_coords]))
+            closest_fountain_pos = (int(fountain_coords[closest_idx][0]), int(fountain_coords[closest_idx][1]))
+
         dungeon = DungeonView(
             tile_type=tile_type,
             in_shop=("shop" in message.lower()),
@@ -467,6 +476,8 @@ class NetHackAdapter(EnvironmentAdapter):
             adjacent_open_door=False,
             door_is_locked=door_is_locked,
             adjacent_fountain=adj_fountain,
+            fountain_in_fov=fountain_in_fov,
+            closest_fountain_pos=closest_fountain_pos,
             adjacent_altar=adj_altar,
             standing_on_altar=(curr_char == "_"),
             adjacent_trap=adj_trap,
@@ -677,6 +688,31 @@ class NetHackAdapter(EnvironmentAdapter):
             if path:
                 dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                 action = Action(name="step_direction", direction=(dy, dx))
+
+        elif action.name == "step_to_fountain" and obs_prev is not None:
+            hero = obs_prev.hero
+            fountain_pos = obs_prev.dungeon.closest_fountain_pos
+            if fountain_pos:
+                walkable = build_walkable_mask(obs_prev.raw_obs)
+                for by, bx in self.blocked_tiles:
+                    if 0 <= by < 21 and 0 <= bx < 79:
+                        walkable[by, bx] = False
+                doors_mask = self._get_doors_mask(obs_prev.glyphs)
+                walkable[doors_mask] = True
+                path = None
+                for fdy, fdx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+                    fy, fx = fountain_pos[0] + fdy, fountain_pos[1] + fdx
+                    if 0 <= fy < 21 and 0 <= fx < 79 and walkable[fy, fx]:
+                        p = SpatialEngine.find_path((hero.y, hero.x), (fy, fx), walkable)
+                        if p and (path is None or len(p) < len(path)):
+                            path = p
+                if path:
+                    dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                    action = Action(name="step_direction", direction=(dy, dx))
+                else:
+                    action = Action(name="search")
+            else:
+                action = Action(name="search")
 
         elif action.name == "step_to_dead_end" and obs_prev is not None:
             hero = obs_prev.hero

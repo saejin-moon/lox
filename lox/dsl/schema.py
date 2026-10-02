@@ -100,6 +100,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "has_daggers": "bool",
     "weapon_is_cursed": "bool",
     "can_forge_excalibur": "bool",
+    "fountain_in_fov": "bool",
 }
 
 # Whitelist of allowed action primitives

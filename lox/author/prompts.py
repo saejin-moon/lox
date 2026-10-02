@@ -53,9 +53,13 @@ class Agent:
                 continue
 
             # 5. Weapon Scaling (Forge Excalibur when lawful Valkyrie level >= 5 at a fountain)
-            if obs.dungeon.adjacent_fountain and obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
-                obs = yield dip_excalibur()
-                continue
+            if obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
+                if obs.dungeon.adjacent_fountain:
+                    obs = yield dip_excalibur()
+                    continue
+                elif obs.dungeon.fountain_in_fov:
+                    obs = yield step_to_fountain()
+                    continue
 
             # 6. Navigation & Exploration
             if obs.spatial.standing_on_stairs_down:
@@ -91,11 +95,11 @@ class Agent:
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
-            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+            if obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
-            # Panic Sanctuary: Engrave Elbereth immediately if low HP (< 35%) or surrounded
-            if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+            # Panic Sanctuary: Engrave Elbereth immediately if low HP (< 40%) or surrounded
+            if (obs.hero.hp_frac < 0.40 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 obs = yield engrave_dust_elbereth()
                 continue
             # While standing on Elbereth: heal, pray, or disengage if monsters fled (never wait forever for passive regeneration)

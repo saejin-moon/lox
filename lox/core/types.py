@@ -243,6 +243,8 @@ class DungeonView:
     adjacent_open_door: bool = False
     door_is_locked: bool = False
     adjacent_fountain: bool = False
+    fountain_in_fov: bool = False
+    closest_fountain_pos: tuple[int, int] | None = None
     adjacent_altar: bool = False
     standing_on_altar: bool = False
     altar_is_aligned: bool = False

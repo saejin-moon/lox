@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 from lox.envs.nethack import NetHackAdapter
 from lox.core.types import Action
@@ -107,4 +108,25 @@ def test_peaceful_prompt_recording_and_zero_turn_shield():
     assert expected_pos in adapter.peaceful_positions
 
     adapter.close()
+
+
+def test_fountain_fov_and_step_to_fountain():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=107)
+
+    # Artificially inject a fountain in FOV on chars grid
+    obs.chars[obs.hero.y, obs.hero.x + 2] = ord("{")
+    raw_obs_mock = obs.raw_obs.copy()
+    raw_obs_mock["chars"] = obs.chars
+    obs_fountain = adapter._extract_obs(raw_obs_mock)
+
+    assert obs_fountain.dungeon.fountain_in_fov is True
+    assert obs_fountain.dungeon.closest_fountain_pos == (obs.hero.y, obs.hero.x + 2)
+
+    # Test step_to_fountain execution
+    obs_after, _, _, _, _ = adapter.step(Action(name="step_to_fountain"))
+    assert obs_after is not None
+
+    adapter.close()
+
 
