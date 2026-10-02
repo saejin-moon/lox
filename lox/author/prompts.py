@@ -52,7 +52,12 @@ class Agent:
                 obs = yield wear_armor()
                 continue
 
-            # 5. Navigation & Exploration
+            # 5. Weapon Scaling (Forge Excalibur when lawful Valkyrie level >= 5 at a fountain)
+            if obs.dungeon.adjacent_fountain and obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
+                obs = yield dip_excalibur()
+                continue
+
+            # 6. Navigation & Exploration
             if obs.spatial.standing_on_stairs_down:
                 obs = yield descend()
             elif obs.spatial.stairs_down_known:
@@ -78,13 +83,32 @@ class Agent:
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
             if obs.combat.closest_hostile_name == "floating eye":
-                obs = yield step_away_from_hostile()
+                if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
+                    obs = yield throw_dagger()
+                else:
+                    obs = yield step_away_from_hostile()
                 continue
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
+                continue
+            # Panic Sanctuary: Engrave Elbereth in the dust if cornered or low HP
+            if obs.hero.hp_frac < 0.35 and not obs.combat.standing_on_elbereth:
+                obs = yield engrave_dust_elbereth()
+                continue
+            # While standing on Elbereth at low HP, do not melee attack; regenerate or pray
+            if obs.combat.standing_on_elbereth and obs.hero.hp_frac < 0.60:
+                if obs.hero.turn - self.last_prayer_turn >= 150 and obs.hero.hp_frac < 0.20:
+                    self.last_prayer_turn = obs.hero.turn
+                    obs = yield pray()
+                else:
+                    obs = yield wait()
+                continue
+            # Ranged Harassment: Throw daggers at distance >= 2 to kill fast pests before contact
+            if obs.combat.closest_hostile_dist >= 2 and obs.inventory.has_daggers:
+                obs = yield throw_dagger()
                 continue
             if obs.combat.is_fast_dangerous:
                 if not obs.combat.in_corridor and obs.combat.can_retreat:
@@ -139,8 +163,8 @@ class Agent:
 Every turn, `obs` provides rich sub-namespaces:
 - `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state` (SATIATED, NORMAL, HUNGRY, WEAK, FAINTING), `dungeon_branch`
 - `obs.status`: `is_blind`, `is_poisoned`, `is_confused`, `is_stunned`, `is_sick`, `is_encumbered`, `encumbrance_level`
-- `obs.inventory`: `has_food`, `has_healing`, `has_wand_of_teleport`, `get_food_slot()`, `get_healing_slot()`, `items`
-- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`
+- `obs.inventory`: `has_food`, `has_healing`, `has_unworn_armor`, `has_daggers`, `get_food_slot()`, `get_healing_slot()`, `get_dagger_slot()`, `items`
+- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`
 - `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`
 - `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `adjacent_altar`, `can_forge_excalibur`
 - `obs.corpses`: list of `FloorCorpse(name, y, x, age_turns, is_fresh, is_poisonous, is_deadly, is_safe)`
@@ -151,13 +175,15 @@ Every turn, `obs` provides rich sub-namespaces:
 2. **Prayer & Major Trouble**: Safe prayer timeout is ~350 turns. However, during **major trouble** (fainting from hunger or HP < 15%), gods grant divine aid even with timeout as high as ~150–200 turns without divine wrath.
 3. **Corpse Consumption Hazards**: Eating a corpse takes multiple turns (`weight / 64 + 3`), leaving the hero completely helpless and vulnerable. NEVER eat a corpse if enemies are in FOV. Corpses older than 50 turns cause food poisoning and 1d8 damage; kobolds are poisonous; cockatrices cause lethal petrification without gloves. Check `corpse.is_safe` before eating!
 4. **Door Breaching**: Always try `open_door()` first on closed doors. Only use `kick_closed_door()` if `obs.dungeon.door_is_locked` is True (kicking unlocked doors can hurt your leg and immobilize you for 5-20 turns).
-5. **Excalibur Dipping**: Dipping a long sword into a fountain has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`).
+5. **Excalibur Dipping (`dip_excalibur`)**: Dipping a long sword into a fountain has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`). Wielding Excalibur gives +1d10 slashing damage, auto-searching for doors, and drain resistance.
 6. **Secret Doors & Corridor Dead Ends**: NetHack procedural generation regularly seals off deeper dungeon sections and staircases behind hidden secret doors located at dead-end corridors (`#`) and room perimeter walls. When visible frontiers are fully explored (`obs.spatial.has_unvisited_frontier == False`), call `step_to_dead_end()` to navigate to dead ends or perimeter walls and `search()` repeatedly until the secret door is exposed. Searching repeatedly inside open rooms will NOT find the stairs.
 7. **Tactical In-Combat Emergency Healing**: Quaffing a healing potion takes only 1 turn and restores 10-20 HP. When `obs.hero.hp_frac < 0.50` and `obs.inventory.has_healing`, ALWAYS quaff healing immediately inside `handle_combat` before taking another attack! Never die with healing potions in your pack.
 8. **Soldier Ants & High-Speed Attackers**: Soldier ants and killer bees move at speed 18 (nearly 2x the hero) and inflict lethal poison stings. If `obs.combat.is_fast_dangerous` is True or `obs.combat.closest_hostile_name in ("soldier ant", "killer bee")`, retreat immediately to a 1-tile corridor chokepoint (`step_to_chokepoint()`), quaff healing, or pray.
-9. **Equipment & Armor Optimization**: Defeated monsters drop helmets, boots, cloaks, and armor. When out of combat and `obs.inventory.has_unworn_armor` is True, yield `wear_armor()` to lower your Armor Class (AC). Lower AC drastically reduces damage from deep monsters.
+9. **Equipment & Armor Optimization (`wear_armor`)**: Defeated monsters drop helmets, boots, cloaks, and armor. When out of combat and `obs.inventory.has_unworn_armor` is True, yield `wear_armor()` to lower your Armor Class (AC). Lower AC drastically reduces damage from deep monsters.
 10. **Shopkeeper & Minetown Non-Aggression**: Never attack shopkeepers, priests, or town watchmen (`obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain")`), and never kick doors when `obs.dungeon.in_shop` is True. Killing or provoking them will instantly end your run.
 11. **Exploration Pacing & No Idle Waiting**: Waiting (`wait()`) during active exploration when seeking stairs is strictly forbidden. Never yield `wait()` when frontiers are clear; instead call `handle_dead_end(obs)` or `search()` to investigate room perimeter walls. Sitting in place produces 0 turns of progress and leads to `MaxTurnsReached`.
+12. **Dust Elbereth Sanctuary (`engrave_dust_elbereth`)**: Engraving "Elbereth" into the dust with bare fingers takes 1 turn and creates an impenetrable ward against 95% of non-humanoid monsters (ants, bees, bats, mumakil, leocrottas, canines). Monsters cannot attack on an Elbereth tile and flee in panic. When cornered or HP < 35%, yield `engrave_dust_elbereth()`. While standing on Elbereth, do NOT attack in melee; heal or wait for regeneration.
+13. **Ranged Missile Harassment (`throw_dagger`)**: Valkyries start with daggers. When enemies are at distance >= 2, yield `throw_dagger()` to kill fast speedsters before they close to melee. Thrown daggers drop onto the ground and are automatically recovered after combat, so freely throw daggers down to 0.
 
 ### Available Actions:
 {actions}

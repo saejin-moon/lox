@@ -89,6 +89,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.blocked_tiles: set[tuple[int, int]] = set()
         self.non_door_tiles: set[tuple[int, int]] = set()
         self.failed_wear_slots: set[str] = set()
+        self.elbereth_positions: set[tuple[int, int]] = set()
 
         # Build ASCII char -> action index map
         unwrapped = getattr(self.env, "unwrapped", self.env)
@@ -352,7 +353,7 @@ class NetHackAdapter(EnvironmentAdapter):
         )
         in_corridor = (walkable_adj <= 2 and chr(chars[y, x]) == "#")
 
-        is_fast_dangerous = closest_name in ("soldier ant", "killer bee", "giant spider", "centipede")
+        is_fast_dangerous = closest_name in ("soldier ant", "killer bee", "giant spider", "centipede", "giant bat", "bat")
         combat = CombatView(
             adjacent_hostile=adjacent_hostile,
             hostile_count_fov=hostile_count,
@@ -362,7 +363,7 @@ class NetHackAdapter(EnvironmentAdapter):
             is_surrounded=(adjacent_hostiles_count >= 2),
             in_corridor=in_corridor,
             can_retreat=(walkable_adj > adjacent_hostiles_count),
-            standing_on_elbereth=("Elbereth" in message),
+            standing_on_elbereth=("Elbereth" in message or (y, x) in self.elbereth_positions),
             floating_eye_in_fov=floating_eye_fov,
             adjacent_peaceful=adjacent_peaceful,
             is_fast_dangerous=is_fast_dangerous,
@@ -565,6 +566,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.blocked_tiles.clear()
         self.non_door_tiles.clear()
         self.failed_wear_slots.clear()
+        self.elbereth_positions.clear()
         self.turns_on_level = 0
         self.last_depth = 1
         self.last_dnum = 0
@@ -832,6 +834,56 @@ class NetHackAdapter(EnvironmentAdapter):
                     obs.inventory.failed_armor_slots.add(slot)
                 return obs, reward, term, trunc, info
             return self.step(Action(name="wait"))
+        elif action.name in ("throw_dagger", "throw_item", "fire_missile") and obs_prev is not None:
+            hero = obs_prev.hero
+            target_pos = action.target_pos or action.extra.get("target_pos") or obs_prev.combat.closest_hostile_pos
+            slot = action.slot or obs_prev.inventory.get_dagger_slot()
+            if target_pos and slot:
+                dy = int(np.sign(target_pos[0] - hero.y))
+                dx = int(np.sign(target_pos[1] - hero.x))
+                dir_char = DIR_CHARS.get((dy, dx), "l")
+                return self._step_sequence([
+                    self.char_to_act.get("t", 0),
+                    self.char_to_act.get(slot, 0),
+                    self.char_to_act.get(dir_char, 0),
+                ])
+            return self.step(Action(name="melee_attack_hostile"))
+
+        elif action.name in ("engrave_dust_elbereth", "engrave_elbereth", "engrave"):
+            enter_idx = self.char_to_act.get("\r", 19)
+            seq = [
+                self.char_to_act.get("E", 0),
+                self.char_to_act.get("-", 0),
+            ]
+            for ch in "Elbereth":
+                seq.append(self.char_to_act.get(ch, 0))
+            seq.append(enter_idx)
+            obs, reward, term, trunc, info = self._step_sequence(seq)
+            if obs_prev:
+                self.elbereth_positions.add((obs_prev.hero.y, obs_prev.hero.x))
+            return obs, reward, term, trunc, info
+
+        elif action.name in ("dip_excalibur", "dip_in_fountain") and obs_prev is not None:
+            chars = obs_prev.chars
+            hero = obs_prev.hero
+            fountain_dir = None
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+                if 0 <= hero.y + dy < 21 and 0 <= hero.x + dx < 79 and chr(chars[hero.y + dy, hero.x + dx]) == "{":
+                    fountain_dir = DIR_CHARS.get((dy, dx))
+                    break
+            sword_slot = obs_prev.inventory.get_weapon_slot()
+            if fountain_dir and sword_slot:
+                enter_idx = self.char_to_act.get("\r", 19)
+                seq = [self.char_to_act.get("#", 0)]
+                for ch in "dip":
+                    seq.append(self.char_to_act.get(ch, 0))
+                seq.append(enter_idx)
+                seq.append(self.char_to_act.get(sword_slot, 0))
+                seq.append(self.char_to_act.get(fountain_dir, 0))
+                seq.append(self.char_to_act.get("y", 0))
+                return self._step_sequence(seq)
+            return self.step(Action(name="wait"))
+
         elif action.name == "pickup":
             target_char = ","
         elif action.name == "pay":

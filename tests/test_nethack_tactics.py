@@ -60,3 +60,31 @@ def test_wear_armor_failed_slot_tracking():
     inv.failed_armor_slots.add("g")
     assert inv.has_unworn_armor is False
     assert inv.get_unworn_armor_slot() is None
+
+
+def test_throw_dagger_and_elbereth_tactics():
+    from lox.core.types import Item, InventoryView
+
+    # 1. Test InventoryView daggers queries
+    sword = Item(slot="a", name="long sword", category="weapon", is_equipped=True)
+    dagger = Item(slot="c", name="+0 dagger", category="weapon", is_equipped=False)
+    inv = InventoryView([sword, dagger])
+    assert inv.has_daggers is True
+    assert inv.get_dagger_slot() == "c"
+
+    # 2. Test NetHackAdapter throw_dagger and engrave_dust_elbereth actions
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=105)
+
+    # Test engrave_dust_elbereth
+    t_start = obs.hero.turn
+    obs, reward, term, trunc, _ = adapter.step(Action(name="engrave_dust_elbereth"))
+    assert obs.hero.turn >= t_start
+    assert (obs.hero.y, obs.hero.x) in adapter.elbereth_positions or obs.combat.standing_on_elbereth
+
+    # Test throw_dagger execution
+    obs, reward, term, trunc, _ = adapter.step(Action(name="throw_dagger", target_pos=(obs.hero.y, obs.hero.x + 2)))
+    assert obs is not None
+    assert obs.hero.hp > 0
+
+    adapter.close()

@@ -115,6 +115,19 @@ lox/
     - `NetHackAdapter` automatically decays search counters by 10 (`self.searched_count = np.maximum(0, self.searched_count - 10)`) when frontiers stall, triggering an active second search sweep across candidate perimeter walls.
     - Exploration policies must strictly avoid yielding `wait()`; they should continually call `handle_dead_end(obs)` or `search()` to investigate room perimeter walls.
 
+13. **Dust Elbereth Sanctuary (`engrave_dust_elbereth`)**:
+    - Writing `"Elbereth"` in the dust using bare fingers (`E` $\to$ `-` $\to$ `Elbereth\r`) creates a 100% reliable ward against all non-humanoid monsters (ants, bees, bats, mumakil, leocrottas, canines, jellies).
+    - Prevents fatal parting strikes when low on HP (`< 35%`) or cornered in open rooms.
+    - While standing on an active Elbereth ward, the policy must avoid melee attacks (which can scuff the dust) and instead heal, pray, or wait for regeneration.
+
+14. **Ranged Missile Harassment (`throw_dagger`)**:
+    - Valkyries start with daggers. Thrown at hostiles at distance $\ge 2$ (`t` $\to$ `slot` $\to$ `dir`).
+    - Neutralizes high-speed lethal pests (bats, killer bees, soldier ants) before melee contact. Thrown daggers can safely be consumed down to 0 because NetHack drops them on the floor for retrieval during or after combat.
+
+15. **Artifact Weapon Scaling (`dip_excalibur`)**:
+    - Lawful Valkyries at Experience Level $\ge 5$ dipping a long sword into a fountain (`#dip` $\to$ `slot` $\to$ `dir`) have a 1/6 chance per dip of forging Excalibur (+1d10 slashing damage, auto-searching for secret doors, and life drain immunity).
+    - Safe dipping requires `obs.hero.hp_frac >= 0.85` to survive rare water demon spawns.
+
 ---
 
 ## 4. Key CLI Commands

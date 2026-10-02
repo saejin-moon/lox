@@ -21,6 +21,9 @@ This plan guides the incoming agent step-by-step from the current checkpoint to 
   10. *Test Suite*: All 36 unit tests pass (`uv run pytest -v`).
   11. *Unified Stride-2 Checkerboard Secret Door Search*: Unified corridor dead ends and perimeter candidates into `_compute_dead_ends_mask`. Uses checkerboard stride-2 pattern `(cy + cx) % 2 == 0` plus all corner tiles (`adj_wall >= 2`) to ensure 100% geometric coverage of all room walls while cutting search stops and turns by $> 50\%$. Automatically decays search counts by 10 on stagnation and sorts reachable candidates by search count and BFS walking distance.
   12. *Prompt Auto-Dismissal (`[ynq]` Post-Death / Identification Shield)*: Auto-dismisses `[ynq]` prompts (`"Do you want your possessions identified?"`, creatures slaughtered, etc.) with `'n'`, preventing NLE smooth-quit aborts and 5,000-turn dead stalls.
+  13. *Tactical Ranged Missile Harassment (`throw_dagger`)*: Macro sequence `t` -> slot -> direction. Neutralizes fast dangerous pests (bats, bees, ants) at distance >= 2 before melee contact; allows freely consuming daggers down to 0.
+  14. *Dust Elbereth Sanctuary (`engrave_dust_elbereth`)*: 1-turn bare-finger dust ward (`E` -> `-` -> `Elbereth\r`) that forces non-humanoid monsters to flee, neutralizing fatal parting attacks when cornered or low HP (< 35%).
+  15. *Artifact Weapon Forging (`dip_excalibur`)*: Dipping long sword into fountain at XP level >= 5 to forge Excalibur (+1d10 damage, auto-searching, drain immunity).
 
 ---
 

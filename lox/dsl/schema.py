@@ -97,6 +97,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "has_pick_axe": "bool",
     "has_lamp": "bool",
     "has_unworn_armor": "bool",
+    "has_daggers": "bool",
     "weapon_is_cursed": "bool",
     "can_forge_excalibur": "bool",
 }
@@ -122,6 +123,8 @@ ALLOWED_ACTIONS: set[str] = {
     "melee_attack",
     "fire_missile",
     "throw_item",
+    "throw_dagger",
+    "engrave_dust_elbereth",
     "engrave_elbereth",
     "engrave",
 

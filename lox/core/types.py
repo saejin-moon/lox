@@ -171,6 +171,16 @@ class InventoryView(list):
                 return it.slot
         return None
 
+    @property
+    def has_daggers(self) -> bool:
+        return any(it.category == "weapon" and "dagger" in it.name.lower() for it in self)
+
+    def get_dagger_slot(self) -> str | None:
+        for it in self:
+            if it.category == "weapon" and "dagger" in it.name.lower():
+                return it.slot
+        return None
+
     def find_items_by_category(self, cat: str) -> list[Item]:
         return [it for it in self if it.category == cat]
 
