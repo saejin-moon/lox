@@ -43,7 +43,7 @@ uv sync
 ```bash
 uv run pytest -v
 ```
-All 36 test suites should pass cleanly in ~4 seconds.
+All 39 test suites should pass cleanly in ~4 seconds.
 
 ---
 
@@ -60,14 +60,14 @@ uv run python -u -m scripts.run_synthesis \
 ```
 
 #### Option B: Live OpenRouter Campaign (Targeting Depth 10+)
-Set your OpenRouter API key and launch the autonomous evolution loop:
+Set your OpenRouter API key and launch the autonomous evolution loop (recommended: 15 generations per execution to inspect progress between batches):
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."
 
 uv run python -u -m scripts.run_synthesis \
   --provider openrouter \
   --model google/gemma-4-31b-it \
-  --generations 100 \
+  --generations 15 \
   --eval-episodes 10 \
   --max-turns 25000 \
   --target-depth 10.0 \

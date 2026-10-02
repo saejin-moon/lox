@@ -85,8 +85,10 @@ lox/
    - In NetHack ASCII, spellbooks on the floor also display as `+`. Using raw character matching `chars == ord("+")` mistakenly treats spellbooks as doors, causing 2,500 consecutive invalid `open_door` commands until NLE aborts the episode (`StepStatus.ABORTED`).
    - `NetHackAdapter` strictly discriminates real closed doors using NLE CMAP glyphs (`nh.GLYPH_CMAP_OFF + 15` and `+ 16`), dynamically marks phantom door coordinates in `self.non_door_tiles` upon receiving `"You see no door there"`, and safely falls back to `wait()` if no valid door is adjacent.
 
-7. **Corpse Safety & Nutrition**:
-   - Eating floor corpses without standing on them causes invalid prompts. `NetHackAdapter.step(Action(name="eat_floor_corpse"))` automatically steps towards the nearest floor corpse if not currently standing on one.
+7. **Corpse Safety, Glyph Ground-Truth & Nutrition**:
+   - `NetHackAdapter` uses NLE body glyph queries (`nethack.glyph_is_body` and `permonst(glyph - GLYPH_BODY_OFF)`) to pinpoint the exact tile, monster species, and poison/deadly status of every corpse on the floor.
+   - `_dismiss_more()` explicitly auto-answers `'y'` to NetHack's `"eat it? [ynq]"` confirmation prompt, preventing the prompt auto-dismissal shield from rejecting floor corpses.
+   - `NetHackAdapter.step(Action(name="eat_floor_corpse"))` automatically steps towards the nearest safe floor corpse if not currently standing on one.
 
 8. **Minetown & Text-Entry Dialog Auto-Dismissal (`ESC`)**:
    - In Minetown (Depths 5–9), guards and temple priests greet the hero with `"Hello stranger, who are you?"` or `"what is your name"`.
@@ -137,7 +139,7 @@ lox/
 uv run python -u -m scripts.run_synthesis \
   --provider openrouter \
   --model google/gemma-4-31b-it \
-  --generations 100 \
+  --generations 15 \
   --eval-episodes 10 \
   --max-turns 25000 \
   --target-depth 10.0 \
