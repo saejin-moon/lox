@@ -64,17 +64,17 @@ This living document tracks empirical progress, critical discoveries, immediate 
 
 ---
 
-## 3. Immediate Next Steps (Priority 1)
+## 3. Autonomous LLM Synthesis Campaign Status
 
-1. **Verify `bench_fixes_18`**:
-   - Confirm completion of `bench_fixes_18` via `manage_task` or DuckDB query.
-   - Verify that no episodes timeout with `MaxTurnsReached` on DL1.
-   - Inspect Excalibur forging occurrences and confirm `weapon_in_hand` tracks properly.
-2. **Review Tactical Survival at Depths 6–8**:
-   - Check death reasons in DuckDB for Depths 6–8 (e.g., dwarf aklys/spear strikes, soldier ant poison, wands).
-   - Verify healing potion quaffing (`quaff_healing`) triggers reliably at `< 50% HP` during deep combat encounters.
-3. **Commit & Push Current Stable Checkpoint**:
-   - Keep git state clean and pushed to `master` with informative commit messages.
+- **Status**: **Active (Task ID: `task-2879`)**
+- **Configuration**: 10 generations, 20 episodes per generation, 25,000 max turns, target depth 10.0, provider OpenRouter (`google/gemma-4-31b-it`).
+- **Generation 1 Results (20 episodes)**:
+  - **Average Depth**: **3.90**
+  - **Max Depth**: **Depth 9**
+  - **Average Turns**: 1,844.5
+  - **Fatalities**: Killed in combat (95.0%), MaxTurnsReached (Depth 2) (5.0%).
+  - **Synthesis**: Gemma-4-31b-it evaluated the Gen 1 batch autopsy, synthesized an evolved policy with refined Elbereth humanoid engagement rules and ranged kiting, validated cleanly, and archived to `data/policies/gen_0001.py` and `data/latest_policy.py`.
+- **Generation 2**: Currently running 20 evaluation episodes in the background.
 
 ---
 
