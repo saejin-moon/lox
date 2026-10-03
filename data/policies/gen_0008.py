@@ -1,27 +1,23 @@
 class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
-        self.search_count = 0
-        self.retreat_streak = 0
-        self.altar_tested = False
         self.last_depth = 1
         self.last_searched_pos = None
 
     def run(self, obs):
         while True:
             if obs.hero.depth != self.last_depth:
-                self.altar_tested = False
                 self.last_searched_pos = None
                 self.last_depth = obs.hero.depth
 
-            # 1. Absolute Emergency Survival (Fainting or Critical HP)
+            # 1. Absolute Emergency Survival (Major Trouble)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
                 if obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
 
-            # 2. Combat Logic (Highest Priority)
+            # 2. Combat Logic (Highest Priority - Must check every turn)
             if obs.combat.hostile_count_fov > 0:
                 obs = yield from self.handle_combat(obs)
                 continue
@@ -41,9 +37,8 @@ class Agent:
                 continue
 
             # 5. Altar BUC Testing
-            if obs.epistemic.has_untested_items and not self.altar_tested:
+            if obs.epistemic.has_untested_items:
                 if obs.dungeon.standing_on_altar:
-                    self.altar_tested = True
                     obs = yield test_altar_buc()
                     continue
                 elif obs.dungeon.adjacent_altar:
@@ -60,10 +55,9 @@ class Agent:
                     continue
 
             # 7. Poison Resistance Harvesting
-            if not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
-                if obs.combat.hostile_count_fov == 0 and obs.dungeon.tile_type == "corridor":
-                    obs = yield harvest_poison_res()
-                    continue
+            if obs.dungeon.can_harvest_poison and not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
+                obs = yield harvest_poison_res()
+                continue
 
             # 8. Navigation & Exploration
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
@@ -79,45 +73,46 @@ class Agent:
                     obs = yield open_door()
                 continue
             elif obs.spatial.has_unvisited_frontier:
-                self.search_count = 0 
                 obs = yield step_to_frontier()
                 continue
             elif obs.spatial.has_unsearched_dead_end:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
+                # Search perimeter walls for secret doors.
                 obs = yield from self.handle_dead_end(obs)
                 continue
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
-            # 1. Non-Aggression (Shopkeepers/Town)
+            # 1. Non-Aggression
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
-                if obs.combat.adjacent_hostile:
-                    obs = yield step_away_from_hostile()
-                else:
-                    obs = yield step_to_frontier() if obs.spatial.has_unvisited_frontier else step_away_from_hostile()
+                obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 2. Tactical In-Combat Healing (Immediate - Higher Priority than Elbereth)
+            # 2. Tactical In-Combat Healing (Critical - Lower threshold for safety)
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # 3. Floating Eye / Gas Spore (Strict Melee Avoidance)
+            # 3. Floating Eye / Gas Spore (STRICT Melee Avoidance)
             if obs.combat.closest_hostile_name in ("floating eye", "gas spore"):
                 if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
                     obs = yield throw_dagger()
                     continue
+                if obs.combat.adjacent_hostile:
+                    if not obs.combat.standing_on_elbereth:
+                        obs = yield engrave_dust_elbereth()
+                    else:
+                        obs = yield step_away_from_hostile()
+                    continue
                 obs = yield step_away_from_hostile()
                 continue
 
-            # 4. Panic Sanctuary (Elbereth) - Only if not already adjacent to a lethal threat
+            # 4. Panic Sanctuary (Elbereth)
             if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
-                # If we are adjacent to a monster, engraving is risky. Only do it if we can survive the turn.
-                if not obs.combat.adjacent_hostile or obs.hero.hp_frac > 0.20:
-                    obs = yield engrave_dust_elbereth()
-                    continue
+                obs = yield engrave_dust_elbereth()
+                continue
 
             # 5. Elbereth Recovery Logic
             if obs.combat.standing_on_elbereth:
@@ -129,15 +124,21 @@ class Agent:
                     obs = yield quaff_healing()
                     continue
                 
-                if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.80:
-                        obs = yield melee_attack_hostile()
+                if not obs.combat.adjacent_hostile:
+                    # Do not wait on Elbereth if we can leave safely to find stairs
+                    if obs.spatial.stairs_down_known:
+                        obs = yield step_to_stairs_down()
+                    elif obs.spatial.has_unvisited_frontier:
+                        obs = yield step_to_frontier()
                     else:
-                        # Use the sanctuary to wait or reposition
-                        obs = yield wait()
+                        obs = yield step_away_from_hostile()
+                    continue
+                elif obs.hero.hp_frac > 0.80:
+                    obs = yield melee_attack_hostile()
                     continue
                 else:
-                    obs = yield step_to_stairs_down() if obs.spatial.stairs_down_known else step_to_frontier()
+                    # Only wait if we are actually recovering and monsters are adjacent
+                    obs = yield wait()
                     continue
 
             # 6. Ranged Harassment
@@ -145,7 +146,7 @@ class Agent:
                 obs = yield throw_dagger()
                 continue
 
-            # 7. High-Speed Attackers (Ants, Bees, etc.)
+            # 7. High-Speed Attackers
             if obs.combat.is_fast_dangerous:
                 if obs.combat.can_retreat:
                     obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
@@ -153,7 +154,7 @@ class Agent:
 
             # 8. Melee Engagement
             if obs.combat.adjacent_hostile:
-                if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                if obs.hero.hp_frac > 0.40 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
                 else:
                     obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
@@ -169,7 +170,7 @@ class Agent:
 
     def handle_corpse_consumption(self, obs):
         if obs.combat.hostile_count_fov > 0:
-            obs = yield step_away_from_hostile()
+            obs = yield wait()
             return obs
         for corpse in obs.corpses:
             if corpse.is_safe:
@@ -185,7 +186,8 @@ class Agent:
         current_pos = (obs.hero.y, obs.hero.x)
         if obs.spatial.standing_on_dead_end and current_pos != self.last_searched_pos:
             self.last_searched_pos = current_pos
-            for _ in range(8):
+            # Search in small bursts to allow combat reaction
+            for _ in range(4):
                 if obs.combat.hostile_count_fov > 0 or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
                     break
                 obs = yield search()

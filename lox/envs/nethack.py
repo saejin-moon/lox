@@ -441,6 +441,7 @@ class NetHackAdapter(EnvironmentAdapter):
         floating_eye_fov = False
         gas_spore_fov = False
         adjacent_gas_spore = False
+        adjacent_floating_eye = False
         adjacent_hostiles_count = 0
 
         if glyphs is not None:
@@ -483,8 +484,11 @@ class NetHackAdapter(EnvironmentAdapter):
                             adjacent_hostiles_count += 1
                             if mname == "gas spore":
                                 adjacent_gas_spore = True
+                            if mname == "floating eye":
+                                adjacent_floating_eye = True
 
         adjacent_monsters: list[str] = []
+        hostile_ignores_elbereth = False
         if glyphs is not None:
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
                 ny, nx = y + dy, x + dx
@@ -503,6 +507,9 @@ class NetHackAdapter(EnvironmentAdapter):
                             self.peaceful_positions.add((ny, nx))
                             continue
                         adjacent_monsters.append(mname)
+                        ml = mname.lower()
+                        if any(ign in ml for ign in ("orc", "uruk", "elf", "human", "soldier", "guard", "captain", "watchman", "priest", "shopkeeper", "minotaur", "skeleton", "demon", "devil", "ghost")):
+                            hostile_ignores_elbereth = True
 
         adjacent_peaceful = any(
             abs(py - y) <= 1 and abs(px - x) <= 1
@@ -571,6 +578,8 @@ class NetHackAdapter(EnvironmentAdapter):
             is_fast_dangerous=is_fast_dangerous,
             gas_spore_in_fov=gas_spore_fov,
             adjacent_gas_spore=adjacent_gas_spore,
+            adjacent_floating_eye=adjacent_floating_eye,
+            hostile_ignores_elbereth=hostile_ignores_elbereth,
             adjacent_monsters=adjacent_monsters,
         )
 
@@ -1273,6 +1282,8 @@ class NetHackAdapter(EnvironmentAdapter):
                 if not is_on_elbereth:
                     return self.step(Action(name="engrave_dust_elbereth"))
                 else:
+                    if getattr(obs_prev.combat, "adjacent_gas_spore", False) or getattr(obs_prev.combat, "adjacent_floating_eye", False):
+                        return self.step(Action(name="wait"))
                     return self.step(Action(name="melee_attack_hostile"))
 
         elif action.name == "melee_attack_hostile" and obs_prev is not None:
@@ -1289,21 +1300,32 @@ class NetHackAdapter(EnvironmentAdapter):
                                 continue
                             g = int(glyphs[ty, tx])
                             if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
+                                mon_id = nethack.glyph_to_mon(g)
+                                try:
+                                    mname = nethack.permonst(mon_id).mname.lower()
+                                except Exception:
+                                    mname = ""
+                                if mname in ("floating eye", "gas spore"):
+                                    continue
                                 action = Action(name="melee_attack", direction=(dy, dx))
                                 break
-            # If no adjacent monster, approach closest hostile if known
-            if action.direction is None and obs_prev.combat.closest_hostile_pos:
-                hy, hx = obs_prev.combat.closest_hostile_pos
-                if (hy, hx) not in self.peaceful_positions:
-                    walkable = build_walkable_mask(obs_prev.raw_obs)
-                    for by, bx in self.blocked_tiles:
-                        if 0 <= by < 21 and 0 <= bx < 79:
-                            walkable[by, bx] = False
-                    walkable[hy, hx] = True
-                    path = SpatialEngine.find_path((hero.y, hero.x), (hy, hx), walkable)
-                    if path:
-                        dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
-                        return self._step_or_breach(obs_prev, dy, dx)
+            # If no adjacent non-passive monster, do not approach floating eye / gas spore in melee
+            if action.direction is None:
+                closest_name = getattr(obs_prev.combat, "closest_hostile_name", "")
+                if closest_name in ("floating eye", "gas spore") or getattr(obs_prev.combat, "adjacent_floating_eye", False) or getattr(obs_prev.combat, "adjacent_gas_spore", False):
+                    return self.step(Action(name="step_away_from_hostile"))
+                elif obs_prev.combat.closest_hostile_pos:
+                    hy, hx = obs_prev.combat.closest_hostile_pos
+                    if (hy, hx) not in self.peaceful_positions:
+                        walkable = build_walkable_mask(obs_prev.raw_obs)
+                        for by, bx in self.blocked_tiles:
+                            if 0 <= by < 21 and 0 <= bx < 79:
+                                walkable[by, bx] = False
+                        walkable[hy, hx] = True
+                        path = SpatialEngine.find_path((hero.y, hero.x), (hy, hx), walkable)
+                        if path:
+                            dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                            return self._step_or_breach(obs_prev, dy, dx)
 
         # Intercept directional steps into closed/locked doors to breach instead of bumping
         if action.name == "step_direction" and action.direction and obs_prev is not None:

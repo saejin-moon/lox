@@ -54,6 +54,8 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "is_fast_dangerous": "bool",
     "gas_spore_in_fov": "bool",
     "adjacent_gas_spore": "bool",
+    "adjacent_floating_eye": "bool",
+    "hostile_ignores_elbereth": "bool",
 
     # Spatial Topology & Navigation
     "stairs_down_known": "bool",

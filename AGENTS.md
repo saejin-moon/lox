@@ -154,6 +154,15 @@ lox/
     - Solver fallbacks must explicitly check `elif obs_prev.dungeon.adjacent_closed_door: return self.step(Action(name="open_door"))` before dispatching to `step_to_frontier` or `step_to_dead_end`.
     - Policies must strictly gate calling `harvest_poison_res()` with `obs.dungeon.can_harvest_poison` so the solver is never invoked when no eligible poison corpses are present.
 
+21. **Passive & Exploding Hazard Discrimination (`adjacent_floating_eye`, `adjacent_gas_spore`)**:
+    - Gas spores explode in melee, inflicting lethal 4d6 area blast damage. Floating eyes inflict 50-turn passive paralysis when struck in melee, allowing nearby monsters to beat the hero to death.
+    - `NetHackAdapter.step(Action(name="melee_attack_hostile"))` strictly inspects per-monster glyph species and refuses to target floating eyes or gas spores in melee. If no safe target is adjacent, it steps away or utilizes ranged missiles.
+
+22. **Elbereth Immunity & Humanoid Combat Tactics (`hostile_ignores_elbereth`)**:
+    - Orcs (Uruk-hai, hill orcs, mordor orcs), elves, humans, guards, and shopkeepers ignore the Elbereth ward entirely.
+    - When standing on Elbereth against enemies with `obs.combat.hostile_ignores_elbereth == True`, yielding `wait()` causes the hero to be executed without resisting.
+    - Policies must detect `obs.combat.hostile_ignores_elbereth` and actively engage in melee (or retreat to 1-tile corridor chokepoints) rather than waiting on the ward.
+
 ---
 
 ## 4. Key CLI Commands

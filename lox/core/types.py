@@ -240,6 +240,8 @@ class CombatView:
     is_fast_dangerous: bool = False
     gas_spore_in_fov: bool = False
     adjacent_gas_spore: bool = False
+    adjacent_floating_eye: bool = False
+    hostile_ignores_elbereth: bool = False
     adjacent_monsters: list[str] = field(default_factory=list)
 
 

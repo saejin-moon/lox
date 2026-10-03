@@ -99,9 +99,25 @@ This living document tracks empirical progress, critical discoveries, immediate 
   - **Fixes Applied**:
     1. Added `elif obs_prev.dungeon.adjacent_closed_door: return self.step(Action(name="open_door"))` to both `test_altar_buc` and `harvest_poison_res` adapter fallbacks in `NetHackAdapter`.
     2. Explicitly gated `harvest_poison_res()` with `obs.dungeon.can_harvest_poison` in `data/latest_policy.py`.
-  - **Synthesis**: Gemma synthesized Gen 10 policy restoring corridor requirement and Elbereth safety margin, archived to `data/policies/gen_0010.py`.
-
----
+- **Campaign 2 Results (Task `task-3156`, 10 Gens x 20 Eps = 200 Episodes)**:
+  - **Gen 1**: Avg Depth 3.40, Max Depth 7, Avg Turns 2,522.1
+  - **Gen 2**: Avg Depth 3.75, Max Depth 7, Avg Turns 1,746.9
+  - **Gen 3**: Avg Depth 2.95, Max Depth 5, Avg Turns 1,960.4
+  - **Gen 4**: Avg Depth 3.25, Max Depth 6, Avg Turns 2,610.5
+  - **Gen 5**: Avg Depth 3.30, Max Depth 5, Avg Turns 1,970.4
+  - **Gen 6**: Avg Depth 3.80, Max Depth 8, Avg Turns 2,065.1
+  - **Gen 7**: Avg Depth 3.55, Max Depth 6, Avg Turns 2,903.8
+  - **Gen 8**: Avg Depth 3.65, **Max Depth 10**, Avg Turns 3,187.0 (Episode reached Depth 10!)
+  - **Gen 9**: Avg Depth 3.60, Max Depth 7, Avg Turns 1,721.0
+  - **Gen 10**: Avg Depth 2.90, Max Depth 7, Avg Turns 2,497.6
+  - **Campaign Stability**: Zero batch collapses (averages stayed 3.0–3.8 throughout all 10 generations, with episodes penetrating to Depths 7, 8, and 10). Excalibur forging verified in telemetry (`the blessed rustproof +1 Excalibur`), alongside equipped helmets, cloaks, and boots.
+  - **Autopsy Diagnoses & Fatal Traps Uncovered**:
+    1. **Mindless & Exploding Hazard Targeting**: `melee_attack_hostile` blindly attacked the first adjacent glyph, including gas spores (causing instant fatal 4d6 explosions) and floating eyes (causing 50-turn paralysis).
+    2. **Elbereth Resistance Waiting Trap**: Humanoids and orcs (Uruk-hai, orcs, elves, soldiers) ignore Elbereth. In `handle_combat`, when standing on Elbereth with low HP, the policy yielded `wait()`, allowing Uruk-hai to shoot poisoned arrows and melee strike the hero without resistance.
+  - **Fixes Applied (Committed & Verified)**:
+    1. Added `adjacent_floating_eye` and `hostile_ignores_elbereth` to `CombatView` and `ALLOWED_PREDICATES`.
+    2. Shielded `NetHackAdapter.step(Action(name="melee_attack_hostile"))` to strictly skip floating eyes and gas spores, and step away rather than approaching them in melee.
+    3. Updated `handle_combat` Elbereth recovery logic to detect `obs.combat.hostile_ignores_elbereth` and actively fight or retreat to corridor chokepoints rather than waiting.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 
