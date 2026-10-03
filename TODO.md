@@ -151,25 +151,25 @@ This living document tracks empirical progress, critical discoveries, immediate 
   - **Gen 3**: Avg Depth 2.70, Max Depth 7, Avg Turns 4,175.9, Avg Score 482.6, Peak Score 1,088 (Eval time: 46.3s)
   - **Gen 4**: Avg Depth 2.20, Max Depth 5, Avg Turns 4,345.7, Avg Score 494.6, Peak Score **1,702** (Eval time: 61.6s)
   - **Gen 5**: Avg Depth 2.20, Max Depth 6, Avg Turns 4,968.2, Avg Score 377.2, Peak Score 1,350 (Eval time: 62.1s)
-  - **Gen 6**: Avg Depth **3.10**, Max Depth **8**, Avg Turns 3,476.4, Avg Score 473.5, Peak Score **1,522** (Eval time: 46.0s)
-  - **Parallel Multiprocessing Engine (`--workers 10`)**: 120 full NetHack episodes across 6 generations evaluated and synthesized in just **14 minutes** (previously took ~55 minutes).
-  - **Ground-Truth NetHack Scoring**: All episodes actively capture true combat XP and gold from NLE `blstats[nh.NLE_BL_SCORE]`. Peak scores consistently reach 1,300–1,700 per batch.
+  - **Gen 7**: Avg Depth 2.10, Max Depth 4, Avg Turns 6,176.9, Avg Score 465.0 (Eval time: 70.2s)
+  - **Gen 8**: Avg Depth 2.50, Max Depth 8, Avg Turns 4,301.8, Avg Score 464.1 (Eval time: 54.1s)
+  - **Gen 9**: Avg Depth 2.30, Max Depth 5, Avg Turns 4,208.0, Avg Score 406.0 (Eval time: 52.8s)
+  - **Gen 10**: Avg Depth 2.45, Max Depth 8, Avg Turns 5,266.1, Avg Score 502.2 (Eval time: 64.7s)
+  - **Comprehensive Telemetry Autopsy & Breakthrough Fixes**:
+    1. **Loot Scooping Ping-Pong Loop**: 120,000+ ticks were lost to dropped weapons/ammo that autopickup excludes. Fixed by adding `self.looted_tiles` and pruning non-autopicked item types from `loot_chars`.
+    2. **Fountain Vanishing Dipping Loop**: When fountains dried up, `known_fountain_pos` was not cleared, causing endless `#dip` failures. Added `fountain_vanished` detection and reset.
+    3. **Interactive Dialog Auto-Dismissals**: Uncovered unhandled prompts (`Call an emerald...`, `What do you want to eat`, `What do you want to throw`) causing 2,500-step 0-turn aborts. Added full ESC auto-dismissals in `_dismiss_more`.
+    4. **Numba JIT Acceleration & Disk Caching**: JIT-compiled dead ends mask kernel with `cache=True`, cutting calculation time by 7x (~58 µs/call). Added `SpatialEngine.warmup()`.
+    5. **Granular Episode Mortality Telemetry**: Added `killer`, `ac_at_death`, `hp_at_death`, `max_hp_at_death`, and `excalibur_forged` to DuckDB and Parquet pipelines.
+
+- **Campaign 6 (Active - Task `task-200`)**:
+  - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 10 workers, OpenRouter `google/gemma-4-31b-it`.
+  - **Status**: Running Generation 1 evaluation across 20 real NetHack episodes with all architectural shields and JIT optimizations active.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 
-1. **Launch Autonomous LLM Synthesis Campaign 5**:
-   - Run:
-     ```bash
-     uv run python -u -m scripts.run_synthesis \
-       --provider openrouter \
-       --model google/gemma-4-31b-it \
-       --generations 10 \
-       --eval-episodes 20 \
-       --max-turns 25000 \
-       --target-depth 10.0 \
-       --workers 10 \
-       --policy-path data/latest_policy.py
-     ```
+1. **Autonomous LLM Synthesis Loop Execution**:
+   - Continue running iterative generations until batch average depth $\ge 10.0$.
 2. **Main Dungeon vs Gnomish Mines Branch Steering**:
    - The Gnomish Mines branch (Depths 2–4) is dark and infested with gnome wand wielders. Prefer descending the main dungeon staircase down to Depth 10 before exploring deep Mines.
 3. **Container & Bag Stash Management**:

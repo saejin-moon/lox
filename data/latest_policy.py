@@ -3,11 +3,11 @@ class Agent:
         self.last_prayer_turn = -1000
         self.last_searched_pos = None
         self.search_count = 0
+        self.retreat_streak = 0
 
     def run(self, obs):
         while True:
             # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
-            # This must override everything to prevent MaxTurnsReached/Death by starvation
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
                 if obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
@@ -43,11 +43,11 @@ class Agent:
                     continue
 
             # 6. Nearby Floor Loot Scooping
-            if obs.spatial.has_nearby_loot and obs.combat.hostile_count_fov == 0:
+            if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile:
                 obs = yield step_to_loot()
                 continue
 
-            # 7. Altar BUC Testing (Gated by health and hunger to prevent death-loops)
+            # 7. Altar BUC Testing
             if obs.epistemic.has_untested_items and obs.hero.hp_frac > 0.50 and obs.hero.hunger_state < 2:
                 if obs.dungeon.standing_on_altar:
                     obs = yield test_altar_buc()
@@ -61,7 +61,7 @@ class Agent:
                 obs = yield harvest_poison_res()
                 continue
 
-            # 9. Navigation & Exploration
+            # 9. Navigation & Exploration (Aggressive Stair Priority to prevent MaxTurnsReached)
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                 obs = yield descend()
                 continue
@@ -81,7 +81,7 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
-                # Prevent idling: always search for secret doors at dead ends/walls
+                # Final fallback: search perimeter walls to find secret stairs/doors
                 obs = yield from self.handle_dead_end(obs)
                 continue
 
@@ -96,17 +96,17 @@ class Agent:
                     obs = yield zap_wand_teleport()
                     continue
 
-            # 1. Non-Aggression (Shopkeepers/Town Watch)
+            # 1. Non-Aggression
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 2. Critical Healing - Quaff immediately if HP is low
+            # 2. Critical Healing
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # 3. Gaze/Touch Hazard Avoidance (Floating Eyes, Gas Spores)
+            # 3. Gaze/Touch Hazard Avoidance
             if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore or \
                obs.combat.closest_hostile_name in ("floating eye", "gas spore"):
                 if obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
@@ -138,14 +138,13 @@ class Agent:
                     continue
                 
                 if not obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.80:
-                        if obs.spatial.stairs_down_known:
-                            obs = yield step_to_stairs_down()
-                            continue
-                        elif obs.spatial.has_unvisited_frontier:
-                            obs = yield step_to_frontier()
-                            continue
-                    # Use wait() only as a last resort on Elbereth to let enemies move
+                    # While safe on Elbereth, prioritize moving toward the exit if possible
+                    if obs.spatial.stairs_down_known:
+                        obs = yield step_to_stairs_down()
+                        continue
+                    elif obs.spatial.has_unvisited_frontier:
+                        obs = yield step_to_frontier()
+                        continue
                     obs = yield wait()
                     continue
                 else:
@@ -198,7 +197,8 @@ class Agent:
         current_pos = (obs.hero.y, obs.hero.x)
         if obs.spatial.standing_on_dead_end and current_pos != self.last_searched_pos:
             self.last_searched_pos = current_pos
-            for _ in range(8):
+            # Search a limited number of times to avoid MaxTurnsReached
+            for _ in range(5):
                 if obs.combat.hostile_count_fov > 0 or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
                     break
                 obs = yield search()

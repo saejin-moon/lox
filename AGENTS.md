@@ -182,6 +182,23 @@ lox/
     - `scripts.run_synthesis` supports `--workers N` (default 10), utilizing `multiprocessing.Pool` to run episodes concurrently across multi-core CPUs.
     - Cuts batch evaluation time from ~4.5 minutes down to ~35 seconds (8x speedup) with partitioned telemetry and atomic DuckDB consolidation.
 
+28. **Loot Scooping Ping-Pong Loop Protection (`self.looted_tiles`)**:
+    - Dropped monster weapons and ammunition (daggers, arrows, darts) are not picked up by NLE's autopickup. Stepping off the tile immediately re-triggered `has_nearby_loot == True`, trapping heroes in an endless 2-tile oscillation for up to 16,900 turns until death on DL1.
+    - `NetHackAdapter` tracks `self.looted_tiles` (cleared on reset and floor change), adds tiles to `self.looted_tiles` when reached, and restricts `loot_chars` strictly to autopicked items (`[`, `!`, `?`, `/`, `=`, `$`, `%`).
+
+29. **Fountain Vanishing Dipping Shield (`fountain_vanished`)**:
+    - When a fountain disappears or dries up (`"The fountain disappears!"`), hero's position was not cleared from `self.known_fountain_pos`, causing consecutive `#dip` commands that prompted `"What do you want to dip ... into?"`.
+    - `_extract_obs` checks for fountain disappearance and clears `self.known_fountain_pos = None`, and `_dismiss_more` intercepts `"what do you want to dip"` with ESC.
+
+30. **Interactive Text & Item Dialog ESC Auto-Dismissal**:
+    - Missing prompt checks in `_dismiss_more` previously hung NLE for 2,500 consecutive 0-turn steps (`"Call an emerald potion"`, `"What do you want to eat"`, `"What do you want to throw"`). Expanded `_dismiss_more` with comprehensive ESC dismissals.
+
+31. **Numba JIT Disk Caching & Vector Dead End Discovery**:
+    - JIT-compiled `_compute_dead_ends_mask_kernel` with `cache=True` in `SpatialEngine`, cutting dead end mask computation from ~0.55s down to 0.08s (7x speedup, ~58 µs/call). Pre-warmed via `SpatialEngine.warmup()`.
+
+32. **Granular Mortality & Progression Telemetry**:
+    - Added `killer`, `ac_at_death`, `hp_at_death`, `max_hp_at_death`, and `excalibur_forged` to episode schema and DuckDB migrations.
+
 ---
 
 ## 4. Key CLI Commands

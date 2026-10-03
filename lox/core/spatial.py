@@ -22,7 +22,7 @@ _DIR_DY = np.array([-1, 1, 0, 0, -1, -1, 1, 1], dtype=np.int32)
 _DIR_DX = np.array([0, 0, -1, 1, -1, 1, -1, 1], dtype=np.int32)
 
 
-@njit(fastmath=True, nogil=True)
+@njit(fastmath=True, nogil=True, cache=True)
 def _bfs_distance_grid(
     start_y: int,
     start_x: int,
@@ -70,7 +70,7 @@ def _bfs_distance_grid(
     return dist
 
 
-@njit(fastmath=True, nogil=True)
+@njit(fastmath=True, nogil=True, cache=True)
 def _find_nearest_target(
     start_y: int,
     start_x: int,
@@ -120,7 +120,7 @@ def _find_nearest_target(
     return -1, -1
 
 
-@njit(fastmath=True, nogil=True)
+@njit(fastmath=True, nogil=True, cache=True)
 def _astar_path(
     start_y: int,
     start_x: int,
@@ -236,6 +236,63 @@ def _astar_path(
     return path
 
 
+
+@njit(fastmath=True, nogil=True, cache=True)
+def _compute_dead_ends_mask_kernel(
+    chars: np.ndarray,
+    walkable: np.ndarray,
+    searched_count: np.ndarray,
+    max_corridor: int = 15,
+    max_perimeter: int = 10,
+) -> np.ndarray:
+    """Numba-accelerated checkerboard dead end and room perimeter candidate discovery."""
+    h, w = chars.shape
+    dead_ends_mask = np.zeros((h, w), dtype=np.bool_)
+    card_dy = np.array([-1, 1, 0, 0], dtype=np.int32)
+    card_dx = np.array([0, 0, -1, 1], dtype=np.int32)
+
+    ord_plus = 43   # '+'
+    ord_hash = 35   # '#'
+    ord_dash = 45   # '-'
+    ord_bar = 124   # '|'
+    ord_space = 32  # ' '
+
+    for cy in range(h):
+        for cx in range(w):
+            if not walkable[cy, cx]:
+                continue
+            ch = chars[cy, cx]
+            if ch == ord_plus:
+                continue
+
+            # Corridor dead ends (walkable # with <= 1 cardinal walkable neighbor)
+            if ch == ord_hash:
+                adj_walkable = 0
+                for i in range(4):
+                    ny = cy + card_dy[i]
+                    nx = cx + card_dx[i]
+                    if 0 <= ny < h and 0 <= nx < w and walkable[ny, nx]:
+                        adj_walkable += 1
+                if adj_walkable <= 1 and searched_count[cy, cx] < max_corridor:
+                    dead_ends_mask[cy, cx] = True
+                continue
+
+            # Room perimeter candidates (adjacent to wall, door frame, or solid stone)
+            if searched_count[cy, cx] < max_perimeter:
+                adj_wall = 0
+                for i in range(4):
+                    ny = cy + card_dy[i]
+                    nx = cx + card_dx[i]
+                    if 0 <= ny < h and 0 <= nx < w:
+                        c_adj = chars[ny, nx]
+                        if c_adj == ord_dash or c_adj == ord_bar or c_adj == ord_space or c_adj == 0:
+                            adj_wall += 1
+                if adj_wall > 0 and (((cy + cx) % 2 == 0) or adj_wall >= 2):
+                    dead_ends_mask[cy, cx] = True
+
+    return dead_ends_mask
+
+
 class SpatialEngine:
     """Python-facing interface for all spatial operations."""
 
@@ -292,6 +349,35 @@ class SpatialEngine:
         d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
         ty, tx = _find_nearest_target(int(start[0]), int(start[1]), w, t, d)
         return (ty, tx) if ty >= 0 else None
+
+    @staticmethod
+    def compute_dead_ends_mask(
+        chars: np.ndarray,
+        walkable: np.ndarray,
+        searched_count: np.ndarray,
+        max_corridor: int = 15,
+        max_perimeter: int = 10,
+    ) -> np.ndarray:
+        """Fast Numba-compiled discovery of corridor dead ends and perimeter search candidates."""
+        return _compute_dead_ends_mask_kernel(
+            chars.astype(np.int32),
+            walkable.astype(np.bool_),
+            searched_count.astype(np.int32),
+            max_corridor,
+            max_perimeter,
+        )
+
+    @classmethod
+    def warmup(cls) -> None:
+        """Pre-warms all Numba JIT kernels to populate disk cache before worker forks."""
+        dummy_chars = np.zeros((21, 79), dtype=np.int32)
+        dummy_walk = np.ones((21, 79), dtype=np.bool_)
+        dummy_searched = np.zeros((21, 79), dtype=np.int32)
+        dummy_door = np.zeros((21, 79), dtype=np.bool_)
+        cls.distance_grid((10, 40), dummy_walk, dummy_door)
+        cls.find_path((10, 40), (10, 42), dummy_walk, is_door=dummy_door)
+        cls.find_nearest_target((10, 40), dummy_walk, dummy_walk, is_door=dummy_door)
+        cls.compute_dead_ends_mask(dummy_chars, dummy_walk, dummy_searched)
 
 
 def build_walkable_mask(obs_or_chars: Any) -> np.ndarray:

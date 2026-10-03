@@ -242,6 +242,20 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             recorder.record_death(death_reason)
             break
 
+    killer = ""
+    if obs.hero.is_dead or "combat" in death_reason.lower():
+        killer = getattr(obs.combat, "closest_hostile_name", "")
+        if not killer:
+            m = obs.message.lower()
+            for k in ("killed by a ", "killed by an ", "killed by the "):
+                if k in m:
+                    killer = m.split(k)[-1].split(".")[0].strip()
+                    break
+    ac_at_death = getattr(obs.hero, "ac", 10)
+    hp_at_death = getattr(obs.hero, "hp", 0)
+    max_hp_at_death = getattr(obs.hero, "max_hp", 0)
+    excalibur_forged = any("excalibur" in it.name.lower() for it in obs.inventory) if hasattr(obs, "inventory") else False
+
     final_depth = max_depth_reached
     final_score = last_valid_score if last_valid_score > 0 else (last_valid_gold + (final_depth * 100))
 
@@ -269,6 +283,11 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         "turns_dl1": turns_dl1,
         "turns_dl2": turns_dl2,
         "turns_mines": turns_mines,
+        "killer": killer,
+        "ac_at_death": ac_at_death,
+        "hp_at_death": hp_at_death,
+        "max_hp_at_death": max_hp_at_death,
+        "excalibur_forged": excalibur_forged,
         "trajectory": recorder.get_last_10_turns_trajectory(),
     }
 
@@ -327,6 +346,10 @@ def run_synthesis_loop(
     except Exception as e:
         print(f"[Warning] Failed to initialize evolved_policies table: {e}")
 
+    # Pre-warm SpatialEngine JIT kernels to populate disk cache before worker forks
+    print("[SpatialEngine] Pre-warming Numba JIT spatial kernels...")
+    SpatialEngine.warmup()
+    print("[SpatialEngine] JIT kernels compiled and ready.")
 
     # Load or Seed policy
     os.makedirs("data/policies", exist_ok=True)
@@ -446,6 +469,11 @@ class Agent:
                 turns_dl1=r["turns_dl1"],
                 turns_dl2=r["turns_dl2"],
                 turns_mines=r["turns_mines"],
+                killer=r.get("killer", ""),
+                ac_at_death=r.get("ac_at_death", 10),
+                hp_at_death=r.get("hp_at_death", 0),
+                max_hp_at_death=r.get("max_hp_at_death", 0),
+                excalibur_forged=r.get("excalibur_forged", False),
             )
 
         # Consolidate raw telemetry into DuckDB so LLM tools query live empirical state

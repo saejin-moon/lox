@@ -72,6 +72,11 @@ EPISODE_SCHEMA = pa.schema([
     ("turns_dl1", pa.int32()),
     ("turns_dl2", pa.int32()),
     ("turns_mines", pa.int32()),
+    ("killer", pa.string()),
+    ("ac_at_death", pa.int32()),
+    ("hp_at_death", pa.int32()),
+    ("max_hp_at_death", pa.int32()),
+    ("excalibur_forged", pa.bool_()),
 ])
 
 EVENT_SCHEMA = pa.schema([
@@ -200,6 +205,11 @@ class ParquetLogger:
         turns_dl1: int = 0,
         turns_dl2: int = 0,
         turns_mines: int = 0,
+        killer: str = "",
+        ac_at_death: int = 10,
+        hp_at_death: int = 0,
+        max_hp_at_death: int = 0,
+        excalibur_forged: bool = False,
     ) -> None:
         self.episode_buffer.append({
             "run_id": self.run_id,
@@ -225,6 +235,11 @@ class ParquetLogger:
             "turns_dl1": int(turns_dl1),
             "turns_dl2": int(turns_dl2),
             "turns_mines": int(turns_mines),
+            "killer": str(killer),
+            "ac_at_death": int(ac_at_death),
+            "hp_at_death": int(hp_at_death),
+            "max_hp_at_death": int(max_hp_at_death),
+            "excalibur_forged": bool(excalibur_forged),
         })
 
     def log_event(

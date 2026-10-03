@@ -115,6 +115,11 @@ def init_db(db_path: str = "data/lox.duckdb") -> duckdb.DuckDBPyConnection:
         ("turns_dl1", "INTEGER"),
         ("turns_dl2", "INTEGER"),
         ("turns_mines", "INTEGER"),
+        ("killer", "VARCHAR"),
+        ("ac_at_death", "INTEGER"),
+        ("hp_at_death", "INTEGER"),
+        ("max_hp_at_death", "INTEGER"),
+        ("excalibur_forged", "BOOLEAN"),
     ]:
         con.execute(f"ALTER TABLE episodes ADD COLUMN IF NOT EXISTS {col} {col_type};")
 
