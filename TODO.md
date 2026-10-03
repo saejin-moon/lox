@@ -23,7 +23,7 @@ This living document tracks empirical progress, critical discoveries, immediate 
 | `bench_fixes_15` | 3.50 | 7 | Eliminated 0-turn locked door kick loop with kick count caps. |
 | `bench_fixes_16` | **4.00** | 6 | 100% DL1 clearance; 3 episodes reached DL6. Diagnosed Excalibur dipping prompt failure. |
 | `bench_fixes_17` | 3.60 | 7 | Two episodes reached DL7. Uncovered 23.5k in-place search decay loop at `(5, 46)`. |
-| `bench_fixes_18` | *Running* | *TBD* | Validating `last_searched_pos` guard, search decay throttling, and `(weapon in hand)` fix. |
+| `bench_fixes_18` | 3.30 | **8** | Reached Depth 8! 0 timeouts at 25k turns; validated `(weapon in hand)` tracking and eliminated in-place search stall. Diagnosed item naming dialog trap (`Call a ...`). |
 
 ---
 
@@ -43,10 +43,15 @@ This living document tracks empirical progress, critical discoveries, immediate 
 3. **Weapon Parsing Grammar (`(weapon in hand)`)**:
    - NetHack formats one-handed weapons (e.g. Valkyrie's long sword) as `(weapon in hand)` (singular). Two-handed weapons use `(weapon in hands)`. Checking only `(weapon in hands)` marked all one-handed weapons as unequipped (`bare hands`).
 
-4. **Encumbrance-Locked Nutrition**:
+4. **Item Naming Dialog Auto-Dismissal (`Call a ...` / ESC)**:
+   - When identifying or picking up unidentified items, NetHack can prompt `Call a white potion: ` or `What do you want to call...`.
+   - Directional navigation keys enter characters into the text buffer (0 turns), triggering NLE's 2,500 consecutive 0-turn step abort.
+   - Intercepting `call a `, `call the `, and `what do you want to call` with ESC (`\x1b`) dismisses the naming dialog instantly.
+
+5. **Encumbrance-Locked Nutrition**:
    - Autopicking heavy chain mails and scale mails induces `STRAINED` encumbrance, blocking eating (`"You can't do that while carrying so much stuff"`). `eat_carried_food` automatically drops unworn heavy armor before consuming food.
 
-5. **Elbereth Ward Erosion Shield**:
+6. **Elbereth Ward Erosion Shield**:
    - Dust Elbereth scuffs when taking damage. Adapter drops coordinates from `self.elbereth_positions` upon receiving melee damage messages, and the policy forbids calling `wait()` while hostiles are adjacent.
 
 ---

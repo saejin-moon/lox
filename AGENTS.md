@@ -143,6 +143,11 @@ lox/
 18. **Floor Transition State Resets**:
     - Depth transitions must explicitly reset `self.known_fountain_pos = None`, `self.known_altar_pos = None`, and clear `self.elbereth_positions` to prevent carrying stale coordinates across dungeon levels.
 
+19. **Item Naming Dialog Auto-Dismissal (`Call a ...` / ESC)**:
+    - When picking up or identifying items, NetHack can prompt `Call a white potion: ` or `What do you want to call...`.
+    - Directional navigation keys enter characters into the text-entry buffer instead of moving, consuming 0 turns and causing NLE to abort with `StepStatus.ABORTED` after 2,500 consecutive 0-turn steps.
+    - `NetHackAdapter._dismiss_more` intercepts `call a `, `call the `, and `what do you want to call` and automatically dismisses them with ESC (`\x1b`).
+
 ---
 
 ## 4. Key CLI Commands

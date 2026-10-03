@@ -831,11 +831,14 @@ class NetHackAdapter(EnvironmentAdapter):
                         dy, dx = self._last_attempted_dir
                         self.peaceful_positions.add((py + dy, px + dx))
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("n", space_idx))
-            elif "who are you" in msg.lower() or "what is your name" in msg.lower() or "call this" in msg.lower() or "hello stranger" in msg.lower():
-                if getattr(self, "_last_attempted_dir", None) is not None:
-                    py, px = getattr(self, "_prev_hero_pos", (0, 0))
-                    dy, dx = self._last_attempted_dir
-                    self.peaceful_positions.add((py + dy, px + dx))
+            elif any(phrase in msg.lower() for phrase in (
+                "who are you", "what is your name", "call this", "call a ", "call the ", "what do you want to call", "hello stranger",
+            )):
+                if any(phrase in msg.lower() for phrase in ("who are you", "what is your name", "hello stranger")):
+                    if getattr(self, "_last_attempted_dir", None) is not None:
+                        py, px = getattr(self, "_prev_hero_pos", (0, 0))
+                        dy, dx = self._last_attempted_dir
+                        self.peaceful_positions.add((py + dy, px + dx))
                 esc_idx = self.char_to_act.get("\x1b", 38)
                 raw_obs, _, term, trunc, _ = self.env.step(esc_idx)
             else:
