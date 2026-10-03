@@ -148,6 +148,12 @@ lox/
     - Directional navigation keys enter characters into the text-entry buffer instead of moving, consuming 0 turns and causing NLE to abort with `StepStatus.ABORTED` after 2,500 consecutive 0-turn steps.
     - `NetHackAdapter._dismiss_more` intercepts `call a `, `call the `, and `what do you want to call` and automatically dismisses them with ESC (`\x1b`).
 
+20. **Solver Fallback Closed Door Navigation & Poison Gating**:
+    - High-level tactical solvers (`harvest_poison_res`, `test_altar_buc`) execute fallback navigation when no active target corpse or altar exists on the floor.
+    - If the hero encounters a closed or locked door during solver fallback, navigating directly to distant frontiers or dead ends causes pathfinding stalls or door bumping.
+    - Solver fallbacks must explicitly check `elif obs_prev.dungeon.adjacent_closed_door: return self.step(Action(name="open_door"))` before dispatching to `step_to_frontier` or `step_to_dead_end`.
+    - Policies must strictly gate calling `harvest_poison_res()` with `obs.dungeon.can_harvest_poison` so the solver is never invoked when no eligible poison corpses are present.
+
 ---
 
 ## 4. Key CLI Commands

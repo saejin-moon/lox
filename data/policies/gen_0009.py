@@ -59,9 +59,10 @@ class Agent:
                     obs = yield step_to_fountain()
                     continue
 
-            # 7. Poison Resistance Harvesting (Strictly gated by can_harvest_poison)
-            if obs.dungeon.can_harvest_poison and not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
-                if obs.combat.hostile_count_fov == 0 and obs.dungeon.tile_type == "corridor":
+            # 7. Poison Resistance Harvesting (Critical for Depth 3+)
+            if not obs.hero.has_poison_res and obs.hero.hp_frac > 0.80:
+                # Only harvest when safe and in a corridor to avoid being trapped in rooms
+                if obs.combat.hostile_count_fov == 0:
                     obs = yield harvest_poison_res()
                     continue
 
@@ -86,6 +87,7 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
+                # Exhaustive search for secret doors/stairs
                 obs = yield from self.handle_dead_end(obs)
                 continue
 
@@ -114,7 +116,6 @@ class Agent:
 
             # 4. Panic Sanctuary (Elbereth)
             if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
-                # Only engrave if we aren't about to be hit by a fast monster in 1 turn
                 if not obs.combat.adjacent_hostile or obs.hero.hp_frac > 0.20:
                     obs = yield engrave_dust_elbereth()
                     continue
@@ -184,10 +185,12 @@ class Agent:
         current_pos = (obs.hero.y, obs.hero.x)
         if obs.spatial.standing_on_dead_end and current_pos != self.last_searched_pos:
             self.last_searched_pos = current_pos
+            # Search repeatedly to find secret doors, but break if combat starts
             for _ in range(8):
                 if obs.combat.hostile_count_fov > 0 or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
                     break
                 obs = yield search()
         else:
+            # Move toward the dead end, but this is a potential ambush point
             obs = yield step_to_dead_end()
         return obs

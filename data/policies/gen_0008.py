@@ -59,8 +59,8 @@ class Agent:
                     obs = yield step_to_fountain()
                     continue
 
-            # 7. Poison Resistance Harvesting (Strictly gated by can_harvest_poison)
-            if obs.dungeon.can_harvest_poison and not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
+            # 7. Poison Resistance Harvesting
+            if not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
                 if obs.combat.hostile_count_fov == 0 and obs.dungeon.tile_type == "corridor":
                     obs = yield harvest_poison_res()
                     continue
@@ -99,7 +99,7 @@ class Agent:
                     obs = yield step_to_frontier() if obs.spatial.has_unvisited_frontier else step_away_from_hostile()
                 continue
 
-            # 2. Tactical In-Combat Healing (Immediate)
+            # 2. Tactical In-Combat Healing (Immediate - Higher Priority than Elbereth)
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
@@ -112,9 +112,9 @@ class Agent:
                 obs = yield step_away_from_hostile()
                 continue
 
-            # 4. Panic Sanctuary (Elbereth)
+            # 4. Panic Sanctuary (Elbereth) - Only if not already adjacent to a lethal threat
             if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
-                # Only engrave if we aren't about to be hit by a fast monster in 1 turn
+                # If we are adjacent to a monster, engraving is risky. Only do it if we can survive the turn.
                 if not obs.combat.adjacent_hostile or obs.hero.hp_frac > 0.20:
                     obs = yield engrave_dust_elbereth()
                     continue
@@ -133,6 +133,7 @@ class Agent:
                     if obs.hero.hp_frac > 0.80:
                         obs = yield melee_attack_hostile()
                     else:
+                        # Use the sanctuary to wait or reposition
                         obs = yield wait()
                     continue
                 else:
@@ -144,7 +145,7 @@ class Agent:
                 obs = yield throw_dagger()
                 continue
 
-            # 7. High-Speed Attackers (Ants, Bees)
+            # 7. High-Speed Attackers (Ants, Bees, etc.)
             if obs.combat.is_fast_dangerous:
                 if obs.combat.can_retreat:
                     obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()

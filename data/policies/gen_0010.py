@@ -59,8 +59,9 @@ class Agent:
                     obs = yield step_to_fountain()
                     continue
 
-            # 7. Poison Resistance Harvesting (Strictly gated by can_harvest_poison)
-            if obs.dungeon.can_harvest_poison and not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
+            # 7. Poison Resistance Harvesting (Moved to lower priority, strict safety)
+            # Only harvest if we are healthy, safe, and not in a room (to avoid being surrounded)
+            if not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
                 if obs.combat.hostile_count_fov == 0 and obs.dungeon.tile_type == "corridor":
                     obs = yield harvest_poison_res()
                     continue

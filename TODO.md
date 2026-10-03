@@ -87,7 +87,19 @@ This living document tracks empirical progress, critical discoveries, immediate 
 - **Generation 7 Results (20 episodes)**:
   - **Average Depth**: **3.60**, **Max Depth**: **Depth 11** (Episode 7 penetrated to Depth 11!), **Average Turns**: 3,347.4.
   - **Synthesis**: Gemma synthesized Gen 7 policy emphasizing floating eye melee avoidance and aggressive hunger prevention, archived to `data/policies/gen_0007.py`.
-- **Generation 8**: Currently executing 20 evaluation episodes in the background.
+- **Generation 8 Results (20 episodes)**:
+  - **Average Depth**: **4.05**, **Max Depth**: **Depth 7**, **Average Turns**: 2,655.9.
+  - **Milestone**: Reached new peak batch average depth of 4.05! 9 out of 20 episodes penetrated to Depths 5–7, and 18/20 survived Depth 1. Archived to `data/policies/gen_0008.py`.
+- **Generation 9 Results (20 episodes)**:
+  - **Average Depth**: **3.20**, **Max Depth**: **Depth 6**, **Average Turns**: 1,442.1.
+  - **Milestone**: Archived to `data/policies/gen_0009.py`.
+- **Generation 10 Results (20 episodes)**:
+  - **Average Depth**: 1.40, **Max Depth**: Depth 4, **Average Turns**: 4,701.3.
+  - **Autopsy Diagnosis**: Gen 9 policy omitted `and obs.dungeon.tile_type == "corridor"` and lacked `obs.dungeon.can_harvest_poison`, calling `harvest_poison_res()` continually from turn 1. Furthermore, solver fallbacks in `NetHackAdapter` lacked `adjacent_closed_door`, stalling navigation behind closed doors.
+  - **Fixes Applied**:
+    1. Added `elif obs_prev.dungeon.adjacent_closed_door: return self.step(Action(name="open_door"))` to both `test_altar_buc` and `harvest_poison_res` adapter fallbacks in `NetHackAdapter`.
+    2. Explicitly gated `harvest_poison_res()` with `obs.dungeon.can_harvest_poison` in `data/latest_policy.py`.
+  - **Synthesis**: Gemma synthesized Gen 10 policy restoring corridor requirement and Elbereth safety margin, archived to `data/policies/gen_0010.py`.
 
 ---
 

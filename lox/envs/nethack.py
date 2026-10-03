@@ -1188,6 +1188,8 @@ class NetHackAdapter(EnvironmentAdapter):
                 return self.step(Action(name="descend"))
             elif obs_prev.spatial.stairs_down_known:
                 return self.step(Action(name="step_to_stairs_down"))
+            elif obs_prev.dungeon.adjacent_closed_door:
+                return self.step(Action(name="open_door"))
             elif obs_prev.spatial.has_unvisited_frontier:
                 return self.step(Action(name="step_to_frontier"))
             return self.step(Action(name="step_to_dead_end"))
@@ -1200,6 +1202,8 @@ class NetHackAdapter(EnvironmentAdapter):
                 return self.step(Action(name="descend"))
             elif obs_prev.spatial.stairs_down_known:
                 return self.step(Action(name="step_to_stairs_down"))
+            elif obs_prev.dungeon.adjacent_closed_door:
+                return self.step(Action(name="open_door"))
             elif obs_prev.spatial.has_unvisited_frontier:
                 return self.step(Action(name="step_to_frontier"))
             return self.step(Action(name="step_to_dead_end"))
