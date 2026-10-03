@@ -66,7 +66,7 @@ This living document tracks empirical progress, critical discoveries, immediate 
 
 ## 3. Autonomous LLM Synthesis Campaign Status
 
-- **Status**: **Active (Task ID: `task-2879`)**
+- **Status**: **Active (Task ID: `task-3156`)**
 - **Configuration**: 10 generations, 20 episodes per generation, 25,000 max turns, target depth 10.0, provider OpenRouter (`google/gemma-4-31b-it`).
 - **Generation 1 Results (20 episodes)**:
   - **Average Depth**: **3.90**, **Max Depth**: **Depth 9**, **Average Turns**: 1,844.5.
