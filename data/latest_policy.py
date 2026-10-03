@@ -2,10 +2,11 @@ class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
         self.last_searched_pos = None
+        self.search_count = 0
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble)
+            # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
                 if obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
@@ -31,27 +32,27 @@ class Agent:
                 obs = yield wear_armor()
                 continue
 
-            # 5. Nearby Floor Loot Scooping (Strictly gated by safety)
-            if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile and obs.hero.hp_frac > 0.60:
-                obs = yield step_to_loot()
-                continue
-
-            # 6. Altar BUC Testing
-            if obs.epistemic.has_untested_items:
-                if obs.dungeon.standing_on_altar:
-                    obs = yield test_altar_buc()
-                    continue
-                elif obs.dungeon.adjacent_altar:
-                    obs = yield step_to_altar()
-                    continue
-
-            # 7. Weapon Scaling (Excalibur)
+            # 5. Weapon Scaling (Forge Excalibur)
             if obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
                 if obs.dungeon.standing_on_fountain:
                     obs = yield dip_excalibur()
                     continue
                 elif obs.dungeon.adjacent_fountain:
                     obs = yield step_to_fountain()
+                    continue
+
+            # 6. Nearby Floor Loot Scooping
+            if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile:
+                obs = yield step_to_loot()
+                continue
+
+            # 7. Altar BUC Testing
+            if obs.epistemic.has_untested_items:
+                if obs.dungeon.standing_on_altar:
+                    obs = yield test_altar_buc()
+                    continue
+                elif obs.dungeon.adjacent_altar:
+                    obs = yield step_to_altar()
                     continue
 
             # 8. Poison Resistance Harvesting
@@ -85,7 +86,7 @@ class Agent:
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
             # 0. Emergency Panic Escape
-            if (obs.hero.hp_frac < 0.20 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
+            if (obs.hero.hp_frac < 0.25 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
                     obs = yield read_scroll_teleport()
                     continue
@@ -93,29 +94,31 @@ class Agent:
                     obs = yield zap_wand_teleport()
                     continue
 
-            # 1. Non-Aggression
+            # 1. Non-Aggression (Shopkeepers/Town Watch)
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 2. Critical Healing (Priority over everything except panic escape)
+            # 2. Critical Healing
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # 3. Gaze/Touch Hazard Avoidance
-            if obs.combat.closest_hostile_name in ("floating eye", "gas spore") or obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
-                if obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2 and not obs.combat.adjacent_gas_spore:
+            # 3. Gaze/Touch Hazard Avoidance (Floating Eyes, Gas Spores)
+            # NEVER melee attack these. Use ranged or retreat.
+            if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore or \
+               obs.combat.closest_hostile_name in ("floating eye", "gas spore"):
+                if obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
                     obs = yield zap_offensive_wand()
                     continue
-                if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2 and not obs.combat.adjacent_gas_spore:
+                if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
                     obs = yield throw_dagger()
                     continue
                 obs = yield step_away_from_hostile()
                 continue
 
-            # 4. Panic Sanctuary (Elbereth) - Only if not already standing on it
-            if (obs.hero.hp_frac < 0.30 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+            # 4. Panic Sanctuary (Elbereth)
+            if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 obs = yield engrave_dust_elbereth()
                 continue
 
