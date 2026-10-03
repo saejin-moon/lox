@@ -84,7 +84,10 @@ This living document tracks empirical progress, critical discoveries, immediate 
 - **Generation 6 Results (20 episodes)**:
   - **Average Depth**: **3.15**, **Max Depth**: **Depth 7**, **Average Turns**: 1,974.3.
   - **Milestone**: Reached Depth 7, archived to `data/policies/gen_0006.py`.
-- **Generation 7**: Currently executing 20 evaluation episodes in the background.
+- **Generation 7 Results (20 episodes)**:
+  - **Average Depth**: **3.60**, **Max Depth**: **Depth 11** (Episode 7 penetrated to Depth 11!), **Average Turns**: 3,347.4.
+  - **Synthesis**: Gemma synthesized Gen 7 policy emphasizing floating eye melee avoidance and aggressive hunger prevention, archived to `data/policies/gen_0007.py`.
+- **Generation 8**: Currently executing 20 evaluation episodes in the background.
 
 ---
 
