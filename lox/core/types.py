@@ -131,6 +131,25 @@ class InventoryView(list):
     def has_wand_of_teleport(self) -> bool:
         return any(it.category == "wand" and "teleport" in it.name.lower() for it in self)
 
+    def get_wand_of_teleport_slot(self) -> str | None:
+        for it in self:
+            if it.category == "wand" and "teleport" in it.name.lower():
+                return it.slot
+        return None
+
+    @property
+    def has_offensive_wand(self) -> bool:
+        return any(
+            it.category == "wand" and any(k in it.name.lower() for k in ("striking", "sleep", "fire", "cold", "lightning", "magic missile", "death", "slow monster"))
+            for it in self
+        )
+
+    def get_offensive_wand_slot(self) -> str | None:
+        for it in self:
+            if it.category == "wand" and any(k in it.name.lower() for k in ("striking", "sleep", "fire", "cold", "lightning", "magic missile", "death", "slow monster")):
+                return it.slot
+        return None
+
     @property
     def has_wand_of_digging(self) -> bool:
         return any(it.category == "wand" and "digging" in it.name.lower() for it in self)
@@ -138,6 +157,12 @@ class InventoryView(list):
     @property
     def has_scroll_of_teleport(self) -> bool:
         return any(it.category == "scroll" and "teleport" in it.name.lower() for it in self)
+
+    def get_scroll_of_teleport_slot(self) -> str | None:
+        for it in self:
+            if it.category == "scroll" and "teleport" in it.name.lower():
+                return it.slot
+        return None
 
     @property
     def has_pick_axe(self) -> bool:
@@ -242,6 +267,7 @@ class CombatView:
     adjacent_gas_spore: bool = False
     adjacent_floating_eye: bool = False
     hostile_ignores_elbereth: bool = False
+    has_panic_escape: bool = False
     adjacent_monsters: list[str] = field(default_factory=list)
 
 
@@ -262,6 +288,8 @@ class SpatialView:
     dead_ends_count: int = 0
     target_pos: tuple[int, int] | None = None
     floor_explored: bool = False
+    has_nearby_loot: bool = False
+    nearby_loot_pos: tuple[int, int] | None = None
 
 
 @dataclass(slots=True)

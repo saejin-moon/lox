@@ -56,6 +56,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "adjacent_gas_spore": "bool",
     "adjacent_floating_eye": "bool",
     "hostile_ignores_elbereth": "bool",
+    "has_panic_escape": "bool",
 
     # Spatial Topology & Navigation
     "stairs_down_known": "bool",
@@ -69,6 +70,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "has_unsearched_dead_end": "bool",
     "unvisited_frontier_count": "int",
     "floor_explored": "bool",
+    "has_nearby_loot": "bool",
 
     # Dungeon Features & Environment
     "tile_type": "str",
@@ -102,6 +104,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     # Equipment & Item Intrinsics
     "has_wand_of_teleport": "bool",
     "has_wand_of_digging": "bool",
+    "has_offensive_wand": "bool",
     "has_scroll_of_teleport": "bool",
     "has_pick_axe": "bool",
     "has_lamp": "bool",
@@ -131,6 +134,7 @@ ALLOWED_ACTIONS: set[str] = {
     "step_to_closed_door",
     "step_away_from_hostile",
     "step_to_chokepoint",
+    "step_to_loot",
     "step_to_fountain",
     "step_to_altar",
     "step_to",
@@ -174,7 +178,10 @@ ALLOWED_ACTIONS: set[str] = {
     "quaff_healing",
     "quaff",
     "read_scroll",
+    "read_scroll_teleport",
     "zap_wand",
+    "zap_offensive_wand",
+    "zap_wand_teleport",
     "apply_item",
     "wield_weapon",
     "wear_armor",

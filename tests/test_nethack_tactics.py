@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import pytest
 from lox.envs.nethack import NetHackAdapter
@@ -128,5 +129,60 @@ def test_fountain_fov_and_step_to_fountain():
     assert obs_after is not None
 
     adapter.close()
+
+
+def test_nearby_loot_and_step_to_loot():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=108)
+
+    # Place armor '[' on a walkable adjacent tile
+    target_loot = (obs.hero.y, obs.hero.x + 1)
+    raw_obs_mock = obs.raw_obs.copy()
+    raw_obs_mock["chars"] = obs.chars.copy()
+    raw_obs_mock["chars"][target_loot[0], target_loot[1]] = ord("[")
+    obs_loot = adapter._extract_obs(raw_obs_mock)
+
+    assert obs_loot.spatial.has_nearby_loot is True
+    assert obs_loot.spatial.nearby_loot_pos is not None
+    assert math.hypot(obs_loot.spatial.nearby_loot_pos[0] - obs.hero.y, obs_loot.spatial.nearby_loot_pos[1] - obs.hero.x) <= 4
+
+    # Step to loot
+    obs_after, _, _, _, _ = adapter.step(Action(name="step_to_loot"))
+    assert obs_after is not None
+
+    adapter.close()
+
+
+def test_wand_actions_and_teleport_panic_escape():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=109)
+
+    # Inject teleport scroll and wand of striking into inventory
+    from lox.core.types import Item, InventoryView
+    test_inv = InventoryView([
+        Item(slot="a", name="+1 long sword", category="weapon", is_equipped=True, buc="uncursed"),
+        Item(slot="b", name="scroll of teleportation", category="scroll", is_equipped=False, buc="uncursed"),
+        Item(slot="c", name="wand of striking", category="wand", is_equipped=False, buc="uncursed"),
+        Item(slot="d", name="wand of teleportation", category="wand", is_equipped=False, buc="uncursed"),
+    ])
+    assert test_inv.has_scroll_of_teleport is True
+    assert test_inv.get_scroll_of_teleport_slot() == "b"
+    assert test_inv.has_offensive_wand is True
+    assert test_inv.get_offensive_wand_slot() == "c"
+    assert test_inv.has_wand_of_teleport is True
+    assert test_inv.get_wand_of_teleport_slot() == "d"
+
+    # Test action dispatching
+    obs_zap, _, _, _, _ = adapter.step(Action(name="zap_offensive_wand", slot="c", target_pos=(obs.hero.y, obs.hero.x + 2)))
+    assert obs_zap is not None
+
+    obs_tele, _, _, _, _ = adapter.step(Action(name="zap_wand_teleport", slot="d"))
+    assert obs_tele is not None
+
+    obs_scroll, _, _, _, _ = adapter.step(Action(name="read_scroll_teleport", slot="b"))
+    assert obs_scroll is not None
+
+    adapter.close()
+
 
 

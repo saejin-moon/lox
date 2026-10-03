@@ -61,7 +61,12 @@ class Agent:
                     obs = yield step_to_fountain()
                     continue
 
-            # 6. Altar BUC Testing (Only when adjacent or standing on altar with untested items)
+            # 6. Nearby Floor Loot Scooping (Collect dropped armor/wands/potions to lower AC and gain tactical items)
+            if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile:
+                obs = yield step_to_loot()
+                continue
+
+            # 7. Altar BUC Testing (Only when adjacent or standing on altar with untested items)
             if obs.dungeon.standing_on_altar and obs.epistemic.has_untested_items:
                 obs = yield test_altar_buc()
                 continue
@@ -69,7 +74,7 @@ class Agent:
                 obs = yield step_to_altar()
                 continue
 
-            # 7. Poison Resistance Harvesting (STRICTLY gate by obs.dungeon.can_harvest_poison!)
+            # 8. Poison Resistance Harvesting (STRICTLY gate by obs.dungeon.can_harvest_poison!)
             if obs.dungeon.can_harvest_poison and not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
                 obs = yield harvest_poison_res()
                 continue
@@ -99,30 +104,61 @@ class Agent:
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
-            if obs.combat.closest_hostile_name == "floating eye":
-                if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
-                    obs = yield throw_dagger()
-                else:
+            # 0. Emergency Panic Escape: Teleport away if critically low HP (< 25%) or surrounded
+            if (obs.hero.hp_frac < 0.25 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
+                if obs.inventory.has_scroll_of_teleport:
+                    obs = yield read_scroll_teleport()
+                    continue
+                elif obs.inventory.has_wand_of_teleport:
+                    obs = yield zap_wand_teleport()
+                    continue
+
+            # 1. Passive & Exploding Hazards: NEVER attack floating eyes or gas spores in melee!
+            if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
+                if obs.combat.can_retreat:
                     obs = yield step_away_from_hostile()
+                    continue
+                elif obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2 and not obs.combat.adjacent_gas_spore:
+                    obs = yield zap_offensive_wand()
+                    continue
+                elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2 and not obs.combat.adjacent_gas_spore:
+                    obs = yield throw_dagger()
+                    continue
+                obs = yield step_away_from_hostile()
                 continue
+
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
             if obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
-            # Panic Sanctuary: Engrave Elbereth immediately if low HP (< 40%) or surrounded
-            if (obs.hero.hp_frac < 0.40 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+
+            # 2. Panic Sanctuary: Engrave Elbereth immediately if low HP (< 35%) or surrounded
+            if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 obs = yield engrave_dust_elbereth()
                 continue
-            # While standing on Elbereth: heal, pray, or disengage if monsters fled (never wait forever for passive regeneration)
+
+            # 3. While standing on Elbereth:
             if obs.combat.standing_on_elbereth:
+                # Hostiles that ignore Elbereth (orcs, elves, humans) must be fought or retreated from!
+                if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
+                    if obs.hero.hp_frac > 0.40 or not obs.combat.can_retreat:
+                        obs = yield melee_attack_hostile()
+                        continue
+                    else:
+                        obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
+                        continue
+
                 if obs.hero.hp_frac < 0.30 and obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
                 elif obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
                     obs = yield quaff_healing()
+                    continue
+                elif obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
+                    obs = yield zap_offensive_wand()
                     continue
                 elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
                     obs = yield throw_dagger()
@@ -138,25 +174,32 @@ class Agent:
                 else:
                     obs = yield melee_attack_hostile()
                     continue
-            # Ranged Harassment: Throw daggers at distance >= 2 to kill fast pests before contact
+
+            # 4. Ranged Harassment: Offensive wands and daggers at distance >= 2
+            if obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
+                obs = yield zap_offensive_wand()
+                continue
             if obs.combat.closest_hostile_dist >= 2 and obs.inventory.has_daggers:
                 obs = yield throw_dagger()
                 continue
+
+            # 5. Fast Dangerous Attackers (Soldier ants, killer bees)
             if obs.combat.is_fast_dangerous:
                 if not obs.combat.in_corridor and obs.combat.can_retreat:
                     obs = yield step_to_chokepoint()
                     continue
 
+            # 6. Tactical Melee / Chokepoint Retreat
             if obs.combat.adjacent_hostile:
                 if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
                 else:
-                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
+                    obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
             else:
                 if obs.hero.hp_frac > 0.50:
                     obs = yield melee_attack_hostile()
                 else:
-                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
+                    obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
             if obs.combat.hostile_count_fov == 0:
                 break
         return obs
@@ -200,32 +243,35 @@ class Agent:
 Every turn, `obs` provides rich sub-namespaces:
 - `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state` (SATIATED, NORMAL, HUNGRY, WEAK, FAINTING), `dungeon_branch`, `has_poison_res`
 - `obs.status`: `is_blind`, `is_poisoned`, `is_confused`, `is_stunned`, `is_sick`, `is_encumbered`, `encumbrance_level`, `is_levitating`
-- `obs.inventory`: `has_food`, `has_healing`, `has_unworn_armor`, `has_daggers`, `get_food_slot()`, `get_healing_slot()`, `get_dagger_slot()`, `items`
-- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`
-- `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`
-- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `standing_on_fountain`, `adjacent_altar`, `standing_on_altar`, `can_forge_excalibur`
+- `obs.inventory`: `has_food`, `has_healing`, `has_unworn_armor`, `has_daggers`, `has_offensive_wand`, `has_wand_of_teleport`, `has_scroll_of_teleport`, `get_food_slot()`, `get_healing_slot()`, `get_dagger_slot()`, `get_offensive_wand_slot()`, `items`
+- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`, `adjacent_floating_eye`, `adjacent_gas_spore`, `hostile_ignores_elbereth`, `has_panic_escape`
+- `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`, `has_nearby_loot`
+- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `standing_on_fountain`, `adjacent_altar`, `standing_on_altar`, `can_forge_excalibur`, `can_harvest_poison`
 - `obs.epistemic`: `untested_buc_count` (int), `has_untested_items` (bool), `can_safely_wear_armor` (bool), `can_safely_quaff_healing` (bool), `items_belief` (dict of ItemBeliefState)
 - `obs.agenda`: `active_goal` (str), `goal_stack` (list of str), `is_active(goal_name)` (bool)
 - `obs.corpses`: list of `FloorCorpse(name, y, x, age_turns, is_fresh, is_poisonous, is_deadly, is_safe)`
 - `obs.message`: last raw game message
 
 ### Critical NetHack 3.6.6 Mechanics & Invariants:
-1. **Floating Eyes**: Attacking in melee triggers a passive gaze that paralyzes the hero for up to 70 turns (`0d70`). Ranged attacks, wands, and blindness completely bypass the gaze. Always step away or use ranged attacks!
-2. **Prayer & Major Trouble**: Safe prayer timeout is ~350 turns. However, during **major trouble** (fainting from hunger or HP < 15%), gods grant divine aid even with timeout as high as ~150–200 turns without divine wrath.
-3. **Corpse Consumption Hazards**: Eating a corpse takes multiple turns (`weight / 64 + 3`), leaving the hero completely helpless and vulnerable. NEVER eat a corpse if enemies are in FOV. Corpses older than 50 turns cause food poisoning and 1d8 damage; kobolds are poisonous; cockatrices cause lethal petrification without gloves. Check `corpse.is_safe` before eating!
-4. **Door Breaching**: Always try `open_door()` first on closed doors. Only use `kick_closed_door()` if `obs.dungeon.door_is_locked` is True (kicking unlocked doors can hurt your leg and immobilize you for 5-20 turns).
-5. **Excalibur Dipping (`dip_excalibur`)**: Dipping a long sword into a fountain strictly requires **standing directly on the fountain tile** (`obs.dungeon.standing_on_fountain`). It has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`). Wielding Excalibur gives +1d10 slashing damage, auto-searching for doors, and drain resistance. Never dip from an adjacent tile!
-6. **Secret Doors & Corridor Dead Ends**: NetHack procedural generation regularly seals off deeper dungeon sections and staircases behind hidden secret doors located at dead-end corridors (`#`) and room perimeter walls. When visible frontiers are fully explored (`obs.spatial.has_unvisited_frontier == False`), call `step_to_dead_end()` to navigate to dead ends or perimeter walls and `search()` repeatedly until the secret door is exposed. Searching repeatedly inside open rooms will NOT find the stairs.
-7. **Tactical In-Combat Emergency Healing**: Quaffing a healing potion takes only 1 turn and restores 10-20 HP. When `obs.hero.hp_frac < 0.50` and `obs.inventory.has_healing`, ALWAYS quaff healing immediately inside `handle_combat` before taking another attack! Never die with healing potions in your pack.
-8. **Soldier Ants & High-Speed Attackers**: Soldier ants and killer bees move at speed 18 (nearly 2x the hero) and inflict lethal poison stings. If `obs.combat.is_fast_dangerous` is True or `obs.combat.closest_hostile_name in ("soldier ant", "killer bee")`, retreat immediately to a 1-tile corridor chokepoint (`step_to_chokepoint()`), quaff healing, or pray.
-9. **Equipment & Armor Optimization (`wear_armor`)**: Defeated monsters drop helmets, boots, cloaks, and armor. When out of combat, `obs.inventory.has_unworn_armor` is True, and `obs.epistemic.can_safely_wear_armor` is True, yield `wear_armor()` to lower your Armor Class (AC). Lower AC drastically reduces damage from deep monsters.
-10. **Shopkeeper & Minetown Non-Aggression**: Never attack shopkeepers, priests, or town watchmen (`obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain")`), and never kick doors when `obs.dungeon.in_shop` is True. Killing or provoking them will instantly end your run.
-11. **Exploration Pacing & No Idle Waiting**: Waiting (`wait()`) during active exploration when seeking stairs is strictly forbidden. Never yield `wait()` when frontiers are clear; instead call `handle_dead_end(obs)` or `search()` to investigate room perimeter walls. Sitting in place produces 0 turns of progress and leads to `MaxTurnsReached`.
-12. **Dust Elbereth Sanctuary (`engrave_dust_elbereth`)**: Engraving "Elbereth" into the dust with bare fingers takes 1 turn and creates an impenetrable ward against 95% of non-humanoid monsters (ants, bees, bats, mumakil, leocrottas, canines). Monsters cannot attack on an Elbereth tile and flee in panic. When cornered or HP < 35%, yield `engrave_dust_elbereth()`. While standing on Elbereth, do NOT attack in melee; heal or wait for regeneration.
-13. **Ranged Missile Harassment (`throw_dagger`)**: Valkyries start with daggers. When enemies are at distance >= 2, yield `throw_dagger()` to kill fast speedsters before they close to melee. Thrown daggers drop onto the ground and are automatically recovered after combat, so freely throw daggers down to 0.
-14. **Altar BUC Identification (`test_altar_buc`)**: Equipping cursed armor or weapons welds them to your body. When an altar is nearby (`obs.dungeon.adjacent_altar` or `obs.dungeon.standing_on_altar`) and `obs.epistemic.has_untested_items` is True, yield `test_altar_buc()` to automatically batch-drop and identify the BUC status of untested inventory items.
-15. **Poison Resistance Harvesting (`harvest_poison_res`)**: Poisonous bites from ants and bees kill heroes instantly at Depth 4+. When out of combat and `not obs.hero.has_poison_res`, yield `harvest_poison_res()` to seek out and consume killer bee or soldier ant corpses to gain permanent poison resistance intrinsic.
-16. **Hybrid HTN-BT Goal Agenda**: Structure strategic progression around milestones (`obs.agenda.active_goal` or `GoalDirective`). Reactive reflexes (Combat, Healing, Hunger, Panic Elbereth) ALWAYS execute first. When safe, evaluate your strategic goal: e.g. acquire poison resistance (`GOAL_COLLECT_POISON_RES`), forge Excalibur (`GOAL_FORGE_EXCALIBUR`), test BUC on altars (`GOAL_TEST_BUC_ALTAR`), or clear the floor and descend (`GOAL_DESCEND_STAIRS`).
+1. **Passive & Exploding Hazards (`adjacent_floating_eye`, `adjacent_gas_spore`)**: Attacking a floating eye in melee triggers a passive 70-turn paralysis gaze (`0d70`). Striking a gas spore explodes for lethal 4d6 area blast. NEVER melee attack them! Step away or destroy with ranged daggers or offensive wands.
+2. **Emergency Panic Escape (`read_scroll_teleport`, `zap_wand_teleport`)**: When low on HP (< 25%) or surrounded by high-speed attackers, teleport away immediately. NetHack teleport scrolls and wands (zapped at `.`) instantly relocate the hero to a random safe tile.
+3. **Nearby Floor Loot Scooping (`step_to_loot`)**: Defeated monsters drop armor, weapons, wands, and scrolls on their death tile. When out of combat and `obs.spatial.has_nearby_loot` is True, yield `step_to_loot()` to walk over the dropped items. Autopickup collects them, allowing `wear_armor()` to lower Armor Class (AC) towards negative numbers!
+4. **Elbereth Immunity & Humanoid Combat Tactics (`hostile_ignores_elbereth`)**: Orcs, elves, and humans ignore Elbereth. While standing on Elbereth, if `obs.combat.hostile_ignores_elbereth` is True, do NOT wait passively; actively fight in melee or retreat to a 1-tile corridor chokepoint.
+5. **Prayer & Major Trouble**: Safe prayer timeout is ~350 turns. However, during **major trouble** (fainting from hunger or HP < 15%), gods grant divine aid even with timeout as high as ~150–200 turns without divine wrath.
+6. **Corpse Consumption Hazards**: Eating a corpse takes multiple turns (`weight / 64 + 3`), leaving the hero completely helpless and vulnerable. NEVER eat a corpse if enemies are in FOV. Corpses older than 50 turns cause food poisoning; kobolds are poisonous; cockatrices cause lethal petrification without gloves. Check `corpse.is_safe` before eating!
+7. **Door Breaching**: Always try `open_door()` first on closed doors. Only use `kick_closed_door()` if `obs.dungeon.door_is_locked` is True (kicking unlocked doors can hurt your leg and immobilize you for 5-20 turns).
+8. **Excalibur Dipping (`dip_excalibur`)**: Dipping a long sword into a fountain strictly requires **standing directly on the fountain tile** (`obs.dungeon.standing_on_fountain`). It has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`). Wielding Excalibur gives +1d10 slashing damage, auto-searching for doors, and drain resistance. Never dip from an adjacent tile!
+9. **Secret Doors & Corridor Dead Ends**: NetHack procedural generation regularly seals off deeper dungeon sections and staircases behind hidden secret doors located at dead-end corridors (`#`) and room perimeter walls. When visible frontiers are fully explored (`obs.spatial.has_unvisited_frontier == False`), call `step_to_dead_end()` to navigate to dead ends or perimeter walls and `search()` repeatedly until the secret door is exposed. Searching repeatedly inside open rooms will NOT find the stairs.
+10. **Tactical In-Combat Emergency Healing**: Quaffing a healing potion takes only 1 turn and restores 10-20 HP. When `obs.hero.hp_frac < 0.50` and `obs.inventory.has_healing`, ALWAYS quaff healing immediately inside `handle_combat` before taking another attack! Never die with healing potions in your pack.
+11. **Soldier Ants & High-Speed Attackers**: Soldier ants and killer bees move at speed 18 (nearly 2x the hero) and inflict lethal poison stings. If `obs.combat.is_fast_dangerous` is True or `obs.combat.closest_hostile_name in ("soldier ant", "killer bee")`, retreat immediately to a 1-tile corridor chokepoint (`step_to_chokepoint()`), quaff healing, or pray.
+12. **Equipment & Armor Optimization (`wear_armor`)**: Defeated monsters drop helmets, boots, cloaks, and armor. When out of combat, `obs.inventory.has_unworn_armor` is True, and `obs.epistemic.can_safely_wear_armor` is True, yield `wear_armor()` to lower your Armor Class (AC). Lower AC drastically reduces damage from deep monsters.
+13. **Shopkeeper & Minetown Non-Aggression**: Never attack shopkeepers, priests, or town watchmen (`obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain")`), and never kick doors when `obs.dungeon.in_shop` is True. Killing or provoking them will instantly end your run.
+14. **Exploration Pacing & No Idle Waiting**: Waiting (`wait()`) during active exploration when seeking stairs is strictly forbidden. Never yield `wait()` when frontiers are clear; instead call `handle_dead_end(obs)` or `search()` to investigate room perimeter walls. Sitting in place produces 0 turns of progress and leads to `MaxTurnsReached`.
+15. **Dust Elbereth Sanctuary (`engrave_dust_elbereth`)**: Engraving "Elbereth" into the dust with bare fingers takes 1 turn and creates an impenetrable ward against 95% of non-humanoid monsters (ants, bees, bats, mumakil, leocrottas, canines). Monsters cannot attack on an Elbereth tile and flee in panic. When cornered or HP < 35%, yield `engrave_dust_elbereth()`.
+16. **Ranged Missile Harassment (`throw_dagger`, `zap_offensive_wand`)**: Valkyries start with daggers. When enemies are at distance >= 2, yield `throw_dagger()` or `zap_offensive_wand()` to kill fast speedsters before they close to melee. Thrown daggers drop onto the ground and are automatically recovered after combat, so freely throw daggers down to 0.
+17. **Altar BUC Identification (`test_altar_buc`)**: Equipping cursed armor or weapons welds them to your body. When an altar is nearby (`obs.dungeon.adjacent_altar` or `obs.dungeon.standing_on_altar`) and `obs.epistemic.has_untested_items` is True, yield `test_altar_buc()` to automatically batch-drop and identify the BUC status of untested inventory items.
+18. **Poison Resistance Harvesting (`harvest_poison_res`)**: Poisonous bites from ants and bees kill heroes instantly at Depth 4+. When out of combat and `obs.dungeon.can_harvest_poison` is True and `not obs.hero.has_poison_res`, yield `harvest_poison_res()` to seek out and consume killer bee or soldier ant corpses to gain permanent poison resistance intrinsic.
+19. **Hybrid HTN-BT Goal Agenda**: Structure strategic progression around milestones (`obs.agenda.active_goal` or `GoalDirective`). Reactive reflexes (Combat, Healing, Hunger, Panic Elbereth) ALWAYS execute first. When safe, evaluate your strategic goal: e.g. acquire poison resistance (`GOAL_COLLECT_POISON_RES`), forge Excalibur (`GOAL_FORGE_EXCALIBUR`), test BUC on altars (`GOAL_TEST_BUC_ALTAR`), or clear the floor and descend (`GOAL_DESCEND_STAIRS`).
 
 ### Available Actions:
 {actions}

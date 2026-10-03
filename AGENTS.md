@@ -163,6 +163,18 @@ lox/
     - When standing on Elbereth against enemies with `obs.combat.hostile_ignores_elbereth == True`, yielding `wait()` causes the hero to be executed without resisting.
     - Policies must detect `obs.combat.hostile_ignores_elbereth` and actively engage in melee (or retreat to 1-tile corridor chokepoints) rather than waiting on the ward.
 
+23. **Floor Loot Scooping & AC Scaling (`step_to_loot`, `has_nearby_loot`)**:
+    - Slain monsters drop armor, helmets, boots, cloaks, and wands on their death tile. Because melee combat happens at distance 1 and exploration routes to distant frontiers, heroes previously never stepped on dropped monster loot, leaving AC stuck at 5–6 for whole episodes.
+    - `obs.spatial.has_nearby_loot` detects dropped items within distance $\le 4$ outside shops, and `step_to_loot` steps directly onto them so NLE's autopickup collects them. This immediately provides armor for `wear_armor()` to drive AC down towards negative values.
+
+24. **Offensive Wand Zapping (`zap_offensive_wand`, `has_offensive_wand`)**:
+    - Heroes collect offensive wands (striking, fire, cold, sleep, lightning, magic missile).
+    - `zap_offensive_wand()` targets the closest hostile at distance $\ge 2$, safely eliminating high-speed pests and passive hazards (floating eyes, gas spores) without taking melee damage or paralysis.
+
+25. **Emergency Teleportation Panic Escape (`read_scroll_teleport`, `zap_wand_teleport`, `has_panic_escape`)**:
+    - When cornered, surrounded by multiple attackers, or critically injured ($< 25\%$ HP) with prayer on timeout, normal retreats fail.
+    - `obs.combat.has_panic_escape` flags teleport scrolls and wands. Calling `read_scroll_teleport` or `zap_wand_teleport` (zapping self at `.`) instantly relocates the hero to a random safe tile on the level, averting death.
+
 ---
 
 ## 4. Key CLI Commands

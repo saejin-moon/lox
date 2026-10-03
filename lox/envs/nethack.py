@@ -580,6 +580,7 @@ class NetHackAdapter(EnvironmentAdapter):
             adjacent_gas_spore=adjacent_gas_spore,
             adjacent_floating_eye=adjacent_floating_eye,
             hostile_ignores_elbereth=hostile_ignores_elbereth,
+            has_panic_escape=bool(inv_view.has_scroll_of_teleport or inv_view.has_wand_of_teleport),
             adjacent_monsters=adjacent_monsters,
         )
 
@@ -598,6 +599,27 @@ class NetHackAdapter(EnvironmentAdapter):
                 dead_end_target = SpatialEngine.find_nearest_target((y, x), walkable_nav, target_mask=dead_ends_mask, is_door=all_doors)
                 has_dead_ends = (dead_end_target is not None and dead_end_target != (-1, -1))
 
+        # Nearby dropped loot discovery (armor, weapons, wands, potions, scrolls, rings)
+        has_nearby_loot = False
+        nearby_loot_pos = None
+        if "shop" not in message.lower():
+            loot_chars = (ord("["), ord(")"), ord("!"), ord("?"), ord("/"), ord("="), ord('"'), ord("$"))
+            loot_candidates = []
+            for dy in range(-4, 5):
+                for dx in range(-4, 5):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ly, lx = y + dy, x + dx
+                    if 0 <= ly < 21 and 0 <= lx < 79 and walkable_nav[ly, lx]:
+                        if (ly, lx) not in self.blocked_tiles and int(chars[ly, lx]) in loot_chars:
+                            if glyphs is not None and nethack.glyph_is_monster(int(glyphs[ly, lx])):
+                                continue
+                            loot_candidates.append((ly, lx))
+            if loot_candidates:
+                has_nearby_loot = True
+                closest_idx = int(np.argmin([math.hypot(ly - y, lx - x) for ly, lx in loot_candidates]))
+                nearby_loot_pos = loot_candidates[closest_idx]
+
         spatial = SpatialView(
             stairs_down_known=(self.known_stairs_down is not None),
             stairs_up_known=(self.known_stairs_up is not None),
@@ -613,6 +635,8 @@ class NetHackAdapter(EnvironmentAdapter):
             dead_ends_count=int(np.sum(dead_ends_mask)),
             target_pos=self.last_target_pos,
             floor_explored=(not has_frontier and self.known_stairs_down is not None),
+            has_nearby_loot=has_nearby_loot,
+            nearby_loot_pos=nearby_loot_pos,
         )
 
         # Dungeon tile type
@@ -1233,6 +1257,25 @@ class NetHackAdapter(EnvironmentAdapter):
                     return self._step_or_breach(obs_prev, dy, dx)
             return self.step(Action(name="step_away_from_hostile"))
 
+        elif action.name == "step_to_loot" and obs_prev is not None:
+            hero = obs_prev.hero
+            target_pos = action.target_pos or action.extra.get("target_pos") or getattr(obs_prev.spatial, "nearby_loot_pos", None)
+            if target_pos:
+                if (hero.y, hero.x) == target_pos:
+                    if obs_prev.spatial.has_unvisited_frontier:
+                        return self.step(Action(name="step_to_frontier"))
+                    return self.step(Action(name="step_to_dead_end"))
+                walkable, walkable_nav = self._build_walkable_nav(obs_prev)
+                all_doors = self._get_all_doors_mask(obs_prev)
+                walkable_nav[target_pos[0], target_pos[1]] = True
+                path = SpatialEngine.find_path((hero.y, hero.x), target_pos, walkable_nav, is_door=all_doors)
+                if path:
+                    dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                    return self._step_or_breach(obs_prev, dy, dx)
+            if obs_prev.spatial.has_unvisited_frontier:
+                return self.step(Action(name="step_to_frontier"))
+            return self.step(Action(name="step_to_dead_end"))
+
         elif action.name in ("step_away_from_hostile", "retreat") and obs_prev is not None:
             hero = obs_prev.hero
             walkable, walkable_nav = self._build_walkable_nav(obs_prev)
@@ -1391,9 +1434,29 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name in ("quaff_healing", "quaff"):
             slot = action.slot or (obs_prev.inventory.get_healing_slot() if obs_prev else "a")
             return self._step_sequence([self.char_to_act.get("q", 0), self.char_to_act.get(slot or "a", 0)])
-        elif action.name == "read_scroll":
-            slot = action.slot or "a"
+        elif action.name in ("read_scroll_teleport", "read_scroll"):
+            slot = action.slot
+            if not slot and action.name == "read_scroll_teleport" and obs_prev:
+                slot = obs_prev.inventory.get_scroll_of_teleport_slot()
+            slot = slot or "a"
             return self._step_sequence([self.char_to_act.get("r", 0), self.char_to_act.get(slot, 0)])
+        elif action.name == "zap_offensive_wand" and obs_prev is not None:
+            hero = obs_prev.hero
+            slot = action.slot or obs_prev.inventory.get_offensive_wand_slot()
+            target_pos = action.target_pos or action.extra.get("target_pos") or obs_prev.combat.closest_hostile_pos
+            if slot and target_pos:
+                dy = int(np.sign(target_pos[0] - hero.y))
+                dx = int(np.sign(target_pos[1] - hero.x))
+                dir_char = DIR_CHARS.get((dy, dx), ".")
+                return self._step_sequence([
+                    self.char_to_act.get("z", 0),
+                    self.char_to_act.get(slot, 0),
+                    self.char_to_act.get(dir_char, 0),
+                ])
+            return self.step(Action(name="melee_attack_hostile"))
+        elif action.name == "zap_wand_teleport":
+            slot = action.slot or (obs_prev.inventory.get_wand_of_teleport_slot() if obs_prev else "a")
+            return self._step_sequence([self.char_to_act.get("z", 0), self.char_to_act.get(slot or "a", 0), self.char_to_act.get(".", 0)])
         elif action.name == "zap_wand":
             slot = action.slot or "a"
             dir_char = DIR_CHARS.get(action.direction, ".") if action.direction else "."

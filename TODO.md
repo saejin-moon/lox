@@ -135,30 +135,35 @@ This living document tracks empirical progress, critical discoveries, immediate 
     1. Corrected chokepoint retreat direction in [`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py).
     2. Added mixed hazard swarm engagement with Elbereth warding in [`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py).
     3. Archived synthesized policies `gen_0009.py` and `gen_0010.py`.
+- **Campaign 4 Results (Task `task-3358`, Gens 1–4 Completed)**:
+  - **Gen 1**: Avg Depth **3.50**, Max Depth 8, Avg Turns 2,210.5
+  - **Gen 2**: Avg Depth **3.85**, Max Depth 7, Avg Turns 1,940.2
+  - **Gen 3**: Avg Depth **3.80**, Max Depth 8, Avg Turns 2,150.8
+  - **Gen 4**: Avg Depth **3.85**, Max Depth 8, Avg Turns 2,340.1
+  - **Strategic Pause & Upgrade**: Stably held high averages near 4.0, but identified 3 critical macro gaps needed to unlock Depths 8–15:
+    1. **Floor Loot Scooping (`step_to_loot`, `has_nearby_loot`)**: Monsters dropped helmets, mail, boots, and cloaks, but heroes never stepped on death tiles. Added `has_nearby_loot` and `step_to_loot` so autopickup collects armor, enabling `wear_armor` to drop AC towards negative numbers.
+    2. **Offensive Wand Zapping (`zap_offensive_wand`, `has_offensive_wand`)**: Enabled zapping wands of striking, magic missile, fire, cold, sleep, and lightning at range $\ge 2$ to safely neutralize high-threat hostiles and passive hazards.
+    3. **Emergency Panic Teleportation (`read_scroll_teleport`, `zap_wand_teleport`, `has_panic_escape`)**: Teleporting out of lethal surrounds or $< 25\%$ HP situations to reset the encounter.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 
-1. **Launch Autonomous LLM Synthesis Loop**:
-   - Once all manual tactical and navigational primitives are empirically validated, run:
+1. **Launch Autonomous LLM Synthesis Campaign 5**:
+   - Run:
      ```bash
      uv run python -u -m scripts.run_synthesis \
        --provider openrouter \
        --model google/gemma-4-31b-it \
-       --generations 15 \
-       --eval-episodes 10 \
+       --generations 10 \
+       --eval-episodes 20 \
        --max-turns 25000 \
        --target-depth 10.0 \
        --policy-path data/latest_policy.py
      ```
-2. **Tactical Offensive & Utility Wands**:
-   - Implement `zap_wand(direction, slot)` for wands of striking, digging, sleep, fire, and lightning.
-   - Zapping sleep or striking at ranged enemies (dwarves, leocrottas) dramatically reduces incoming damage at Depths 6–10.
-3. **Scroll & Potion Identification & Use**:
-   - Read uncursed scrolls of identify/teleportation.
-   - Emergency teleportation (`read_scroll_teleport`) when surrounded by high-damage packs at Depths 7–10.
-4. **Mines vs Main Dungeon Branch Selection**:
-   - The Gnomish Mines branch (Depths 2–4) is dark and filled with gnome/dwarf wand wielders.
-   - Add branch-awareness: prefer clearing the main dungeon staircase down to Depth 10 before exploring deep Mines.
-5. **Campaign Completion Verification**:
+2. **Main Dungeon vs Gnomish Mines Branch Steering**:
+   - The Gnomish Mines branch (Depths 2–4) is dark and infested with gnome wand wielders. Prefer descending the main dungeon staircase down to Depth 10 before exploring deep Mines.
+3. **Container & Bag Stash Management**:
+   - Looting sacks and chests for additional scrolls and potions.
+4. **Campaign Completion Verification**:
    - Batch average depth $\ge 10.0$ triggers `[CAMPAIGN GOAL ACHIEVED]`.
    - Record final DuckDB telemetry and emit `<!-- GOAL_COMPLETE -->`.
+
