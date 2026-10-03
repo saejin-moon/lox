@@ -65,6 +65,7 @@ class HeroState:
     is_hallucinating: bool = False
     is_poisoned: bool = False
     is_sick: bool = False
+    has_poison_res: bool = False
 
     @property
     def hp_frac(self) -> float:
@@ -197,6 +198,29 @@ class InventoryView(list):
                 return it.slot
         return None
 
+    @property
+    def dagger_count(self) -> int:
+        return sum(it.quantity for it in self if it.category == "weapon" and "dagger" in it.name.lower())
+
+    @property
+    def food_count(self) -> int:
+        return sum(it.quantity for it in self if it.category == "food")
+
+    @property
+    def potion_count(self) -> int:
+        return sum(it.quantity for it in self if it.category == "potion")
+
+    @property
+    def scroll_count(self) -> int:
+        return sum(it.quantity for it in self if it.category == "scroll")
+
+    @property
+    def equipped_weapon_name(self) -> str:
+        for it in self:
+            if it.category == "weapon" and it.is_equipped:
+                return it.name
+        return "bare hands"
+
 
 @dataclass(slots=True)
 class CombatView:
@@ -214,6 +238,9 @@ class CombatView:
     adjacent_pet: bool = False
     adjacent_peaceful: bool = False
     is_fast_dangerous: bool = False
+    gas_spore_in_fov: bool = False
+    adjacent_gas_spore: bool = False
+    adjacent_monsters: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -226,9 +253,12 @@ class SpatialView:
     standing_on_stairs_down: bool = False
     standing_on_stairs_up: bool = False
     standing_on_elbereth: bool = False
+    standing_on_dead_end: bool = False
     has_unvisited_frontier: bool = False
     has_unsearched_dead_end: bool = False
     unvisited_frontier_count: int = 0
+    dead_ends_count: int = 0
+    target_pos: tuple[int, int] | None = None
     floor_explored: bool = False
 
 
@@ -242,8 +272,12 @@ class DungeonView:
     dungeon_branch: str = "dungeon"  # "dungeon", "mines", "sokoban", "quest"
     adjacent_closed_door: bool = False
     adjacent_open_door: bool = False
+    has_closed_door: bool = False
+    closed_door_in_fov: bool = False
+    closest_door_pos: tuple[int, int] | None = None
     door_is_locked: bool = False
     adjacent_fountain: bool = False
+    standing_on_fountain: bool = False
     fountain_in_fov: bool = False
     closest_fountain_pos: tuple[int, int] | None = None
     adjacent_altar: bool = False
@@ -252,6 +286,7 @@ class DungeonView:
     adjacent_trap: bool = False
     standing_on_trap: bool = False
     can_forge_excalibur: bool = False
+    can_harvest_poison: bool = False
 
 
 @dataclass(slots=True)
@@ -272,6 +307,27 @@ class FloorCorpse:
 
 
 @dataclass
+class EpistemicView:
+    """Belief state over latent properties (BUC, safe-gates, identity)."""
+    untested_buc_count: int = 0
+    has_untested_items: bool = False
+    can_safely_wear_armor: bool = True
+    can_safely_quaff_healing: bool = True
+    items_belief: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgendaView:
+    """Read-only view of the active strategic agenda exposed to policies."""
+    active_goal: str = "explore_floor"
+    goal_stack: list[str] = field(default_factory=lambda: ["explore_floor"])
+
+    def is_active(self, goal_name: Any) -> bool:
+        target = goal_name.value if hasattr(goal_name, "value") else str(goal_name)
+        return self.active_goal == target
+
+
+@dataclass
 class Observation:
     """Standardized environment observation across all domains."""
     chars: np.ndarray             # 2D character grid (uint8)
@@ -282,6 +338,8 @@ class Observation:
     combat: CombatView = field(default_factory=CombatView)
     spatial: SpatialView = field(default_factory=SpatialView)
     dungeon: DungeonView = field(default_factory=DungeonView)
+    epistemic: EpistemicView = field(default_factory=EpistemicView)
+    agenda: AgendaView = field(default_factory=AgendaView)
     corpses: list[FloorCorpse] = field(default_factory=list)
     message: str = ""             # Last in-game message text
     raw_obs: Any = None           # Original environment observation dict
@@ -296,4 +354,5 @@ class Action:
     slot: str | None = None                  # Inventory slot letter (e.g. "a", "b")
     target_pos: tuple[int, int] | None = None
     count: int = 1                           # Repeat count
+    subroutine: str = ""                     # Policy goal/subroutine name
     extra: dict[str, Any] = field(default_factory=dict)

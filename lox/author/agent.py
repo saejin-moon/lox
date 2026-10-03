@@ -86,6 +86,8 @@ class AuthorAgent:
                 return self.tools.get_floor_stash_report()
             elif tool_name == "get_death_autopsy_trace":
                 return self.tools.get_death_autopsy_trace(episode_id=args.get("episode_id", ""))
+            elif tool_name == "get_macro_requests":
+                return self.tools.get_macro_requests()
             return f"Unknown tool '{tool_name}'."
         except Exception as e:
             return f"Tool execution error for '{tool_name}': {e}"
@@ -503,7 +505,7 @@ class Agent:
                             chars=np.full((21, 79), ord("."), dtype=np.uint8),
                             glyphs=np.zeros((21, 79), dtype=np.int16),
                             hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
-                            combat=CombatView(hostile_count_fov=1, adjacent_hostile=True, closest_hostile_name="floating eye"),
+                            combat=CombatView(hostile_count_fov=1, adjacent_hostile=True, closest_hostile_name="floating eye", floating_eye_in_fov=True),
                         )),
                         ("combat", Observation(
                             chars=np.full((21, 79), ord("."), dtype=np.uint8),

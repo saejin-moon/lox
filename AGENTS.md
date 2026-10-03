@@ -127,8 +127,21 @@ lox/
     - Neutralizes high-speed lethal pests (bats, killer bees, soldier ants) before melee contact. Thrown daggers can safely be consumed down to 0 because NetHack drops them on the floor for retrieval during or after combat.
 
 15. **Artifact Weapon Scaling (`dip_excalibur`)**:
-    - Lawful Valkyries at Experience Level $\ge 5$ dipping a long sword into a fountain (`#dip` $\to$ `slot` $\to$ `dir`) have a 1/6 chance per dip of forging Excalibur (+1d10 slashing damage, auto-searching for secret doors, and life drain immunity).
+    - Lawful Valkyries at Experience Level $\ge 5$ dipping a long sword into a fountain have a 1/6 chance per dip of forging Excalibur (+1d10 slashing damage, auto-searching for secret doors, and life drain immunity).
     - Safe dipping requires `obs.hero.hp_frac >= 0.85` to survive rare water demon spawns.
+    - **Fountain Dipping Mechanism**: Dipping a weapon into a fountain strictly requires **standing directly on the fountain tile** (`obs.dungeon.standing_on_fountain`). In NetHack, executing `#dip` from an adjacent tile prompts for an inventory container to dip *into*, causing the game to reject the command with `"That is a silly thing to dip..."`. `step_to_fountain` steps directly onto `closest_fountain_pos`, and `dip_excalibur` issues `[DIP, weapon_slot]`, with `_dismiss_more` auto-confirming `"dip into the fountain? [yn]"`.
+
+16. **Wielded Weapon Recognition Grammar (`(weapon in hand)`)**:
+    - In NetHack, one-handed wielded weapons use singular `(weapon in hand)`. Only two-handed weapons use `(weapon in hands)`.
+    - Inventory parsing must check for `"weapon in hand"` (covering both singular and plural), otherwise one-handed weapons are marked unequipped, causing characters to falsely report `bare hands`.
+
+17. **In-Place Search Stall Prevention & Navigation Exclusion**:
+    - When visible frontiers and dead ends are exhausted without discovering stairs, `NetHackAdapter` decays search counters by 10. If `step_to_dead_end` or stagnation decay permits the hero to target `(hero.y, hero.x)` (distance 0), the hero repeatedly searches in place for tens of thousands of turns without exploring other room walls.
+    - `step_to_dead_end` must strictly exclude the current coordinate (`step_target_mask[hero.y, hero.x] = False`).
+    - The policy must enforce `self.last_searched_pos`: a candidate tile cannot be searched twice consecutively without navigating to a different coordinate first.
+
+18. **Floor Transition State Resets**:
+    - Depth transitions must explicitly reset `self.known_fountain_pos = None`, `self.known_altar_pos = None`, and clear `self.elbereth_positions` to prevent carrying stale coordinates across dungeon levels.
 
 ---
 

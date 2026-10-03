@@ -207,6 +207,20 @@ class DuckDBToolRegistry:
         )
         return res["message"]
 
+    def get_macro_requests(self) -> str:
+        """
+        Returns all registered macro requests and their implementation status from data/macro_requests.md.
+        """
+        path = "data/macro_requests.md"
+        if not os.path.exists(path):
+            return "No macro requests have been submitted yet."
+        try:
+            with open(path, "r") as f:
+                content = f.read().strip()
+            return f"### Macro Requests Backlog:\n{content}" if content else "Macro requests queue is empty."
+        except Exception as e:
+            return f"Error reading macro requests: {e}"
+
     def get_dungeon_topology(self, depth: int = 1) -> str:
         """
         Renders a visual 21x79 ASCII map of visited tiles for a given dungeon level
@@ -506,6 +520,17 @@ OPENAI_TOOL_SPECS = [
                         "description": "Optional episode ID. If omitted, returns trace of the most recent death.",
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_macro_requests",
+            "description": "Returns all registered macro requests and their implementation status from the backlog.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },

@@ -27,11 +27,12 @@ def _bfs_distance_grid(
     start_y: int,
     start_x: int,
     walkable: np.ndarray,
+    is_door: np.ndarray,
 ) -> np.ndarray:
     """Computes shortest step distance from start to all reachable tiles (-1 if unreachable)."""
     h, w = walkable.shape
     dist = np.full((h, w), -1, dtype=np.int32)
-    if not (0 <= start_y < h and 0 <= start_x < w) or not walkable[start_y, start_x]:
+    if not (0 <= start_y < h and 0 <= start_x < w):
         return dist
 
     queue_y = np.empty(h * w, dtype=np.int32)
@@ -58,6 +59,9 @@ def _bfs_distance_grid(
                 if i >= 4:
                     if not walkable[cy, nx] or not walkable[ny, cx]:
                         continue
+                    # NetHack rule: strictly no diagonal movement into or out of doorways
+                    if is_door[cy, cx] or is_door[ny, nx]:
+                        continue
                 dist[ny, nx] = cd + 1
                 queue_y[tail] = ny
                 queue_x[tail] = nx
@@ -72,10 +76,11 @@ def _find_nearest_target(
     start_x: int,
     walkable: np.ndarray,
     target_mask: np.ndarray,
+    is_door: np.ndarray,
 ) -> tuple[int, int]:
     """Finds closest target tile in target_mask reachable from (start_y, start_x). Returns (-1, -1) if none."""
     h, w = walkable.shape
-    if not (0 <= start_y < h and 0 <= start_x < w) or not walkable[start_y, start_x]:
+    if not (0 <= start_y < h and 0 <= start_x < w):
         return -1, -1
 
     visited = np.zeros((h, w), dtype=np.bool_)
@@ -94,7 +99,7 @@ def _find_nearest_target(
         cx = queue_x[head]
         head += 1
 
-        if target_mask[cy, cx] and not (cy == start_y and cx == start_x):
+        if target_mask[cy, cx]:
             return cy, cx
 
         for i in range(8):
@@ -103,6 +108,9 @@ def _find_nearest_target(
             if 0 <= ny < h and 0 <= nx < w and walkable[ny, nx] and not visited[ny, nx]:
                 if i >= 4:
                     if not walkable[cy, nx] or not walkable[ny, cx]:
+                        continue
+                    # NetHack rule: strictly no diagonal movement into or out of doorways
+                    if is_door[cy, cx] or is_door[ny, nx]:
                         continue
                 visited[ny, nx] = True
                 queue_y[tail] = ny
@@ -120,14 +128,12 @@ def _astar_path(
     goal_x: int,
     walkable: np.ndarray,
     cost_grid: np.ndarray,
+    is_door: np.ndarray,
 ) -> np.ndarray:
     """Finds path from start to goal. Returns array of shape (N, 2), empty if no path."""
     h, w = walkable.shape
     if start_y == goal_y and start_x == goal_x:
-        res = np.empty((1, 2), dtype=np.int32)
-        res[0, 0] = start_y
-        res[0, 1] = start_x
-        return res
+        return np.empty((0, 2), dtype=np.int32)
 
     parent_y = np.full((h, w), -1, dtype=np.int32)
     parent_x = np.full((h, w), -1, dtype=np.int32)
@@ -180,8 +186,12 @@ def _astar_path(
                 continue
             if not walkable[ny, nx]:
                 continue
-            if i >= 4 and (not walkable[cy, nx] or not walkable[ny, cx]):
-                continue
+            if i >= 4:
+                if not walkable[cy, nx] or not walkable[ny, cx]:
+                    continue
+                # NetHack rule: strictly no diagonal movement into or out of doorways
+                if is_door[cy, cx] or is_door[ny, nx]:
+                    continue
 
             step_cost = 1.414 if i >= 4 else 1.0
             step_cost += cost_grid[ny, nx]
@@ -230,8 +240,10 @@ class SpatialEngine:
     """Python-facing interface for all spatial operations."""
 
     @staticmethod
-    def distance_grid(start: tuple[int, int], walkable: np.ndarray) -> np.ndarray:
-        return _bfs_distance_grid(int(start[0]), int(start[1]), walkable.astype(np.bool_))
+    def distance_grid(start: tuple[int, int], walkable: np.ndarray, is_door: np.ndarray | None = None) -> np.ndarray:
+        w = walkable.astype(np.bool_)
+        d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
+        return _bfs_distance_grid(int(start[0]), int(start[1]), w, d)
 
     @staticmethod
     def find_path(
@@ -239,11 +251,13 @@ class SpatialEngine:
         goal: tuple[int, int],
         walkable: np.ndarray,
         cost_grid: np.ndarray | None = None,
+        is_door: np.ndarray | None = None,
     ) -> list[tuple[int, int]]:
         """Returns list of (y, x) steps from start to goal (excluding start)."""
         w = walkable.astype(np.bool_)
         c = cost_grid.astype(np.float32) if cost_grid is not None else np.zeros(w.shape, dtype=np.float32)
-        arr = _astar_path(int(start[0]), int(start[1]), int(goal[0]), int(goal[1]), w, c)
+        d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
+        arr = _astar_path(int(start[0]), int(start[1]), int(goal[0]), int(goal[1]), w, c, d)
         return [(int(arr[i, 0]), int(arr[i, 1])) for i in range(len(arr))]
 
     @staticmethod
@@ -252,6 +266,7 @@ class SpatialEngine:
         walkable: np.ndarray,
         visited: np.ndarray,
         target_mask: np.ndarray | None = None,
+        is_door: np.ndarray | None = None,
     ) -> tuple[int, int] | None:
         """Finds closest walkable tile adjacent to unvisited floor or unexplored space."""
         w = walkable.astype(np.bool_)
@@ -260,7 +275,22 @@ class SpatialEngine:
         else:
             v = visited.astype(np.bool_)
             frontier_mask = w & (~v)
-        ty, tx = _find_nearest_target(int(start[0]), int(start[1]), w, frontier_mask)
+        d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
+        ty, tx = _find_nearest_target(int(start[0]), int(start[1]), w, frontier_mask, d)
+        return (ty, tx) if ty >= 0 else None
+
+    @staticmethod
+    def find_nearest_target(
+        start: tuple[int, int],
+        walkable: np.ndarray,
+        target_mask: np.ndarray,
+        is_door: np.ndarray | None = None,
+    ) -> tuple[int, int] | None:
+        """Finds closest tile matching target_mask reachable from start."""
+        w = walkable.astype(np.bool_)
+        t = target_mask.astype(np.bool_)
+        d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
+        ty, tx = _find_nearest_target(int(start[0]), int(start[1]), w, t, d)
         return (ty, tx) if ty >= 0 else None
 
 
@@ -271,10 +301,13 @@ def build_walkable_mask(obs_or_chars: Any) -> np.ndarray:
     fountains ({), altars (_), sinks, traps (^), items, and empty walkable spaces.
     Non-walkable tiles include solid rock / stone (' ' or 0), walls (-, |), and closed doors (+).
     """
+    glyphs = None
     if hasattr(obs_or_chars, "chars"):
         chars = obs_or_chars.chars
+        glyphs = getattr(obs_or_chars, "glyphs", None)
     elif isinstance(obs_or_chars, dict) and "chars" in obs_or_chars:
         chars = obs_or_chars["chars"]
+        glyphs = obs_or_chars.get("glyphs")
     elif isinstance(obs_or_chars, np.ndarray):
         chars = obs_or_chars
     else:
@@ -292,4 +325,10 @@ def build_walkable_mask(obs_or_chars: Any) -> np.ndarray:
         | (chars == ord("0"))  # Boulders
         | (chars == ord("`"))  # Statues
     )
-    return (~non_walkable).astype(np.bool_)
+    walkable = (~non_walkable).astype(np.bool_)
+    # Open doorways in NetHack draw with '-' or '|' but have CMAP glyphs 12 (ndoor), 13 (vodoor), 14 (hodoor)
+    if glyphs is not None:
+        GLYPH_CMAP_OFF = 2359
+        open_doors = (glyphs >= (GLYPH_CMAP_OFF + 12)) & (glyphs <= (GLYPH_CMAP_OFF + 14))
+        walkable[open_doors] = True
+    return walkable

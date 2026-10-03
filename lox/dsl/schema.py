@@ -52,6 +52,8 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "adjacent_peaceful": "bool",
     "can_safely_pray": "bool",
     "is_fast_dangerous": "bool",
+    "gas_spore_in_fov": "bool",
+    "adjacent_gas_spore": "bool",
 
     # Spatial Topology & Navigation
     "stairs_down_known": "bool",
@@ -60,6 +62,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "stairs_up_pos": "tuple",
     "standing_on_stairs_down": "bool",
     "standing_on_stairs_up": "bool",
+    "standing_on_dead_end": "bool",
     "has_unvisited_frontier": "bool",
     "has_unsearched_dead_end": "bool",
     "unvisited_frontier_count": "int",
@@ -72,8 +75,11 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "is_dark_level": "bool",
     "adjacent_closed_door": "bool",
     "adjacent_open_door": "bool",
+    "has_closed_door": "bool",
+    "closed_door_in_fov": "bool",
     "door_is_locked": "bool",
     "adjacent_fountain": "bool",
+    "standing_on_fountain": "bool",
     "adjacent_altar": "bool",
     "standing_on_altar": "bool",
     "altar_is_aligned": "bool",
@@ -89,6 +95,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "corpse_is_safe": "bool",
     "corpse_is_deadly": "bool",
     "has_poison_res": "bool",
+    "can_harvest_poison": "bool",
 
     # Equipment & Item Intrinsics
     "has_wand_of_teleport": "bool",
@@ -101,6 +108,15 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "weapon_is_cursed": "bool",
     "can_forge_excalibur": "bool",
     "fountain_in_fov": "bool",
+
+    # Epistemic POMDP Belief & Safety Gates
+    "untested_buc_count": "int",
+    "has_untested_items": "bool",
+    "can_safely_wear_armor": "bool",
+    "can_safely_quaff_healing": "bool",
+
+    # Strategic Goal Agenda
+    "active_goal": "str",
 }
 
 # Whitelist of allowed action primitives
@@ -110,6 +126,7 @@ ALLOWED_ACTIONS: set[str] = {
     "step_to_stairs_down",
     "step_to_stairs_up",
     "step_to_dead_end",
+    "step_to_closed_door",
     "step_away_from_hostile",
     "step_to_chokepoint",
     "step_to_fountain",
@@ -143,11 +160,13 @@ ALLOWED_ACTIONS: set[str] = {
     "eat_carried_food",
     "eat_food",
     "eat_floor_corpse",
+    "harvest_poison_res",
 
-    # Divine & Rituals
+    # Divine, Rituals & Epistemic Testing
     "pray",
     "dip_excalibur",
     "dip_in_fountain",
+    "test_altar_buc",
 
     # Equipment & Consumables
     "quaff_healing",
@@ -184,4 +203,13 @@ ENUM_CONSTANTS: dict[str, int | str] = {
     "BRANCH_MINES": "mines",
     "BRANCH_SOKOBAN": "sokoban",
     "BRANCH_QUEST": "quest",
+
+    # Strategic Goal Directives
+    "GOAL_EXPLORE_FLOOR": "explore_floor",
+    "GOAL_COLLECT_POISON_RES": "collect_poison_res",
+    "GOAL_FORGE_EXCALIBUR": "forge_excalibur",
+    "GOAL_TEST_BUC_ALTAR": "test_buc_altar",
+    "GOAL_CLEAR_MINES": "clear_mines",
+    "GOAL_SOLVE_SOKOBAN": "solve_sokoban",
+    "GOAL_DESCEND_STAIRS": "descend_stairs",
 }

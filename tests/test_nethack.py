@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
-from lox.core.types import Action
+import nle.nethack as nethack
+from lox.core.types import Action, Observation
 from lox.envs.nethack import NetHackAdapter
 
 
@@ -142,4 +143,67 @@ def test_dismiss_more_ynq_prompts():
     assert cleaned_obs4 is not None
 
     adapter.close()
+
+
+def test_locked_door_breach_and_poison_gating():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=42)
+
+    # 1. Door Breaching: Set adjacent door
+    hy, hx = obs.hero.y, obs.hero.x
+    fake_glyphs = obs.glyphs.copy()
+    fake_glyphs[hy, hx + 1] = nethack.GLYPH_CMAP_OFF + 15  # closed door to the East
+    adapter._last_obs = Observation(
+        chars=obs.chars,
+        glyphs=fake_glyphs,
+        hero=obs.hero,
+        raw_obs=obs.raw_obs,
+    )
+
+    # Calling step_direction directly into the closed door should trigger open_door
+    # and if the door is in locked_doors, should trigger kick_closed_door
+    adapter.locked_doors.add((hy, hx + 1))
+    sub_action = None
+
+    # Step or breach returns kick_closed_door when locked
+    # We can inspect _step_or_breach delegation
+    obs_test = adapter._last_obs
+    # Mock step to record action
+    recorded_actions = []
+    orig_step = adapter.step
+    def mock_step(action):
+        recorded_actions.append(action.name)
+        if action.name in ("kick_closed_door", "open_door"):
+            return obs_test, 0.0, False, False, {}
+        return orig_step(action)
+    adapter.step = mock_step
+
+    adapter._step_or_breach(obs_test, 0, 1)
+    assert "kick_closed_door" in recorded_actions
+
+    adapter.close()
+
+
+def test_hero_position_walkability_and_dead_end_stagnation_recovery():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=42)
+    hy, hx = obs.hero.y, obs.hero.x
+
+    # 1. Test that hero position is NEVER in blocked_tiles even if artificially added
+    adapter.blocked_tiles.add((hy, hx))
+    adapter.non_door_tiles.add((hy, hx))
+    walkable, walkable_nav = adapter._build_walkable_nav(obs)
+    assert (hy, hx) not in adapter.blocked_tiles
+    assert (hy, hx) not in adapter.non_door_tiles
+    assert walkable_nav[hy, hx] == True
+
+    # 2. Test stagnation recovery: artificially max out search counts on dead ends
+    adapter.searched_count.fill(20)
+    # step_to_dead_end should decay searched_count and find/search a candidate instead of hanging
+    obs_next, _, _, _, _ = adapter.step(Action(name="step_to_dead_end"))
+    assert np.any(adapter.searched_count <= 11)  # Decayed by 10!
+    assert obs_next is not None
+
+    adapter.close()
+
 

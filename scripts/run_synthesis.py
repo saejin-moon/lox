@@ -264,6 +264,14 @@ class Agent:
                     dungeon_branch=dungeon_branch,
                 )
 
+                stairs_y = adapter.known_stairs_down[0] if getattr(adapter, "known_stairs_down", None) is not None else -1
+                stairs_x = adapter.known_stairs_down[1] if getattr(adapter, "known_stairs_down", None) is not None else -1
+                target_y = adapter.last_target_pos[0] if getattr(adapter, "last_target_pos", None) is not None else -1
+                target_x = adapter.last_target_pos[1] if getattr(adapter, "last_target_pos", None) is not None else -1
+                tiles_vis = int(np.sum(adapter.visited)) if hasattr(adapter, "visited") and adapter.visited is not None else 0
+                adj_monsters = ",".join(obs.combat.adjacent_monsters) if hasattr(obs, "combat") and hasattr(obs.combat, "adjacent_monsters") else ""
+                act_subroutine = getattr(action, "subroutine", "") or action.name
+
                 logger.log_tick(
                     episode_id=ep_id,
                     turn=hero.turn,
@@ -281,6 +289,23 @@ class Agent:
                     hostiles_in_fov=hostiles_fov,
                     tile_type=tile_type,
                     dungeon_branch=dungeon_branch,
+                    target_y=target_y,
+                    target_x=target_x,
+                    stairs_down_y=stairs_y,
+                    stairs_down_x=stairs_x,
+                    stairs_down_turn=getattr(adapter, "stairs_down_discovery_turn", -1),
+                    tiles_visited_count=tiles_vis,
+                    unvisited_frontier_count=getattr(obs.spatial, "unvisited_frontier_count", 0),
+                    dead_ends_count=getattr(obs.spatial, "dead_ends_count", 0),
+                    adjacent_monsters=adj_monsters,
+                    ac=hero.ac,
+                    xl=hero.level,
+                    active_subroutine=act_subroutine,
+                    food_count=getattr(obs.inventory, "food_count", 0),
+                    potion_count=getattr(obs.inventory, "potion_count", 0),
+                    scroll_count=getattr(obs.inventory, "scroll_count", 0),
+                    dagger_count=getattr(obs.inventory, "dagger_count", 0),
+                    weapon_in_hand=getattr(obs.inventory, "equipped_weapon_name", ""),
                 )
 
                 step_res = adapter.step(action)

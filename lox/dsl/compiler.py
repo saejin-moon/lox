@@ -12,6 +12,7 @@ import inspect
 from typing import Any, Callable
 
 from lox.core.types import Status, Action, Observation, HeroState, HungerState
+from lox.core.agenda import GoalDirective, GoalAgenda
 from lox.core.tree import (
     BehaviorTree,
     BehaviorNode,
@@ -42,6 +43,7 @@ def _create_action_builder(name: str) -> Callable[..., Action]:
         direction = kwargs.get("direction")
         slot = kwargs.get("slot")
         target_pos = kwargs.get("target_pos")
+        subroutine = kwargs.get("subroutine", "")
         if len(args) == 2 and isinstance(args[0], int) and isinstance(args[1], int):
             target_pos = (args[0], args[1])
         elif args and isinstance(args[0], tuple):
@@ -50,7 +52,7 @@ def _create_action_builder(name: str) -> Callable[..., Action]:
                 direction = args[0]
         elif args and isinstance(args[0], str):
             slot = args[0]
-        return Action(name=name, direction=direction, slot=slot, target_pos=target_pos, extra=kwargs)
+        return Action(name=name, direction=direction, slot=slot, target_pos=target_pos, subroutine=subroutine, extra=kwargs)
     return action_fn
 
 
@@ -73,6 +75,19 @@ def _extract_val(node: ast.AST, bb: Blackboard) -> Any:
             if isinstance(val, HungerState):
                 return val.value
             return val
+        # Check epistemic view
+        epistemic = getattr(bb.obs, "epistemic", None)
+        if epistemic and hasattr(epistemic, name):
+            return getattr(epistemic, name)
+        # Check agenda view
+        agenda = getattr(bb.obs, "agenda", None)
+        if agenda and hasattr(agenda, name):
+            return getattr(agenda, name)
+        # Check combat, spatial, dungeon, status, inventory
+        for sub_ns in ("combat", "spatial", "dungeon", "status", "inventory"):
+            sub_obj = getattr(bb.obs, sub_ns, None)
+            if sub_obj and hasattr(sub_obj, name):
+                return getattr(sub_obj, name)
         # Check blackboard memory / flags
         return bb.memory.get(name, False)
     elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
@@ -254,6 +269,8 @@ def compile_policy(
     if visitor.classes or visitor.has_generator:
         sandbox: dict[str, Any] = {
             "Action": Action,
+            "GoalDirective": GoalDirective,
+            "GoalAgenda": GoalAgenda,
             **ENUM_CONSTANTS,
             **DEFAULT_ACTION_BUILDERS,
         }

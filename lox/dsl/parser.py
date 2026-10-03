@@ -31,6 +31,7 @@ SAFE_BUILTINS = {
 SPECIAL_NAMES = {
     "plan", "self", "args", "kwargs", "Action", "Status", "Agent", "Policy",
     "Blackboard", "obs", "Observation", "Item", "HeroState",
+    "GoalDirective", "GoalAgenda", "ItemBeliefState",
 }
 
 

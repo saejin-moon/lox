@@ -95,7 +95,7 @@ def test_openrouter_tool_calling_and_code_synthesis():
         "choices": [{
             "message": {
                 "role": "assistant",
-                "content": "```python\ndef combat():\n    if adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
+                "content": "```python\ndef combat():\n    if floating_eye_in_fov:\n        step_away_from_hostile()\n    elif adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
             }
         }]
     }
@@ -192,7 +192,7 @@ def test_openrouter_ast_self_repair():
         "choices": [{
             "message": {
                 "role": "assistant",
-                "content": "```python\ndef combat():\n    if adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
+                "content": "```python\ndef combat():\n    if floating_eye_in_fov:\n        step_away_from_hostile()\n    elif adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
             }
         }]
     }

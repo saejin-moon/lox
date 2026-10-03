@@ -181,12 +181,14 @@ class Agent:
 
 ### Observation Interface (`obs`)
 Every turn, `obs` provides rich sub-namespaces:
-- `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state` (SATIATED, NORMAL, HUNGRY, WEAK, FAINTING), `dungeon_branch`
-- `obs.status`: `is_blind`, `is_poisoned`, `is_confused`, `is_stunned`, `is_sick`, `is_encumbered`, `encumbrance_level`
+- `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state` (SATIATED, NORMAL, HUNGRY, WEAK, FAINTING), `dungeon_branch`, `has_poison_res`
+- `obs.status`: `is_blind`, `is_poisoned`, `is_confused`, `is_stunned`, `is_sick`, `is_encumbered`, `encumbrance_level`, `is_levitating`
 - `obs.inventory`: `has_food`, `has_healing`, `has_unworn_armor`, `has_daggers`, `get_food_slot()`, `get_healing_slot()`, `get_dagger_slot()`, `items`
 - `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`
 - `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`
-- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `adjacent_altar`, `can_forge_excalibur`
+- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `adjacent_altar`, `standing_on_altar`, `can_forge_excalibur`
+- `obs.epistemic`: `untested_buc_count` (int), `has_untested_items` (bool), `can_safely_wear_armor` (bool), `can_safely_quaff_healing` (bool), `items_belief` (dict of ItemBeliefState)
+- `obs.agenda`: `active_goal` (str), `goal_stack` (list of str), `is_active(goal_name)` (bool)
 - `obs.corpses`: list of `FloorCorpse(name, y, x, age_turns, is_fresh, is_poisonous, is_deadly, is_safe)`
 - `obs.message`: last raw game message
 
@@ -199,11 +201,14 @@ Every turn, `obs` provides rich sub-namespaces:
 6. **Secret Doors & Corridor Dead Ends**: NetHack procedural generation regularly seals off deeper dungeon sections and staircases behind hidden secret doors located at dead-end corridors (`#`) and room perimeter walls. When visible frontiers are fully explored (`obs.spatial.has_unvisited_frontier == False`), call `step_to_dead_end()` to navigate to dead ends or perimeter walls and `search()` repeatedly until the secret door is exposed. Searching repeatedly inside open rooms will NOT find the stairs.
 7. **Tactical In-Combat Emergency Healing**: Quaffing a healing potion takes only 1 turn and restores 10-20 HP. When `obs.hero.hp_frac < 0.50` and `obs.inventory.has_healing`, ALWAYS quaff healing immediately inside `handle_combat` before taking another attack! Never die with healing potions in your pack.
 8. **Soldier Ants & High-Speed Attackers**: Soldier ants and killer bees move at speed 18 (nearly 2x the hero) and inflict lethal poison stings. If `obs.combat.is_fast_dangerous` is True or `obs.combat.closest_hostile_name in ("soldier ant", "killer bee")`, retreat immediately to a 1-tile corridor chokepoint (`step_to_chokepoint()`), quaff healing, or pray.
-9. **Equipment & Armor Optimization (`wear_armor`)**: Defeated monsters drop helmets, boots, cloaks, and armor. When out of combat and `obs.inventory.has_unworn_armor` is True, yield `wear_armor()` to lower your Armor Class (AC). Lower AC drastically reduces damage from deep monsters.
+9. **Equipment & Armor Optimization (`wear_armor`)**: Defeated monsters drop helmets, boots, cloaks, and armor. When out of combat, `obs.inventory.has_unworn_armor` is True, and `obs.epistemic.can_safely_wear_armor` is True, yield `wear_armor()` to lower your Armor Class (AC). Lower AC drastically reduces damage from deep monsters.
 10. **Shopkeeper & Minetown Non-Aggression**: Never attack shopkeepers, priests, or town watchmen (`obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain")`), and never kick doors when `obs.dungeon.in_shop` is True. Killing or provoking them will instantly end your run.
 11. **Exploration Pacing & No Idle Waiting**: Waiting (`wait()`) during active exploration when seeking stairs is strictly forbidden. Never yield `wait()` when frontiers are clear; instead call `handle_dead_end(obs)` or `search()` to investigate room perimeter walls. Sitting in place produces 0 turns of progress and leads to `MaxTurnsReached`.
 12. **Dust Elbereth Sanctuary (`engrave_dust_elbereth`)**: Engraving "Elbereth" into the dust with bare fingers takes 1 turn and creates an impenetrable ward against 95% of non-humanoid monsters (ants, bees, bats, mumakil, leocrottas, canines). Monsters cannot attack on an Elbereth tile and flee in panic. When cornered or HP < 35%, yield `engrave_dust_elbereth()`. While standing on Elbereth, do NOT attack in melee; heal or wait for regeneration.
 13. **Ranged Missile Harassment (`throw_dagger`)**: Valkyries start with daggers. When enemies are at distance >= 2, yield `throw_dagger()` to kill fast speedsters before they close to melee. Thrown daggers drop onto the ground and are automatically recovered after combat, so freely throw daggers down to 0.
+14. **Altar BUC Identification (`test_altar_buc`)**: Equipping cursed armor or weapons welds them to your body. When an altar is nearby (`obs.dungeon.adjacent_altar` or `obs.dungeon.standing_on_altar`) and `obs.epistemic.has_untested_items` is True, yield `test_altar_buc()` to automatically batch-drop and identify the BUC status of untested inventory items.
+15. **Poison Resistance Harvesting (`harvest_poison_res`)**: Poisonous bites from ants and bees kill heroes instantly at Depth 4+. When out of combat and `not obs.hero.has_poison_res`, yield `harvest_poison_res()` to seek out and consume killer bee or soldier ant corpses to gain permanent poison resistance intrinsic.
+16. **Hybrid HTN-BT Goal Agenda**: Structure strategic progression around milestones (`obs.agenda.active_goal` or `GoalDirective`). Reactive reflexes (Combat, Healing, Hunger, Panic Elbereth) ALWAYS execute first. When safe, evaluate your strategic goal: e.g. acquire poison resistance (`GOAL_COLLECT_POISON_RES`), forge Excalibur (`GOAL_FORGE_EXCALIBUR`), test BUC on altars (`GOAL_TEST_BUC_ALTAR`), or clear the floor and descend (`GOAL_DESCEND_STAIRS`).
 
 ### Available Actions:
 {actions}
@@ -211,7 +216,7 @@ Every turn, `obs` provides rich sub-namespaces:
 ### Constants:
 {enums}
 
-### Analytical & Memory Inspection Tools:
+### Analytical & Empirical Investigation Tools:
 - `query_duckdb(sql)`: Read-only SQL on `data/lox.duckdb` (tables: `episodes`, `ticks`, `events`).
   * `episodes`: run_id, episode_id, depth, score, turns, death_reason, inventory_at_death, last_5_actions, turns_dl1, turns_dl2, turns_mines
   * `ticks`: episode_id, turn, depth, hp, max_hp, hunger, y, x, action, closest_hostile_name, closest_hostile_dist, tile_type, dungeon_branch, message
@@ -221,6 +226,14 @@ Every turn, `obs` provides rich sub-namespaces:
 - `get_floor_stash_report()`: Altars, fountains, and features discovered across all explored dungeon levels.
 - `get_death_taxonomy(window)`: Top death causes, frequencies, and avg depth.
 - `query_wiki(query)`: Search offline NetHack 3.6.6 encyclopedia (monsters, intrinsics, corpses, rituals).
+- `request_macro(macro_name, rationale, proposed_interface, priority)`:
+  * **When to request a macro**: Call `request_macro` when you identify a complex, multi-turn algorithmic procedure that cannot be cleanly implemented in simple reactive `Agent` code (for example: Sokoban boulder-push pathfinding, shop price-identification sequences, complex container stash packing, or water-crossing solvers).
+  * **Contract**:
+    - `macro_name`: Concise action identifier (e.g. `solve_sokoban_boulder`, `identify_shop_prices`, `stash_items`).
+    - `rationale`: Clear explanation of the empirical mortality bottleneck or tactical need observed in DuckDB telemetry.
+    - `proposed_interface`: Proposed Python signature, input arguments, expected return behavior, and failure fallbacks.
+    - `priority`: `"low"`, `"medium"`, `"high"`, or `"critical"`.
+  * **Result**: Your request is registered into `data/macro_requests.md` for human platform engineering integration into future synthesis cycles.
 
 ### Safety Rules:
 No imports, no filesystem calls, no arbitrary exec/eval. All logic must reside within `class Agent`.
