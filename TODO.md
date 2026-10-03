@@ -73,11 +73,18 @@ This living document tracks empirical progress, critical discoveries, immediate 
   - **Synthesis**: Gemma-4-31b-it evaluated mortality logs, refined Elbereth engagement and ranged harassment, archived to `data/policies/gen_0001.py`.
 - **Generation 2 Results (20 episodes)**:
   - **Average Depth**: 1.50, **Max Depth**: Depth 4, **Average Turns**: 3,786.5.
-  - **Diagnosis**: Poison harvesting lacked `tile_type == "corridor"` guard and called `harvest_poison_res()` repeatedly. Gemma diagnosed this and synthesized `gen_0002.py`.
 - **Generation 3 Results (20 episodes)**:
-  - **Average Depth**: 1.90, **Max Depth**: **Depth 5**, **Average Turns**: 4,687.6.
-  - **Diagnosis & Synthesis**: Gemma identified stairs priority and restricted poison harvesting to corridor chokepoints, moving `step_to_stairs_down` above doors and frontiers in `gen_0003.py`.
-- **Generation 4**: Currently running 20 evaluation episodes in the background.
+  - **Average Depth**: 1.90, **Max Depth**: Depth 5, **Average Turns**: 4,687.6.
+- **Generation 4 Results (20 episodes)**:
+  - **Average Depth**: **3.05**, **Max Depth**: **Depth 6**, **Average Turns**: 3,933.2.
+  - **Recovery**: Elevation of `stairs_down_known` immediately restored deep floor traversal across the batch.
+- **Generation 5 Results (20 episodes)**:
+  - **Average Depth**: **3.65**, **Max Depth**: **Depth 6**, **Average Turns**: 1,820.5.
+  - **Synthesis**: Gemma integrated BUC testing with `obs.epistemic.has_untested_items` and safe armor equipping via `obs.epistemic.can_safely_wear_armor`.
+- **Generation 6 Results (20 episodes)**:
+  - **Average Depth**: **3.15**, **Max Depth**: **Depth 7**, **Average Turns**: 1,974.3.
+  - **Milestone**: Reached Depth 7, archived to `data/policies/gen_0006.py`.
+- **Generation 7**: Currently executing 20 evaluation episodes in the background.
 
 ---
 
