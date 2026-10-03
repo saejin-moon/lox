@@ -145,6 +145,13 @@ This living document tracks empirical progress, critical discoveries, immediate 
     2. **Offensive Wand Zapping (`zap_offensive_wand`, `has_offensive_wand`)**: Enabled zapping wands of striking, magic missile, fire, cold, sleep, and lightning at range $\ge 2$ to safely neutralize high-threat hostiles and passive hazards.
     3. **Emergency Panic Teleportation (`read_scroll_teleport`, `zap_wand_teleport`, `has_panic_escape`)**: Teleporting out of lethal surrounds or $< 25\%$ HP situations to reset the encounter.
 
+- **Campaign 5 (Parallel Multiprocessing Synthesis & Ground-Truth Scoring)**:
+  - **Gen 1**: Avg Depth 2.00, Max Depth 5, Avg Turns 4,102.8
+  - **Gen 2**: Avg Depth 2.50, Max Depth 7, Avg Turns 4,684.4
+  - **Gen 3**: Avg Depth 2.30, Max Depth 5, Avg Turns 4,068.9
+  - **Parallel Multiprocessing Engine (`--workers 10`)**: Upgraded evaluation runner from single-threaded sequential execution to 10-core parallel worker pool via `multiprocessing.Pool`. Cut 20-episode batch evaluation time from **4.5 minutes down to ~35 seconds** (an **8x speedup**), utilizing host machine's 22 CPU threads.
+  - **Ground-Truth NetHack Scoring**: Connected native NLE in-game score (`blstats[nh.NLE_BL_SCORE]`, index 9) directly to `HeroState.score` and episode logging. Now records official NetHack score including XP from monster kills instead of heuristic approximation.
+
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 
 1. **Launch Autonomous LLM Synthesis Campaign 5**:
@@ -157,6 +164,7 @@ This living document tracks empirical progress, critical discoveries, immediate 
        --eval-episodes 20 \
        --max-turns 25000 \
        --target-depth 10.0 \
+       --workers 10 \
        --policy-path data/latest_policy.py
      ```
 2. **Main Dungeon vs Gnomish Mines Branch Steering**:

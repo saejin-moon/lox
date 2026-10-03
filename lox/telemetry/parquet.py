@@ -88,11 +88,12 @@ EVENT_SCHEMA = pa.schema([
 class ParquetLogger:
     """Streams execution data into chunked Parquet partition files."""
 
-    def __init__(self, run_id: str, base_dir: str = "data/telemetry", flush_interval: int = 500):
+    def __init__(self, run_id: str, base_dir: str = "data/telemetry", flush_interval: int = 500, file_prefix: str = ""):
         self.run_id = run_id
         self.run_dir = os.path.join(base_dir, run_id)
         os.makedirs(self.run_dir, exist_ok=True)
         self.flush_interval = flush_interval
+        self.file_prefix = f"{file_prefix}_" if file_prefix else ""
 
         self.tick_buffer: list[dict[str, Any]] = []
         self.episode_buffer: list[dict[str, Any]] = []
@@ -249,7 +250,7 @@ class ParquetLogger:
         if not self.tick_buffer:
             return
         table = pa.Table.from_pylist(self.tick_buffer, schema=TICK_SCHEMA)
-        part_name = f"ticks_part_{self.tick_part_count:04d}.parquet"
+        part_name = f"ticks_{self.file_prefix}part_{self.tick_part_count:04d}.parquet"
         pq.write_table(table, os.path.join(self.run_dir, part_name))
         self.tick_part_count += 1
         self.tick_buffer.clear()

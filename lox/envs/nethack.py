@@ -291,6 +291,7 @@ class NetHackAdapter(EnvironmentAdapter):
     def _extract_obs(self, raw_obs: dict[str, Any]) -> Observation:
         bl = raw_obs["blstats"]
         x, y = int(bl[0]), int(bl[1])
+        score = int(bl[9]) if len(bl) > 9 else 0
         hp, max_hp = int(bl[10]), int(bl[11])
         depth = int(bl[12])
         gold = int(bl[13])
@@ -351,6 +352,7 @@ class NetHackAdapter(EnvironmentAdapter):
             depth=depth,
             dungeon_num=dnum,
             gold=gold,
+            score=score,
             turn=turn,
             turns_on_level=self.turns_on_level,
             hunger_state=hunger,
@@ -1018,6 +1020,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.known_fountain_pos = None
         raw_obs, _ = self.env.reset(seed=seed)
         raw_obs, _, _ = self._dismiss_more(raw_obs, False, False)
+        self._last_raw_obs = raw_obs
         obs = self._extract_obs(raw_obs)
         self._last_obs = obs
         return obs

@@ -171,7 +171,7 @@ def consolidate_run(
     con = init_db(db_path)
 
     # Vectorized SQL merge for ticks
-    ticks_pattern = os.path.join(run_dir, "ticks_part_*.parquet")
+    ticks_pattern = os.path.join(run_dir, "ticks_*part_*.parquet")
     ticks_files = glob.glob(ticks_pattern)
     ticks_added = 0
     if ticks_files:
