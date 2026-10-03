@@ -69,12 +69,15 @@ This living document tracks empirical progress, critical discoveries, immediate 
 - **Status**: **Active (Task ID: `task-2879`)**
 - **Configuration**: 10 generations, 20 episodes per generation, 25,000 max turns, target depth 10.0, provider OpenRouter (`google/gemma-4-31b-it`).
 - **Generation 1 Results (20 episodes)**:
-  - **Average Depth**: **3.90**
-  - **Max Depth**: **Depth 9**
-  - **Average Turns**: 1,844.5
-  - **Fatalities**: Killed in combat (95.0%), MaxTurnsReached (Depth 2) (5.0%).
-  - **Synthesis**: Gemma-4-31b-it evaluated the Gen 1 batch autopsy, synthesized an evolved policy with refined Elbereth humanoid engagement rules and ranged kiting, validated cleanly, and archived to `data/policies/gen_0001.py` and `data/latest_policy.py`.
-- **Generation 2**: Currently running 20 evaluation episodes in the background.
+  - **Average Depth**: **3.90**, **Max Depth**: **Depth 9**, **Average Turns**: 1,844.5.
+  - **Synthesis**: Gemma-4-31b-it evaluated mortality logs, refined Elbereth engagement and ranged harassment, archived to `data/policies/gen_0001.py`.
+- **Generation 2 Results (20 episodes)**:
+  - **Average Depth**: 1.50, **Max Depth**: Depth 4, **Average Turns**: 3,786.5.
+  - **Diagnosis**: Poison harvesting lacked `tile_type == "corridor"` guard and called `harvest_poison_res()` repeatedly. Gemma diagnosed this and synthesized `gen_0002.py`.
+- **Generation 3 Results (20 episodes)**:
+  - **Average Depth**: 1.90, **Max Depth**: **Depth 5**, **Average Turns**: 4,687.6.
+  - **Diagnosis & Synthesis**: Gemma identified stairs priority and restricted poison harvesting to corridor chokepoints, moving `step_to_stairs_down` above doors and frontiers in `gen_0003.py`.
+- **Generation 4**: Currently running 20 evaluation episodes in the background.
 
 ---
 

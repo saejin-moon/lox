@@ -1184,7 +1184,11 @@ class NetHackAdapter(EnvironmentAdapter):
             sub_act = self.altar_solver.plan_step(obs_prev, self.epistemic, self.known_altar_pos)
             if sub_act:
                 return self.step(sub_act)
-            if obs_prev.spatial.has_unvisited_frontier:
+            if obs_prev.spatial.standing_on_stairs_down and not obs_prev.status.is_levitating:
+                return self.step(Action(name="descend"))
+            elif obs_prev.spatial.stairs_down_known:
+                return self.step(Action(name="step_to_stairs_down"))
+            elif obs_prev.spatial.has_unvisited_frontier:
                 return self.step(Action(name="step_to_frontier"))
             return self.step(Action(name="step_to_dead_end"))
 
@@ -1192,7 +1196,11 @@ class NetHackAdapter(EnvironmentAdapter):
             sub_act = self.poison_solver.plan_step(obs_prev)
             if sub_act:
                 return self.step(sub_act)
-            if obs_prev.spatial.has_unvisited_frontier:
+            if obs_prev.spatial.standing_on_stairs_down and not obs_prev.status.is_levitating:
+                return self.step(Action(name="descend"))
+            elif obs_prev.spatial.stairs_down_known:
+                return self.step(Action(name="step_to_stairs_down"))
+            elif obs_prev.spatial.has_unvisited_frontier:
                 return self.step(Action(name="step_to_frontier"))
             return self.step(Action(name="step_to_dead_end"))
 

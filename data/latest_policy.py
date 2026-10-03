@@ -59,24 +59,26 @@ class Agent:
                     obs = yield step_to_fountain()
                     continue
 
-            # 7. Poison Resistance Harvesting
+            # 7. Poison Resistance Harvesting (Strictly Safe)
+            # CRITICAL FIX: Only harvest if we are healthy, NO enemies in FOV, 
+            # and we are in a corridor (chokepoint) to prevent being ambushed in open rooms.
             if not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
-                # This action handles seeking and eating safe poison-res corpses
-                obs = yield harvest_poison_res()
-                continue
+                if obs.combat.hostile_count_fov == 0 and obs.dungeon.tile_type == "corridor":
+                    obs = yield harvest_poison_res()
+                    continue
 
             # 8. Navigation & Exploration
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                 obs = yield descend()
+                continue
+            elif obs.spatial.stairs_down_known:
+                obs = yield step_to_stairs_down()
                 continue
             elif obs.dungeon.adjacent_closed_door:
                 if obs.dungeon.door_is_locked and not obs.dungeon.in_shop:
                     obs = yield kick_closed_door()
                 else:
                     obs = yield open_door()
-                continue
-            elif obs.spatial.stairs_down_known:
-                obs = yield step_to_stairs_down()
                 continue
             elif obs.spatial.has_unvisited_frontier:
                 self.search_count = 0 
@@ -86,7 +88,7 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
-                # Perimeter search to find secret doors/stairs.
+                # No frontiers left: search for secret doors at dead ends
                 obs = yield from self.handle_dead_end(obs)
                 continue
 
@@ -101,7 +103,6 @@ class Agent:
                     obs = yield step_away_from_hostile()
                     continue
                 elif obs.combat.hostile_count_fov == 1:
-                    # If only one eye/spore, prioritize exiting the area
                     if obs.spatial.stairs_down_known:
                         obs = yield step_to_stairs_down()
                     else:
@@ -136,25 +137,20 @@ class Agent:
                     obs = yield quaff_healing()
                     continue
                 
-                # Check for Elbereth-ignoring humanoids
-                fearless = any(any(k in m.lower() for k in ("orc", "goblin", "gnome", "dwarf", "elf", "human", "kobold")) 
-                               for m in obs.combat.adjacent_monsters)
-                if fearless or obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.40:
-                        obs = yield melee_attack_hostile()
-                    else:
-                        obs = yield step_away_from_hostile()
+                # Only attack from Elbereth if we are healthy or forced
+                if obs.combat.adjacent_hostile and obs.hero.hp_frac > 0.40:
+                    obs = yield melee_attack_hostile()
                     continue
                 
-                if obs.hero.hp_frac < 0.80:
-                    obs = yield wait()
-                    continue
-                else:
-                    # Recovered: move to objective
+                # If no one is adjacent, leave the sanctuary to avoid idling
+                if not obs.combat.adjacent_hostile:
                     if obs.spatial.stairs_down_known:
                         obs = yield step_to_stairs_down()
                     else:
                         obs = yield step_to_frontier()
+                    continue
+                else:
+                    obs = yield wait()
                     continue
 
             # 6. High-Speed Attackers

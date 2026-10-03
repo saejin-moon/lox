@@ -61,6 +61,19 @@ class Agent:
                     obs = yield step_to_fountain()
                     continue
 
+            # 6. Altar BUC Testing (Only when adjacent or standing on altar with untested items)
+            if obs.dungeon.standing_on_altar and obs.epistemic.has_untested_items:
+                obs = yield test_altar_buc()
+                continue
+            elif obs.dungeon.adjacent_altar and obs.epistemic.has_untested_items:
+                obs = yield step_to_altar()
+                continue
+
+            # 7. Poison Resistance Harvesting (STRICTLY gate by obs.dungeon.can_harvest_poison!)
+            if obs.dungeon.can_harvest_poison and not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
+                obs = yield harvest_poison_res()
+                continue
+
             # 6. Navigation & Exploration
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                 obs = yield descend()
