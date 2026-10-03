@@ -54,10 +54,10 @@ class Agent:
 
             # 5. Weapon Scaling (Forge Excalibur when lawful Valkyrie level >= 5 at a fountain)
             if obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
-                if obs.dungeon.adjacent_fountain:
+                if obs.dungeon.standing_on_fountain:
                     obs = yield dip_excalibur()
                     continue
-                elif obs.dungeon.fountain_in_fov:
+                elif obs.dungeon.fountain_in_fov or obs.dungeon.adjacent_fountain:
                     obs = yield step_to_fountain()
                     continue
 
@@ -163,13 +163,17 @@ class Agent:
         return obs
 
     def handle_dead_end(self, obs):
-        obs = yield step_to_dead_end()
-        for _ in range(15):
-            if obs.combat.hostile_count_fov > 0:
-                return obs
-            if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
-                break
-            obs = yield search()
+        current_pos = (obs.hero.y, obs.hero.x)
+        if obs.spatial.standing_on_dead_end and current_pos != getattr(self, "last_searched_pos", None):
+            self.last_searched_pos = current_pos
+            for _ in range(8):
+                if obs.combat.hostile_count_fov > 0:
+                    return obs
+                if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
+                    break
+                obs = yield search()
+        else:
+            obs = yield step_to_dead_end()
         return obs
 ```
 
@@ -186,7 +190,7 @@ Every turn, `obs` provides rich sub-namespaces:
 - `obs.inventory`: `has_food`, `has_healing`, `has_unworn_armor`, `has_daggers`, `get_food_slot()`, `get_healing_slot()`, `get_dagger_slot()`, `items`
 - `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`
 - `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`
-- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `adjacent_altar`, `standing_on_altar`, `can_forge_excalibur`
+- `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `standing_on_fountain`, `adjacent_altar`, `standing_on_altar`, `can_forge_excalibur`
 - `obs.epistemic`: `untested_buc_count` (int), `has_untested_items` (bool), `can_safely_wear_armor` (bool), `can_safely_quaff_healing` (bool), `items_belief` (dict of ItemBeliefState)
 - `obs.agenda`: `active_goal` (str), `goal_stack` (list of str), `is_active(goal_name)` (bool)
 - `obs.corpses`: list of `FloorCorpse(name, y, x, age_turns, is_fresh, is_poisonous, is_deadly, is_safe)`
@@ -197,7 +201,7 @@ Every turn, `obs` provides rich sub-namespaces:
 2. **Prayer & Major Trouble**: Safe prayer timeout is ~350 turns. However, during **major trouble** (fainting from hunger or HP < 15%), gods grant divine aid even with timeout as high as ~150–200 turns without divine wrath.
 3. **Corpse Consumption Hazards**: Eating a corpse takes multiple turns (`weight / 64 + 3`), leaving the hero completely helpless and vulnerable. NEVER eat a corpse if enemies are in FOV. Corpses older than 50 turns cause food poisoning and 1d8 damage; kobolds are poisonous; cockatrices cause lethal petrification without gloves. Check `corpse.is_safe` before eating!
 4. **Door Breaching**: Always try `open_door()` first on closed doors. Only use `kick_closed_door()` if `obs.dungeon.door_is_locked` is True (kicking unlocked doors can hurt your leg and immobilize you for 5-20 turns).
-5. **Excalibur Dipping (`dip_excalibur`)**: Dipping a long sword into a fountain has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`). Wielding Excalibur gives +1d10 slashing damage, auto-searching for doors, and drain resistance.
+5. **Excalibur Dipping (`dip_excalibur`)**: Dipping a long sword into a fountain strictly requires **standing directly on the fountain tile** (`obs.dungeon.standing_on_fountain`). It has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`). Wielding Excalibur gives +1d10 slashing damage, auto-searching for doors, and drain resistance. Never dip from an adjacent tile!
 6. **Secret Doors & Corridor Dead Ends**: NetHack procedural generation regularly seals off deeper dungeon sections and staircases behind hidden secret doors located at dead-end corridors (`#`) and room perimeter walls. When visible frontiers are fully explored (`obs.spatial.has_unvisited_frontier == False`), call `step_to_dead_end()` to navigate to dead ends or perimeter walls and `search()` repeatedly until the secret door is exposed. Searching repeatedly inside open rooms will NOT find the stairs.
 7. **Tactical In-Combat Emergency Healing**: Quaffing a healing potion takes only 1 turn and restores 10-20 HP. When `obs.hero.hp_frac < 0.50` and `obs.inventory.has_healing`, ALWAYS quaff healing immediately inside `handle_combat` before taking another attack! Never die with healing potions in your pack.
 8. **Soldier Ants & High-Speed Attackers**: Soldier ants and killer bees move at speed 18 (nearly 2x the hero) and inflict lethal poison stings. If `obs.combat.is_fast_dangerous` is True or `obs.combat.closest_hostile_name in ("soldier ant", "killer bee")`, retreat immediately to a 1-tile corridor chokepoint (`step_to_chokepoint()`), quaff healing, or pray.
