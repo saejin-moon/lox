@@ -117,7 +117,17 @@ This living document tracks empirical progress, critical discoveries, immediate 
   - **Fixes Applied (Committed & Verified)**:
     1. Added `adjacent_floating_eye` and `hostile_ignores_elbereth` to `CombatView` and `ALLOWED_PREDICATES`.
     2. Shielded `NetHackAdapter.step(Action(name="melee_attack_hostile"))` to strictly skip floating eyes and gas spores, and step away rather than approaching them in melee.
-    3. Updated `handle_combat` Elbereth recovery logic to detect `obs.combat.hostile_ignores_elbereth` and actively fight or retreat to corridor chokepoints rather than waiting.
+- **Campaign 3 Results (Task `task-3296`, In Flight - Gen 9/10 Running)**:
+  - **Gen 1**: Avg Depth **3.65**, Max Depth 7, Avg Turns 2,979.2
+  - **Gen 2**: Avg Depth **3.85**, **Max Depth 10** (Episode reached Depth 10!), Avg Turns 2,416.8
+  - **Gen 3**: Avg Depth **3.35**, Max Depth 6, Avg Turns 2,193.5
+  - **Gen 4**: Avg Depth 2.70, Max Depth 5, Avg Turns 3,632.7
+  - **Gen 5**: Avg Depth **3.60**, Max Depth 6, Avg Turns 2,810.9
+  - **Gen 6**: Avg Depth **3.60**, **Max Depth 9** (Episode reached Depth 9!), Avg Turns 4,218.9
+  - **Gen 7**: Avg Depth **3.60**, Max Depth 6, Avg Turns 2,048.2
+  - **Gen 8**: Avg Depth **3.50**, Max Depth 7, Avg Turns 2,124.6
+  - **Gen 9**: Currently running Episode 16 of 20.
+  - **Key Progress**: Gemma adopted `obs.combat.hostile_ignores_elbereth` into `data/policies/gen_0008.py` and elevated emergency healing on Elbereth (`hp_frac < 0.70`). Zero paralysis deaths from floating eyes or gas spores recorded.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 
