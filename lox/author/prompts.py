@@ -120,7 +120,7 @@ class Agent:
 
             # 0.1 In-Combat Hunger Emergency: Eat carried food to avoid fainting
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
-                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.combat.adjacent_floating_eye:
+                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
                     obs = yield eat_carried_food()
                     continue
 
@@ -130,27 +130,38 @@ class Agent:
                 obs = yield pray()
                 continue
 
-            # 1. Passive & Exploding Hazards: NEVER attack floating eyes or gas spores in melee!
-            # BUT if another active attacker is also adjacent, attack the safe target in melee!
-            if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
-                if obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
-                    obs = yield zap_offensive_wand()
-                    continue
-                elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
+            # 1. Passive Hazards (Floating Eye): Safe to snipe with daggers/wands at distance 1!
+            if obs.combat.adjacent_floating_eye:
+                if obs.inventory.has_daggers:
                     obs = yield throw_dagger()
                     continue
-                elif obs.combat.has_safe_melee_target:
-                    # Safely attack the active attacker; adapter skips the passive hazard!
-                    obs = yield melee_attack_hostile()
+                elif obs.inventory.has_offensive_wand:
+                    obs = yield zap_offensive_wand()
                     continue
                 elif obs.combat.can_retreat:
                     obs = yield step_away_from_hostile()
                     continue
+                elif obs.combat.has_safe_melee_target:
+                    obs = yield melee_attack_hostile()
+                    continue
                 else:
-                    if not obs.combat.standing_on_elbereth:
-                        obs = yield engrave_dust_elbereth()
-                    else:
-                        obs = yield wait()
+                    # Trapped in dead end with floating eye and 0 missiles: strike in melee to kill 1-HP eye and escape!
+                    obs = yield melee_attack_hostile()
+                    continue
+
+            # 1.1 Exploding Hazards (Gas Spore): 4d6 explosion blast at distance 1; retreat or fight safe targets!
+            if obs.combat.adjacent_gas_spore:
+                if obs.combat.can_retreat:
+                    obs = yield step_away_from_hostile()
+                    continue
+                elif obs.combat.has_safe_melee_target:
+                    obs = yield melee_attack_hostile()
+                    continue
+                elif not obs.combat.standing_on_elbereth:
+                    obs = yield engrave_dust_elbereth()
+                    continue
+                else:
+                    obs = yield wait()
                     continue
 
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain", "guard", "priest", "priestess", "oracle") or obs.dungeon.in_shop:
@@ -310,6 +321,8 @@ Every turn, `obs` provides rich sub-namespaces:
 18. **Poison Resistance Harvesting (`harvest_poison_res`)**: Poisonous bites from ants and bees kill heroes instantly at Depth 4+. When out of combat and `obs.dungeon.can_harvest_poison` is True and `not obs.hero.has_poison_res`, yield `harvest_poison_res()` to seek out and consume killer bee or soldier ant corpses to gain permanent poison resistance intrinsic.
 19. **Hybrid HTN-BT Goal Agenda**: Structure strategic progression around milestones (`obs.agenda.active_goal` or `GoalDirective`). Reactive reflexes (Combat, Healing, Hunger, Panic Elbereth) ALWAYS execute first. When safe, evaluate your strategic goal: e.g. acquire poison resistance (`GOAL_COLLECT_POISON_RES`), forge Excalibur (`GOAL_FORGE_EXCALIBUR`), test BUC on altars (`GOAL_TEST_BUC_ALTAR`), or clear the floor and descend (`GOAL_DESCEND_STAIRS`).
 20. **Gnomish Mines Avoidance & Main Dungeon Steering**: The Gnomish Mines entrance (`obs.hero.dungeon_branch == "mines"`) appears on Depths 2–4. The Mines are pitch dark and infested with deadly gnome packs with wands and crossbows. If `obs.hero.dungeon_branch == "mines"`, immediately ascend back up to the main dungeon (`yield ascend()` if on stairs up, or `yield step_to_stairs_up()`). NetHackAdapter will dynamically record and prune that Mines staircase from `known_stairs_down` upon returning to the Dungeons of Doom, allowing the hero to locate and descend the true main dungeon staircase down toward Depth 20.
+21. **Adjacent Passive Hazard Ranged Elimination & Dead-End Melee Break**: Throwing daggers, darts, arrows, or rocks (`throw_dagger()`) at an adjacent floating eye (`obs.combat.adjacent_floating_eye`) is 100% safe at distance 1 and does NOT trigger the passive melee paralysis attack. Never restrict ranged attacks against floating eyes to distance >= 2. If cornered in a dead end with an adjacent floating eye and 0 missiles, waiting will cause certain starvation; striking it in melee kills its 1-HP body and clears the path. Gas spores explode for 4d6 damage at distance 1, so retreat away or fight adjacent safe targets.
+22. **Proactive In-Combat Nutrition**: NetHack fainting occurs randomly at `hunger_state >= 3`, leaving the hero unconscious for 30 turns and defenseless against monsters. Consume carried food (`eat_carried_food()`) proactively at `hunger_state >= 2` ("Weak") when standing on Elbereth, out of melee reach, or adjacent only to passive hazards (floating eyes or gas spores). Never wait until `hunger_state >= 3` to eat while monsters are in FOV.
 
 ### Available Actions:
 {actions}

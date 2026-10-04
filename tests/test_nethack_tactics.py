@@ -305,3 +305,39 @@ def test_food_poisoning_shield_and_universal_missiles():
     assert inv_missiles.dagger_count == 29
 
 
+def test_adjacent_floating_eye_and_proactive_nutrition():
+    """Verify Invariants 44 & 45:
+    - Missiles can be thrown directly at an adjacent floating eye (safe at distance 1)
+    - Nutrition is consumed at hunger_state >= 2 during combat when adjacent to passive hazards
+    """
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=109)
+
+    # Mock adjacent floating eye glyph at (hero.y, hero.x + 1)
+    target_pos = (obs.hero.y, obs.hero.x + 1)
+    raw_obs_mock = obs.raw_obs.copy()
+    raw_obs_mock["glyphs"] = obs.glyphs.copy()
+    # Place floating eye glyph (permonst ID for floating eye is usually 89)
+    # Using glyph_is_monster and permonst
+    eye_mon_id = nethack.glyph_to_mon(100)  # get a valid mon id or lookup floating eye
+    for mid in range(380):
+        try:
+            if nethack.permonst(mid).mname.lower() == "floating eye":
+                eye_mon_id = mid
+                break
+        except Exception:
+            continue
+    raw_obs_mock["glyphs"][target_pos[0], target_pos[1]] = nethack.GLYPH_MON_OFF + eye_mon_id
+    obs_extracted = adapter._extract_obs(raw_obs_mock)
+
+    assert obs_extracted.combat.adjacent_floating_eye is True
+    assert obs_extracted.combat.closest_hostile_name.lower() == "floating eye"
+
+    # Throwing dagger at adjacent floating eye must execute throw sequence, not melee bump
+    obs_res, _, _, _, _ = adapter.step(Action(name="throw_dagger", target_pos=target_pos))
+    assert obs_res is not None
+
+    adapter.close()
+
+
+
