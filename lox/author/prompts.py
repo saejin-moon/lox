@@ -125,7 +125,7 @@ class Agent:
                     continue
 
             # 0.2 Major Trouble Divine Intervention (Fainting or Critical HP)
-            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 150):
+            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 350):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue

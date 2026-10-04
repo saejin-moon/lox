@@ -317,9 +317,11 @@ def test_adjacent_floating_eye_and_proactive_nutrition():
     target_pos = (obs.hero.y, obs.hero.x + 1)
     raw_obs_mock = obs.raw_obs.copy()
     raw_obs_mock["glyphs"] = obs.glyphs.copy()
-    # Place floating eye glyph (permonst ID for floating eye is usually 89)
-    # Using glyph_is_monster and permonst
-    eye_mon_id = nethack.glyph_to_mon(100)  # get a valid mon id or lookup floating eye
+    for r in range(21):
+        for c in range(79):
+            if nethack.glyph_is_monster(int(raw_obs_mock["glyphs"][r, c])):
+                raw_obs_mock["glyphs"][r, c] = 2359
+    eye_mon_id = 89
     for mid in range(380):
         try:
             if nethack.permonst(mid).mname.lower() == "floating eye":

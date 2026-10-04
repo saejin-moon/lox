@@ -265,15 +265,25 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
 
     killer = ""
     if obs.hero.is_dead or "combat" in death_reason.lower() or "fatality" in death_reason.lower():
-        killer = getattr(obs.combat, "closest_hostile_name", "")
-        if not killer and last_known_hostile:
-            killer = last_known_hostile
+        m = obs.message.lower()
+        for hit_verb in (" bites!", " hits!", " stings!", " claws!", " shoots!", " strikes!", " kicks!", " zaps!", " bites.", " hits.", " stings."):
+            if hit_verb in m:
+                part = m.split(hit_verb)[0].strip()
+                words = part.split()
+                if words and words[0] in ("the", "a", "an"):
+                    killer = " ".join(words[1:])
+                elif words:
+                    killer = words[-1]
+                break
         if not killer:
-            m = obs.message.lower()
             for k in ("killed by a ", "killed by an ", "killed by the "):
                 if k in m:
                     killer = m.split(k)[-1].split(".")[0].strip()
                     break
+        if not killer:
+            killer = getattr(obs.combat, "closest_hostile_name", "")
+        if not killer and last_known_hostile:
+            killer = last_known_hostile
     ac_at_death = last_valid_ac
     hp_at_death = getattr(obs.hero, "hp", 0)
     max_hp_at_death = last_valid_max_hp

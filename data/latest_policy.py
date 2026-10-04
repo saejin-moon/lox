@@ -23,12 +23,11 @@ class Agent:
                     continue
 
             # 3. Combat Logic (Highest Priority)
-            # We treat any hostile in FOV as a combat state to prevent "search-death"
-            if obs.combat.adjacent_hostile or obs.combat.hostile_count_fov > 0:
+            if obs.combat.adjacent_hostile or obs.combat.hostile_count_fov > 0 or obs.combat.has_active_hostile:
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 4. Hunger Prevention (Only when safe)
+            # 4. Proactive Hunger Prevention (Prevent Fainting)
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -47,12 +46,12 @@ class Agent:
                 if obs.dungeon.standing_on_fountain:
                     obs = yield dip_excalibur()
                     continue
-                elif obs.dungeon.adjacent_fountain:
+                elif obs.dungeon.adjacent_fountain or obs.dungeon.fountain_in_fov:
                     obs = yield step_to_fountain()
                     continue
 
             # 7. Nearby Floor Loot Scooping
-            if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile:
+            if obs.spatial.has_nearby_loot:
                 if not obs.status.is_encumbered or obs.status.encumbrance_level < 3:
                     obs = yield step_to_loot()
                     continue
@@ -91,7 +90,6 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
-                # Prevent EpisodeWallTimeout by actively searching perimeter/dead-ends
                 obs = yield from self.handle_dead_end(obs)
 
     def handle_combat(self, obs):
@@ -105,19 +103,19 @@ class Agent:
                     obs = yield zap_wand_teleport()
                     continue
 
-            # 0.1 In-Combat Hunger Emergency: Eat carried food at hunger_state >= 2 (Weak) when safe to prevent random fainting
+            # 0.1 In-Combat Hunger Emergency
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
-                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
+                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
                     obs = yield eat_carried_food()
                     continue
 
             # 0.2 Major Trouble Divine Intervention
-            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 150):
+            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 350):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
 
-            # 1. Tactical Healing (Highest Priority in Combat)
+            # 1. Tactical Healing (Aggressive attrition prevention)
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
@@ -127,7 +125,7 @@ class Agent:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 3. Passive Hazards (Floating Eye): Safe to snipe with daggers/wands at distance 1!
+            # 3. Passive Hazards (Floating Eye) - Ranged is safe at distance 1
             if obs.combat.adjacent_floating_eye:
                 if obs.inventory.has_daggers:
                     obs = yield throw_dagger()
@@ -135,24 +133,23 @@ class Agent:
                 elif obs.inventory.has_offensive_wand:
                     obs = yield zap_offensive_wand()
                     continue
+                elif obs.combat.has_safe_melee_target:
+                    obs = yield melee_attack_hostile()
+                    continue
                 elif obs.combat.can_retreat:
                     obs = yield step_away_from_hostile()
                     continue
-                elif obs.combat.has_safe_melee_target:
-                    obs = yield melee_attack_hostile()
-                    continue
                 else:
-                    # Trapped in dead end with floating eye and 0 missiles: strike in melee to kill 1-HP eye and escape!
                     obs = yield melee_attack_hostile()
                     continue
 
-            # 3.1 Exploding Hazards (Gas Spore): 4d6 explosion blast at distance 1; retreat or fight safe targets!
+            # 3.1 Exploding Hazards (Gas Spore)
             if obs.combat.adjacent_gas_spore:
-                if obs.combat.can_retreat:
-                    obs = yield step_away_from_hostile()
-                    continue
-                elif obs.combat.has_safe_melee_target:
+                if obs.combat.has_safe_melee_target:
                     obs = yield melee_attack_hostile()
+                    continue
+                elif obs.combat.can_retreat:
+                    obs = yield step_away_from_hostile()
                     continue
                 elif not obs.combat.standing_on_elbereth:
                     obs = yield engrave_dust_elbereth()
@@ -269,7 +266,6 @@ class Agent:
             if current_pos != getattr(self, "last_searched_pos", None):
                 self.last_searched_pos = current_pos
                 for _ in range(8):
-                    # CRITICAL: Check for combat inside the search loop to prevent "search-death"
                     if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
                         return obs
                     if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
