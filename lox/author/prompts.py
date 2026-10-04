@@ -222,6 +222,11 @@ class Agent:
 
             # 5. Fast Dangerous Attackers (Soldier ants, killer bees, giant bats, foxes)
             if obs.combat.is_fast_dangerous:
+                # If surrounded or facing multiple fast attackers in open rooms: engrave Elbereth immediately! They flee in terror!
+                if (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2) and not obs.combat.standing_on_elbereth:
+                    obs = yield engrave_dust_elbereth()
+                    continue
+
                 # If adjacent, NEVER run in the open against faster predators! Strike in melee or engrave Elbereth
                 if obs.combat.adjacent_hostile:
                     if obs.hero.hp_frac > 0.40 or not obs.combat.can_retreat:
