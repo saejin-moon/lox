@@ -162,9 +162,31 @@ This living document tracks empirical progress, critical discoveries, immediate 
     4. **Numba JIT Acceleration & Disk Caching**: JIT-compiled dead ends mask kernel with `cache=True`, cutting calculation time by 7x (~58 µs/call). Added `SpatialEngine.warmup()`.
     5. **Granular Episode Mortality Telemetry**: Added `killer`, `ac_at_death`, `hp_at_death`, `max_hp_at_death`, and `excalibur_forged` to DuckDB and Parquet pipelines.
 
-- **Campaign 6 (Active - Task `task-200`)**:
+- **Campaign 6 Results & Autopsy Breakthroughs**:
+  - **Gen 1**: Avg Depth 2.55, Max Depth 6, Avg Turns 1,790.6
+  - **Gen 2**: Avg Depth 1.90, Max Depth 4, Avg Turns 1,688.6
+  - **Gen 3**: Avg Depth 1.95, Max Depth 4, Avg Turns 1,733.2
+  - **Gen 4**: Avg Depth 2.25, Max Depth 5, Avg Turns 1,736.9
+  - **Gen 5**: Avg Depth 1.70, Max Depth 4, Avg Turns 1,741.1
+  - **Gen 6**: Avg Depth 2.05, Max Depth 4, Avg Turns 1,601.4
+  - **Gen 7**: Avg Depth 1.75, Max Depth 3, Avg Turns 1,759.5
+  - **Autopsy Diagnoses & Fatal Traps Uncovered**:
+    1. **Intermediate Keystroke Dialog Cancellation Trap**:
+       - When `_dismiss_more` was expanded with ESC dismissals for `"what do you want to eat"`, `_step_sequence([e, food_slot])` sent `e`, `_dismiss_more` immediately saw the item prompt and pressed ESC (printing `"Never mind."`), cancelling the eat action before the slot key was delivered.
+       - At hunger $\ge 2$ (~turn 750), heroes repeatedly attempted `eat_carried_food` for over 1,200 zero-turn steps until NLE aborted the episode at ~1,700 steps.
+       - **Fix**: Added `is_intermediate = (idx < len(action_indices) - 1)` to `_step_sequence` and `_dismiss_more`, preserving intermediate prompts across multi-key actions (`eat_carried_food`, `wear_armor`, `zap_offensive_wand`, `throw_dagger`).
+    2. **Consecutive Zero-Turn Non-Movement Obstacle Poisoning**:
+       - `self.consecutive_zero_turns >= 2` previously marked the tile in the direction of the last movement step as blocked, even when the zero-turn actions were inventory queries or failed eating.
+       - **Fix**: Gated with `is_step_direction`.
+    3. **False MaxTurnsReached Classification**:
+       - Aborted runs (`StepStatus.ABORTED`) were misclassified as `MaxTurnsReached`, blinding the synthesis engine.
+       - **Fix**: Added strict check for `obs.hero.hp <= 0` (fatality), then `StepStatus.ABORTED` (`Aborted / ZeroProgress`), and onlyalive runs reaching `max_turns` marked as `MaxTurnsReached`.
+    4. **Hero Occlusion Mask Corruption**:
+       - `self.known_chars` substitution in `_compute_dead_ends_mask` now strictly checks `(chars == ord("@")) & (self.known_chars > 0)`.
+
+- **Campaign 7 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 10 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Status**: Running Generation 1 evaluation across 20 real NetHack episodes with all architectural shields and JIT optimizations active.
+  - **Target**: Average Depth $\ge 10.0$ with working nutrition, armor equipping, and truthful mortality telemetry.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 

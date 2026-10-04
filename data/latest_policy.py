@@ -3,11 +3,10 @@ class Agent:
         self.last_prayer_turn = -1000
         self.last_searched_pos = None
         self.search_count = 0
-        self.retreat_streak = 0
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival
+            # 1. Absolute Emergency Survival (Fainting or <15% HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
                 if obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
@@ -19,7 +18,7 @@ class Agent:
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 3. Immediate Stair Descent (Prevent MaxTurnsReached)
+            # 3. Immediate Stair Descent (Primary mitigation for MaxTurnsReached)
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                 obs = yield descend()
                 continue
@@ -27,7 +26,7 @@ class Agent:
                 obs = yield step_to_stairs_down()
                 continue
 
-            # 4. Hunger Prevention (Only when safe and not on stairs)
+            # 4. Hunger Prevention (Only when safe)
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -41,7 +40,7 @@ class Agent:
                 obs = yield wear_armor()
                 continue
 
-            # 6. Weapon Scaling (Forge Excalibur)
+            # 6. Weapon Scaling (Excalibur)
             if obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
                 if obs.dungeon.standing_on_fountain:
                     obs = yield dip_excalibur()
@@ -56,7 +55,7 @@ class Agent:
                 continue
 
             # 8. Altar BUC Testing
-            if obs.epistemic.has_untested_items and obs.hero.hp_frac > 0.50 and obs.hero.hunger_state < 2:
+            if obs.epistemic.has_untested_items and obs.hero.hp_frac > 0.50:
                 if obs.dungeon.standing_on_altar:
                     obs = yield test_altar_buc()
                     continue
@@ -142,10 +141,10 @@ class Agent:
                 if not obs.combat.adjacent_hostile:
                     if obs.spatial.stairs_down_known:
                         obs = yield step_to_stairs_down()
-                        continue
+                        break 
                     elif obs.spatial.has_unvisited_frontier:
                         obs = yield step_to_frontier()
-                        continue
+                        break
                     obs = yield wait()
                     continue
                 else:
@@ -153,11 +152,11 @@ class Agent:
                     continue
 
             # 6. Ranged Harassment
-            if (obs.combat.closest_hostile_dist >= 2) and (obs.inventory.has_offensive_wand or obs.inventory.has_daggers):
+            if 2 <= obs.combat.closest_hostile_dist <= 4:
                 if obs.inventory.has_offensive_wand:
                     obs = yield zap_offensive_wand()
                     continue
-                else:
+                elif obs.inventory.has_daggers:
                     obs = yield throw_dagger()
                     continue
 
@@ -199,14 +198,17 @@ class Agent:
         if obs.spatial.standing_on_dead_end:
             if current_pos != self.last_searched_pos:
                 self.last_searched_pos = current_pos
-                # Search a limited number of times to avoid MaxTurnsReached
-                for _ in range(3):
+                for _ in range(5):
                     if obs.combat.hostile_count_fov > 0 or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
                         break
                     obs = yield search()
             else:
-                # Already searched this spot, move away to avoid loop
-                obs = yield step_to_frontier() if obs.spatial.has_unvisited_frontier else step_away_from_hostile()
+                if obs.spatial.has_unvisited_frontier:
+                    obs = yield step_to_frontier()
+                elif obs.spatial.stairs_down_known:
+                    obs = yield step_to_stairs_down()
+                else:
+                    obs = yield step_away_from_hostile()
         else:
             obs = yield step_to_dead_end()
         return obs

@@ -199,6 +199,17 @@ lox/
 32. **Granular Mortality & Progression Telemetry**:
     - Added `killer`, `ac_at_death`, `hp_at_death`, `max_hp_at_death`, and `excalibur_forged` to episode schema and DuckDB migrations.
 
+33. **Intermediate Multi-Key Keystroke Prompt Preservation (`is_intermediate`)**:
+    - When executing multi-key actions like `eat_carried_food` (`[e, slot]`), `quaff_healing` (`[q, slot]`), `wear_armor` (`[W, slot]`), `zap_offensive_wand` (`[z, slot, dir]`), or `throw_dagger` (`[t, slot, dir]`), NetHack displays interactive item selection prompts (`"What do you want to eat?"`, `"What do you want to wear?"`).
+    - If `_dismiss_more` dismisses these prompts with ESC between keystrokes, the action is cancelled with `"Never mind."`, consuming 0 turns and causing the hero to starve or loop endlessly.
+    - `_step_sequence` flags `is_intermediate = (idx < len(action_indices) - 1)`, preserving item selection prompts so the subsequent key selection is delivered.
+
+34. **Directional Step Verification for Impassable Obstacle Learning**:
+    - When consecutive 0-turn steps occur, only genuine directional movement actions (`is_step_direction`) should register the candidate tile in `self.blocked_tiles`. Non-directional actions (inventory queries, failed eating, search) must not block adjacent walkable tiles.
+
+35. **Episode Mortality Discrimination (HP <= 0 vs Zero-Progress Abort vs MaxTurnsReached)**:
+    - Real fatalities (HP <= 0) must always be classified by their lethal cause (combat, starvation, poison), even if NLE triggers termination. Zero-progress aborts (`StepStatus.ABORTED`) must be logged as `Aborted / ZeroProgress` rather than `MaxTurnsReached`, reserving `MaxTurnsReached` exclusively for runs reaching `max_turns` while alive.
+
 ---
 
 ## 4. Key CLI Commands

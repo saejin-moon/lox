@@ -229,8 +229,8 @@ class NetHackAdapter(EnvironmentAdapter):
         """Unified dead end and perimeter secret door candidate mask."""
         effective_chars = chars.copy()
         if hasattr(self, "known_chars"):
-            mask = self.known_chars > 0
-            effective_chars[mask] = self.known_chars[mask]
+            hero_mask = (chars == ord("@")) & (self.known_chars > 0)
+            effective_chars[hero_mask] = self.known_chars[hero_mask]
         return SpatialEngine.compute_dead_ends_mask(
             effective_chars, walkable, self.searched_count, max_corridor, max_perimeter
         )
@@ -816,7 +816,9 @@ class NetHackAdapter(EnvironmentAdapter):
         self.agenda.evaluate_milestones(obs)
         return obs
 
-    def _dismiss_more(self, raw_obs: dict[str, Any], term: bool, trunc: bool) -> tuple[dict[str, Any], bool, bool]:
+    def _dismiss_more(
+        self, raw_obs: dict[str, Any], term: bool, trunc: bool, is_intermediate: bool = False
+    ) -> tuple[dict[str, Any], bool, bool]:
         space_idx = self.char_to_act.get(" ", 18)
         for _ in range(25):
             if term or trunc:
@@ -832,7 +834,7 @@ class NetHackAdapter(EnvironmentAdapter):
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("y", space_idx))
             elif "dip" in msg.lower() and "fountain" in msg.lower():
                 raw_obs, _, term, trunc, _ = self.env.step(self.char_to_act.get("y", space_idx))
-            elif any(phrase in msg.lower() for phrase in (
+            elif not is_intermediate and any(phrase in msg.lower() for phrase in (
                 "eat what?", "what do you want to eat",
                 "drop what?", "what do you want to drop",
                 "throw what?", "what do you want to throw",
@@ -876,12 +878,13 @@ class NetHackAdapter(EnvironmentAdapter):
         trunc = False
         info: dict[str, Any] = {}
         raw_obs = getattr(self, "_last_raw_obs", {})
-        for act in action_indices:
+        for idx, act in enumerate(action_indices):
             if term or trunc:
                 break
             raw_obs, r, term, trunc, info = self.env.step(act)
             total_reward += float(r)
-            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc)
+            is_intermediate = (idx < len(action_indices) - 1)
+            raw_obs, term, trunc = self._dismiss_more(raw_obs, term, trunc, is_intermediate=is_intermediate)
             if term or trunc:
                 break
         self._last_raw_obs = raw_obs
@@ -944,7 +947,7 @@ class NetHackAdapter(EnvironmentAdapter):
         is_step_direction = (getattr(self, "_last_action_name", "") == "step_direction")
         if curr_turn == prev_turn:
             self.consecutive_zero_turns += 1
-            if self.consecutive_zero_turns >= 2 and getattr(self, "_last_attempted_dir", None) is not None:
+            if self.consecutive_zero_turns >= 2 and is_step_direction and getattr(self, "_last_attempted_dir", None) is not None:
                 py, px = getattr(self, "_prev_hero_pos", (obs.hero.y, obs.hero.x))
                 dy, dx = self._last_attempted_dir
                 target_tile = (py + dy, px + dx)

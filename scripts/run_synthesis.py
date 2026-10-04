@@ -215,9 +215,10 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             term = done and not trunc
 
         if done:
-            if trunc or step >= max_turns - 1:
-                death_reason = f"MaxTurnsReached (Depth {max_depth_reached})"
-            elif getattr(obs.hero, "hp", 0) <= 0 or term:
+            end_status = info.get("end_status", None) if isinstance(info, dict) else None
+            is_aborted = (end_status is not None and getattr(end_status, "name", "") == "ABORTED")
+
+            if getattr(obs.hero, "hp", 0) <= 0:
                 msg = getattr(obs, "message", "").strip()
                 msg_l = msg.lower()
                 if "starv" in msg_l:
@@ -234,8 +235,12 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
                     death_reason = msg[:45]
                 else:
                     death_reason = "Killed in combat"
+            elif is_aborted:
+                death_reason = f"Aborted / ZeroProgress (Depth {max_depth_reached})"
+            elif step >= max_turns - 1 or trunc:
+                death_reason = f"MaxTurnsReached (Depth {max_depth_reached})"
             else:
-                death_reason = info.get("death_reason", "died") if hasattr(info, "get") else "ended"
+                death_reason = info.get("death_reason", "ended") if hasattr(info, "get") else "ended"
 
             inventory_items = [f"{it.name} ({it.category})" for it in obs.inventory] if hasattr(obs, "inventory") else []
             inventory_at_death_str = ", ".join(inventory_items[:10])
