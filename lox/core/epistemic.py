@@ -7,7 +7,6 @@ Exposes Shannon entropy safe-gates to inform policy predicates without engine-le
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 import numpy as np
 import numpy.typing as npt
 

@@ -3,7 +3,7 @@ LOX Author Prompts: Complete NetHack Vocabulary, Class Agent Generator Paradigm,
 """
 from __future__ import annotations
 
-from lox.dsl.schema import ALLOWED_PREDICATES, ALLOWED_ACTIONS, ENUM_CONSTANTS
+from lox.dsl.schema import ALLOWED_ACTIONS, ENUM_CONSTANTS
 
 
 def build_system_prompt() -> str:
@@ -28,7 +28,7 @@ class Agent:
         while True:
             # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
-                if obs.hero.turn - self.last_prayer_turn >= 150:
+                if obs.hero.turn - self.last_prayer_turn >= 350:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
@@ -187,7 +187,7 @@ class Agent:
                         obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
                         continue
 
-                if obs.hero.hp_frac < 0.30 and obs.hero.turn - self.last_prayer_turn >= 150:
+                if obs.hero.hp_frac < 0.30 and obs.hero.turn - self.last_prayer_turn >= 350:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
@@ -310,7 +310,7 @@ Every turn, `obs` provides rich sub-namespaces:
 2. **Emergency Panic Escape (`read_scroll_teleport`, `zap_wand_teleport`)**: When low on HP (< 25%) or surrounded by high-speed attackers, teleport away immediately. NetHack teleport scrolls and wands (zapped at `.`) instantly relocate the hero to a random safe tile.
 3. **Nearby Floor Loot Scooping (`step_to_loot`)**: Defeated monsters drop armor, weapons, wands, and scrolls on their death tile. When out of combat and `obs.spatial.has_nearby_loot` is True, yield `step_to_loot()` to walk over the dropped items. Autopickup collects them, allowing `wear_armor()` to lower Armor Class (AC) towards negative numbers!
 4. **Elbereth Immunity & Humanoid Combat Tactics (`hostile_ignores_elbereth`)**: Orcs, elves, and humans ignore Elbereth. While standing on Elbereth, if `obs.combat.hostile_ignores_elbereth` is True, do NOT wait passively; actively fight in melee or retreat to a 1-tile corridor chokepoint.
-5. **Prayer & Major Trouble**: Safe prayer timeout is ~350 turns. However, during **major trouble** (fainting from hunger or HP < 15%), gods grant divine aid even with timeout as high as ~150–200 turns without divine wrath.
+5. **Prayer & Divine Favor**: In NetHack, successful prayer resets divine timeout to 300 + rn2(500) turns. Enforce `obs.hero.turn - self.last_prayer_turn >= 350` before emergency prayer (`pray()`) to guarantee divine aid and avoid angering your deity ("Tyr is displeased"), which causes divine smiting or paralysis.
 6. **Corpse Consumption Hazards**: Eating a corpse takes multiple turns (`weight / 64 + 3`), leaving the hero completely helpless and vulnerable. NEVER eat a corpse if enemies are in FOV. Corpses older than 50 turns cause food poisoning; kobolds are poisonous; cockatrices cause lethal petrification without gloves. Check `corpse.is_safe` before eating!
 7. **Door Breaching**: Always try `open_door()` first on closed doors. Only use `kick_closed_door()` if `obs.dungeon.door_is_locked` is True (kicking unlocked doors can hurt your leg and immobilize you for 5-20 turns).
 8. **Excalibur Dipping (`dip_excalibur`)**: Dipping a long sword into a fountain strictly requires **standing directly on the fountain tile** (`obs.dungeon.standing_on_fountain`). It has a 1/6 chance of forging Excalibur when lawful Valkyrie/Knight at level >= 5 (`obs.dungeon.can_forge_excalibur`). Wielding Excalibur gives +1d10 slashing damage, auto-searching for doors, and drain resistance. Never dip from an adjacent tile!

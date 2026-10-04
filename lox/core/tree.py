@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from lox.core.types import Status, Action, Observation, HeroState
+from lox.core.types import Status, Action, Observation
 
 
 @dataclass

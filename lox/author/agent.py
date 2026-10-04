@@ -510,7 +510,6 @@ class Agent:
                 try:
                     tree = compile_policy(candidate_code, action_handlers=action_handlers)
                     # Multi-scenario dry-run validation: execute test steps across scenarios with timeout shield
-                    import concurrent.futures
                     from lox.core.types import HungerState, CombatView, FloorCorpse, SpatialView
 
                     test_scenarios = [

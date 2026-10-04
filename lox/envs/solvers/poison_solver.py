@@ -5,6 +5,8 @@ before descending to deeper dungeon levels (depth >= 4).
 """
 from __future__ import annotations
 
+from typing import Any
+
 from lox.core.types import Action, Observation
 
 

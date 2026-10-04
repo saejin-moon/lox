@@ -6,7 +6,7 @@ Directs non-emergency macro selection across long dungeon horizons.
 from __future__ import annotations
 
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
