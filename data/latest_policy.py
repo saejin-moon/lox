@@ -13,7 +13,12 @@ class Agent:
                     obs = yield pray()
                     continue
 
-            # 2. Combat Logic (Highest Priority)
+            # 2. Immediate Staircase Descent (Progress & Escape)
+            if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
+                obs = yield descend()
+                continue
+
+            # 3. Combat Logic (High Priority)
             if obs.combat.hostile_count_fov > 0:
                 obs = yield from self.handle_combat(obs)
                 continue
@@ -80,7 +85,12 @@ class Agent:
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
-            # 0. Emergency Panic Escape
+            # 0. Staircase Escape (Instant exit from combat)
+            if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
+                obs = yield descend()
+                break
+
+            # 0.1 Emergency Panic Escape
             if (obs.hero.hp_frac < 0.25 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
                     obs = yield read_scroll_teleport()
