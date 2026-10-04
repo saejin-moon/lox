@@ -8,7 +8,7 @@ class Agent:
         while True:
             # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
-                if obs.hero.turn - self.last_prayer_turn >= 150:
+                if obs.hero.turn - self.last_prayer_turn >= 350:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
