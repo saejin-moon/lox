@@ -15,7 +15,7 @@ class Agent:
 
             # 1.5 Avoid Gnomish Mines: Return immediately to Main Dungeons of Doom
             if obs.hero.dungeon_branch == "mines":
-                if obs.spatial.standing_on_stairs_up or chr(obs.chars[obs.hero.y, obs.hero.x]) == ord("<"):
+                if obs.spatial.standing_on_stairs_up or obs.chars[obs.hero.y, obs.hero.x] == ord("<"):
                     obs = yield ascend()
                     continue
                 elif obs.spatial.stairs_up_known:

@@ -24,7 +24,7 @@ SAFE_BUILTINS = {
     "range", "len", "min", "max", "abs", "sum", "enumerate", "zip",
     "int", "float", "str", "bool", "list", "dict", "set", "tuple",
     "print", "round", "isinstance", "getattr", "hasattr", "any", "all",
-    "sorted", "reversed", "True", "False", "None",
+    "sorted", "reversed", "chr", "ord", "True", "False", "None",
 }
 
 # Special framework keywords and type names
