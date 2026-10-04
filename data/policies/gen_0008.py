@@ -2,6 +2,7 @@ class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
         self.last_searched_pos = None
+        self.search_count = 0
 
     def run(self, obs):
         while True:
@@ -27,11 +28,16 @@ class Agent:
                 continue
 
             # 3.1 Post-Combat Recovery
-            if obs.hero.hp_frac < 0.80 and obs.inventory.has_healing:
-                obs = yield quaff_healing()
-                continue
+            if obs.hero.hp_frac < 0.70:
+                if obs.inventory.has_healing:
+                    obs = yield quaff_healing()
+                    continue
+                elif obs.hero.hp_frac < 0.30 and (obs.hero.turn - self.last_prayer_turn >= 350):
+                    self.last_prayer_turn = obs.hero.turn
+                    obs = yield pray()
+                    continue
 
-            # 4. Proactive Hunger Prevention (Safe zones)
+            # 4. Proactive Hunger Prevention
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -121,16 +127,13 @@ class Agent:
                 continue
 
             # 1. Tactical Healing
-            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+            if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # 2. Non-Aggression (CRITICAL: Prevent Shopkeeper/Guard deaths)
+            # 2. Non-Aggression
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain", "guard", "priest", "priestess", "oracle") or obs.dungeon.in_shop:
-                if obs.combat.can_retreat:
-                    obs = yield retreat()
-                else:
-                    obs = yield step_away_from_hostile()
+                obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
             # 3. Passive Hazards (Floating Eyes/Gas Spores)
@@ -145,9 +148,10 @@ class Agent:
                     obs = yield melee_attack_hostile()
                     continue
                 elif obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
+                    obs = yield step_away_from_hostile()
                     continue
                 else:
+                    # Last resort: kill the 1-HP eye to clear the path
                     obs = yield melee_attack_hostile()
                     continue
 
@@ -156,7 +160,7 @@ class Agent:
                     obs = yield melee_attack_hostile()
                     continue
                 elif obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
+                    obs = yield step_away_from_hostile()
                     continue
                 elif not obs.combat.standing_on_elbereth:
                     obs = yield engrave_dust_elbereth()
@@ -166,22 +170,22 @@ class Agent:
                     continue
 
             # 4. Panic Sanctuary
-            if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
-                if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth) or obs.hero.hp_frac < 0.25:
+            if (obs.hero.hp_frac < 0.30 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+                if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth) or obs.hero.hp_frac < 0.15:
                     obs = yield engrave_dust_elbereth()
                     continue
 
             # 5. Sanctuary Logic
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.70 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
                         obs = yield melee_attack_hostile()
                         continue
                     else:
-                        obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
+                        obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
                         continue
 
-                if obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
+                if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                     obs = yield quaff_healing()
                     continue
                 elif obs.combat.closest_hostile_dist >= 2:
@@ -217,7 +221,7 @@ class Agent:
                     continue
 
                 if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
                         obs = yield melee_attack_hostile()
                         continue
                     else:
@@ -232,7 +236,7 @@ class Agent:
 
             # 8. Tactical Melee / Retreat
             if obs.combat.adjacent_hostile:
-                if obs.hero.hp_frac < 0.50:
+                if obs.hero.hp_frac < 0.45:
                     if not obs.combat.standing_on_elbereth and not (obs.combat.hostile_ignores_elbereth):
                         obs = yield engrave_dust_elbereth()
                         continue
@@ -246,13 +250,13 @@ class Agent:
                         obs = yield pray()
                         continue
 
-                if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
                     continue
                 
                 obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
             else:
-                if obs.hero.hp_frac > 0.50:
+                if obs.hero.hp_frac > 0.40:
                     obs = yield melee_attack_hostile()
                 else:
                     obs = yield step_away_from_hostile()

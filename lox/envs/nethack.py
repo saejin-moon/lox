@@ -857,7 +857,9 @@ class NetHackAdapter(EnvironmentAdapter):
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
             if 0 <= y + dy < 21 and 0 <= x + dx < 79 and walkable[y + dy, x + dx]
         )
-        in_corridor = walkable_adj <= 2 and chr(chars[y, x]) == "#"
+        in_corridor = (walkable_adj <= 2 and chr(chars[y, x]) == "#") or bool(
+            all_doors[y, x]
+        )
 
         is_fast_dangerous = closest_name.lower() in (
             "soldier ant",

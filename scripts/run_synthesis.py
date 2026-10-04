@@ -54,7 +54,7 @@ except ImportError:
 
 from lox.author.agent import AuthorAgent
 from lox.core.spatial import SpatialEngine
-from lox.core.types import Action
+from lox.core.types import Action, HungerState
 from lox.dsl.compiler import compile_policy
 from lox.envs.minihack import MiniHackAdapter
 from lox.envs.nethack import NetHackAdapter
@@ -295,16 +295,31 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
                 end_status is not None and getattr(end_status, "name", "") == "ABORTED"
             )
 
+            recent_msgs = [
+                t.get("message", "") for t in getattr(recorder, "turns", [])[-6:]
+            ]
             if getattr(obs.hero, "hp", 0) <= 0:
                 msg = getattr(obs, "message", "").strip()
                 msg_l = msg.lower()
-                if "starv" in msg_l:
+                is_starving = (
+                    "starv" in msg_l
+                    or any(
+                        "starv" in m.lower() or "faint from lack of food" in m.lower()
+                        for m in recent_msgs
+                    )
+                    or getattr(obs.hero, "hunger_state", None) == HungerState.FAINTING
+                )
+                if is_starving:
                     death_reason = "Starvation"
-                elif "chok" in msg_l:
+                elif "chok" in msg_l or any("chok" in m.lower() for m in recent_msgs):
                     death_reason = "Choked on food"
-                elif "poison" in msg_l:
+                elif "poison" in msg_l or any(
+                    "poison" in m.lower() for m in recent_msgs
+                ):
                     death_reason = "Poison"
-                elif "petrif" in msg_l:
+                elif "petrif" in msg_l or any(
+                    "petrif" in m.lower() for m in recent_msgs
+                ):
                     death_reason = "Petrification"
                 elif any(
                     k in msg_l
@@ -345,7 +360,15 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             break
 
     killer = ""
-    if (
+    if death_reason == "Starvation":
+        killer = "starvation"
+    elif death_reason == "Choked on food":
+        killer = "choking"
+    elif death_reason == "Poison":
+        killer = "poison"
+    elif death_reason == "Petrification":
+        killer = "petrification"
+    elif (
         obs.hero.is_dead
         or "combat" in death_reason.lower()
         or "fatality" in death_reason.lower()

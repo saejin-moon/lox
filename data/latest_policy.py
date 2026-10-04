@@ -2,6 +2,7 @@ class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
         self.last_searched_pos = None
+        self.search_count = 0
 
     def run(self, obs):
         while True:
@@ -27,11 +28,16 @@ class Agent:
                 continue
 
             # 3.1 Post-Combat Recovery
-            if obs.hero.hp_frac < 0.80 and obs.inventory.has_healing:
-                obs = yield quaff_healing()
-                continue
+            if obs.hero.hp_frac < 0.70:
+                if obs.inventory.has_healing:
+                    obs = yield quaff_healing()
+                    continue
+                elif obs.hero.hp_frac < 0.30 and (obs.hero.turn - self.last_prayer_turn >= 350):
+                    self.last_prayer_turn = obs.hero.turn
+                    obs = yield pray()
+                    continue
 
-            # 4. Proactive Hunger Prevention (Safe zones)
+            # 4. Proactive Hunger Prevention (Crucial to prevent fainting deaths)
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -99,7 +105,7 @@ class Agent:
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
-            # 0. Emergency Panic Escape
+            # 0. Emergency Panic Escape (Teleport)
             if (obs.hero.hp_frac < 0.20 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
                     obs = yield read_scroll_teleport()
@@ -108,7 +114,7 @@ class Agent:
                     obs = yield zap_wand_teleport()
                     continue
 
-            # 0.1 Proactive In-Combat Nutrition
+            # 0.1 Proactive In-Combat Nutrition (Prevent Fainting)
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
                 if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
                     obs = yield eat_carried_food()
@@ -120,8 +126,8 @@ class Agent:
                 obs = yield pray()
                 continue
 
-            # 1. Tactical Healing (Aggressive threshold)
-            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+            # 1. Tactical Healing (High Priority)
+            if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
@@ -142,9 +148,10 @@ class Agent:
                     obs = yield melee_attack_hostile()
                     continue
                 elif obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
+                    obs = yield step_away_from_hostile()
                     continue
                 else:
+                    # Last resort: kill the 1HP eye to clear path
                     obs = yield melee_attack_hostile()
                     continue
 
@@ -153,7 +160,7 @@ class Agent:
                     obs = yield melee_attack_hostile()
                     continue
                 elif obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
+                    obs = yield step_away_from_hostile()
                     continue
                 elif not obs.combat.standing_on_elbereth:
                     obs = yield engrave_dust_elbereth()
@@ -162,23 +169,23 @@ class Agent:
                     obs = yield step_away_from_hostile()
                     continue
 
-            # 4. Panic Sanctuary
+            # 4. Panic Sanctuary (Engrave Elbereth)
             if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
-                if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth) or obs.hero.hp_frac < 0.20:
+                if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth) or obs.hero.hp_frac < 0.15:
                     obs = yield engrave_dust_elbereth()
                     continue
 
             # 5. Sanctuary Logic
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
                         obs = yield melee_attack_hostile()
                         continue
                     else:
                         obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
                         continue
 
-                if obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
+                if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                     obs = yield quaff_healing()
                     continue
                 elif obs.combat.closest_hostile_dist >= 2:
@@ -207,14 +214,14 @@ class Agent:
                     obs = yield throw_dagger()
                     continue
 
-            # 7. Fast Dangerous Attackers
+            # 7. Fast Dangerous Attackers (Bees, Ants)
             if obs.combat.is_fast_dangerous:
                 if (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2) and not obs.combat.standing_on_elbereth:
                     obs = yield engrave_dust_elbereth()
                     continue
 
                 if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
                         obs = yield melee_attack_hostile()
                         continue
                     else:
@@ -229,7 +236,7 @@ class Agent:
 
             # 8. Tactical Melee / Retreat
             if obs.combat.adjacent_hostile:
-                if obs.hero.hp_frac < 0.50:
+                if obs.hero.hp_frac < 0.45:
                     if not obs.combat.standing_on_elbereth and not (obs.combat.hostile_ignores_elbereth):
                         obs = yield engrave_dust_elbereth()
                         continue
@@ -240,16 +247,20 @@ class Agent:
                         if obs.inventory.has_healing:
                             obs = yield quaff_healing()
                             continue
-                        obs = yield pray()
+                        if obs.hero.turn - self.last_prayer_turn >= 350:
+                            self.last_prayer_turn = obs.hero.turn
+                            obs = yield pray()
+                            continue
+                        obs = yield melee_attack_hostile()
                         continue
 
-                if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
                     continue
                 
                 obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
             else:
-                if obs.hero.hp_frac > 0.50:
+                if obs.hero.hp_frac > 0.40:
                     obs = yield melee_attack_hostile()
                 else:
                     obs = yield step_away_from_hostile()
