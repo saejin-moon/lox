@@ -691,8 +691,14 @@ class NetHackAdapter(EnvironmentAdapter):
                             is_pois,
                             is_deadly,
                         )
-        # Prune corpses that have disappeared in hero's line of sight
-        for cy, cx in list(self.floor_corpses.keys()):
+        # Prune corpses that have rotted away (> 50 turns unless lichen/lizard) or disappeared in LOS
+        for (cy, cx), corpse_data in list(self.floor_corpses.items()):
+            cname, dturn = corpse_data[0], corpse_data[1]
+            age = turn - dturn
+            is_non_rotting = "lichen" in cname.lower() or "lizard" in cname.lower()
+            if age >= 50 and not is_non_rotting:
+                del self.floor_corpses[(cy, cx)]
+                continue
             if (cy, cx) not in visible_corpse_positions and (
                 abs(cy - y) <= 8
                 and abs(cx - x) <= 8

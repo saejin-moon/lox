@@ -44,7 +44,7 @@ class Agent:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
                     continue
-                elif obs.corpses:
+                elif any(c.is_safe for c in obs.corpses):
                     obs = yield from self.handle_corpse_consumption(obs)
                     continue
 
@@ -272,7 +272,7 @@ class Agent:
                 else:
                     obs = yield step_to(corpse.y, corpse.x)
                 return obs
-        obs = yield wait()
+        obs = yield step_to_frontier() if obs.spatial.has_unvisited_frontier else step_to_dead_end()
         return obs
 
     def handle_dead_end(self, obs):

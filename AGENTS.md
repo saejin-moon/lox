@@ -163,6 +163,8 @@ lox/
    - `step_to_dead_end()` is strictly a movement primitive and must NEVER return `Action(name="search")`. Searching is executed explicitly by `handle_dead_end()` or when `standing_on_dead_end` is true. `step_to_dead_end()` navigates to unsearched corridor dead ends or wall perimeters (`wall_adj_mask`). Search count decay (`searched_count - 10`) is strictly rate-limited to at most once per 50 turns to prevent resetting search counts every turn, which previously trapped heroes in 2,500-turn in-place search loops on Depth 1–2.
 37. **Proactive Divine Feeding at Weakness (`hunger_state >= 3`)**:
    - In NetHack, `HungerState` transitions from `HUNGRY` (2) to `WEAK` (3) before `FAINTING` (4). At `FAINTING`, the hero randomly falls unconscious for 30 turns and cannot act or pray. Emergency prayer for food must trigger at `hunger_state >= 3` when packaged food is exhausted, ensuring divine feeding before the hero falls unconscious.
+38. **Floor Corpse Aging Pruning & Safe Corpse Consumption Gating**:
+   - In NetHack, non-lichen/non-lizard corpses rot within 50 turns. The adapter strictly prunes floor corpses with `age >= 50` from `self.floor_corpses`. Policies gate floor corpse consumption on `any(c.is_safe for c in obs.corpses)` rather than truthiness of `obs.corpses`, and `handle_corpse_consumption` falls back to `step_to_frontier()` or `step_to_dead_end()` rather than `wait()`. This completely eliminates the 1,000-turn stationary `wait` stall that previously affected 19% of episodes when inedible rotten corpses lingered on the floor.
 
 ---
 
