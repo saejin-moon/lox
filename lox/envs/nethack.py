@@ -2066,6 +2066,24 @@ class NetHackAdapter(EnvironmentAdapter):
                                 break
             # If no adjacent non-passive monster, do not approach floating eye / gas spore in melee
             if action.direction is None:
+                # Cornered last resort: Trapped with adjacent floating eye and cannot retreat (Invariant 14)
+                if (
+                    getattr(obs_prev.combat, "adjacent_floating_eye", False)
+                    and not getattr(obs_prev.combat, "can_retreat", True)
+                    and glyphs is not None
+                ):
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            if dy == 0 and dx == 0:
+                                continue
+                            ty, tx = hero.y + dy, hero.x + dx
+                            if 0 <= ty < 21 and 0 <= tx < 79:
+                                g = int(glyphs[ty, tx])
+                                if 0 <= g < _MAX_GLYPH and GLYPH_IS_FLOATING_EYE[g]:
+                                    return self.step(
+                                        Action(name="melee_attack", direction=(dy, dx))
+                                    )
+
                 closest_name = getattr(obs_prev.combat, "closest_hostile_name", "")
                 if (
                     closest_name in ("floating eye", "gas spore")
