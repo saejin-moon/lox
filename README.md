@@ -262,5 +262,5 @@ lox/
 
 ## 6. Operational Guides for Agents & Developers
 
-- **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Complete operational guide, architecture, 52 technical invariants, and synthesis protocols.
+- **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Complete operational guide, architecture, 24 consolidated technical invariants across 6 operational domains, and synthesis protocols.
 - **[`TODO.md`](file:///home/moose/git/lox/TODO.md)**: Real-time campaign tracking, empirical benchmark progression, autopsy findings, and active roadmap.
