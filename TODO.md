@@ -337,18 +337,26 @@ This living document tracks empirical progress, critical discoveries, immediate 
     - `NetHackAdapter` previously assumed all floor arrivals happen on stairs up (`self.known_stairs_up = (y, x)` on turn 0), which caused heroes falling into the Mines to repeatedly execute `ascend` on open floor tiles (`"You can't go up here."`), aborting after 2,500 consecutive 0-turn steps.
     - Added `had_explicit_descent` tracking (only true if `descend` was taken), invalidated `known_stairs_up` upon trap door messages or `"You can't go up here."`, and added consecutive 0-turn shields to `ascend` falling back to `step_to_frontier`.
 
-- **Campaign 15 (Active)**:
-  - **Gen 1 Results**: Avg Depth 3.10, Max Depth 8, Avg Turns 3,025.4 (90% combat deaths, 10% aborted on locked door loop).
-  - **Diagnoses & Engine Hardening (Invariants 47 & 48)**:
-    1. **OpenRouter Network Resilience (Invariant 47)**:
-       - Transient dropped connection (`httpx.RemoteProtocolError: peer closed connection without sending complete message body`) during synthesis prompt crashed the loop.
-       - Implemented 6-attempt exponential backoff retry with randomized jitter for all network/timeout exceptions and 429/5xx status codes in `AuthorAgent._call_openai_compatible`.
-    2. **Locked Door Zero-Turn Circuit Breaker & Chokepoint Blocking Safeguard (Invariant 48)**:
-       - Unbreachable locked doors (in shops or exceeding 6 kick attempts) generated 0-turn `"This door is locked."` loops when targeted by `step_to_chokepoint`.
-       - Updated `_step_or_breach` to mark unbreachable locked doors in `self.blocked_tiles` and navigate away.
-       - Updated `step_to_chokepoint` to explicitly mask out blocked tiles and unbreachable locked doors from candidate chokepoints.
-       - Added `"open_door"` and `"kick_closed_door"` to `is_step_direction` for immediate obstacle learning.
-       - Enforced universal `consecutive_zero_turns >= 4` circuit breaker in `NetHackAdapter.step()` forcing `wait()` (`.`) to guarantee in-game turn advancement.
+- **Campaign 15 Results (Completed - 10 Gens x 20 Eps = 200 Episodes in 16 mins)**:
+  - **Gen 1**: Avg Depth 3.75, Max Depth 8, Avg Turns 2,072.1
+  - **Gen 2**: Avg Depth 3.30, Max Depth 5, Avg Turns 3,148.3
+  - **Gen 3**: Avg Depth 3.65, Max Depth 7, Avg Turns 2,479.1
+  - **Gen 4**: Avg Depth **4.30**, **Max Depth 11**!, Avg Turns 3,480.3, Avg Score 561.2
+  - **Gen 5**: Avg Depth 2.45, Max Depth 8, Avg Turns 2,733.6
+  - **Gen 6**: Avg Depth 3.90, Max Depth 8, Avg Turns 2,193.4
+  - **Gen 7**: Avg Depth 3.65, Max Depth 8, Avg Turns 3,247.0
+  - **Gen 8**: Avg Depth 2.50, Max Depth 5, Avg Turns 3,146.0
+  - **Gen 9**: Avg Depth **4.50**, **Max Depth 9**, Avg Turns 2,330.1, Avg Score 541.5
+  - **Gen 10**: Avg Depth 3.40, Max Depth 6, Avg Turns 2,682.1
+  - **Batch Total**: 200 episodes, 100.0% genuine combat deaths (0 aborts, 0 timeouts!), 140,064 tokens, **$0.0227 USD**.
+  - **Diagnoses & Engine Hardening (Invariant 49)**:
+    1. **Full-Floor Persistent Topological Memory & Doorway Connectivity (Invariant 49)**:
+       - Inspection of episodes with 12,000–17,000 turns on DL 1–3 revealed heroes trapped in rooms, searching the same room perimeter up to 511 times.
+       - Discovered that because `build_walkable_mask` only examined `raw_obs["chars"]` (which zeroes out tiles outside line-of-sight FOV) and `_get_doors_mask` only checked visible CMAP glyphs, `walkable_nav` forgot the corridor and doorway path back into earlier rooms once the hero moved away.
+       - Consequently, `step_to_dead_end` failed to pathfind to distant unsearched candidates, decayed search counters locally, and re-searched the current room in an endless cycle.
+       - `NetHackAdapter` now augments `walkable` and `walkable_nav` with `self.visited` and `self.known_chars` (`#`, `.`, `<`, `>`, `_`, `{`), incorporates known closed doorways (`ord("+")`) into `_get_doors_mask` and `_get_all_doors_mask`, and preserves all discovered level terrain in `_compute_dead_ends_mask`.
+
+- **Campaign 16 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
   - **Target**: Average Depth $\ge 20.0$.
 

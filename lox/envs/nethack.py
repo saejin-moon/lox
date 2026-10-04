@@ -144,8 +144,12 @@ class NetHackAdapter(EnvironmentAdapter):
         self.last_prayer_turn: int = -1000
 
     def _get_doors_mask(self, glyphs: np.ndarray) -> np.ndarray:
-        """Returns boolean mask of real closed doors using NLE CMAP glyphs."""
-        doors_mask = (glyphs == (nethack.GLYPH_CMAP_OFF + 15)) | (glyphs == (nethack.GLYPH_CMAP_OFF + 16))
+        """Returns boolean mask of real closed doors using NLE CMAP glyphs and persistent door memory."""
+        doors_mask = np.zeros((21, 79), dtype=bool)
+        if glyphs is not None:
+            doors_mask |= (glyphs == (nethack.GLYPH_CMAP_OFF + 15)) | (glyphs == (nethack.GLYPH_CMAP_OFF + 16))
+        if hasattr(self, "known_chars"):
+            doors_mask |= (self.known_chars == ord("+"))
         for dy, dx in self.non_door_tiles:
             if 0 <= dy < 21 and 0 <= dx < 79:
                 doors_mask[dy, dx] = False
@@ -166,6 +170,8 @@ class NetHackAdapter(EnvironmentAdapter):
             door_mask |= (glyphs >= (nethack.GLYPH_CMAP_OFF + 13)) & (glyphs <= (nethack.GLYPH_CMAP_OFF + 16))
         if chars is not None:
             door_mask |= (chars == ord("+"))
+        if hasattr(self, "known_chars"):
+            door_mask |= (self.known_chars == ord("+"))
         return door_mask
 
     def _build_walkable_nav(self, obs_or_raw: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -188,6 +194,22 @@ class NetHackAdapter(EnvironmentAdapter):
         doors_mask = self._get_doors_mask(glyphs) if glyphs is not None else np.zeros((21, 79), dtype=bool)
         walkable_nav = walkable.copy()
         walkable_nav[doors_mask] = True
+
+        # Augment with persistent spatial memory of visited tiles and known walkable characters
+        walkable[self.visited] = True
+        walkable_nav[self.visited] = True
+
+        if hasattr(self, "known_chars"):
+            known_walkable = (
+                (self.known_chars == ord("."))
+                | (self.known_chars == ord("#"))
+                | (self.known_chars == ord("<"))
+                | (self.known_chars == ord(">"))
+                | (self.known_chars == ord("_"))
+                | (self.known_chars == ord("{"))
+            )
+            walkable[known_walkable] = True
+            walkable_nav[known_walkable] = True
 
         # Extract hero position if available
         hy, hx = None, None
@@ -246,8 +268,9 @@ class NetHackAdapter(EnvironmentAdapter):
         """Unified dead end and perimeter secret door candidate mask."""
         effective_chars = chars.copy()
         if hasattr(self, "known_chars"):
-            hero_mask = (chars == ord("@")) & (self.known_chars > 0)
-            effective_chars[hero_mask] = self.known_chars[hero_mask]
+            known_mask = (self.known_chars > 0)
+            blank_mask = (chars == 0) | (chars == ord(" ")) | (chars == ord("@"))
+            effective_chars[known_mask & blank_mask] = self.known_chars[known_mask & blank_mask]
         return SpatialEngine.compute_dead_ends_mask(
             effective_chars, walkable, self.searched_count, max_corridor, max_perimeter
         )

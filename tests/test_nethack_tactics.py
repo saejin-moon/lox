@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 from lox.envs.nethack import NetHackAdapter
 from lox.core.types import Action
+from nle import nethack
 
 
 def test_tactical_primitives_execution():
@@ -135,17 +136,22 @@ def test_nearby_loot_and_step_to_loot():
     adapter = NetHackAdapter()
     obs = adapter.reset(seed=108)
 
-    # Place armor '[' on a walkable adjacent tile
+    # Place armor '[' on a walkable adjacent tile with no monster standing on it
     _, walkable_nav = adapter._build_walkable_nav(obs.raw_obs)
     candidates = [
         (obs.hero.y + dy, obs.hero.x + dx)
         for dy in (-1, 0, 1) for dx in (-1, 0, 1)
-        if (dy != 0 or dx != 0) and 0 <= obs.hero.y + dy < 21 and 0 <= obs.hero.x + dx < 79 and walkable_nav[obs.hero.y + dy, obs.hero.x + dx]
+        if (dy != 0 or dx != 0)
+        and 0 <= obs.hero.y + dy < 21 and 0 <= obs.hero.x + dx < 79
+        and walkable_nav[obs.hero.y + dy, obs.hero.x + dx]
+        and not nethack.glyph_is_monster(int(obs.glyphs[obs.hero.y + dy, obs.hero.x + dx]))
     ]
     target_loot = candidates[0] if candidates else (obs.hero.y, obs.hero.x + 1)
     raw_obs_mock = obs.raw_obs.copy()
     raw_obs_mock["chars"] = obs.chars.copy()
     raw_obs_mock["chars"][target_loot[0], target_loot[1]] = ord("[")
+    raw_obs_mock["glyphs"] = obs.glyphs.copy()
+    raw_obs_mock["glyphs"][target_loot[0], target_loot[1]] = 2359  # non-monster floor/object glyph
     obs_loot = adapter._extract_obs(raw_obs_mock)
 
     assert obs_loot.spatial.has_nearby_loot is True

@@ -264,8 +264,12 @@ lox/
 48. **Locked Door Breaching & Chokepoint Blocking Safeguard (`_step_or_breach`, `step_to_chokepoint`)**:
     - When locked doors cannot be breached (due to being inside a shop where kicking angers the shopkeeper, or having exhausted 6 failed kick attempts), attempting `open_door` outputs `"This door is locked."` and consumes 0 turns in NetHack.
     - If `step_to_chokepoint` targets the door coordinate repeatedly, it enters a zero-turn loop and causes NLE to abort with `StepStatus.ABORTED` after 2,500 steps.
-    - `_step_or_breach` dynamically adds unbreachable locked doors to `self.blocked_tiles` and falls back to frontier/dead-end navigation. `step_to_chokepoint` explicitly masks out `self.blocked_tiles` and unbreachable locked doors from candidate chokepoints.
     - `NetHackAdapter.step()` enforces a universal circuit breaker: whenever `consecutive_zero_turns >= 4`, it immediately yields `wait()` (`.`) to unconditionally advance the NetHack turn, eliminating all zero-progress aborts.
+
+49. **Full-Floor Persistent Topological Memory & Doorway Connectivity (`_build_walkable_nav`, `_get_doors_mask`, `_compute_dead_ends_mask`)**:
+    - In NetHack, when the hero transitions between rooms, corridor tiles and closed doorways leave active line-of-sight FOV. Because `raw_obs["glyphs"]` zeroes out tiles outside FOV and `build_walkable_mask` marks `+` as non-walkable, `walkable_nav` previously lost the path back through previously navigated corridors and closed doorways.
+    - This trapped heroes in individual rooms, where `step_to_dead_end` failed to pathfind to candidates in earlier rooms, decayed search counters locally, and re-searched the same room perimeter walls for up to 15,000 turns without reaching other rooms or staircases.
+    - `NetHackAdapter` now augments `walkable` and `walkable_nav` with the persistent spatial memory of all visited tiles (`self.visited`) and clean known terrain (`self.known_chars` for `#`, `.`, `<`, `>`, `_`, `{`), incorporates known closed doorways (`ord("+")`) into `_get_doors_mask` and `_get_all_doors_mask`, and preserves all discovered level terrain in `_compute_dead_ends_mask`. This ensures 100% unbroken topological connectivity across the entire dungeon floor.
 
 ---
 
