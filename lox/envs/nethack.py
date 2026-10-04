@@ -229,8 +229,14 @@ class NetHackAdapter(EnvironmentAdapter):
         ny, nx = obs.hero.y + dy, obs.hero.x + dx
         doors_mask = self._get_doors_mask(obs.glyphs)
         if 0 <= ny < 21 and 0 <= nx < 79 and doors_mask[ny, nx]:
-            if (ny, nx) in self.locked_doors and not obs.dungeon.in_shop:
-                return self.step(Action(name="kick_closed_door", direction=(dy, dx)))
+            if (ny, nx) in self.locked_doors:
+                if not obs.dungeon.in_shop and self.door_kick_count.get((ny, nx), 0) < 6:
+                    return self.step(Action(name="kick_closed_door", direction=(dy, dx)))
+                else:
+                    self.blocked_tiles.add((ny, nx))
+                    if obs.spatial.has_unvisited_frontier:
+                        return self.step(Action(name="step_to_frontier"))
+                    return self.step(Action(name="step_to_dead_end"))
             return self.step(Action(name="open_door", direction=(dy, dx)))
         return self.step(Action(name="step_direction", direction=(dy, dx)))
 
@@ -970,7 +976,7 @@ class NetHackAdapter(EnvironmentAdapter):
         prev_turn = getattr(self, "_prev_turn", 0)
         curr_turn = obs.hero.turn
         self._prev_turn = curr_turn
-        is_step_direction = (getattr(self, "_last_action_name", "") == "step_direction")
+        is_step_direction = (getattr(self, "_last_action_name", "") in ("step_direction", "step_to_chokepoint", "step_to_frontier", "step_to_dead_end", "step_away_from_hostile", "retreat", "open_door", "kick_closed_door"))
         if curr_turn == prev_turn:
             self.consecutive_zero_turns += 1
             if self.consecutive_zero_turns >= 2 and is_step_direction and getattr(self, "_last_attempted_dir", None) is not None:
@@ -1026,6 +1032,9 @@ class NetHackAdapter(EnvironmentAdapter):
         self.turns_on_level = 0
         self.last_depth = 1
         self.last_dnum = 0
+        self.consecutive_zero_turns = 0
+        self._consecutive_failed_steps = 0
+        self._prev_turn = 0
         self.last_prayer_turn = -1000
         self.floor_corpses.clear()
         self.known_stairs_down = None
@@ -1055,6 +1064,12 @@ class NetHackAdapter(EnvironmentAdapter):
         self._last_attempted_dir = action.direction
         self._last_action_name = action.name
         target_char = "."
+
+        # Break any consecutive 0-turn loop before NLE aborts at 2500
+        if getattr(self, "consecutive_zero_turns", 0) >= 4:
+            self.consecutive_zero_turns = 0
+            act_idx = self.char_to_act.get(".", 0)
+            return self._step_sequence([act_idx])
 
         # Handle composite navigation actions
         if action.name == "step_to_frontier" and obs_prev is not None:
@@ -1269,9 +1284,15 @@ class NetHackAdapter(EnvironmentAdapter):
             chars = obs_prev.chars
             walkable, walkable_nav = self._build_walkable_nav(obs_prev)
             all_doors = self._get_all_doors_mask(obs_prev)
-            # Chokepoints are corridor tiles (#) or doorways
+            # Chokepoints are corridor tiles (#) or doorways, excluding blocked tiles and unbreachable locked doors
             chokepoint_mask = (chars == ord("#")) | all_doors
             chokepoint_mask[hero.y, hero.x] = False
+            for by, bx in self.blocked_tiles:
+                if 0 <= by < 21 and 0 <= bx < 79:
+                    chokepoint_mask[by, bx] = False
+            for ly, lx in self.locked_doors:
+                if 0 <= ly < 21 and 0 <= lx < 79 and (obs_prev.dungeon.in_shop or self.door_kick_count.get((ly, lx), 0) >= 6):
+                    chokepoint_mask[ly, lx] = False
             chokepoint = SpatialEngine.find_nearest_target((hero.y, hero.x), walkable_nav, target_mask=chokepoint_mask, is_door=all_doors)
             if chokepoint and chokepoint != (-1, -1):
                 path = SpatialEngine.find_path((hero.y, hero.x), chokepoint, walkable_nav, is_door=all_doors)

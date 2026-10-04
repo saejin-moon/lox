@@ -257,6 +257,16 @@ lox/
     - `NetHackAdapter` previously assumed all floor transitions arrive on stairs up, setting `self.known_stairs_up = (y, x)` on turn 0. When in the Mines after a trap door fall, the policy yielded `ascend()` on open floor, which output `"You can't go up here."` (0 turns) and triggered NLE abort after 2,500 consecutive 0-turn steps.
     - `NetHackAdapter` now records `had_explicit_descent` (only true if `descend` was issued), invalidates `known_stairs_up` upon trap door messages or `"You can't go up here."`, and shields `ascend` by falling back to `step_to_frontier` if consecutive 0-turn steps occur.
 
+47. **OpenRouter Network Resilience & Exponential Backoff Retry (`_call_openai_compatible`)**:
+    - Transient dropped connections (`httpx.RemoteProtocolError: peer closed connection without sending complete message body`), rate limits (`HTTP 429`), and upstream gateway errors (`HTTP 500`, `502`, `503`, `504`) from OpenRouter can terminate long-running autonomous synthesis loops mid-campaign.
+    - `AuthorAgent._call_openai_compatible` implements a 6-attempt exponential backoff retry loop with randomized jitter and automated recovery, shielding overnight synthesis runs from network volatility.
+
+48. **Locked Door Breaching & Chokepoint Blocking Safeguard (`_step_or_breach`, `step_to_chokepoint`)**:
+    - When locked doors cannot be breached (due to being inside a shop where kicking angers the shopkeeper, or having exhausted 6 failed kick attempts), attempting `open_door` outputs `"This door is locked."` and consumes 0 turns in NetHack.
+    - If `step_to_chokepoint` targets the door coordinate repeatedly, it enters a zero-turn loop and causes NLE to abort with `StepStatus.ABORTED` after 2,500 steps.
+    - `_step_or_breach` dynamically adds unbreachable locked doors to `self.blocked_tiles` and falls back to frontier/dead-end navigation. `step_to_chokepoint` explicitly masks out `self.blocked_tiles` and unbreachable locked doors from candidate chokepoints.
+    - `NetHackAdapter.step()` enforces a universal circuit breaker: whenever `consecutive_zero_turns >= 4`, it immediately yields `wait()` (`.`) to unconditionally advance the NetHack turn, eliminating all zero-progress aborts.
+
 ---
 
 ## 4. Key CLI Commands

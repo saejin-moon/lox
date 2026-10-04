@@ -136,7 +136,13 @@ def test_nearby_loot_and_step_to_loot():
     obs = adapter.reset(seed=108)
 
     # Place armor '[' on a walkable adjacent tile
-    target_loot = (obs.hero.y, obs.hero.x + 1)
+    _, walkable_nav = adapter._build_walkable_nav(obs.raw_obs)
+    candidates = [
+        (obs.hero.y + dy, obs.hero.x + dx)
+        for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+        if (dy != 0 or dx != 0) and 0 <= obs.hero.y + dy < 21 and 0 <= obs.hero.x + dx < 79 and walkable_nav[obs.hero.y + dy, obs.hero.x + dx]
+    ]
+    target_loot = candidates[0] if candidates else (obs.hero.y, obs.hero.x + 1)
     raw_obs_mock = obs.raw_obs.copy()
     raw_obs_mock["chars"] = obs.chars.copy()
     raw_obs_mock["chars"][target_loot[0], target_loot[1]] = ord("[")

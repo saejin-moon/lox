@@ -13,6 +13,8 @@ import signal
 import threading
 import uuid
 from typing import Any
+import time
+import random
 import httpx
 
 try:
@@ -265,7 +267,27 @@ class Agent:
                 if use_tools:
                     payload["tools"] = OPENAI_TOOL_SPECS
 
-                resp = client.post(url, headers=headers, json=payload)
+                max_retries = 6
+                resp = None
+                for attempt in range(max_retries):
+                    try:
+                        resp = client.post(url, headers=headers, json=payload)
+                        status = getattr(resp, "status_code", 200)
+                        if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                            backoff = (2 ** attempt) + random.uniform(1.0, 3.0)
+                            time.sleep(backoff)
+                            continue
+                        break
+                    except (httpx.RemoteProtocolError, httpx.NetworkError, httpx.TimeoutException) as exc:
+                        if attempt < max_retries - 1:
+                            backoff = (2 ** attempt) + random.uniform(1.0, 3.0)
+                            time.sleep(backoff)
+                            continue
+                        raise RuntimeError(f"OpenRouter network error after {max_retries} attempts: {exc}") from exc
+
+                if resp is None:
+                    raise RuntimeError("No response received from OpenRouter API")
+
                 if resp.is_error:
                     err_msg = resp.text
                     try:

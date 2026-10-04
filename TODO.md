@@ -338,8 +338,19 @@ This living document tracks empirical progress, critical discoveries, immediate 
     - Added `had_explicit_descent` tracking (only true if `descend` was taken), invalidated `known_stairs_up` upon trap door messages or `"You can't go up here."`, and added consecutive 0-turn shields to `ascend` falling back to `step_to_frontier`.
 
 - **Campaign 15 (Active)**:
+  - **Gen 1 Results**: Avg Depth 3.10, Max Depth 8, Avg Turns 3,025.4 (90% combat deaths, 10% aborted on locked door loop).
+  - **Diagnoses & Engine Hardening (Invariants 47 & 48)**:
+    1. **OpenRouter Network Resilience (Invariant 47)**:
+       - Transient dropped connection (`httpx.RemoteProtocolError: peer closed connection without sending complete message body`) during synthesis prompt crashed the loop.
+       - Implemented 6-attempt exponential backoff retry with randomized jitter for all network/timeout exceptions and 429/5xx status codes in `AuthorAgent._call_openai_compatible`.
+    2. **Locked Door Zero-Turn Circuit Breaker & Chokepoint Blocking Safeguard (Invariant 48)**:
+       - Unbreachable locked doors (in shops or exceeding 6 kick attempts) generated 0-turn `"This door is locked."` loops when targeted by `step_to_chokepoint`.
+       - Updated `_step_or_breach` to mark unbreachable locked doors in `self.blocked_tiles` and navigate away.
+       - Updated `step_to_chokepoint` to explicitly mask out blocked tiles and unbreachable locked doors from candidate chokepoints.
+       - Added `"open_door"` and `"kick_closed_door"` to `is_step_direction` for immediate obstacle learning.
+       - Enforced universal `consecutive_zero_turns >= 4` circuit breaker in `NetHackAdapter.step()` forcing `wait()` (`.`) to guarantee in-game turn advancement.
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 20.0$ leveraging trap door arrival discrimination, 0-turn ascend fallback, encumbrance-gated loot scooping, and deep Dungeons of Doom exploration.
+  - **Target**: Average Depth $\ge 20.0$.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 20+)
 
