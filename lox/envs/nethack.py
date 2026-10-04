@@ -64,6 +64,13 @@ OCLASS_MAP: dict[int, str] = {
     nethack.GEM_CLASS: "gem",
 }
 
+IGNORES_ELBERETH_SPECIES: tuple[str, ...] = (
+    "orc", "uruk", "elf", "human", "soldier", "guard", "captain", "watchman",
+    "priest", "shopkeeper", "minotaur", "skeleton", "demon", "devil", "ghost",
+    "goblin", "hobgoblin", "gnome", "dwarf", "giant", "ogre", "troll",
+    "zombie", "mummy", "vampire", "shade", "wraith", "lich"
+)
+
 BRANCH_NAMES: dict[int, str] = {
     0: "dungeon",
     1: "mines",
@@ -481,7 +488,7 @@ class NetHackAdapter(EnvironmentAdapter):
                             continue
                         adjacent_monsters.append(mname)
                         ml = mname.lower()
-                        if any(ign in ml for ign in ("orc", "uruk", "elf", "human", "soldier", "guard", "captain", "watchman", "priest", "shopkeeper", "minotaur", "skeleton", "demon", "devil", "ghost")):
+                        if any(ign in ml for ign in IGNORES_ELBERETH_SPECIES):
                             hostile_ignores_elbereth = True
 
         adjacent_peaceful = any(
@@ -536,6 +543,8 @@ class NetHackAdapter(EnvironmentAdapter):
         in_corridor = (walkable_adj <= 2 and chr(chars[y, x]) == "#")
 
         is_fast_dangerous = closest_name in ("soldier ant", "killer bee", "giant spider", "centipede", "giant bat", "bat")
+        if closest_name and any(ign in closest_name.lower() for ign in IGNORES_ELBERETH_SPECIES):
+            hostile_ignores_elbereth = True
         combat = CombatView(
             adjacent_hostile=adjacent_hostile,
             hostile_count_fov=hostile_count,
@@ -937,7 +946,7 @@ class NetHackAdapter(EnvironmentAdapter):
                 self.blocked_tiles.add((py + dy, px + dx))
         if "feel healthy" in msg:
             self.has_poison_res = True
-        if any(w in msg for w in ("hits!", "bites!", "stings!", "kicks!", "strikes!", "scratches!")):
+        if any(w in msg for w in ("wipe out the message", "wiped out", "rubbed out", "scuffed", "erased", "fades", "vanishes")):
             self.elbereth_positions.discard((obs.hero.y, obs.hero.x))
 
         # Check turn advancement to shield against 0-turn infinite loops
@@ -1560,6 +1569,8 @@ class NetHackAdapter(EnvironmentAdapter):
             return self.step(Action(name="melee_attack_hostile"))
 
         elif action.name in ("engrave_dust_elbereth", "engrave_elbereth", "engrave"):
+            if obs_prev:
+                self.elbereth_positions.add((obs_prev.hero.y, obs_prev.hero.x))
             enter_idx = self.char_to_act.get("\r", 19)
             seq = [
                 self.char_to_act.get("E", 0),
@@ -1569,8 +1580,6 @@ class NetHackAdapter(EnvironmentAdapter):
                 seq.append(self.char_to_act.get(ch, 0))
             seq.append(enter_idx)
             obs, reward, term, trunc, info = self._step_sequence(seq)
-            if obs_prev:
-                self.elbereth_positions.add((obs_prev.hero.y, obs_prev.hero.x))
             return obs, reward, term, trunc, info
 
         elif action.name in ("dip_excalibur", "dip_in_fountain") and obs_prev is not None:

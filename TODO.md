@@ -264,9 +264,38 @@ This living document tracks empirical progress, critical discoveries, immediate 
        - Why: The policy previously prioritized eating carried food rations over floor corpses, and only looked for corpses at `hunger_state >= 2` (hungry). By the time hunger reached 2, fresh monster corpses dropped earlier in combat had long since rotted away (decay takes only 30–50 turns). The hero consumed their carried food rations early on, leaving zero food reserves for Depths 7–10.
        - **Fix Applied**: Updated `run()` to opportunistically consume safe fresh monster corpses right after combat whenever `hunger_state < 3`, preserving carried rations exclusively for deep-level hunger emergencies.
 
-- **Campaign 11 (Active)**:
+- **Campaign 12 Results (Completed - 10 Gens x 20 Eps = 200 Episodes in 14 mins)**:
+  - **Gen 1**: Avg Depth **3.45**, Max Depth 7, Avg Turns 4,389.4
+  - **Gen 2**: Avg Depth **3.50**, Max Depth 6, Avg Turns 2,610.4
+  - **Gen 3**: Avg Depth **3.80**, Max Depth 7, Avg Turns 3,360.1
+  - **Gen 4**: Avg Depth **3.30**, Max Depth 8, Avg Turns 2,846.7
+  - **Gen 5**: Avg Depth **3.70**, Max Depth 8, Avg Turns 2,020.6
+  - **Gen 6**: Avg Depth **3.70**, Max Depth 7, Avg Turns 2,996.7
+  - **Gen 7**: Avg Depth **4.10**, **Max Depth 8**, Avg Turns 2,266.2
+  - **Gen 8**: Avg Depth **3.80**, Max Depth 7, Avg Turns 2,909.2
+  - **Gen 9**: Avg Depth **3.15**, Max Depth 6, Avg Turns 1,991.2
+  - **Gen 10**: Avg Depth 2.60, Max Depth 6, Avg Turns 2,238.4
+  - **Autopsy Diagnoses & Critical Engine Fixes Uncovered**:
+    1. **`standing_on_elbereth` Timing Trap in `engrave_dust_elbereth`**:
+       - `(obs_prev.hero.y, obs_prev.hero.x)` was previously added to `self.elbereth_positions` *after* `self._step_sequence(seq)` executed.
+       - Inside `_step_sequence`, `_extract_obs` checked `(y, x) in self.elbereth_positions`, which was still False.
+       - The observation returned to the policy reported `standing_on_elbereth: False`.
+       - Because the policy saw `not obs.combat.standing_on_elbereth`, it immediately yielded `engrave_dust_elbereth` on the very next turn, wiping the first engraving out (`"You wipe out the message that was written in the dust"`) and burning 2 full turns while being attacked.
+       - **Fix Applied**: Pre-populate `self.elbereth_positions.add((obs_prev.hero.y, obs_prev.hero.x))` before executing the keystroke sequence so `obs.combat.standing_on_elbereth` is immediately `True`.
+    2. **Premature Elbereth Discard on Monster Attacks**:
+       - In NetHack, monsters hitting or missing the hero does not erase dust Elbereth. However, line 940 discarded `(obs.hero.y, obs.hero.x)` upon receiving `"hits!"`, `"bites!"`, `"stings!"`, etc.
+       - This caused `standing_on_elbereth` to flip to False the moment an attacker struck, triggering endless engrave -> hit -> discard -> engrave loops.
+       - **Fix Applied**: Discard Elbereth strictly on actual erasure/smudge messages (`"wipe out the message"`, `"wiped out"`, `"rubbed out"`, `"scuffed"`, `"erased"`, `"fades"`).
+    3. **Comprehensive Elbereth-Immune Monster Species Coverage (`IGNORES_ELBERETH_SPECIES`)**:
+       - Goblins, hobgoblins, gnomes, dwarves, ogres, trolls, giants, zombies, mummies, and vampires ignore Elbereth or throw ranged missiles. Previously, `hostile_ignores_elbereth` only checked for `"orc"`, `"uruk"`, `"elf"`, `"human"`.
+       - Expanded `IGNORES_ELBERETH_SPECIES` and check both `closest_name` and adjacent monsters so the hero never wastes turns engraving dust Elbereth when facing immune hostiles.
+    4. **Granular Killer & Stat Telemetry at Episode Death**:
+       - Episodes previously logged empty killer strings because death messages were cleared on the terminal screen.
+       - Added tick-level persistence for `last_known_hostile`, `last_valid_ac`, and `last_valid_max_hp`, accurately logging killer species and real AC at death into DuckDB.
+
+- **Campaign 13 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 10.0$ leveraging opportunistic fresh corpse nutrition, open-floor tactical retreat, and staircase escape descent.
+  - **Target**: Average Depth $\ge 10.0$ leveraging instant Elbereth state reporting, persistent ward durability, immune species discrimination, and staircase escape.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 

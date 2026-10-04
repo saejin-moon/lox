@@ -222,6 +222,15 @@ lox/
     - When stepping away or retreating from hostiles, directional evaluation must strictly prefer open walkable floor tiles over closed or locked doors.
     - If a closed or locked door must be breached during retreat, `NetHackAdapter` must dispatch via `self._step_or_breach(obs_prev, dy, dx)` to open or kick the door open rather than issuing raw `step_direction` (which bumps into locked doors and aborts after 2,500 consecutive 0-turn steps).
 
+39. **`standing_on_elbereth` Observation Timing Invariant**:
+    - Pre-populate `self.elbereth_positions.add((obs_prev.hero.y, obs_prev.hero.x))` before executing the keystroke sequence in `engrave_dust_elbereth` so `_extract_obs` marks `obs.combat.standing_on_elbereth = True` immediately on the returned observation, preventing double-engraving wipes.
+
+40. **Truthful Elbereth Ward Durability & Monster Hit Discrimination**:
+    - NetHack monster melee and ranged strikes do not erase dust Elbereth. `self.elbereth_positions` must only be discarded upon actual smudge/wipe/erasure messages (`"wipe out the message"`, `"wiped out"`, `"rubbed out"`, `"scuffed"`, `"erased"`, `"fades"`), preventing flip-flop re-engraving loops during battle.
+
+41. **Comprehensive Elbereth-Immune Species Discrimination (`IGNORES_ELBERETH_SPECIES`)**:
+    - Goblins, hobgoblins, gnomes, dwarves, ogres, trolls, giants, zombies, mummies, and vampires ignore Elbereth or attack with ranged weapons. Checking both adjacent hostiles and closest hostile against `IGNORES_ELBERETH_SPECIES` prevents wasting turns attempting to engrave dust when pursued by immune hostiles.
+
 ---
 
 ## 4. Key CLI Commands
