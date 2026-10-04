@@ -105,6 +105,94 @@ BRANCH_NAMES: dict[int, str] = {
     7: "planes",
 }
 
+_MAX_GLYPH: int = nethack.MAX_GLYPH
+
+# Precomputed NumPy Boolean Lookup Tables (LUTs) for O(1) vectorized indexing
+GLYPH_IS_MONSTER_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_PET_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_BODY_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_MON_HOSTILE_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_PASSIVE_HAZARD_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_PEACEFUL_SPECIES_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IGNORES_ELBERETH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_FAST_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+
+# Metadata arrays/lists for fast lookup
+GLYPH_MON_NAME: list[str] = [""] * _MAX_GLYPH
+GLYPH_IS_FLOATING_EYE = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_GAS_SPORE = np.zeros(_MAX_GLYPH, dtype=bool)
+
+# Precomputed body metadata
+BODY_SPECIES_NAME: list[str] = [""] * _MAX_GLYPH
+BODY_IS_POISONOUS = np.zeros(_MAX_GLYPH, dtype=bool)
+BODY_IS_DEADLY = np.zeros(_MAX_GLYPH, dtype=bool)
+
+for _g in range(_MAX_GLYPH):
+    if nethack.glyph_is_monster(_g):
+        GLYPH_IS_MONSTER_LUT[_g] = True
+        if nethack.glyph_is_pet(_g):
+            GLYPH_IS_PET_LUT[_g] = True
+        else:
+            GLYPH_IS_MON_HOSTILE_LUT[_g] = True
+            _mid = nethack.glyph_to_mon(_g)
+            try:
+                _pm = permonst(_mid)
+                _mname = _pm.mname
+                GLYPH_MON_NAME[_g] = _mname
+                _ml = _mname.lower()
+                if (
+                    _ml in ("floating eye", "gas spore")
+                    or "mold" in _ml
+                    or "jelly" in _ml
+                    or "sphere" in _ml
+                ):
+                    GLYPH_IS_PASSIVE_HAZARD_LUT[_g] = True
+                if _ml == "floating eye":
+                    GLYPH_IS_FLOATING_EYE[_g] = True
+                elif _ml == "gas spore":
+                    GLYPH_IS_GAS_SPORE[_g] = True
+
+                if _ml in (
+                    "watchman",
+                    "watch captain",
+                    "shopkeeper",
+                    "guard",
+                    "priest",
+                    "priestess",
+                    "aligned priest",
+                    "high priest",
+                    "oracle",
+                ):
+                    GLYPH_IS_PEACEFUL_SPECIES_LUT[_g] = True
+
+                if any(_ign in _ml for _ign in IGNORES_ELBERETH_SPECIES):
+                    GLYPH_IGNORES_ELBERETH_LUT[_g] = True
+
+                if _pm.mmove > 12:
+                    GLYPH_IS_FAST_LUT[_g] = True
+            except Exception:
+                GLYPH_MON_NAME[_g] = "monster"
+
+    elif nethack.glyph_is_body(_g):
+        GLYPH_IS_BODY_LUT[_g] = True
+        _mid = _g - nethack.GLYPH_BODY_OFF
+        try:
+            _mname = (
+                permonst(_mid).mname.lower()
+                if 0 <= _mid < nethack.NUMMONS
+                else "corpse"
+            )
+        except Exception:
+            _mname = "corpse"
+        BODY_SPECIES_NAME[_g] = _mname
+        if any(
+            _k in _mname
+            for _k in ("poison", "kobold", "snake", "spider", "viper", "beetle")
+        ):
+            BODY_IS_POISONOUS[_g] = True
+        if any(_k in _mname for _k in ("cockatrice", "chickatrice", "medusa")):
+            BODY_IS_DEADLY[_g] = True
+
 
 class NetHackAdapter(EnvironmentAdapter):
     """Clean NetHack adapter with unconstrained agentic execution."""
@@ -287,22 +375,8 @@ class NetHackAdapter(EnvironmentAdapter):
 
         # Exclude passive and exploding hazards from pathfinding navigation
         if glyphs is not None:
-            for my in range(21):
-                for mx in range(79):
-                    g = int(glyphs[my, mx])
-                    if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
-                        mon_id = nethack.glyph_to_mon(g)
-                        try:
-                            mname = nethack.permonst(mon_id).mname.lower()
-                        except Exception:
-                            mname = ""
-                        if (
-                            mname in ("floating eye", "gas spore")
-                            or "mold" in mname
-                            or "jelly" in mname
-                            or "sphere" in mname
-                        ):
-                            walkable_nav[my, mx] = False
+            valid_glyphs = np.clip(glyphs, 0, _MAX_GLYPH - 1)
+            walkable_nav[GLYPH_IS_PASSIVE_HAZARD_LUT[valid_glyphs]] = False
 
         # Hero's current position is always walkable and can depart
         if hy is not None and 0 <= hy < 21 and 0 <= hx < 79:
@@ -358,10 +432,7 @@ class NetHackAdapter(EnvironmentAdapter):
         if not (0 <= y < 21 and 0 <= x < 79):
             return False
         g = int(glyphs[y, x])
-        if nethack.glyph_is_monster(g):
-            mon_id = nethack.glyph_to_mon(g)
-            return mon_id == 28
-        return False
+        return 0 <= g < _MAX_GLYPH and bool(GLYPH_IS_FLOATING_EYE[g])
 
     def can_safely_pray(self, turn: int) -> bool:
         """Informational check: returns True if prayer cooldown (350 turns) has elapsed."""
@@ -369,15 +440,24 @@ class NetHackAdapter(EnvironmentAdapter):
 
     def _decode_message(self, msg_raw: Any) -> str:
         if isinstance(msg_raw, np.ndarray):
-            return "".join(chr(int(c)) for c in msg_raw if int(c) > 0).strip()
+            return (
+                bytes(msg_raw)
+                .split(b"\x00", 1)[0]
+                .decode("ascii", errors="ignore")
+                .strip()
+            )
+        elif isinstance(msg_raw, (bytes, bytearray)):
+            return msg_raw.split(b"\x00", 1)[0].decode("ascii", errors="ignore").strip()
         elif isinstance(msg_raw, list):
-            return "".join(
-                chr(int(c)) if isinstance(c, (int, np.integer)) else str(c)
-                for c in msg_raw
-                if (isinstance(c, (int, np.integer)) and int(c) > 0) or c
-            ).strip()
-        elif isinstance(msg_raw, bytes):
-            return msg_raw.decode("ascii", errors="ignore").strip()
+            try:
+                return (
+                    bytes(msg_raw)
+                    .split(b"\x00", 1)[0]
+                    .decode("ascii", errors="ignore")
+                    .strip()
+                )
+            except Exception:
+                return "".join(str(c) for c in msg_raw).strip()
         return str(msg_raw).strip()
 
     def _extract_obs(self, raw_obs: dict[str, Any]) -> Observation:
@@ -549,66 +629,50 @@ class NetHackAdapter(EnvironmentAdapter):
 
         # Track clean underlying terrain characters
         if glyphs is not None and chars is not None:
-            for cy in range(21):
-                for cx in range(79):
-                    g = int(glyphs[cy, cx])
-                    c = chars[cy, cx]
-                    if (
-                        not nethack.glyph_is_monster(g)
-                        and c != ord("@")
-                        and c != 0
-                        and c != ord(" ")
-                    ):
-                        self.known_chars[cy, cx] = c
-                    elif (cy, cx) == (y, x) and self.known_chars[cy, cx] == 0:
-                        self.known_chars[cy, cx] = ord(".")
+            valid_glyphs = np.clip(glyphs, 0, _MAX_GLYPH - 1)
+            valid_c = (
+                (~GLYPH_IS_MONSTER_LUT[valid_glyphs])
+                & (chars != ord("@"))
+                & (chars != 0)
+                & (chars != ord(" "))
+            )
+            self.known_chars[valid_c] = chars[valid_c]
+            if self.known_chars[y, x] == 0:
+                self.known_chars[y, x] = ord(".")
 
         # Track corpses on the floor from visible glyphs
         visible_corpse_positions = set()
         if glyphs is not None:
-            for gy in range(21):
-                for gx in range(79):
-                    g = int(glyphs[gy, gx])
-                    if nethack.glyph_is_body(g):
-                        visible_corpse_positions.add((gy, gx))
-                        if (gy, gx) not in self.floor_corpses:
-                            m_idx = g - nethack.GLYPH_BODY_OFF
-                            mname = (
-                                permonst(m_idx).mname.lower()
-                                if 0 <= m_idx < nethack.NUMMONS
-                                else "corpse"
-                            )
-                            is_pois = any(
-                                k in mname
-                                for k in (
-                                    "poison",
-                                    "kobold",
-                                    "snake",
-                                    "spider",
-                                    "viper",
-                                    "beetle",
-                                )
-                            )
-                            is_deadly = any(
-                                k in mname
-                                for k in ("cockatrice", "chickatrice", "medusa")
-                            )
-                            self.floor_corpses[(gy, gx)] = (
-                                mname,
-                                turn,
-                                is_pois,
-                                is_deadly,
-                            )
+            valid_glyphs = np.clip(glyphs, 0, _MAX_GLYPH - 1)
+            body_mask = GLYPH_IS_BODY_LUT[valid_glyphs]
+            if np.any(body_mask):
+                for gy, gx in np.argwhere(body_mask):
+                    gy, gx = int(gy), int(gx)
+                    visible_corpse_positions.add((gy, gx))
+                    if (gy, gx) not in self.floor_corpses:
+                        g = int(glyphs[gy, gx])
+                        mname = BODY_SPECIES_NAME[g] if g < _MAX_GLYPH else "corpse"
+                        is_pois = (
+                            bool(BODY_IS_POISONOUS[g]) if g < _MAX_GLYPH else False
+                        )
+                        is_deadly = bool(BODY_IS_DEADLY[g]) if g < _MAX_GLYPH else False
+                        self.floor_corpses[(gy, gx)] = (
+                            mname,
+                            turn,
+                            is_pois,
+                            is_deadly,
+                        )
         # Prune corpses that have disappeared in hero's line of sight
         for cy, cx in list(self.floor_corpses.keys()):
-            if (cy, cx) not in visible_corpse_positions:
-                if (
-                    abs(cy - y) <= 8
-                    and abs(cx - x) <= 8
-                    and glyphs is not None
-                    and not nethack.glyph_is_body(int(glyphs[cy, cx]))
-                ):
-                    del self.floor_corpses[(cy, cx)]
+            if (cy, cx) not in visible_corpse_positions and (
+                abs(cy - y) <= 8
+                and abs(cx - x) <= 8
+                and glyphs is not None
+                and not GLYPH_IS_BODY_LUT[
+                    min(max(0, int(glyphs[cy, cx])), _MAX_GLYPH - 1)
+                ]
+            ):
+                del self.floor_corpses[(cy, cx)]
 
         # Tactical combat analysis from glyphs
         adjacent_hostile = False
@@ -624,70 +688,54 @@ class NetHackAdapter(EnvironmentAdapter):
         active_hostile_count = 0
 
         if glyphs is not None:
-            for gy in range(max(0, y - 8), min(21, y + 9)):
-                for gx in range(max(0, x - 8), min(79, x + 9)):
+            y_min, y_max = max(0, y - 8), min(21, y + 9)
+            x_min, x_max = max(0, x - 8), min(79, x + 9)
+            sub_g = glyphs[y_min:y_max, x_min:x_max]
+            valid_sub = np.clip(sub_g, 0, _MAX_GLYPH - 1)
+            hostile_mask = GLYPH_IS_MON_HOSTILE_LUT[valid_sub]
+            if np.any(hostile_mask):
+                for ry, rx in np.argwhere(hostile_mask):
+                    gy, gx = y_min + int(ry), x_min + int(rx)
                     if gy == y and gx == x:
                         continue
                     if (gy, gx) in self.peaceful_positions:
                         continue
                     g = int(glyphs[gy, gx])
-                    if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
-                        mon_id = nethack.glyph_to_mon(g)
-                        try:
-                            mname = nethack.permonst(mon_id).mname
-                        except Exception:
-                            mname = "monster"
+                    if g >= _MAX_GLYPH:
+                        continue
+                    if GLYPH_IS_PEACEFUL_SPECIES_LUT[g] and (gy, gx) not in getattr(
+                        self, "hostile_npc_positions", set()
+                    ):
+                        self.peaceful_positions.add((gy, gx))
+                        continue
 
-                        # Town Watch / Peaceful NPC discrimination (Minetown guards, priests, shopkeepers, vault guards)
-                        is_peaceful_species = mname.lower() in (
-                            "watchman",
-                            "watch captain",
-                            "shopkeeper",
-                            "guard",
-                            "priest",
-                            "priestess",
-                            "aligned priest",
-                            "high priest",
-                            "oracle",
-                        )
-                        if is_peaceful_species and (gy, gx) not in getattr(
-                            self, "hostile_npc_positions", set()
-                        ):
-                            self.peaceful_positions.add((gy, gx))
-                            continue
+                    mname = GLYPH_MON_NAME[g]
+                    is_passive_hazard = bool(GLYPH_IS_PASSIVE_HAZARD_LUT[g])
+                    is_adjacent = abs(gy - y) <= 1 and abs(gx - x) <= 1
 
-                        ml = mname.lower()
-                        is_passive_hazard = (
-                            ml in ("floating eye", "gas spore")
-                            or "mold" in ml
-                            or "jelly" in ml
-                            or "sphere" in ml
-                        )
-                        is_adjacent = abs(gy - y) <= 1 and abs(gx - x) <= 1
+                    if not is_passive_hazard or is_adjacent:
+                        hostile_count += 1
+                    if not is_passive_hazard:
+                        active_hostile_count += 1
+                    if GLYPH_IS_FLOATING_EYE[g]:
+                        floating_eye_fov = True
+                    if GLYPH_IS_GAS_SPORE[g]:
+                        gas_spore_fov = True
 
-                        if not is_passive_hazard or is_adjacent:
-                            hostile_count += 1
-                        if not is_passive_hazard:
-                            active_hostile_count += 1
-                        if mname == "floating eye":
-                            floating_eye_fov = True
-                        if mname == "gas spore":
-                            gas_spore_fov = True
+                    if not is_passive_hazard or is_adjacent:
+                        dist = math.hypot(gy - y, gx - x)
+                        if dist < closest_dist:
+                            closest_dist = dist
+                            closest_name = mname
+                            closest_pos = (gy, gx)
 
-                        if not is_passive_hazard or is_adjacent:
-                            dist = math.hypot(gy - y, gx - x)
-                            if dist < closest_dist:
-                                closest_dist = dist
-                                closest_name = mname
-                                closest_pos = (gy, gx)
-
-                        if is_adjacent:
-                            adjacent_hostile = True
-                            adjacent_hostiles_count += 1
-                            if mname == "gas spore":
-                                adjacent_gas_spore = True
-                            if mname == "floating eye":
-                                adjacent_floating_eye = True
+                    if is_adjacent:
+                        adjacent_hostile = True
+                        adjacent_hostiles_count += 1
+                        if GLYPH_IS_GAS_SPORE[g]:
+                            adjacent_gas_spore = True
+                        if GLYPH_IS_FLOATING_EYE[g]:
+                            adjacent_floating_eye = True
 
         adjacent_monsters: list[str] = []
         hostile_ignores_elbereth = False
@@ -710,38 +758,17 @@ class NetHackAdapter(EnvironmentAdapter):
                     and (ny, nx) not in self.peaceful_positions
                 ):
                     g = int(glyphs[ny, nx])
-                    if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
-                        mon_id = nethack.glyph_to_mon(g)
-                        try:
-                            mname = nethack.permonst(mon_id).mname
-                        except Exception:
-                            mname = "monster"
-                        is_peaceful_species = mname.lower() in (
-                            "watchman",
-                            "watch captain",
-                            "shopkeeper",
-                            "guard",
-                            "priest",
-                            "priestess",
-                            "aligned priest",
-                            "high priest",
-                            "oracle",
-                        )
-                        if is_peaceful_species and (ny, nx) not in getattr(
+                    if 0 <= g < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[g]:
+                        if GLYPH_IS_PEACEFUL_SPECIES_LUT[g] and (ny, nx) not in getattr(
                             self, "hostile_npc_positions", set()
                         ):
                             self.peaceful_positions.add((ny, nx))
                             continue
+                        mname = GLYPH_MON_NAME[g]
                         adjacent_monsters.append(mname)
-                        ml = mname.lower()
-                        if any(ign in ml for ign in IGNORES_ELBERETH_SPECIES):
+                        if GLYPH_IGNORES_ELBERETH_LUT[g]:
                             hostile_ignores_elbereth = True
-                        if (
-                            ml not in ("floating eye", "gas spore")
-                            and "mold" not in ml
-                            and "jelly" not in ml
-                            and "sphere" not in ml
-                        ):
+                        if not GLYPH_IS_PASSIVE_HAZARD_LUT[g]:
                             has_safe_melee_target = True
 
         adjacent_peaceful = any(
@@ -772,13 +799,12 @@ class NetHackAdapter(EnvironmentAdapter):
             dnum == 0
             and hasattr(self, "mines_stairs_positions")
             and self.known_stairs_down is not None
-        ):
-            if (
-                self.known_stairs_down[0],
-                self.known_stairs_down[1],
-                depth,
-            ) in self.mines_stairs_positions:
-                self.known_stairs_down = None
+        ) and (
+            self.known_stairs_down[0],
+            self.known_stairs_down[1],
+            depth,
+        ) in self.mines_stairs_positions:
+            self.known_stairs_down = None
 
         if self.known_stairs_down is not None and self.stairs_down_discovery_turn == -1:
             self.stairs_down_discovery_turn = turn
@@ -847,13 +873,9 @@ class NetHackAdapter(EnvironmentAdapter):
         )
         if closest_pos and glyphs is not None:
             cg = int(glyphs[closest_pos[0], closest_pos[1]])
-            if nethack.glyph_is_monster(cg) and not nethack.glyph_is_pet(cg):
-                try:
-                    cpm = nethack.permonst(nethack.glyph_to_mon(cg))
-                    if cpm.mmove > 12:
-                        is_fast_dangerous = True
-                except Exception:
-                    pass
+            if 0 <= cg < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[cg]:
+                if GLYPH_IS_FAST_LUT[cg]:
+                    is_fast_dangerous = True
         if closest_name and any(
             ign in closest_name.lower() for ign in IGNORES_ELBERETH_SPECIES
         ):
@@ -935,10 +957,10 @@ class NetHackAdapter(EnvironmentAdapter):
                             and (ly, lx) not in self.looted_tiles
                             and int(chars[ly, lx]) in loot_chars
                         ):
-                            if glyphs is not None and nethack.glyph_is_monster(
-                                int(glyphs[ly, lx])
-                            ):
-                                continue
+                            if glyphs is not None:
+                                lg = int(glyphs[ly, lx])
+                                if 0 <= lg < _MAX_GLYPH and GLYPH_IS_MONSTER_LUT[lg]:
+                                    continue
                             loot_candidates.append((ly, lx))
             if loot_candidates:
                 has_nearby_loot = True
@@ -1005,10 +1027,9 @@ class NetHackAdapter(EnvironmentAdapter):
         adj_door = False
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             ny, nx = y + dy, x + dx
-            if 0 <= ny < 21 and 0 <= nx < 79:
-                if doors_mask[ny, nx]:
-                    adj_door = True
-                    break
+            if 0 <= ny < 21 and 0 <= nx < 79 and doors_mask[ny, nx]:
+                adj_door = True
+                break
 
         adj_fountain = False
         adj_altar = False
@@ -1307,14 +1328,20 @@ class NetHackAdapter(EnvironmentAdapter):
                     "hello stranger",
                 )
             ):
-                if any(
-                    phrase in msg.lower()
-                    for phrase in ("who are you", "what is your name", "hello stranger")
+                if (
+                    any(
+                        phrase in msg.lower()
+                        for phrase in (
+                            "who are you",
+                            "what is your name",
+                            "hello stranger",
+                        )
+                    )
+                    and getattr(self, "_last_attempted_dir", None) is not None
                 ):
-                    if getattr(self, "_last_attempted_dir", None) is not None:
-                        py, px = getattr(self, "_prev_hero_pos", (0, 0))
-                        dy, dx = self._last_attempted_dir
-                        self.peaceful_positions.add((py + dy, px + dx))
+                    py, px = getattr(self, "_prev_hero_pos", (0, 0))
+                    dy, dx = self._last_attempted_dir
+                    self.peaceful_positions.add((py + dy, px + dx))
                 esc_idx = self.char_to_act.get("\x1b", 38)
                 raw_obs, _, term, trunc, _ = self.env.step(esc_idx)
             else:
@@ -1348,49 +1375,49 @@ class NetHackAdapter(EnvironmentAdapter):
 
         msg = obs.message.lower()
         all_doors = self._get_all_doors_mask(obs)
-        if any(
-            f"{npc} hits" in msg
-            for npc in (
-                "watchman",
-                "shopkeeper",
-                "watch captain",
-                "priest",
-                "priestess",
-                "guard",
+        if (
+            any(
+                f"{npc} hits" in msg
+                for npc in (
+                    "watchman",
+                    "shopkeeper",
+                    "watch captain",
+                    "priest",
+                    "priestess",
+                    "guard",
+                )
             )
+            and getattr(self, "_last_attempted_dir", None) is not None
         ):
-            if getattr(self, "_last_attempted_dir", None) is not None:
-                py, px = getattr(self, "_prev_hero_pos", (0, 0))
-                dy, dx = self._last_attempted_dir
-                target_tile = (py + dy, px + dx)
-                self.hostile_npc_positions.add(target_tile)
-                self.peaceful_positions.discard(target_tile)
+            py, px = getattr(self, "_prev_hero_pos", (0, 0))
+            dy, dx = self._last_attempted_dir
+            target_tile = (py + dy, px + dx)
+            self.hostile_npc_positions.add(target_tile)
+            self.peaceful_positions.discard(target_tile)
         if (
             "really attack" in msg
             or "who are you" in msg
             or "hello stranger" in msg
             or "follow me" in msg
-        ):
-            if getattr(self, "_last_attempted_dir", None) is not None:
-                py, px = getattr(self, "_prev_hero_pos", (0, 0))
-                dy, dx = self._last_attempted_dir
-                self.peaceful_positions.add((py + dy, px + dx))
+        ) and getattr(self, "_last_attempted_dir", None) is not None:
+            py, px = getattr(self, "_prev_hero_pos", (0, 0))
+            dy, dx = self._last_attempted_dir
+            self.peaceful_positions.add((py + dy, px + dx))
         if (
             "cannot pass through" in msg
             or "it's a wall" in msg
             or "it's solid stone" in msg
             or "cannot move there" in msg
-        ):
-            if getattr(self, "_last_attempted_dir", None) is not None:
-                py, px = getattr(self, "_prev_hero_pos", (0, 0))
-                dy, dx = self._last_attempted_dir
-                target_tile = (py + dy, px + dx)
-                if (
-                    0 <= target_tile[0] < 21
-                    and 0 <= target_tile[1] < 79
-                    and not all_doors[target_tile[0], target_tile[1]]
-                ):
-                    self.blocked_tiles.add(target_tile)
+        ) and getattr(self, "_last_attempted_dir", None) is not None:
+            py, px = getattr(self, "_prev_hero_pos", (0, 0))
+            dy, dx = self._last_attempted_dir
+            target_tile = (py + dy, px + dx)
+            if (
+                0 <= target_tile[0] < 21
+                and 0 <= target_tile[1] < 79
+                and not all_doors[target_tile[0], target_tile[1]]
+            ):
+                self.blocked_tiles.add(target_tile)
         if "you see no door there" in msg or "cannot open that" in msg:
             if getattr(self, "_last_attempted_dir", None) is not None:
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
@@ -1402,23 +1429,25 @@ class NetHackAdapter(EnvironmentAdapter):
                 dy, dx = self._last_attempted_dir
                 self.locked_doors.add((py + dy, px + dx))
         # Clear locked/blocked status when door opens or gives way
-        if any(
-            w in msg
-            for w in (
-                "gives way",
-                "crash!",
-                "smashes",
-                "breaks",
-                "destroyed",
-                "door opens",
+        if (
+            any(
+                w in msg
+                for w in (
+                    "gives way",
+                    "crash!",
+                    "smashes",
+                    "breaks",
+                    "destroyed",
+                    "door opens",
+                )
             )
+            and getattr(self, "_last_attempted_dir", None) is not None
         ):
-            if getattr(self, "_last_attempted_dir", None) is not None:
-                py, px = getattr(self, "_prev_hero_pos", (0, 0))
-                dy, dx = self._last_attempted_dir
-                target_tile = (py + dy, px + dx)
-                self.locked_doors.discard(target_tile)
-                self.blocked_tiles.discard(target_tile)
+            py, px = getattr(self, "_prev_hero_pos", (0, 0))
+            dy, dx = self._last_attempted_dir
+            target_tile = (py + dy, px + dx)
+            self.locked_doors.discard(target_tile)
+            self.blocked_tiles.discard(target_tile)
         if "iron door" in msg:
             if getattr(self, "_last_attempted_dir", None) is not None:
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
@@ -1921,9 +1950,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         ny, nx = hero.y + dy, hero.x + dx
                         if 0 <= ny < 21 and 0 <= nx < 79:
                             g = int(glyphs[ny, nx])
-                            if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(
-                                g
-                            ):
+                            if 0 <= g < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[g]:
                                 walkable_nav[ny, nx] = False
 
             best_tile = None
@@ -2025,15 +2052,8 @@ class NetHackAdapter(EnvironmentAdapter):
                             ) in self.blocked_tiles:
                                 continue
                             g = int(glyphs[ty, tx])
-                            if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(
-                                g
-                            ):
-                                mon_id = nethack.glyph_to_mon(g)
-                                try:
-                                    mname = nethack.permonst(mon_id).mname.lower()
-                                except Exception:
-                                    mname = ""
-                                if mname in ("floating eye", "gas spore"):
+                            if 0 <= g < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[g]:
+                                if GLYPH_IS_FLOATING_EYE[g] or GLYPH_IS_GAS_SPORE[g]:
                                     continue
                                 action = Action(name="melee_attack", direction=(dy, dx))
                                 break

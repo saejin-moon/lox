@@ -154,7 +154,6 @@ ALLOWED_ACTIONS: set[str] = {
     "pickup",
     "drop",
     "pay",
-    "chat",
     # Nutrition & Safe Corpse Eating
     "eat_carried_food",
     "eat_food",
@@ -173,12 +172,9 @@ ALLOWED_ACTIONS: set[str] = {
     "zap_wand",
     "zap_offensive_wand",
     "zap_wand_teleport",
-    "apply_item",
-    "wield_weapon",
     "wear_armor",
     "retreat",
     "rest",
-    "idle",
 }
 
 # Enum constants exposed to conditions

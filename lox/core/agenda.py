@@ -9,6 +9,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
+from lox.core.types import AgendaView
+
 
 class GoalDirective(str, Enum):
     """Core strategic milestones in NetHack progression."""
@@ -20,9 +22,6 @@ class GoalDirective(str, Enum):
     CLEAR_MINES = "clear_mines"
     SOLVE_SOKOBAN = "solve_sokoban"
     DESCEND_STAIRS = "descend_stairs"
-
-
-from lox.core.types import AgendaView
 
 
 class GoalAgenda:

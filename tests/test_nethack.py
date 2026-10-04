@@ -23,7 +23,7 @@ def test_nethack_adapter_step():
 
 def test_nethack_interlocks():
     adapter = NetHackAdapter()
-    obs = adapter.reset(seed=42)
+    adapter.reset(seed=42)
 
     # Test floating eye safety check: monster 28 is floating eye
     fake_glyphs = np.zeros((21, 79), dtype=np.int32)
@@ -52,8 +52,8 @@ def test_door_glyph_discrimination_and_open_fallback():
     fake_glyphs[5, 6] = nh.GLYPH_OBJ_OFF + 300  # Spellbook object (char '+')
 
     doors_mask = adapter._get_doors_mask(fake_glyphs)
-    assert doors_mask[5, 5] == True
-    assert doors_mask[5, 6] == False  # Must NOT be marked as door!
+    assert doors_mask[5, 5]
+    assert not doors_mask[5, 6]  # Must NOT be marked as door!
 
     # Test open_door fallback to wait when no door adjacent
     t_before = obs.hero.turn
@@ -96,32 +96,32 @@ def test_unified_stride2_dead_ends_mask():
     mask = adapter._compute_dead_ends_mask(chars, walkable)
 
     # Corridors: (5, 10) and (5, 12) are dead ends, (5, 11) is not
-    assert mask[5, 10] == True
-    assert mask[5, 12] == True
-    assert mask[5, 11] == False
+    assert mask[5, 10]
+    assert mask[5, 12]
+    assert not mask[5, 11]
 
     # Room corners: (10, 10), (10, 12), (12, 10), (12, 12) have adj_wall >= 2
     # They MUST be candidates regardless of parity!
-    assert mask[10, 10] == True
-    assert mask[10, 12] == True
-    assert mask[12, 10] == True
-    assert mask[12, 12] == True
+    assert mask[10, 10]
+    assert mask[10, 12]
+    assert mask[12, 10]
+    assert mask[12, 12]
 
     # Check search threshold filtering
     adapter.searched_count[5, 10] = 15
     mask_after = adapter._compute_dead_ends_mask(chars, walkable)
-    assert mask_after[5, 10] == False  # Corridor with 15 searches is pruned!
+    assert not mask_after[5, 10]  # Corridor with 15 searches is pruned!
 
     adapter.searched_count[10, 10] = 10
     mask_after2 = adapter._compute_dead_ends_mask(chars, walkable)
-    assert mask_after2[10, 10] == False  # Room wall with 10 searches is pruned!
+    assert not mask_after2[10, 10]  # Room wall with 10 searches is pruned!
 
     adapter.close()
 
 
 def test_dismiss_more_ynq_prompts():
     adapter = NetHackAdapter()
-    obs = adapter.reset(seed=42)
+    adapter.reset(seed=42)
 
     # Test that [ynq] prompts are auto-dismissed with 'n'
     fake_obs = {
@@ -173,7 +173,6 @@ def test_locked_door_breach_and_poison_gating():
     # Calling step_direction directly into the closed door should trigger open_door
     # and if the door is in locked_doors, should trigger kick_closed_door
     adapter.locked_doors.add((hy, hx + 1))
-    sub_action = None
 
     # Step or breach returns kick_closed_door when locked
     # We can inspect _step_or_breach delegation
@@ -207,7 +206,7 @@ def test_hero_position_walkability_and_dead_end_stagnation_recovery():
     walkable, walkable_nav = adapter._build_walkable_nav(obs)
     assert (hy, hx) not in adapter.blocked_tiles
     assert (hy, hx) not in adapter.non_door_tiles
-    assert walkable_nav[hy, hx] == True
+    assert walkable_nav[hy, hx]
 
     # 2. Test stagnation recovery: artificially max out search counts on dead ends
     adapter.searched_count.fill(20)

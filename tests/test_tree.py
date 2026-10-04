@@ -11,8 +11,6 @@ def test_behavior_tree_execution():
         hero=HeroState(hp=20, max_hp=100, hunger_state=HungerState.WEAK),
     )
 
-    action_taken = None
-
     def heal(bb):
         return Action(name="HEAL")
 

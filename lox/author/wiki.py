@@ -74,7 +74,7 @@ class WikiEngine:
         try:
             cur.execute(
                 """
-                SELECT 
+                SELECT
                     a.title,
                     snippet(wiki_fts, 1, '«', '»', '...', 25) AS match_snippet,
                     bm25(wiki_fts, 10.0, 1.0) AS score,
@@ -109,7 +109,7 @@ class WikiEngine:
             prefix_query = " ".join(f"{t}*" for t in tokens)
             cur.execute(
                 """
-                SELECT 
+                SELECT
                     a.title,
                     snippet(wiki_fts, 1, '«', '»', '...', 25) AS match_snippet,
                     bm25(wiki_fts, 10.0, 1.0) AS score,

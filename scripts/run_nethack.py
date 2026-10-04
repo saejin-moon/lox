@@ -127,19 +127,11 @@ class Agent:
         ep_t0 = time.perf_counter()
         obs = adapter.reset(seed=ep + 2000)
 
-        current_depth = obs.hero.depth
-        known_stairs_down = None
-        known_stairs_up = None
-        last_position = (-1, -1)
-        stuck_counter = 0
-
         score = 0
         death_reason = "MaxTurnsReached"
         solved = False
-        last_action_name = ""
         max_depth_reached = obs.hero.depth
         last_valid_turns = obs.hero.turn
-        last_valid_hp = obs.hero.hp
         last_valid_max_hp = obs.hero.max_hp
         policy_runner = tree.create_runner(obs)
         last_5_actions: list[str] = []
@@ -161,7 +153,6 @@ class Agent:
             hy, hx = hero.y, hero.x
             max_depth_reached = max(max_depth_reached, hero.depth)
             last_valid_turns = hero.turn
-            last_valid_hp = hero.hp
             last_valid_max_hp = hero.max_hp
 
             if hero.depth == 1:
@@ -174,7 +165,6 @@ class Agent:
             action = policy_runner.send(obs)
             if action is None:
                 action = Action(name="search")
-            last_action_name = action.name
 
             last_5_actions.append(action.name)
             if len(last_5_actions) > 5:

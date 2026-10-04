@@ -91,7 +91,7 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
-                # Prevent EpisodeWallTimeout by ensuring we don't just search in place
+                # Prevent EpisodeWallTimeout by actively searching perimeter/dead-ends
                 obs = yield from self.handle_dead_end(obs)
 
     def handle_combat(self, obs):
@@ -117,7 +117,7 @@ class Agent:
                 obs = yield pray()
                 continue
 
-            # 1. Tactical Healing (Crucial for Mimics/Fast Attackers)
+            # 1. Tactical Healing
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
@@ -127,7 +127,7 @@ class Agent:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 3. Passive Hazards (Floating Eyes/Gas Spores) - STRICT NO-MELEE
+            # 3. Passive Hazards (Floating Eyes/Gas Spores) - STRICT NO-MELEE unless desperate
             if obs.combat.adjacent_floating_eye:
                 if obs.inventory.has_daggers:
                     obs = yield throw_dagger()
@@ -295,6 +295,7 @@ class Agent:
                 elif obs.spatial.has_unvisited_frontier:
                     obs = yield step_to_frontier()
                 else:
+                    # If stuck in a dead end and no frontiers, try to move away to break loop
                     obs = yield step_away_from_hostile()
                 return obs
         else:

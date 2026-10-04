@@ -91,7 +91,7 @@ class Agent:
                 else:
                     obs = yield open_door()
             elif obs.spatial.has_unvisited_frontier:
-                self.search_count = 0 
+                self.search_count = 0
                 obs = yield step_to_frontier()
             elif obs.spatial.has_unsearched_dead_end:
                 obs = yield from self.handle_dead_end(obs)
@@ -99,7 +99,7 @@ class Agent:
                 # When visible room and frontiers are cleared, never idle!
                 # Move to candidate perimeter walls and dead ends to find secret doors.
                 obs = yield from self.handle_dead_end(obs)
-            
+
             if obs.spatial.stairs_down_known and not obs.spatial.standing_on_stairs_down:
                 obs = yield step_to_stairs_down()
 

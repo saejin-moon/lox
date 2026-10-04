@@ -468,10 +468,10 @@ def run_synthesis_loop(
     author = AuthorAgent(
         provider=provider, model=model, api_key=api_key, db_path=db_path
     )
-    trigger_engine = DynamicTriggerEngine(
+    DynamicTriggerEngine(
         stall_threshold=stall_threshold, cluster_threshold=cluster_threshold
     )
-    recorder = FlightRecorder(capacity=100)
+    FlightRecorder(capacity=100)
 
     # Initialize DuckDB evolved_policies table
     try:
@@ -552,14 +552,13 @@ class Agent:
         print("\n[Initialized Seed Policy]:")
     print(current_policy.strip())
 
-    current_tree = compile_policy(current_policy)
+    compile_policy(current_policy)
 
     for gen in range(1, max_generations + 1):
         print(
             f"\n--- Running Generation {gen} Evaluation ({eval_episodes} real episodes) ---"
         )
         gen_start_t = time.perf_counter()
-        trigger_fired = False
         trigger_reason = ""
         gen_depths = []
         gen_turns = []
@@ -769,7 +768,6 @@ class Agent:
         else:
             print(f"[Policy Verified & Compiled! Generation {gen} accepted]")
             current_policy = new_code
-            current_tree = tree
             print("\nEvolved Policy Program:")
             print(new_code.strip())
 

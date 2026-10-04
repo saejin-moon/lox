@@ -144,7 +144,7 @@ class DuckDBToolRegistry:
 
         con = duckdb.connect(self.db_path, read_only=True)
         query = f"""
-            SELECT 
+            SELECT
                 COUNT(*) as total_episodes,
                 ROUND(AVG(turns), 1) as avg_total_turns,
                 MAX(turns) as max_turns,
@@ -172,9 +172,9 @@ class DuckDBToolRegistry:
         con = duckdb.connect(self.db_path, read_only=True)
         where = f"WHERE run_id = '{run_id}'" if run_id else ""
         query = f"""
-            SELECT 
-                action, 
-                COUNT(*) as count, 
+            SELECT
+                action,
+                COUNT(*) as count,
                 ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) as pct
             FROM ticks
             {where}

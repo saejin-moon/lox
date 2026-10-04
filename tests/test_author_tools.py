@@ -12,12 +12,12 @@ def populated_db(tmp_path):
     con = init_db(db_file)
     con.execute("""
         INSERT INTO episodes (run_id, episode_id, depth, score, turns, death_reason, solved, wall_sec, max_depth)
-        VALUES 
+        VALUES
             ('run_1', 'ep_1', 1, 100, 80, 'starved to death', false, 0.5, 1),
             ('run_1', 'ep_2', 2, 250, 150, 'killed by newt', false, 0.8, 2),
             ('run_1', 'ep_3', 1, 120, 85, 'starved to death', false, 0.5, 1);
         INSERT INTO ticks (run_id, episode_id, turn, depth, hp, max_hp, hunger, y, x, action, message, reward)
-        VALUES 
+        VALUES
             ('run_1', 'ep_1', 1, 1, 16, 16, 'NORMAL', 5, 5, 'step', '', 0.0),
             ('run_1', 'ep_1', 2, 1, 16, 16, 'NORMAL', 5, 6, 'step', '', 0.0),
             ('run_1', 'ep_1', 3, 1, 16, 16, 'NORMAL', 5, 6, 'search', '', 0.0);

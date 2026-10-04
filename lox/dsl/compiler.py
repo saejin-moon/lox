@@ -110,7 +110,6 @@ def _extract_val(node: ast.AST, bb: Blackboard) -> Any:
 def _compile_condition_node(node: ast.AST) -> Callable[[Blackboard], bool]:
     """Recursively compiles an AST expression into a fast boolean evaluator."""
     if isinstance(node, ast.Name):
-        name = node.id
         return lambda bb: bool(_extract_val(node, bb))
 
     elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
@@ -315,7 +314,7 @@ class PolicyExecutor:
             def tree_generator(obs):
                 while True:
                     bb.obs = obs
-                    status = tree.tick(bb)
+                    tree.tick(bb)
                     act = bb.last_action or Action(name="wait")
                     obs = yield act
 
@@ -336,7 +335,7 @@ class PolicyExecutor:
 
                     def fallback_gen(obs):
                         while True:
-                            obs = yield Action(name="wait")
+                            yield Action(name="wait")
 
                     return PolicyRunner(fallback_gen(initial_obs), guard=self.guard)
                 raise
@@ -350,7 +349,7 @@ class PolicyExecutor:
 
                     def fallback_gen(obs):
                         while True:
-                            obs = yield Action(name="wait")
+                            yield Action(name="wait")
 
                     return PolicyRunner(fallback_gen(initial_obs), guard=self.guard)
                 raise
@@ -373,7 +372,7 @@ def compile_policy(
     Seamlessly handles Class-based agents, Generator functions, and legacy Behavior Trees.
     """
     tree_ast, plan_order, functions, visitor = parse_and_validate(policy_code)
-    clean_code = normalize_code(policy_code)
+    normalize_code(policy_code)
 
     # 1. If policy defines classes or generators, compile into sandbox namespace
     if visitor.classes or visitor.has_generator:
