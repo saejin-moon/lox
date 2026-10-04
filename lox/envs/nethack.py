@@ -518,8 +518,9 @@ class NetHackAdapter(EnvironmentAdapter):
 
         if valid_stairs:
             self.known_stairs_down = valid_stairs[0]
-        else:
-            self.known_stairs_down = None
+        elif dnum == 0 and hasattr(self, "mines_stairs_positions") and self.known_stairs_down is not None:
+            if (self.known_stairs_down[0], self.known_stairs_down[1], depth) in self.mines_stairs_positions:
+                self.known_stairs_down = None
 
         if self.known_stairs_down is not None and self.stairs_down_discovery_turn == -1:
             self.stairs_down_discovery_turn = turn

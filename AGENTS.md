@@ -247,6 +247,11 @@ lox/
     - When descending from DL 2–4 of Dungeons of Doom, if the destination floor is the Gnomish Mines (`dnum == 2`), `NetHackAdapter` dynamically marks that staircase in `self.mines_stairs_positions` and filters it out of `self.known_stairs_down`.
     - The policy immediately yields `ascend()` on `<` back to the Dungeons of Doom, allowing the hero to locate and descend the true main dungeon staircase to DL 5–20 without entering the lethal dark Mines.
 
+45. **Persistent Level Feature State & FOV Caching Invariant**:
+    - Staircases, fountains, and altars are static level fixtures. In NetHack, when the hero walks into an adjacent corridor or room, fixtures leave the active FOV `glyphs` and `chars`.
+    - `NetHackAdapter` must strictly preserve `self.known_stairs_down` across turns once discovered on a level. Setting `self.known_stairs_down = None` when not currently visible in FOV causes the hero to forget the exit the moment they walk away, resulting in endless search loops and stalling on DL1 for 10,000+ turns.
+    - Only level transitions or explicit branch staircase pruning (e.g. entering the Mines) may invalidate or clear `self.known_stairs_down`.
+
 ---
 
 ## 4. Key CLI Commands

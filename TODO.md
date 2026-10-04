@@ -318,10 +318,11 @@ This living document tracks empirical progress, critical discoveries, immediate 
     1. Fixed `BRANCH_NAMES` in `NetHackAdapter` so `dnum = 2` is `"mines"`.
     2. Added `mines_stairs_positions` tracking in `NetHackAdapter`: when descending into the Mines from Dungeons of Doom, the stair position is remembered and pruned from `known_stairs_down`.
     3. Updated policy to immediately ascend back to Dungeons of Doom when `obs.hero.dungeon_branch == "mines"`.
+    4. **Staircase Persistence Invariant**: Fixed bug where `self.known_stairs_down` was reset to `None` when stairs were not in immediate FOV. Preserving `known_stairs_down` allows the hero to navigate to the stairs from anywhere on the floor without forgetting their location.
 
 - **Campaign 14 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 20.0$ leveraging Gnomish Mines avoidance, 4-layer infinite loop protection, and deep Dungeons of Doom exploration.
+  - **Target**: Average Depth $\ge 20.0$ leveraging Gnomish Mines avoidance, persistent staircase discovery, 4-layer infinite loop protection, and deep Dungeons of Doom exploration.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 20+)
 
