@@ -242,6 +242,11 @@ lox/
     - **Layer 3 (Episode Wall-Clock Ceiling)**: Sets `MAX_EPISODE_WALL_SEC = 90.0` in `_run_single_episode_worker`, breaking out with `EpisodeWallTimeout` if unexpected C-level NLE lockups occur.
     - **Layer 4 (Worker Pool Batch Ceiling)**: Dispatches `mp.Pool` via `map_async` with a 180s ceiling, automatically executing `pool.terminate()` and `pool.join()` to eliminate zombie worker processes if a batch stalls.
 
+44. **Gnomish Mines Avoidance & Main Dungeon Staircase Discrimination (`dnum == 2`, `BRANCH_NAMES`)**:
+    - NetHack internal branch IDs (`dungeon.def`) assign `dnum = 0` (Dungeons of Doom), `dnum = 1` (Gehennom), `dnum = 2` (Gnomish Mines), `dnum = 3` (The Quest), `dnum = 4` (Sokoban). Fixed `BRANCH_NAMES` so `dnum == 2` correctly maps to `"mines"` (previously mismapped to `"quest"`).
+    - When descending from DL 2–4 of Dungeons of Doom, if the destination floor is the Gnomish Mines (`dnum == 2`), `NetHackAdapter` dynamically marks that staircase in `self.mines_stairs_positions` and filters it out of `self.known_stairs_down`.
+    - The policy immediately yields `ascend()` on `<` back to the Dungeons of Doom, allowing the hero to locate and descend the true main dungeon staircase to DL 5–20 without entering the lethal dark Mines.
+
 ---
 
 ## 4. Key CLI Commands

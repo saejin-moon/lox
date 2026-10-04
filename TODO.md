@@ -302,16 +302,33 @@ This living document tracks empirical progress, critical discoveries, immediate 
          3. **`MAX_EPISODE_WALL_SEC = 90.0`**: Enforces a strict 90s wall-clock ceiling per episode to catch unexpected C-level NLE hangs.
          4. **`mp.Pool` Batch Ceiling (`180.0s`)**: Dispatches worker processes via `map_async` with a 180s timeout, automatically executing `pool.terminate()` and `pool.join()` to eliminate zombie worker processes.
 
-- **Campaign 13 (Active)**:
+- **Campaign 13 Results (Completed - 10 Gens x 20 Eps = 200 Episodes in 12 min)**:
+  - **Gen 1**: Avg Depth **4.35**, Max Depth 8, Avg Turns 4,170.9
+  - **Gen 2**: Avg Depth 3.65, Max Depth 7, Avg Turns 2,510.4
+  - **Gen 3**: Avg Depth 3.45, Max Depth 7, Avg Turns 2,230.1
+  - **Gen 4**: Avg Depth 3.80, Max Depth 7, Avg Turns 2,640.8
+  - **Gen 5**: Avg Depth 3.55, **Max Depth 9**, Avg Turns 2,980.2
+  - **Gen 6**: Avg Depth 3.50, Max Depth 8, Avg Turns 2,410.5
+  - **Gen 7**: Avg Depth 3.75, Max Depth 7, Avg Turns 2,350.2
+  - **Gen 8**: Avg Depth 3.30, **Max Depth 9**, Avg Turns 2,820.6
+  - **Gen 9**: Avg Depth 3.40, Max Depth 7, Avg Turns 2,190.4
+  - **Gen 10**: Avg Depth 3.70, Max Depth 7, Avg Turns 2,610.7
+  - **Key Diagnoses**: Telemetry analysis showed 24 deaths to gnomes/gnome lords in `dnum = 2`. Discovered that NetHack's internal `dungeon.def` branch ID for the Gnomish Mines is `dnum = 2` (was mapped to `"quest"`). The Mines branch has no stairs to lower Dungeons of Doom, trapping heroes in dark levels with dangerous gnome packs.
+  - **Fixes Applied**:
+    1. Fixed `BRANCH_NAMES` in `NetHackAdapter` so `dnum = 2` is `"mines"`.
+    2. Added `mines_stairs_positions` tracking in `NetHackAdapter`: when descending into the Mines from Dungeons of Doom, the stair position is remembered and pruned from `known_stairs_down`.
+    3. Updated policy to immediately ascend back to Dungeons of Doom when `obs.hero.dungeon_branch == "mines"`.
+
+- **Campaign 14 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 20.0$ leveraging instant Elbereth state reporting, persistent ward durability, immune species discrimination, signal-based dry-run validation, and staircase escape.
+  - **Target**: Average Depth $\ge 20.0$ leveraging Gnomish Mines avoidance, 4-layer infinite loop protection, and deep Dungeons of Doom exploration.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 20+)
 
 1. **Autonomous LLM Synthesis Loop Execution**:
    - Continue running iterative generations until batch average depth $\ge 20.0$.
 2. **Main Dungeon vs Gnomish Mines Branch Steering**:
-   - The Gnomish Mines branch (Depths 2–4) is dark and infested with gnome wand wielders. Prefer descending the main dungeon staircase down to Depth 20 before exploring deep Mines.
+   - Prioritize descending the main dungeon staircase down to Depth 20 without entering the lethal dark Mines.
 3. **Container & Bag Stash Management**:
    - Looting sacks and chests for additional scrolls and potions.
 4. **Mid-Game Ascension Prep & Medusa / Castle Breaching**:

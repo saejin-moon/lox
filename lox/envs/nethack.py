@@ -73,11 +73,13 @@ IGNORES_ELBERETH_SPECIES: tuple[str, ...] = (
 
 BRANCH_NAMES: dict[int, str] = {
     0: "dungeon",
-    1: "mines",
-    2: "quest",
-    3: "sokoban",
-    4: "fort_ludios",
-    5: "vlad_tower",
+    1: "gehennom",
+    2: "mines",
+    3: "quest",
+    4: "sokoban",
+    5: "fort_ludios",
+    6: "vlad_tower",
+    7: "planes",
 }
 
 
@@ -110,6 +112,8 @@ class NetHackAdapter(EnvironmentAdapter):
         self.door_kick_count: dict[tuple[int, int], int] = {}
         self.hostile_npc_positions: set[tuple[int, int]] = set()
         self.looted_tiles: set[tuple[int, int]] = set()
+        self.mines_stairs_positions: set[tuple[int, int, int]] = set()  # (y, x, depth) in Dungeons of Doom
+        self._last_descended_stair: tuple[int, int, int] | None = None
         self.consecutive_zero_turns: int = 0
         self._prev_turn: int = 0
         self.known_chars = np.zeros((21, 79), dtype=np.uint8)
@@ -293,6 +297,8 @@ class NetHackAdapter(EnvironmentAdapter):
         is_sick = bool(cond & (getattr(nethack, "BL_MASK_FOODPOIS", 8) | getattr(nethack, "BL_MASK_TERMILL", 16)))
 
         if depth != self.last_depth or dnum != self.last_dnum:
+            if branch_name == "mines" and getattr(self, "_last_descended_stair", None) is not None:
+                self.mines_stairs_positions.add(self._last_descended_stair)
             self.turns_on_level = 0
             self.visited.fill(False)
             self.searched_count.fill(0)
@@ -500,12 +506,20 @@ class NetHackAdapter(EnvironmentAdapter):
         stair_down_glyph = nethack.GLYPH_CMAP_OFF + 24
         stair_up_glyph = nethack.GLYPH_CMAP_OFF + 23
         glyph_stairs_down = np.argwhere(glyphs == stair_down_glyph)
-        if len(glyph_stairs_down) > 0:
-            self.known_stairs_down = (int(glyph_stairs_down[0][0]), int(glyph_stairs_down[0][1]))
+        stairs_candidates = [(int(pt[0]), int(pt[1])) for pt in glyph_stairs_down]
+        if not stairs_candidates:
+            chars_stairs_down = np.argwhere(chars == ord(">"))
+            stairs_candidates = [(int(pt[0]), int(pt[1])) for pt in chars_stairs_down]
+
+        if dnum == 0 and hasattr(self, "mines_stairs_positions"):
+            valid_stairs = [pos for pos in stairs_candidates if (pos[0], pos[1], depth) not in self.mines_stairs_positions]
         else:
-            stairs_down = np.argwhere(chars == ord(">"))
-            if len(stairs_down) > 0:
-                self.known_stairs_down = (int(stairs_down[0][0]), int(stairs_down[0][1]))
+            valid_stairs = stairs_candidates
+
+        if valid_stairs:
+            self.known_stairs_down = valid_stairs[0]
+        else:
+            self.known_stairs_down = None
 
         if self.known_stairs_down is not None and self.stairs_down_discovery_turn == -1:
             self.stairs_down_discovery_turn = turn
@@ -1003,6 +1017,8 @@ class NetHackAdapter(EnvironmentAdapter):
         self.door_kick_count.clear()
         self.hostile_npc_positions.clear()
         self.looted_tiles.clear()
+        self.mines_stairs_positions.clear()
+        self._last_descended_stair = None
         self.has_poison_res = False
         self.turns_on_level = 0
         self.last_depth = 1
@@ -1414,6 +1430,8 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "descend":
             if obs_prev and getattr(obs_prev.status, "is_levitating", False):
                 return self.step(Action(name="wait"))
+            if obs_prev and hasattr(obs_prev, "hero"):
+                self._last_descended_stair = (obs_prev.hero.y, obs_prev.hero.x, obs_prev.hero.depth)
             target_char = ">"
         elif action.name == "ascend":
             if obs_prev and getattr(obs_prev.status, "is_levitating", False):
