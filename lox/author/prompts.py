@@ -114,18 +114,27 @@ class Agent:
                     continue
 
             # 1. Passive & Exploding Hazards: NEVER attack floating eyes or gas spores in melee!
+            # BUT if another active attacker is also adjacent, attack the safe target in melee!
             if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
-                if obs.combat.can_retreat:
-                    obs = yield step_away_from_hostile()
-                    continue
-                elif obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2 and not obs.combat.adjacent_gas_spore:
+                if obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
                     obs = yield zap_offensive_wand()
                     continue
-                elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2 and not obs.combat.adjacent_gas_spore:
+                elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
                     obs = yield throw_dagger()
                     continue
-                obs = yield step_away_from_hostile()
-                continue
+                elif obs.combat.has_safe_melee_target:
+                    # Safely attack the active attacker; adapter skips the passive hazard!
+                    obs = yield melee_attack_hostile()
+                    continue
+                elif obs.combat.can_retreat:
+                    obs = yield step_away_from_hostile()
+                    continue
+                else:
+                    if not obs.combat.standing_on_elbereth:
+                        obs = yield engrave_dust_elbereth()
+                    else:
+                        obs = yield wait()
+                    continue
 
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
@@ -244,7 +253,7 @@ Every turn, `obs` provides rich sub-namespaces:
 - `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state` (SATIATED, NORMAL, HUNGRY, WEAK, FAINTING), `dungeon_branch`, `has_poison_res`
 - `obs.status`: `is_blind`, `is_poisoned`, `is_confused`, `is_stunned`, `is_sick`, `is_encumbered`, `encumbrance_level`, `is_levitating`
 - `obs.inventory`: `has_food`, `has_healing`, `has_unworn_armor`, `has_daggers`, `has_offensive_wand`, `has_wand_of_teleport`, `has_scroll_of_teleport`, `get_food_slot()`, `get_healing_slot()`, `get_dagger_slot()`, `get_offensive_wand_slot()`, `items`
-- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`, `adjacent_floating_eye`, `adjacent_gas_spore`, `hostile_ignores_elbereth`, `has_panic_escape`
+- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`, `adjacent_floating_eye`, `adjacent_gas_spore`, `hostile_ignores_elbereth`, `has_panic_escape`, `has_safe_melee_target`
 - `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`, `has_nearby_loot`
 - `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `standing_on_fountain`, `adjacent_altar`, `standing_on_altar`, `can_forge_excalibur`, `can_harvest_poison`
 - `obs.epistemic`: `untested_buc_count` (int), `has_untested_items` (bool), `can_safely_wear_armor` (bool), `can_safely_quaff_healing` (bool), `items_belief` (dict of ItemBeliefState)
@@ -253,7 +262,7 @@ Every turn, `obs` provides rich sub-namespaces:
 - `obs.message`: last raw game message
 
 ### Critical NetHack 3.6.6 Mechanics & Invariants:
-1. **Passive & Exploding Hazards (`adjacent_floating_eye`, `adjacent_gas_spore`)**: Attacking a floating eye in melee triggers a passive 70-turn paralysis gaze (`0d70`). Striking a gas spore explodes for lethal 4d6 area blast. NEVER melee attack them! Step away or destroy with ranged daggers or offensive wands.
+1. **Passive & Exploding Hazards (`adjacent_floating_eye`, `adjacent_gas_spore`, `has_safe_melee_target`)**: Attacking a floating eye in melee triggers a passive 70-turn paralysis gaze (`0d70`). Striking a gas spore explodes for lethal 4d6 area blast. NEVER melee attack them! Destroy with ranged daggers or offensive wands. However, if an active attacker (newt, jackal, orc) is adjacent alongside the hazard, `obs.combat.has_safe_melee_target` is True: yield `melee_attack_hostile()` to eliminate the active attacker (the adapter automatically skips the passive hazard). Never idle or wait passively when being bitten!
 2. **Emergency Panic Escape (`read_scroll_teleport`, `zap_wand_teleport`)**: When low on HP (< 25%) or surrounded by high-speed attackers, teleport away immediately. NetHack teleport scrolls and wands (zapped at `.`) instantly relocate the hero to a random safe tile.
 3. **Nearby Floor Loot Scooping (`step_to_loot`)**: Defeated monsters drop armor, weapons, wands, and scrolls on their death tile. When out of combat and `obs.spatial.has_nearby_loot` is True, yield `step_to_loot()` to walk over the dropped items. Autopickup collects them, allowing `wear_armor()` to lower Armor Class (AC) towards negative numbers!
 4. **Elbereth Immunity & Humanoid Combat Tactics (`hostile_ignores_elbereth`)**: Orcs, elves, and humans ignore Elbereth. While standing on Elbereth, if `obs.combat.hostile_ignores_elbereth` is True, do NOT wait passively; actively fight in melee or retreat to a 1-tile corridor chokepoint.
