@@ -244,9 +244,29 @@ This living document tracks empirical progress, critical discoveries, immediate 
        - Walking into a locked door returned `"This door is locked."` and consumed 0 turns. Because the hero position did not change and the door remained in `walkable_nav`, it repeated 2,500 consecutive zero-turn steps until NLE aborted the episode at turn 8,612 while the hero was alive with 51 HP!
        - **Fix Applied**: Upgraded `step_away_from_hostile` in `NetHackAdapter` to strictly prefer open walkable floor tiles over closed/locked doors, and route any door retreat through `self._step_or_breach(obs_prev, dy, dx)` so locked doors are breached with kicking instead of endless zero-turn walking.
 
-- **Campaign 10 (Active)**:
+- **Campaign 10 Results (Completed - 10 Gens x 20 Eps = 200 Episodes in 12 mins)**:
+  - **Gen 1**: Avg Depth **3.65**, **Max Depth 9**, Avg Turns 2,588.5
+  - **Gen 2**: Avg Depth **3.40**, Max Depth 6, Avg Turns 2,055.4
+  - **Gen 3**: Avg Depth **3.10**, Max Depth 6, Avg Turns 3,214.8
+  - **Gen 4**: Avg Depth 2.85, Max Depth 6, Avg Turns 3,302.7
+  - **Gen 5**: Avg Depth **4.40**, **Max Depth 9**, Avg Turns 2,927.5
+  - **Gen 6**: Avg Depth **3.75**, Max Depth 8, Avg Turns 3,352.6
+  - **Gen 7**: Avg Depth **3.90**, Max Depth 8, Avg Turns 2,149.1
+  - **Gen 8**: Avg Depth **3.85**, Max Depth 8, Avg Turns 2,225.8
+  - **Gen 9**: Avg Depth 2.80, Max Depth 7, Avg Turns 3,505.6
+  - **Gen 10**: Avg Depth **3.35**, Max Depth 7, Avg Turns 1,683.2
+  - **Major Milestones Achieved**:
+    - Reached **Depth 9** in both Gen 1 (`g001_e001`) and Gen 5 (`g005_e003`).
+    - Ultra-fast execution: 200 episodes in 12 minutes (~1.2 min per generation) across 20 workers.
+  - **Autopsy Diagnoses & Key Discoveries**:
+    1. **Deep-Level Starvation Fainting (`You faint from lack of food`)**:
+       - Detailed tick inspection of `g001_e001` on Depth 9 revealed that at turn 3,462, the hero began fainting from starvation and remained paralyzed for dozens of turns until death.
+       - Why: The policy previously prioritized eating carried food rations over floor corpses, and only looked for corpses at `hunger_state >= 2` (hungry). By the time hunger reached 2, fresh monster corpses dropped earlier in combat had long since rotted away (decay takes only 30–50 turns). The hero consumed their carried food rations early on, leaving zero food reserves for Depths 7–10.
+       - **Fix Applied**: Updated `run()` to opportunistically consume safe fresh monster corpses right after combat whenever `hunger_state < 3`, preserving carried rations exclusively for deep-level hunger emergencies.
+
+- **Campaign 11 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 10.0$ leveraging open-floor tactical retreat, staircase descent priority, and high-level armor scaling.
+  - **Target**: Average Depth $\ge 10.0$ leveraging opportunistic fresh corpse nutrition, open-floor tactical retreat, and staircase escape descent.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 
