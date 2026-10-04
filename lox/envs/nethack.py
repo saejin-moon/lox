@@ -239,6 +239,20 @@ class NetHackAdapter(EnvironmentAdapter):
             if 0 <= ndy < 21 and 0 <= ndx < 79:
                 walkable_nav[ndy, ndx] = False
 
+        # Exclude passive and exploding hazards from pathfinding navigation
+        if glyphs is not None:
+            for my in range(21):
+                for mx in range(79):
+                    g = int(glyphs[my, mx])
+                    if nethack.glyph_is_monster(g) and not nethack.glyph_is_pet(g):
+                        mon_id = nethack.glyph_to_mon(g)
+                        try:
+                            mname = nethack.permonst(mon_id).mname.lower()
+                        except Exception:
+                            mname = ""
+                        if mname in ("floating eye", "gas spore") or "mold" in mname or "jelly" in mname or "sphere" in mname:
+                            walkable_nav[my, mx] = False
+
         # Hero's current position is always walkable and can depart
         if hy is not None and 0 <= hy < 21 and 0 <= hx < 79:
             walkable[hy, hx] = True
@@ -588,7 +602,18 @@ class NetHackAdapter(EnvironmentAdapter):
         )
         in_corridor = (walkable_adj <= 2 and chr(chars[y, x]) == "#")
 
-        is_fast_dangerous = closest_name in ("soldier ant", "killer bee", "giant spider", "centipede", "giant bat", "bat")
+        is_fast_dangerous = closest_name.lower() in (
+            "soldier ant", "killer bee", "giant spider", "centipede", "giant bat", "bat", "fox", "coyote", "jaguar", "leocrotta"
+        )
+        if closest_pos and glyphs is not None:
+            cg = int(glyphs[closest_pos[0], closest_pos[1]])
+            if nethack.glyph_is_monster(cg) and not nethack.glyph_is_pet(cg):
+                try:
+                    cpm = nethack.permonst(nethack.glyph_to_mon(cg))
+                    if cpm.mmove > 12:
+                        is_fast_dangerous = True
+                except Exception:
+                    pass
         if closest_name and any(ign in closest_name.lower() for ign in IGNORES_ELBERETH_SPECIES):
             hostile_ignores_elbereth = True
         combat = CombatView(
@@ -1401,14 +1426,18 @@ class NetHackAdapter(EnvironmentAdapter):
                 else:
                     return self.step(Action(name="step_to_dead_end"))
             else:
-                closest_name = getattr(obs_prev.combat, "closest_hostile_name", "")
-                if closest_name in ("floating eye", "gas spore") or getattr(obs_prev.combat, "gas_spore_in_fov", False):
-                    if obs_prev.spatial.stairs_down_known:
-                        return self.step(Action(name="step_to_stairs_down"))
-                    elif obs_prev.spatial.has_unvisited_frontier:
-                        return self.step(Action(name="step_to_frontier"))
-                    else:
-                        return self.step(Action(name="step_to_dead_end"))
+                closest_name = getattr(obs_prev.combat, "closest_hostile_name", "").lower()
+                is_passive = (
+                    closest_name in ("floating eye", "gas spore")
+                    or "mold" in closest_name
+                    or "jelly" in closest_name
+                    or "sphere" in closest_name
+                    or getattr(obs_prev.combat, "gas_spore_in_fov", False)
+                    or getattr(obs_prev.combat, "adjacent_floating_eye", False)
+                    or getattr(obs_prev.combat, "adjacent_gas_spore", False)
+                )
+                if is_passive:
+                    return self.step(Action(name="wait"))
                 is_on_elbereth = (hero.y, hero.x) in self.elbereth_positions or getattr(obs_prev.combat, "standing_on_elbereth", False) or getattr(obs_prev.spatial, "standing_on_elbereth", False)
                 if not is_on_elbereth:
                     return self.step(Action(name="engrave_dust_elbereth"))

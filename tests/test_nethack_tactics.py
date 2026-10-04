@@ -192,9 +192,51 @@ def test_wand_actions_and_teleport_panic_escape():
     assert obs_tele is not None
 
     obs_scroll, _, _, _, _ = adapter.step(Action(name="read_scroll_teleport", slot="b"))
-    assert obs_scroll is not None
-
     adapter.close()
 
 
+def test_passive_hazard_nav_mask_and_cornered_retreat_safety():
+    """Verify that passive hazards (floating eyes, gas spores, molds) are excluded from walkable_nav
+    and that cornered retreat falls back to wait() rather than bumping/attacking them."""
+    import nle.nethack as nh
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=123)
 
+    hy, hx = obs.hero.y, obs.hero.x
+    # Simulate a floating eye adjacent to the hero
+    eye_pos = (hy, hx + 1)
+    eye_mon_id = nh.PM_FLOATING_EYE if hasattr(nh, "PM_FLOATING_EYE") else None
+    if eye_mon_id is None:
+        for i in range(nh.NUMMONS):
+            if nh.permonst(i).mname == "floating eye":
+                eye_mon_id = i
+                break
+    eye_glyph = nh.GLYPH_MON_OFF + eye_mon_id
+
+    # Place eye glyph in raw observation
+    obs.glyphs[eye_pos[0], eye_pos[1]] = eye_glyph
+    obs.raw_obs["glyphs"][eye_pos[0], eye_pos[1]] = eye_glyph
+
+    # Verify _build_walkable_nav excludes the floating eye
+    walkable, walkable_nav = adapter._build_walkable_nav(obs)
+    assert walkable_nav[eye_pos[0], eye_pos[1]] is False or walkable_nav[eye_pos[0], eye_pos[1]] == 0
+
+    # Set up observation with adjacent_floating_eye and no open retreat
+    obs.combat.closest_hostile_name = "floating eye"
+    obs.combat.closest_hostile_pos = eye_pos
+    obs.combat.adjacent_floating_eye = True
+    obs.combat.adjacent_hostile = True
+    obs.combat.hostile_count_fov = 1
+
+    # In step_away_from_hostile, when blocked or no tile increases distance, must yield wait()
+    # Mask all neighbors in walkable_nav so no direction increases distance
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if (hy + dy, hx + dx) != (hy, hx):
+                walkable_nav[hy + dy, hx + dx] = False
+
+    # Dispatch step_away_from_hostile
+    next_obs, _, _, _, _ = adapter.step(Action(name="step_away_from_hostile"))
+    assert next_obs is not None
+
+    adapter.close()

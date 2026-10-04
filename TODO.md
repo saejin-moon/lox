@@ -62,14 +62,17 @@ All tactical, spatial, and execution rules are systematically documented and mai
 | **C13** | 10 x 20 | **DL 9** | 4.35 | 12m / $0.02 | Discovered Gnomish Mines branch ID (`dnum == 2`). Added immediate Mines ascend and stair persistence. |
 | **C14** | 10 x 20 | **DL 11** | 4.00 | 18m / $0.02 | `e018` reached DL11 in 1,702 turns. Added trap-door fall discrimination vs genuine stair arrival. |
 | **C15** | 10 x 20 | **DL 11** | 4.50 | 16m / $0.02 | 100% genuine combat deaths (0 aborts/timeouts). Added full-floor persistent topological memory (Inv 49). |
+| **C16** | 10 x 20 | DL 8 | 3.35 | 14m / $0.023 | 2 episodes survived all 25k turns; 0 zero-progress aborts. Diagnosed passive hazard pathfinding bumps & fast predator speeds. |
 
 ### Recent Breakthroughs & Engine Hardening
-- **Full-Floor Persistent Topological Memory (Invariant 49)**: Fixed line-of-sight amnesia where `walkable_nav` and closed doors were lost when moving out of FOV. Augmenting pathfinding with `self.visited` and `self.known_chars` preserves 100% floor connectivity, eliminating 15,000-turn room search traps.
+- **Passive Hazard Pathfinding Masking & Safe Cornered Wait (Invariant 22)**: Fixed pathfinding routing through passive/exploding hazards (floating eyes, gas spores, molds, jellies) by masking them out of `walkable_nav`. When cornered or unable to retreat, `step_away_from_hostile()` yields `wait()` rather than bumping into them.
+- **Dynamic Fast Monster Discrimination (Invariant 23)**: Ground-truth `permonst.mmove > 12` dynamic check plus foxes (speed 15), coyotes, and jaguars flags fast predators for immediate corridor chokepoints (`step_to_chokepoint()`).
+- **Full-Floor Persistent Topological Memory (Invariant 49)**: Fixed line-of-sight amnesia where `walkable_nav` and closed doors were lost when moving out of FOV. Augmenting pathfinding with `self.visited` and `self.known_chars` preserves 100% floor connectivity.
 - **Locked Door Circuit Breaker & Chokepoint Blocking (Invariant 48)**: Locked doors in shops or after 6 failed kicks are added to `self.blocked_tiles`. Universal $\ge 4$ zero-turn circuit breaker forces `wait()` (`.`), eliminating all `StepStatus.ABORTED` occurrences.
-- **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter for network timeouts, 429 rate limits, and 5xx gateway errors ensures uninterrupted overnight synthesis.
+- **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter ensures uninterrupted overnight synthesis.
 
 ### Current Campaign Status
-- **Campaign 16 (Active)**:
+- **Campaign 17 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
   - **Target**: Average Depth $\ge 20.0$.
 
