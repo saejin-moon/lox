@@ -1091,11 +1091,16 @@ class NetHackAdapter(EnvironmentAdapter):
             self.known_fountain_pos = closest_fountain_pos
         elif getattr(self, "known_fountain_pos", None) is not None:
             kfy, kfx = self.known_fountain_pos
-            if (
-                abs(kfy - y) <= 1
-                and abs(kfx - x) <= 1
-                and (chr(chars[kfy, kfx]) != "{" or fountain_vanished)
+            if fountain_vanished:
+                self.known_fountain_pos = None
+            elif (kfy, kfx) == (y, x):
+                # Hero is standing directly on the fountain tile; hero '@' occludes '{'
+                fountain_in_fov = True
+                closest_fountain_pos = self.known_fountain_pos
+            elif (
+                abs(kfy - y) <= 1 and abs(kfx - x) <= 1 and chr(chars[kfy, kfx]) != "{"
             ):
+                # Adjacent and fountain is genuinely gone
                 self.known_fountain_pos = None
             else:
                 fountain_in_fov = True

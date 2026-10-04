@@ -2,7 +2,7 @@
 
 **LOX** is an autonomous, empirical neuro-symbolic policy synthesis engine for NetHack. It enables large language models (such as `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on flight telemetry, DuckDB incident autopsies, and an offline NetHack encyclopedia.
 
-LOX achieves sub-50 microsecond execution latency (>1,000 game turns/second) by compiling generator policies alongside a standalone Numba-accelerated A* spatial navigation engine. Across 27 continuous evolutionary campaigns and over 5,700 real episodes evaluated (18.2M game ticks), LOX has systematically eradicated zero-progress stalls, locked-door loops, and starvation blackouts, driving peak batch performance to **5.10 Average Depth** and peak exploration depth to **Dungeon Level 14**.
+LOX achieves sub-50 microsecond execution latency (>1,000 game turns/second) by compiling generator policies alongside a standalone Numba-accelerated A* spatial navigation engine. Across 30 continuous evolutionary campaigns and over 6,300 real episodes evaluated (20.5M game ticks), LOX has systematically eradicated zero-progress stalls, locked-door loops, and starvation blackouts, driving peak batch performance to **5.10 Average Depth**, peak exploration depth to **Dungeon Level 14**, and repeatedly reaching **Depth 12** in autonomous runs.
 
 ---
 
@@ -262,5 +262,5 @@ lox/
 
 ## 6. Operational Guides for Agents & Developers
 
-- **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Complete operational guide, architecture, 48 technical invariants, and synthesis protocols.
+- **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Complete operational guide, architecture, 52 technical invariants, and synthesis protocols.
 - **[`TODO.md`](file:///home/moose/git/lox/TODO.md)**: Real-time campaign tracking, empirical benchmark progression, autopsy findings, and active roadmap.

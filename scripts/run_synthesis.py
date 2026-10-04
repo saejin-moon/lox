@@ -350,37 +350,51 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         or "combat" in death_reason.lower()
         or "fatality" in death_reason.lower()
     ):
-        m = obs.message.lower()
-        for hit_verb in (
-            " bites!",
-            " hits!",
-            " stings!",
-            " claws!",
-            " shoots!",
-            " strikes!",
-            " kicks!",
-            " zaps!",
-            " bites.",
-            " hits.",
-            " stings.",
-        ):
-            if hit_verb in m:
-                part = m.split(hit_verb)[0].strip()
-                words = part.split()
-                if words and words[0] in ("the", "a", "an"):
-                    killer = " ".join(words[1:])
-                elif words:
-                    killer = words[-1]
+        recent_msgs = [
+            t.get("message", "") for t in getattr(recorder, "turns", [])[-6:]
+        ]
+        if getattr(obs, "message", ""):
+            recent_msgs.append(obs.message)
+        for cand in reversed(recent_msgs):
+            m = cand.lower()
+            for hit_verb in (
+                " bites!",
+                " hits!",
+                " stings!",
+                " claws!",
+                " shoots!",
+                " strikes!",
+                " kicks!",
+                " zaps!",
+                " bites.",
+                " hits.",
+                " stings.",
+            ):
+                if hit_verb in m:
+                    part = m.split(hit_verb)[0].strip()
+                    words = part.split()
+                    if words and words[0] in ("the", "a", "an"):
+                        killer = " ".join(words[1:])
+                    elif words:
+                        killer = words[-1]
+                    break
+            if killer:
                 break
-        if not killer:
             for k in ("killed by a ", "killed by an ", "killed by the "):
                 if k in m:
                     killer = m.split(k)[-1].split(".")[0].strip()
                     break
+            if killer:
+                break
+
         if not killer:
-            killer = getattr(obs.combat, "closest_hostile_name", "")
+            adj_mons = getattr(obs.combat, "adjacent_monsters", [])
+            if adj_mons:
+                killer = adj_mons[0]
         if not killer and last_known_hostile:
             killer = last_known_hostile
+        if not killer:
+            killer = getattr(obs.combat, "closest_hostile_name", "")
     ac_at_death = last_valid_ac
     hp_at_death = getattr(obs.hero, "hp", 0)
     max_hp_at_death = last_valid_max_hp

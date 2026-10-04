@@ -216,3 +216,42 @@ def test_hero_position_walkability_and_dead_end_stagnation_recovery():
     assert obs_next is not None
 
     adapter.close()
+
+
+def test_fountain_occlusion_and_excalibur_dip():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=42)
+
+    # Place a synthetic fountain at (10, 10)
+    fy, fx = 10, 10
+    adapter.known_fountain_pos = (fy, fx)
+
+    # 1. Test when hero is adjacent: (10, 9)
+    obs.hero.y, obs.hero.x = 10, 9
+    fake_chars = np.zeros((21, 79), dtype=np.uint8)
+    fake_chars[fy, fx] = ord("{")
+    fake_chars[10, 9] = ord("@")
+
+    raw_obs = dict(obs.raw_obs)
+    raw_obs["chars"] = fake_chars
+    raw_obs["blstats"] = np.copy(raw_obs["blstats"])
+    raw_obs["blstats"][0] = 9
+    raw_obs["blstats"][1] = 10
+
+    extracted = adapter._extract_obs(raw_obs)
+    assert extracted.dungeon.closest_fountain_pos == (fy, fx)
+    assert not extracted.dungeon.standing_on_fountain
+
+    # 2. Test when hero steps ONTO the fountain: (10, 10)
+    # The chars map displays '@' at (10, 10), occluding '{'
+    fake_chars[fy, fx] = ord("@")
+    raw_obs["chars"] = fake_chars
+    raw_obs["blstats"][0] = 10
+    raw_obs["blstats"][1] = 10
+
+    extracted_on = adapter._extract_obs(raw_obs)
+    assert adapter.known_fountain_pos == (fy, fx)
+    assert extracted_on.dungeon.standing_on_fountain
+    assert extracted_on.dungeon.closest_fountain_pos == (fy, fx)
+
+    adapter.close()
