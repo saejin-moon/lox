@@ -58,6 +58,8 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "hostile_ignores_elbereth": "bool",
     "has_panic_escape": "bool",
     "has_safe_melee_target": "bool",
+    "has_active_hostile": "bool",
+    "active_hostile_count": "int",
 
     # Spatial Topology & Navigation
     "stairs_down_known": "bool",

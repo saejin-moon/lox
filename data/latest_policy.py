@@ -6,7 +6,7 @@ class Agent:
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
+            # 1. Absolute Emergency Survival (Fainting or Critical HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
                 if obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
@@ -21,16 +21,16 @@ class Agent:
                 elif obs.spatial.stairs_up_known:
                     obs = yield step_to_stairs_up()
                     continue
-                if obs.combat.hostile_count_fov > 0:
+                if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
                     obs = yield from self.handle_combat(obs)
                     continue
 
             # 3. Combat Logic (Highest Priority)
-            if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
+            if obs.combat.adjacent_hostile or obs.combat.has_active_hostile or (obs.combat.hostile_count_fov > 0 and (obs.inventory.has_offensive_wand or obs.inventory.has_daggers)):
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 4. Hunger Prevention (Only when safe)
+            # 4. Hunger Prevention
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -54,7 +54,7 @@ class Agent:
                     continue
 
             # 7. Nearby Floor Loot Scooping
-            if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile:
+            if obs.spatial.has_nearby_loot and obs.combat.hostile_count_fov == 0:
                 if not obs.status.is_encumbered or obs.status.encumbrance_level < 3:
                     obs = yield step_to_loot()
                     continue
@@ -93,11 +93,15 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
-                # Prevent EpisodeWallTimeout by ensuring we are always moving/searching
                 obs = yield from self.handle_dead_end(obs)
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
+            # If the only monsters in FOV are distant passive hazards and we have no ranged weapons, exit combat
+            if not obs.combat.adjacent_hostile and not obs.combat.has_active_hostile:
+                if not (obs.inventory.has_offensive_wand or obs.inventory.has_daggers):
+                    break
+
             # 0. Emergency Panic Escape
             if (obs.hero.hp_frac < 0.20 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
@@ -107,19 +111,19 @@ class Agent:
                     obs = yield zap_wand_teleport()
                     continue
 
-            # 0.1 In-Combat Hunger Emergency: Eat carried food to avoid fainting
-            if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
-                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.combat.adjacent_floating_eye:
+            # 0.1 In-Combat Hunger Emergency
+            if obs.hero.hunger_state >= 3 and obs.inventory.has_food:
+                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
                     obs = yield eat_carried_food()
                     continue
 
-            # 0.2 Major Trouble Divine Intervention (Fainting or Critical HP)
+            # 0.2 Major Trouble Divine Intervention
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 150):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
 
-            # 1. Tactical Healing (Aggressive: Quaff at 50% to avoid critical drops)
+            # 1. Tactical Healing (Aggressive healing to prevent attrition deaths)
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
@@ -138,21 +142,19 @@ class Agent:
                 elif obs.combat.can_retreat:
                     obs = yield step_away_from_hostile()
                     continue
-                elif obs.combat.adjacent_floating_eye and obs.combat.hostile_count_fov == 1:
-                    # Trapped alone with a floating eye: attacking in melee destroys it; with 0
-                    # other monsters in FOV, paralysis is safe and breaks the starvation stalemate!
-                    obs = yield melee_attack_hostile()
-                    continue
                 else:
-                    obs = yield step_away_from_hostile()
+                    if not obs.combat.standing_on_elbereth:
+                        obs = yield engrave_dust_elbereth()
+                        continue
+                    obs = yield wait()
                     continue
 
             # 3. Non-Aggression
-            if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
+            if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain", "guard", "priest", "priestess", "oracle") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 4. Panic Sanctuary (Engrave Elbereth)
+            # 4. Panic Sanctuary (Engrave Elbereth if low HP or surrounded)
             if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth):
                     obs = yield engrave_dust_elbereth()
@@ -199,8 +201,8 @@ class Agent:
 
             # 7. Fast Dangerous Attackers
             if obs.combat.is_fast_dangerous:
-                if obs.combat.in_corridor and obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint()
+                if obs.combat.can_retreat:
+                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
                     continue
 
             # 8. Tactical Melee / Retreat

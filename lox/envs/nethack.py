@@ -474,6 +474,7 @@ class NetHackAdapter(EnvironmentAdapter):
         adjacent_gas_spore = False
         adjacent_floating_eye = False
         adjacent_hostiles_count = 0
+        active_hostile_count = 0
 
         if glyphs is not None:
             for gy in range(max(0, y - 8), min(21, y + 9)):
@@ -490,15 +491,18 @@ class NetHackAdapter(EnvironmentAdapter):
                         except Exception:
                             mname = "monster"
 
-                        # Town Watch / Peaceful NPC discrimination (Minetown guards, priests, shopkeepers)
+                        # Town Watch / Peaceful NPC discrimination (Minetown guards, priests, shopkeepers, vault guards)
                         is_peaceful_species = mname.lower() in (
-                            "watchman", "watch captain", "shopkeeper", "aligned priest", "high priest", "oracle"
+                            "watchman", "watch captain", "shopkeeper", "guard", "priest", "priestess", "aligned priest", "high priest", "oracle"
                         )
                         if is_peaceful_species and (gy, gx) not in getattr(self, "hostile_npc_positions", set()):
                             self.peaceful_positions.add((gy, gx))
                             continue
 
                         hostile_count += 1
+                        ml = mname.lower()
+                        if ml not in ("floating eye", "gas spore") and "mold" not in ml and "jelly" not in ml and "sphere" not in ml:
+                            active_hostile_count += 1
                         if mname == "floating eye":
                             floating_eye_fov = True
                         if mname == "gas spore":
@@ -533,7 +537,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         except Exception:
                             mname = "monster"
                         is_peaceful_species = mname.lower() in (
-                            "watchman", "watch captain", "shopkeeper", "aligned priest", "high priest", "oracle"
+                            "watchman", "watch captain", "shopkeeper", "guard", "priest", "priestess", "aligned priest", "high priest", "oracle"
                         )
                         if is_peaceful_species and (ny, nx) not in getattr(self, "hostile_npc_positions", set()):
                             self.peaceful_positions.add((ny, nx))
@@ -638,6 +642,8 @@ class NetHackAdapter(EnvironmentAdapter):
             hostile_ignores_elbereth=hostile_ignores_elbereth,
             has_panic_escape=bool(inv_view.has_scroll_of_teleport or inv_view.has_wand_of_teleport),
             has_safe_melee_target=has_safe_melee_target,
+            has_active_hostile=(active_hostile_count > 0),
+            active_hostile_count=active_hostile_count,
             adjacent_monsters=adjacent_monsters,
         )
 
@@ -977,14 +983,14 @@ class NetHackAdapter(EnvironmentAdapter):
 
         msg = obs.message.lower()
         all_doors = self._get_all_doors_mask(obs)
-        if any(f"{npc} hits" in msg for npc in ("watchman", "shopkeeper", "watch captain", "priest")):
+        if any(f"{npc} hits" in msg for npc in ("watchman", "shopkeeper", "watch captain", "priest", "priestess", "guard")):
             if getattr(self, "_last_attempted_dir", None) is not None:
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
                 dy, dx = self._last_attempted_dir
                 target_tile = (py + dy, px + dx)
                 self.hostile_npc_positions.add(target_tile)
                 self.peaceful_positions.discard(target_tile)
-        if "really attack" in msg or "who are you" in msg or "hello stranger" in msg:
+        if "really attack" in msg or "who are you" in msg or "hello stranger" in msg or "follow me" in msg:
             if getattr(self, "_last_attempted_dir", None) is not None:
                 py, px = getattr(self, "_prev_hero_pos", (0, 0))
                 dy, dx = self._last_attempted_dir
@@ -1481,12 +1487,10 @@ class NetHackAdapter(EnvironmentAdapter):
                 elif obs_prev.combat.closest_hostile_pos:
                     hy, hx = obs_prev.combat.closest_hostile_pos
                     if (hy, hx) not in self.peaceful_positions:
-                        walkable = build_walkable_mask(obs_prev.raw_obs)
-                        for by, bx in self.blocked_tiles:
-                            if 0 <= by < 21 and 0 <= bx < 79:
-                                walkable[by, bx] = False
-                        walkable[hy, hx] = True
-                        path = SpatialEngine.find_path((hero.y, hero.x), (hy, hx), walkable)
+                        walkable, walkable_nav = self._build_walkable_nav(obs_prev)
+                        all_doors = self._get_all_doors_mask(obs_prev)
+                        walkable_nav[hy, hx] = True
+                        path = SpatialEngine.find_path((hero.y, hero.x), (hy, hx), walkable_nav, is_door=all_doors)
                         if path:
                             dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                             return self._step_or_breach(obs_prev, dy, dx)
@@ -1570,6 +1574,8 @@ class NetHackAdapter(EnvironmentAdapter):
             hero = obs_prev.hero
             slot = action.slot or obs_prev.inventory.get_offensive_wand_slot()
             target_pos = action.target_pos or action.extra.get("target_pos") or obs_prev.combat.closest_hostile_pos
+            if target_pos and target_pos in self.peaceful_positions:
+                return self.step(Action(name="wait"))
             if slot and target_pos:
                 dy = int(np.sign(target_pos[0] - hero.y))
                 dx = int(np.sign(target_pos[1] - hero.x))
@@ -1657,6 +1663,8 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name in ("throw_dagger", "throw_item", "fire_missile") and obs_prev is not None:
             hero = obs_prev.hero
             target_pos = action.target_pos or action.extra.get("target_pos") or obs_prev.combat.closest_hostile_pos
+            if target_pos and target_pos in self.peaceful_positions:
+                return self.step(Action(name="wait"))
             slot = action.slot or obs_prev.inventory.get_dagger_slot()
             if target_pos and slot:
                 dy = int(np.sign(target_pos[0] - hero.y))

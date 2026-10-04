@@ -6,7 +6,7 @@ class Agent:
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
+            # 1. Absolute Emergency Survival (Fainting or Critical HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
                 if obs.hero.turn - self.last_prayer_turn >= 150:
                     self.last_prayer_turn = obs.hero.turn
@@ -21,7 +21,8 @@ class Agent:
                 elif obs.spatial.stairs_up_known:
                     obs = yield step_to_stairs_up()
                     continue
-                if obs.combat.hostile_count_fov > 0:
+                # If in mines and not on stairs, still prioritize combat survival
+                if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
                     obs = yield from self.handle_combat(obs)
                     continue
 
@@ -30,7 +31,7 @@ class Agent:
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 4. Hunger Prevention (Only when safe)
+            # 4. Hunger Prevention
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -54,7 +55,7 @@ class Agent:
                     continue
 
             # 7. Nearby Floor Loot Scooping
-            if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile:
+            if obs.spatial.has_nearby_loot and obs.combat.hostile_count_fov == 0:
                 if not obs.status.is_encumbered or obs.status.encumbrance_level < 3:
                     obs = yield step_to_loot()
                     continue
@@ -106,8 +107,20 @@ class Agent:
                     obs = yield zap_wand_teleport()
                     continue
 
-            # 1. Tactical Healing (Aggressive: Quaff at 50% to avoid critical drops)
-            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+            # 0.1 In-Combat Hunger Emergency
+            if obs.hero.hunger_state >= 3 and obs.inventory.has_food:
+                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
+                    obs = yield eat_carried_food()
+                    continue
+
+            # 0.2 Major Trouble Divine Intervention
+            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 150):
+                self.last_prayer_turn = obs.hero.turn
+                obs = yield pray()
+                continue
+
+            # 1. Tactical Healing (Raised threshold to 0.60 to prevent attrition deaths)
+            if obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
@@ -122,8 +135,14 @@ class Agent:
                 elif obs.combat.has_safe_melee_target:
                     obs = yield melee_attack_hostile()
                     continue
-                else:
+                elif obs.combat.can_retreat:
                     obs = yield step_away_from_hostile()
+                    continue
+                else:
+                    if not obs.combat.standing_on_elbereth:
+                        obs = yield engrave_dust_elbereth()
+                        continue
+                    obs = yield wait()
                     continue
 
             # 3. Non-Aggression
@@ -131,12 +150,10 @@ class Agent:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 4. Panic Sanctuary (Engrave Elbereth)
-            # CRITICAL FIX: Do NOT engrave if an adjacent hostile is already attacking and ignores Elbereth,
-            # or if we are in a desperate melee where engraving takes a turn we can't afford.
+            # 4. Panic Sanctuary (Engrave Elbereth if low HP or surrounded)
             if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+                # Only engrave if the adjacent hostile doesn't ignore Elbereth
                 if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth):
-                    # Only engrave if we aren't currently being bitten by something that ignores it
                     obs = yield engrave_dust_elbereth()
                     continue
 
@@ -164,13 +181,13 @@ class Agent:
                     if obs.spatial.stairs_down_known:
                         obs = yield step_to_stairs_down()
                     else:
-                        obs = yield wait()
+                        obs = yield step_away_from_hostile()
                     continue
                 else:
                     obs = yield melee_attack_hostile()
                     continue
 
-            # 6. Ranged Harassment (Prioritize distance)
+            # 6. Ranged Harassment
             if obs.combat.closest_hostile_dist >= 2:
                 if obs.inventory.has_offensive_wand:
                     obs = yield zap_offensive_wand()
@@ -181,18 +198,19 @@ class Agent:
 
             # 7. Fast Dangerous Attackers
             if obs.combat.is_fast_dangerous:
-                if obs.combat.in_corridor and obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint()
+                if obs.combat.can_retreat:
+                    obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
                     continue
 
             # 8. Tactical Melee / Retreat
             if obs.combat.adjacent_hostile:
-                # Attack if healthy, or if we've retreated too much, or if we can't move
+                # Attack if healthy, or if we've retreated too much, or if trapped
                 if obs.hero.hp_frac > 0.70 or self.retreat_streak >= 3 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
                     self.retreat_streak = 0
                     continue
                 
+                # Otherwise, attempt tactical retreat
                 if obs.combat.in_corridor:
                     obs = yield step_to_chokepoint()
                     self.retreat_streak += 1

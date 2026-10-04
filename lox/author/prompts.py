@@ -34,7 +34,7 @@ class Agent:
                     continue
 
             # 2. Combat Logic (Highest Priority)
-            if obs.combat.hostile_count_fov > 0:
+            if obs.combat.adjacent_hostile or obs.combat.has_active_hostile or (obs.combat.hostile_count_fov > 0 and (obs.inventory.has_offensive_wand or obs.inventory.has_daggers)):
                 obs = yield from self.handle_combat(obs)
                 continue
 
@@ -104,6 +104,11 @@ class Agent:
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
+            # If the only monsters in FOV are distant passive hazards and we have no ranged weapons, exit combat to explore
+            if not obs.combat.adjacent_hostile and not obs.combat.has_active_hostile:
+                if not (obs.inventory.has_offensive_wand or obs.inventory.has_daggers):
+                    break
+
             # 0. Emergency Panic Escape: Teleport away if critically low HP (< 25%) or surrounded
             if (obs.hero.hp_frac < 0.20 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
@@ -141,11 +146,6 @@ class Agent:
                 elif obs.combat.can_retreat:
                     obs = yield step_away_from_hostile()
                     continue
-                elif obs.combat.adjacent_floating_eye and obs.combat.hostile_count_fov == 1:
-                    # Trapped alone with a floating eye: attacking in melee destroys it; with 0
-                    # other monsters in FOV, paralysis is safe and breaks the starvation stalemate!
-                    obs = yield melee_attack_hostile()
-                    continue
                 else:
                     if not obs.combat.standing_on_elbereth:
                         obs = yield engrave_dust_elbereth()
@@ -153,7 +153,7 @@ class Agent:
                         obs = yield wait()
                     continue
 
-            if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
+            if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain", "guard", "priest", "priestess", "oracle") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
             if obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
@@ -270,7 +270,7 @@ Every turn, `obs` provides rich sub-namespaces:
 - `obs.hero`: `hp`, `max_hp`, `hp_frac`, `energy`, `energy_frac`, `ac`, `level`, `depth`, `turn`, `turns_on_level`, `gold`, `hunger_state` (SATIATED, NORMAL, HUNGRY, WEAK, FAINTING), `dungeon_branch`, `has_poison_res`
 - `obs.status`: `is_blind`, `is_poisoned`, `is_confused`, `is_stunned`, `is_sick`, `is_encumbered`, `encumbrance_level`, `is_levitating`
 - `obs.inventory`: `has_food`, `has_healing`, `has_unworn_armor`, `has_daggers`, `has_offensive_wand`, `has_wand_of_teleport`, `has_scroll_of_teleport`, `get_food_slot()`, `get_healing_slot()`, `get_dagger_slot()`, `get_offensive_wand_slot()`, `items`
-- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`, `adjacent_floating_eye`, `adjacent_gas_spore`, `hostile_ignores_elbereth`, `has_panic_escape`, `has_safe_melee_target`
+- `obs.combat`: `adjacent_hostile`, `hostile_count_fov`, `has_active_hostile`, `active_hostile_count`, `closest_hostile_name`, `closest_hostile_dist`, `is_surrounded`, `in_corridor`, `can_retreat`, `standing_on_elbereth`, `is_fast_dangerous`, `adjacent_floating_eye`, `adjacent_gas_spore`, `hostile_ignores_elbereth`, `has_panic_escape`, `has_safe_melee_target`
 - `obs.spatial`: `stairs_down_known`, `standing_on_stairs_down`, `has_unvisited_frontier`, `has_unsearched_dead_end`, `floor_explored`, `has_nearby_loot`
 - `obs.dungeon`: `tile_type` (corridor, room, doorway, fountain, altar, trap), `in_shop`, `in_temple`, `is_dark_level`, `adjacent_closed_door`, `door_is_locked`, `adjacent_fountain`, `standing_on_fountain`, `adjacent_altar`, `standing_on_altar`, `can_forge_excalibur`, `can_harvest_poison`
 - `obs.epistemic`: `untested_buc_count` (int), `has_untested_items` (bool), `can_safely_wear_armor` (bool), `can_safely_quaff_healing` (bool), `items_belief` (dict of ItemBeliefState)
@@ -279,7 +279,7 @@ Every turn, `obs` provides rich sub-namespaces:
 - `obs.message`: last raw game message
 
 ### Critical NetHack 3.6.6 Mechanics & Invariants:
-1. **Passive & Exploding Hazards (`adjacent_floating_eye`, `adjacent_gas_spore`, `has_safe_melee_target`)**: Attacking a floating eye in melee triggers a passive 70-turn paralysis gaze (`0d70`). Striking a gas spore explodes for lethal 4d6 area blast. NEVER melee attack them! Destroy with ranged daggers or offensive wands. However, if an active attacker (newt, jackal, orc) is adjacent alongside the hazard, `obs.combat.has_safe_melee_target` is True: yield `melee_attack_hostile()` to eliminate the active attacker (the adapter automatically skips the passive hazard). Never idle or wait passively when being bitten!
+1. **Passive & Exploding Hazards (`adjacent_floating_eye`, `adjacent_gas_spore`, `has_safe_melee_target`, `has_active_hostile`)**: Attacking a floating eye in melee triggers a passive 70-turn paralysis gaze (`0d70`). Striking a gas spore explodes for lethal 4d6 area blast. NEVER melee attack them! Destroy with ranged daggers or offensive wands. However, if an active attacker (newt, jackal, orc) is adjacent alongside the hazard, `obs.combat.has_safe_melee_target` is True: yield `melee_attack_hostile()` to eliminate the active attacker (the adapter automatically skips the passive hazard). If no ranged weapons exist and passive hazards are distant (distance >= 2, `has_active_hostile == False`), do not enter combat; continue exploration as `walkable_nav` steers around them!
 2. **Emergency Panic Escape (`read_scroll_teleport`, `zap_wand_teleport`)**: When low on HP (< 25%) or surrounded by high-speed attackers, teleport away immediately. NetHack teleport scrolls and wands (zapped at `.`) instantly relocate the hero to a random safe tile.
 3. **Nearby Floor Loot Scooping (`step_to_loot`)**: Defeated monsters drop armor, weapons, wands, and scrolls on their death tile. When out of combat and `obs.spatial.has_nearby_loot` is True, yield `step_to_loot()` to walk over the dropped items. Autopickup collects them, allowing `wear_armor()` to lower Armor Class (AC) towards negative numbers!
 4. **Elbereth Immunity & Humanoid Combat Tactics (`hostile_ignores_elbereth`)**: Orcs, elves, and humans ignore Elbereth. While standing on Elbereth, if `obs.combat.hostile_ignores_elbereth` is True, do NOT wait passively; actively fight in melee or retreat to a 1-tile corridor chokepoint.
@@ -291,7 +291,7 @@ Every turn, `obs` provides rich sub-namespaces:
 10. **Tactical In-Combat Emergency Healing**: Quaffing a healing potion takes only 1 turn and restores 10-20 HP. When `obs.hero.hp_frac < 0.50` and `obs.inventory.has_healing`, ALWAYS quaff healing immediately inside `handle_combat` before taking another attack! Never die with healing potions in your pack.
 11. **Soldier Ants & High-Speed Attackers**: Soldier ants and killer bees move at speed 18 (nearly 2x the hero) and inflict lethal poison stings. If `obs.combat.is_fast_dangerous` is True or `obs.combat.closest_hostile_name in ("soldier ant", "killer bee")`, retreat immediately to a 1-tile corridor chokepoint (`step_to_chokepoint()`), quaff healing, or pray.
 12. **Equipment & Armor Optimization (`wear_armor`)**: Defeated monsters drop helmets, boots, cloaks, and armor. When out of combat, `obs.inventory.has_unworn_armor` is True, and `obs.epistemic.can_safely_wear_armor` is True, yield `wear_armor()` to lower your Armor Class (AC). Lower AC drastically reduces damage from deep monsters.
-13. **Shopkeeper & Minetown Non-Aggression**: Never attack shopkeepers, priests, or town watchmen (`obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain")`), and never kick doors when `obs.dungeon.in_shop` is True. Killing or provoking them will instantly end your run.
+13. **Shopkeeper, Vault Guard & Peaceful Non-Aggression**: Never attack shopkeepers, vault guards (`guard`), priests, or town watchmen (`obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain", "guard", "priest", "priestess", "oracle")`), and never kick doors when `obs.dungeon.in_shop` is True. Provoking vault guards or shopkeepers will instantly kill your hero.
 14. **Exploration Pacing & No Idle Waiting**: Waiting (`wait()`) during active exploration when seeking stairs is strictly forbidden. Never yield `wait()` when frontiers are clear; instead call `handle_dead_end(obs)` or `search()` to investigate room perimeter walls. Sitting in place produces 0 turns of progress and leads to `MaxTurnsReached`.
 15. **Dust Elbereth Sanctuary (`engrave_dust_elbereth`)**: Engraving "Elbereth" into the dust with bare fingers takes 1 turn and creates an impenetrable ward against 95% of non-humanoid monsters (ants, bees, bats, mumakil, leocrottas, canines). Monsters cannot attack on an Elbereth tile and flee in panic. When cornered or HP < 35%, yield `engrave_dust_elbereth()`.
 16. **Ranged Missile Harassment (`throw_dagger`, `zap_offensive_wand`)**: Valkyries start with daggers. When enemies are at distance >= 2, yield `throw_dagger()` or `zap_offensive_wand()` to kill fast speedsters before they close to melee. Thrown daggers drop onto the ground and are automatically recovered after combat, so freely throw daggers down to 0.

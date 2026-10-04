@@ -240,3 +240,38 @@ def test_passive_hazard_nav_mask_and_cornered_retreat_safety():
     assert next_obs is not None
 
     adapter.close()
+
+
+def test_peaceful_guard_and_active_hostile_discrimination():
+    """Verify that Vault Guards and priests are recognized as peaceful species
+    and that has_active_hostile correctly differentiates active predators from passive hazards."""
+    import nle.nethack as nh
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=456)
+
+    hy, hx = obs.hero.y, obs.hero.x
+    guard_pos = (hy, hx + 1)
+
+    guard_mon_id = 268  # Vault guard
+    assert nh.permonst(guard_mon_id).mname.lower() == "guard"
+    guard_glyph = nh.GLYPH_MON_OFF + guard_mon_id
+
+    initial_active = obs.combat.active_hostile_count
+
+    # Place guard glyph in raw observation
+    obs.glyphs[guard_pos[0], guard_pos[1]] = guard_glyph
+    obs.raw_obs["glyphs"][guard_pos[0], guard_pos[1]] = guard_glyph
+
+    obs_extracted = adapter._extract_obs(obs.raw_obs)
+    # The guard should be identified as peaceful and NOT increment active_hostile_count
+    assert guard_pos in adapter.peaceful_positions
+    assert obs_extracted.combat.adjacent_peaceful is True
+    assert obs_extracted.combat.active_hostile_count == initial_active
+
+    # Throwing dagger or zapping wand at peaceful position must NOT fire at peaceful guard
+    act_dagger = Action(name="throw_dagger", target_pos=guard_pos)
+    obs_res, _, _, _, _ = adapter.step(act_dagger)
+    assert obs_res is not None
+
+    adapter.close()
+

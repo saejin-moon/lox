@@ -66,10 +66,13 @@ All tactical, spatial, and execution rules are systematically documented and mai
 | **C17** | 10 x 20 | **DL 11** | 3.75 | 14m / $0.023 | Gen 9 reached **Depth 11**! Gen 10 avg score 507.6; 99.5% combat deaths. Diagnosed hero idling next to passive hazards during swarms; added `has_safe_melee_target`. |
 | **C18** | 10 x 20 | **DL 10** | 3.50 | 14m / $0.022 | Gen 7 reached **Depth 10**! Gen 8 reached 3.50 avg depth; 99.0% combat deaths. Diagnosed author system prompt template reverting `has_safe_melee_target`; updated `prompts.py`. |
 | **C19** | 10 x 20 | **DL 11** | **4.05** | 15m / $0.022 | Gen 8 reached **4.05 avg depth** (508 score); Gen 10 reached **DL 11**! Diagnosed in-combat hunger starvation lock & floating eye stalemate; added in-combat food/prayer & solo eye resolution. |
+| **C20** | 10 x 20 | **DL 10** | 3.85 | 16m / $0.026 | Gen 3 reached **DL 10**; Gen 6 achieved **650.0 avg score**; 3,666 avg turns across 200 episodes. Diagnosed Vault Guard accidental missile provocation & distant passive hazard combat locks; added Invariants 39 & 40. |
 
 ### Recent Breakthroughs & Engine Hardening
-- **In-Combat Hunger & Solo Floating Eye Stalemate Resolution**: Added in-combat food eating (`obs.hero.hunger_state >= 2`) and major trouble prayer (`hunger_state >= 3`) inside `handle_combat` so heroes never starve while blocked by harmless monsters. Added solo floating eye melee resolution when trapped with no ranged weapons.
-- **Author Prompt Alignment for Mixed Combat (`prompts.py`)**: Updated `build_system_prompt()` template and Invariant 1 so LLM authoring explicitly integrates `has_safe_melee_target` across all synthesis sessions.
+- **Vault Guard, Priest & Peaceful Non-Aggression (Invariant 39)**: Level 12 Vault Guards (`guard`) and temple priests (`priest`, `priestess`) are neutral until attacked. When a vault guard asks the hero to follow him out, policies previously threw daggers or zapped wands, provoking instant 1-hit deaths. Expanded `is_peaceful_species` to include `"guard"`, `"priest"`, `"priestess"`, shielded missiles (`throw_dagger`) and wands (`zap_offensive_wand`) against firing at peaceful targets, and enforced retreat.
+- **Active Hostile Gating & Passive Hazard Bypass (Invariant 40)**: Immobile passive hazards (`floating eye`, `gas spore`) at distance $\ge 2$ do not attack or hunt the hero. Added `has_active_hostile` and `active_hostile_count` to `CombatView` and `ALLOWED_PREDICATES`. When no ranged weapons are in inventory and all hostiles in FOV are passive, policies bypass `handle_combat` and proceed with exploration, as `SpatialEngine` (`walkable_nav`) already steers around them safely without melee paralysis or starvation stalemates.
+- **In-Combat Hunger & Solo Floating Eye Stalemate Resolution**: Added in-combat food eating (`obs.hero.hunger_state >= 2`) and major trouble prayer (`hunger_state >= 3`) inside `handle_combat` so heroes never starve while blocked by harmless monsters.
+- **Author Prompt Alignment for Mixed Combat (`prompts.py`)**: Updated `build_system_prompt()` template and Invariant 1 so LLM authoring explicitly integrates `has_safe_melee_target`, `has_active_hostile`, and peaceful NPC non-aggression across all synthesis sessions.
 - **Safe Melee Engagement in Mixed Hazard Swarms (`has_safe_melee_target`)**: When facing a passive hazard (gas spore or floating eye) alongside active attackers (newt, jackal, orc), `obs.combat.has_safe_melee_target` allows the hero to strike the active attacker in melee while the adapter skips the passive hazard, preventing the hero from idling and dying to minor pests.
 - **Passive Hazard Pathfinding Masking & Safe Cornered Wait (Invariant 22)**: Fixed pathfinding routing through passive/exploding hazards (floating eyes, gas spores, molds, jellies) by masking them out of `walkable_nav`. When cornered or unable to retreat, `step_away_from_hostile()` yields `wait()` rather than bumping into them.
 - **Dynamic Fast Monster Discrimination (Invariant 23)**: Ground-truth `permonst.mmove > 12` dynamic check plus foxes (speed 15), coyotes, and jaguars flags fast predators for immediate corridor chokepoints (`step_to_chokepoint()`).
@@ -78,7 +81,7 @@ All tactical, spatial, and execution rules are systematically documented and mai
 - **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter ensures uninterrupted overnight synthesis.
 
 ### Current Campaign Status
-- **Campaign 20 (Active)**:
+- **Campaign 21 (Upcoming / Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
   - **Target**: Average Depth $\ge 20.0$.
 

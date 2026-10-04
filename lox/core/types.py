@@ -269,6 +269,8 @@ class CombatView:
     hostile_ignores_elbereth: bool = False
     has_panic_escape: bool = False
     has_safe_melee_target: bool = False
+    has_active_hostile: bool = False
+    active_hostile_count: int = 0
     adjacent_monsters: list[str] = field(default_factory=list)
 
 
