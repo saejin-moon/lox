@@ -7,13 +7,13 @@ This document provides complete operational context, architectural foundations, 
 
 ## 1. Mission & Campaign Target
 
-- **Primary Goal**: Synthesize an empirical policy that achieves **Average Dungeon Depth $\ge 10.0$** over a batch of 10 real NetHack episodes.
+- **Primary Goal**: Synthesize an empirical policy that achieves **Average Dungeon Depth $\ge 20.0$** over a batch of 20 real NetHack episodes.
 - **Provider**: OpenRouter (`--provider openrouter`).
 - **Target Model**: `google/gemma-4-31b-it`.
 - **Max Turns**: 25,000 turns per episode (`--max-turns 25000`).
-- **Batch Size**: 10 evaluation episodes per generation (`--eval-episodes 10`).
-- **Checkpoint Resumption**: Policies resume seamlessly from [`data/latest_policy.py`](file:///home/bae/lox/data/latest_policy.py).
-- **Completion Condition**: When a generation batch achieves `avg_depth >= 10.0`, the loop logs `[CAMPAIGN GOAL ACHIEVED]` and finishes.
+- **Batch Size**: 20 evaluation episodes per generation (`--eval-episodes 20`).
+- **Checkpoint Resumption**: Policies resume seamlessly from [`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py).
+- **Completion Condition**: When a generation batch achieves `avg_depth >= 20.0`, the loop logs `[CAMPAIGN GOAL ACHIEVED]` and finishes.
 
 ---
 
@@ -240,11 +240,11 @@ lox/
 uv run python -u -m scripts.run_synthesis \
   --provider openrouter \
   --model google/gemma-4-31b-it \
-  --generations 15 \
-  --eval-episodes 10 \
+  --generations 10 \
+  --eval-episodes 20 \
   --max-turns 25000 \
-  --target-depth 10.0 \
-  --workers 10 \
+  --target-depth 20.0 \
+  --workers 20 \
   --policy-path data/latest_policy.py
 ```
 

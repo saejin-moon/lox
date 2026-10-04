@@ -1,16 +1,13 @@
 # LOX 2.0 Campaign Action Plan & Roadmap (`TODO.md`)
 
-This living document tracks empirical progress, critical discoveries, immediate next actions, and long-term milestones toward the campaign goal: **Average Dungeon Depth $\ge 10.0$** over 10 consecutive NetHack episodes.
+This living document tracks empirical progress, critical discoveries, immediate next actions, and long-term milestones toward the campaign goal: **Average Dungeon Depth $\ge 20.0$** over 20 consecutive NetHack episodes.
 
 ---
 
 ## 1. Current State & Empirical Trajectory
 
-- **Target Goal**: Average Depth $\ge 10.0$ (10 episodes, up to 25,000 max turns each).
-- **Current Baseline (`bench_fixes_17`)**:
-  - **Max Depth**: **Depth 7** (`ep_006` and `ep_007` reached DL7, `ep_001` & `ep_009` reached DL5, `ep_010` reached DL4). Half of all episodes now cluster at Depths 5–7.
-  - **Historical Peak**: Single-run record of **Depth 9** (`ep_001` in `bench_fixes_13`).
-  - **Dungeon Level 1 Clearance**: 100% of non-stalled episodes cleanly solve and descend DL1.
+- **Target Goal**: Average Depth $\ge 20.0$ (20 episodes, up to 25,000 max turns each).
+- **Current Historical Highs**: Peak single-run record of **Depth 11** (`g007_e007`), **Depth 10** (`g009_e017`, `g002_e001`, `g008_e001`), and sustained batch averages reaching **4.10–4.60**.
 
 ### Progression Timeline
 | Benchmark | Avg Depth | Max Depth | Key Diagnoses & Breakthroughs |
@@ -295,17 +292,19 @@ This living document tracks empirical progress, critical discoveries, immediate 
 
 - **Campaign 13 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 10.0$ leveraging instant Elbereth state reporting, persistent ward durability, immune species discrimination, and staircase escape.
+  - **Target**: Average Depth $\ge 20.0$ leveraging instant Elbereth state reporting, persistent ward durability, immune species discrimination, and staircase escape.
 
-## 4. Longer-Term Goals (Roadmap to Depth 10+)
+## 4. Longer-Term Goals (Roadmap to Depth 20+)
 
 1. **Autonomous LLM Synthesis Loop Execution**:
-   - Continue running iterative generations until batch average depth $\ge 10.0$.
+   - Continue running iterative generations until batch average depth $\ge 20.0$.
 2. **Main Dungeon vs Gnomish Mines Branch Steering**:
-   - The Gnomish Mines branch (Depths 2–4) is dark and infested with gnome wand wielders. Prefer descending the main dungeon staircase down to Depth 10 before exploring deep Mines.
+   - The Gnomish Mines branch (Depths 2–4) is dark and infested with gnome wand wielders. Prefer descending the main dungeon staircase down to Depth 20 before exploring deep Mines.
 3. **Container & Bag Stash Management**:
    - Looting sacks and chests for additional scrolls and potions.
-4. **Campaign Completion Verification**:
-   - Batch average depth $\ge 10.0$ triggers `[CAMPAIGN GOAL ACHIEVED]`.
+4. **Mid-Game Ascension Prep & Medusa / Castle Breaching**:
+   - Gearing AC < -5, Excalibur forging, reflection, and poison/cold/fire resistance intrinsic stacking.
+5. **Campaign Completion Verification**:
+   - Batch average depth $\ge 20.0$ triggers `[CAMPAIGN GOAL ACHIEVED]`.
    - Record final DuckDB telemetry and emit `<!-- GOAL_COMPLETE -->`.
 
