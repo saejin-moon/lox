@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
-from lox.core.types import Observation, HeroState, HungerState, Action
+
+from lox.core.types import HeroState, HungerState, Observation
 from lox.dsl.compiler import compile_policy
 from lox.dsl.parser import DSLValidationError
 

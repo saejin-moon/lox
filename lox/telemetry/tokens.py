@@ -3,16 +3,17 @@ LOX Token Usage Tracking.
 Records LLM prompt, completion, and total token usage directly into DuckDB.
 Computes estimated costs and maintains empirical audit trails of synthesis spend.
 """
+
 from __future__ import annotations
 
 import datetime
 import json
 import os
 from typing import Any
+
 import duckdb
 
 from lox.telemetry.consolidator import init_db
-
 
 # Estimated cost in USD per 1,000,000 tokens
 MODEL_PRICING: dict[str, tuple[float, float]] = {
@@ -93,10 +94,18 @@ def log_token_usage(
     }
 
 
-def get_token_usage_summary(run_id: str | None = None, db_path: str = "data/lox.duckdb") -> dict[str, Any]:
+def get_token_usage_summary(
+    run_id: str | None = None, db_path: str = "data/lox.duckdb"
+) -> dict[str, Any]:
     """Retrieves cumulative token stats and cost from DuckDB."""
     if not os.path.exists(db_path):
-        return {"total_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost_usd": 0.0}
+        return {
+            "total_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "total_cost_usd": 0.0,
+        }
 
     con = duckdb.connect(db_path, read_only=True)
     if run_id:
@@ -117,7 +126,13 @@ def get_token_usage_summary(run_id: str | None = None, db_path: str = "data/lox.
     con.close()
 
     if not res or res[0] == 0:
-        return {"total_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost_usd": 0.0}
+        return {
+            "total_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "total_cost_usd": 0.0,
+        }
 
     return {
         "total_calls": int(res[0]),

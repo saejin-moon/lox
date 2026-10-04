@@ -1,6 +1,7 @@
 import numpy as np
-from lox.core.types import Status, Action, Observation, HeroState, HungerState
-from lox.core.tree import BehaviorTree, Selector, Sequence, Condition, ActionNode
+
+from lox.core.tree import ActionNode, BehaviorTree, Condition, Selector, Sequence
+from lox.core.types import Action, HeroState, HungerState, Observation
 
 
 def test_behavior_tree_execution():
@@ -26,17 +27,25 @@ def test_behavior_tree_execution():
     # 2. If Hunger >= WEAK -> EAT
     # 3. Default -> EXPLORE
     tree = BehaviorTree(
-        root=Selector([
-            Sequence([
-                Condition(lambda bb: bb.obs.hero.hp_frac <= 0.25),
-                ActionNode(heal),
-            ]),
-            Sequence([
-                Condition(lambda bb: bb.obs.hero.hunger_state == HungerState.WEAK),
-                ActionNode(eat),
-            ]),
-            ActionNode(explore),
-        ])
+        root=Selector(
+            [
+                Sequence(
+                    [
+                        Condition(lambda bb: bb.obs.hero.hp_frac <= 0.25),
+                        ActionNode(heal),
+                    ]
+                ),
+                Sequence(
+                    [
+                        Condition(
+                            lambda bb: bb.obs.hero.hunger_state == HungerState.WEAK
+                        ),
+                        ActionNode(eat),
+                    ]
+                ),
+                ActionNode(explore),
+            ]
+        )
     )
 
     # HP is 20/100 (<= 0.25) -> HEAL should trigger first

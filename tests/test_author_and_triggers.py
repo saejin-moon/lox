@@ -1,7 +1,6 @@
-import pytest
+from lox.author.agent import AuthorAgent
 from lox.telemetry.recorder import FlightRecorder
 from lox.telemetry.triggers import DynamicTriggerEngine, TriggerType
-from lox.author.agent import AuthorAgent
 
 
 def test_dynamic_triggers():
@@ -18,7 +17,9 @@ def test_dynamic_triggers():
     assert "pacing stall" in msg
 
     # Starvation crisis -> STARVATION trigger fires
-    trig, msg = engine.check_turn(turns_on_level=10, depth=1, hunger_state="WEAK", food_count=0)
+    trig, msg = engine.check_turn(
+        turns_on_level=10, depth=1, hunger_state="WEAK", food_count=0
+    )
     assert trig == TriggerType.STARVATION
     assert "Starvation crisis" in msg
 
@@ -49,7 +50,9 @@ plan = [explore]
     trigger_reason = "Death cluster: 3/5 died of starvation."
     autopsy = "### Autopsy: Fainted on DL1"
 
-    new_code, tree, error = agent.synthesize_policy(current_code, trigger_reason, autopsy)
+    new_code, tree, error = agent.synthesize_policy(
+        current_code, trigger_reason, autopsy
+    )
     assert error is None
     assert tree is not None
     assert "class Agent:" in new_code
@@ -74,8 +77,9 @@ plan = [combat]
 
 
 def test_tool_type_coercion_and_shielding(tmp_path):
-    from lox.author.tools import DuckDBToolRegistry
     import duckdb
+
+    from lox.author.tools import DuckDBToolRegistry
 
     db_path = str(tmp_path / "test.duckdb")
     con = duckdb.connect(db_path)
@@ -88,7 +92,9 @@ def test_tool_type_coercion_and_shielding(tmp_path):
             prayers INTEGER, death_category VARCHAR
         )
     """)
-    con.execute("INSERT INTO episodes VALUES ('r1', 'e1', 1, 10, 50, 'starved', false, 1.0, 'valkyrie', 0, 1, 50, 0, 0, 0, 0, 0, 'hunger')")
+    con.execute(
+        "INSERT INTO episodes VALUES ('r1', 'e1', 1, 10, 50, 'starved', false, 1.0, 'valkyrie', 0, 1, 50, 0, 0, 0, 0, 0, 'hunger')"
+    )
     con.close()
 
     tools = DuckDBToolRegistry(db_path=db_path)

@@ -1,8 +1,9 @@
 import os
+
 import duckdb
-import pytest
-from lox.telemetry.parquet import ParquetLogger
+
 from lox.telemetry.consolidator import consolidate_run
+from lox.telemetry.parquet import ParquetLogger
 
 
 def test_parquet_and_duckdb_consolidation(tmp_path):
@@ -56,7 +57,9 @@ def test_parquet_and_duckdb_consolidation(tmp_path):
     assert os.path.exists(run_dir)
 
     # Consolidate into DuckDB and cleanup
-    stats = consolidate_run(run_id=run_id, db_path=db_path, telemetry_dir=telem_dir, cleanup=True)
+    stats = consolidate_run(
+        run_id=run_id, db_path=db_path, telemetry_dir=telem_dir, cleanup=True
+    )
     assert stats["ticks_added"] == 25
     assert stats["episodes_added"] == 1
     assert stats["events_added"] == 1
@@ -67,9 +70,15 @@ def test_parquet_and_duckdb_consolidation(tmp_path):
 
     # Query DuckDB
     con = duckdb.connect(db_path, read_only=True)
-    ticks_count = con.execute("SELECT COUNT(*) FROM ticks WHERE run_id = ?", [run_id]).fetchone()[0]
-    ep_count = con.execute("SELECT COUNT(*) FROM episodes WHERE run_id = ?", [run_id]).fetchone()[0]
-    ev_count = con.execute("SELECT COUNT(*) FROM events WHERE run_id = ?", [run_id]).fetchone()[0]
+    ticks_count = con.execute(
+        "SELECT COUNT(*) FROM ticks WHERE run_id = ?", [run_id]
+    ).fetchone()[0]
+    ep_count = con.execute(
+        "SELECT COUNT(*) FROM episodes WHERE run_id = ?", [run_id]
+    ).fetchone()[0]
+    ev_count = con.execute(
+        "SELECT COUNT(*) FROM events WHERE run_id = ?", [run_id]
+    ).fetchone()[0]
     con.close()
 
     assert ticks_count == 25

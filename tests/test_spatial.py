@@ -1,6 +1,7 @@
 import time
+
 import numpy as np
-import pytest
+
 from lox.core.spatial import SpatialEngine
 
 
@@ -12,7 +13,7 @@ def test_distance_grid():
     assert dist[0, 0] == 0
     assert dist[0, 1] == 1
     assert dist[5, 5] == -1  # Inside wall
-    assert dist[9, 9] > 0    # Reachable around wall
+    assert dist[9, 9] > 0  # Reachable around wall
 
 
 def test_astar_pathfinding():
@@ -65,7 +66,9 @@ def test_doorway_cardinal_movement_constraint():
         if curr == (5, 5) or step == (5, 5):
             dy = abs(step[0] - curr[0])
             dx = abs(step[1] - curr[1])
-            assert dy + dx == 1, f"Movement between {curr} and {step} involving doorway (5, 5) must be cardinal!"
+            assert dy + dx == 1, (
+                f"Movement between {curr} and {step} involving doorway (5, 5) must be cardinal!"
+            )
         curr = step
 
 
@@ -77,7 +80,9 @@ def test_start_tile_departure_when_unwalkable():
     target_mask[2, 4] = True
 
     # Target search must still find reachable target from start (2, 2)
-    target = SpatialEngine.find_nearest_target((2, 2), walkable, target_mask=target_mask)
+    target = SpatialEngine.find_nearest_target(
+        (2, 2), walkable, target_mask=target_mask
+    )
     assert target == (2, 4)
 
     # Distance grid must still compute distance from start (2, 2)
@@ -85,4 +90,3 @@ def test_start_tile_departure_when_unwalkable():
     assert dist[2, 2] == 0
     assert dist[2, 3] == 1
     assert dist[2, 4] == 2
-

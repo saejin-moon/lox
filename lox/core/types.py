@@ -3,16 +3,19 @@ LOX Core: Standardized Types and Interfaces.
 Pure, lightweight dataclasses without circular dependencies or runtime overhead.
 Equipped with rich observation namespaces for Generator and Class-based policy execution.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum, auto
 from typing import Any
+
 import numpy as np
 
 
 class Status(Enum):
     """Execution status returned by Behavior Tree nodes on each tick."""
+
     SUCCESS = auto()
     FAILURE = auto()
     RUNNING = auto()
@@ -20,6 +23,7 @@ class Status(Enum):
 
 class HungerState(IntEnum):
     """Standardized hunger levels."""
+
     SATIATED = 0
     NORMAL = 1
     HUNGRY = 2
@@ -29,6 +33,7 @@ class HungerState(IntEnum):
 
 class EncumbranceState(IntEnum):
     """Standardized encumbrance levels."""
+
     UNENCUMBERED = 0
     BURDENED = 1
     STRESSED = 2
@@ -40,6 +45,7 @@ class EncumbranceState(IntEnum):
 @dataclass(slots=True)
 class HeroState:
     """Hero attributes extracted from observation for fast predicate evaluation."""
+
     y: int = 0
     x: int = 0
     hp: int = 1
@@ -47,9 +53,9 @@ class HeroState:
     energy: int = 0
     max_energy: int = 0
     ac: int = 10
-    level: int = 1         # XL (Experience level)
-    depth: int = 1         # Dungeon depth
-    dungeon_num: int = 0   # 0 = Doom, 1 = Mines, 2 = Sokoban, 3 = Quest
+    level: int = 1  # XL (Experience level)
+    depth: int = 1  # Dungeon depth
+    dungeon_num: int = 0  # 0 = Doom, 1 = Mines, 2 = Sokoban, 3 = Quest
     gold: int = 0
     score: int = 0
     turn: int = 0
@@ -79,6 +85,7 @@ class HeroState:
 @dataclass(slots=True)
 class HeroStatus:
     """Detailed status effect flags."""
+
     is_blind: bool = False
     is_poisoned: bool = False
     is_confused: bool = False
@@ -96,19 +103,26 @@ class HeroStatus:
 @dataclass(slots=True)
 class Item:
     """Item representation."""
+
     slot: str
     name: str
     glyph: int = 0
     quantity: int = 1
     buc: str = "uncursed"  # "blessed", "uncursed", "cursed", "unknown"
     is_equipped: bool = False
-    category: str = "unknown"  # "weapon", "armor", "food", "potion", "scroll", "wand", "tool"
+    category: str = (
+        "unknown"  # "weapon", "armor", "food", "potion", "scroll", "wand", "tool"
+    )
 
 
 class InventoryView(list):
     """List-compatible inventory with fast query helpers for policies."""
 
-    def __init__(self, items: list[Item] | None = None, failed_armor_slots: set[str] | None = None):
+    def __init__(
+        self,
+        items: list[Item] | None = None,
+        failed_armor_slots: set[str] | None = None,
+    ):
         super().__init__(items or [])
         self.failed_armor_slots: set[str] = set(failed_armor_slots or [])
 
@@ -118,18 +132,23 @@ class InventoryView(list):
 
     @property
     def has_food(self) -> bool:
-        return any(it.category == "food" and "corpse" not in it.name.lower() for it in self)
+        return any(
+            it.category == "food" and "corpse" not in it.name.lower() for it in self
+        )
 
     @property
     def has_healing(self) -> bool:
         return any(
-            it.category == "potion" and any(k in it.name.lower() for k in ["heal", "extra heal"])
+            it.category == "potion"
+            and any(k in it.name.lower() for k in ["heal", "extra heal"])
             for it in self
         )
 
     @property
     def has_wand_of_teleport(self) -> bool:
-        return any(it.category == "wand" and "teleport" in it.name.lower() for it in self)
+        return any(
+            it.category == "wand" and "teleport" in it.name.lower() for it in self
+        )
 
     def get_wand_of_teleport_slot(self) -> str | None:
         for it in self:
@@ -140,23 +159,52 @@ class InventoryView(list):
     @property
     def has_offensive_wand(self) -> bool:
         return any(
-            it.category == "wand" and any(k in it.name.lower() for k in ("striking", "sleep", "fire", "cold", "lightning", "magic missile", "death", "slow monster"))
+            it.category == "wand"
+            and any(
+                k in it.name.lower()
+                for k in (
+                    "striking",
+                    "sleep",
+                    "fire",
+                    "cold",
+                    "lightning",
+                    "magic missile",
+                    "death",
+                    "slow monster",
+                )
+            )
             for it in self
         )
 
     def get_offensive_wand_slot(self) -> str | None:
         for it in self:
-            if it.category == "wand" and any(k in it.name.lower() for k in ("striking", "sleep", "fire", "cold", "lightning", "magic missile", "death", "slow monster")):
+            if it.category == "wand" and any(
+                k in it.name.lower()
+                for k in (
+                    "striking",
+                    "sleep",
+                    "fire",
+                    "cold",
+                    "lightning",
+                    "magic missile",
+                    "death",
+                    "slow monster",
+                )
+            ):
                 return it.slot
         return None
 
     @property
     def has_wand_of_digging(self) -> bool:
-        return any(it.category == "wand" and "digging" in it.name.lower() for it in self)
+        return any(
+            it.category == "wand" and "digging" in it.name.lower() for it in self
+        )
 
     @property
     def has_scroll_of_teleport(self) -> bool:
-        return any(it.category == "scroll" and "teleport" in it.name.lower() for it in self)
+        return any(
+            it.category == "scroll" and "teleport" in it.name.lower() for it in self
+        )
 
     def get_scroll_of_teleport_slot(self) -> str | None:
         for it in self:
@@ -166,11 +214,15 @@ class InventoryView(list):
 
     @property
     def has_pick_axe(self) -> bool:
-        return any("pick-axe" in it.name.lower() or "pickaxe" in it.name.lower() for it in self)
+        return any(
+            "pick-axe" in it.name.lower() or "pickaxe" in it.name.lower() for it in self
+        )
 
     @property
     def has_lamp(self) -> bool:
-        return any("lamp" in it.name.lower() or "lantern" in it.name.lower() for it in self)
+        return any(
+            "lamp" in it.name.lower() or "lantern" in it.name.lower() for it in self
+        )
 
     @property
     def weapon_is_cursed(self) -> bool:
@@ -187,7 +239,9 @@ class InventoryView(list):
 
     def get_healing_slot(self) -> str | None:
         for it in self:
-            if it.category == "potion" and any(k in it.name.lower() for k in ["heal", "extra heal"]):
+            if it.category == "potion" and any(
+                k in it.name.lower() for k in ["heal", "extra heal"]
+            ):
                 return it.slot
         return None
 
@@ -200,8 +254,17 @@ class InventoryView(list):
     @property
     def has_daggers(self) -> bool:
         return any(
-            (it.category == "weapon" and any(k in it.name.lower() for k in ("dagger", "dart", "arrow", "shuriken", "spear", "javelin")))
-            or ("rock" in it.name.lower() and it.category in ("gem", "weapon", "unknown"))
+            (
+                it.category == "weapon"
+                and any(
+                    k in it.name.lower()
+                    for k in ("dagger", "dart", "arrow", "shuriken", "spear", "javelin")
+                )
+            )
+            or (
+                "rock" in it.name.lower()
+                and it.category in ("gem", "weapon", "unknown")
+            )
             for it in self
         )
 
@@ -210,7 +273,10 @@ class InventoryView(list):
             if it.category == "weapon" and "dagger" in it.name.lower():
                 return it.slot
         for it in self:
-            if any(k in it.name.lower() for k in ("dart", "arrow", "shuriken", "rock", "spear", "javelin")):
+            if any(
+                k in it.name.lower()
+                for k in ("dart", "arrow", "shuriken", "rock", "spear", "javelin")
+            ):
                 return it.slot
         return None
 
@@ -220,27 +286,47 @@ class InventoryView(list):
     @property
     def has_unworn_armor(self) -> bool:
         return any(
-            it.category == "armor" and not it.is_equipped and it.slot not in self.failed_armor_slots
+            it.category == "armor"
+            and not it.is_equipped
+            and it.slot not in self.failed_armor_slots
             for it in self
         )
 
     def get_unworn_armor_slot(self) -> str | None:
         for it in self:
-            if it.category == "armor" and not it.is_equipped and it.slot not in self.failed_armor_slots:
+            if (
+                it.category == "armor"
+                and not it.is_equipped
+                and it.slot not in self.failed_armor_slots
+            ):
                 return it.slot
         return None
 
     @property
     def dagger_count(self) -> int:
         return sum(
-            it.quantity for it in self
-            if (it.category == "weapon" and any(k in it.name.lower() for k in ("dagger", "dart", "arrow", "shuriken", "spear", "javelin")))
-            or ("rock" in it.name.lower() and it.category in ("gem", "weapon", "unknown"))
+            it.quantity
+            for it in self
+            if (
+                it.category == "weapon"
+                and any(
+                    k in it.name.lower()
+                    for k in ("dagger", "dart", "arrow", "shuriken", "spear", "javelin")
+                )
+            )
+            or (
+                "rock" in it.name.lower()
+                and it.category in ("gem", "weapon", "unknown")
+            )
         )
 
     @property
     def food_count(self) -> int:
-        return sum(it.quantity for it in self if it.category == "food" and "corpse" not in it.name.lower())
+        return sum(
+            it.quantity
+            for it in self
+            if it.category == "food" and "corpse" not in it.name.lower()
+        )
 
     @property
     def potion_count(self) -> int:
@@ -261,6 +347,7 @@ class InventoryView(list):
 @dataclass(slots=True)
 class CombatView:
     """Tactical combat situational awareness."""
+
     adjacent_hostile: bool = False
     hostile_count_fov: int = 0
     closest_hostile_name: str = ""
@@ -288,6 +375,7 @@ class CombatView:
 @dataclass(slots=True)
 class SpatialView:
     """Spatial dungeon topology and navigation state."""
+
     stairs_down_known: bool = False
     stairs_up_known: bool = False
     stairs_down_pos: tuple[int, int] | None = None
@@ -309,6 +397,7 @@ class SpatialView:
 @dataclass(slots=True)
 class DungeonView:
     """Dungeon features, level properties, and branch context."""
+
     tile_type: str = "room"  # "room", "corridor", "doorway", "fountain", "altar", "trap", "stairs_down", "stairs_up"
     in_shop: bool = False
     in_temple: bool = False
@@ -336,6 +425,7 @@ class DungeonView:
 @dataclass(slots=True)
 class FloorCorpse:
     """Tracked floor corpse."""
+
     name: str = ""
     y: int = 0
     x: int = 0
@@ -353,6 +443,7 @@ class FloorCorpse:
 @dataclass
 class EpistemicView:
     """Belief state over latent properties (BUC, safe-gates, identity)."""
+
     untested_buc_count: int = 0
     has_untested_items: bool = False
     can_safely_wear_armor: bool = True
@@ -363,6 +454,7 @@ class EpistemicView:
 @dataclass
 class AgendaView:
     """Read-only view of the active strategic agenda exposed to policies."""
+
     active_goal: str = "explore_floor"
     goal_stack: list[str] = field(default_factory=lambda: ["explore_floor"])
 
@@ -374,9 +466,10 @@ class AgendaView:
 @dataclass
 class Observation:
     """Standardized environment observation across all domains."""
-    chars: np.ndarray             # 2D character grid (uint8)
-    glyphs: np.ndarray | None     # 2D glyph grid (int16/int32)
-    hero: HeroState               # Hero status
+
+    chars: np.ndarray  # 2D character grid (uint8)
+    glyphs: np.ndarray | None  # 2D glyph grid (int16/int32)
+    hero: HeroState  # Hero status
     inventory: InventoryView = field(default_factory=InventoryView)
     status: HeroStatus = field(default_factory=HeroStatus)
     combat: CombatView = field(default_factory=CombatView)
@@ -385,18 +478,19 @@ class Observation:
     epistemic: EpistemicView = field(default_factory=EpistemicView)
     agenda: AgendaView = field(default_factory=AgendaView)
     corpses: list[FloorCorpse] = field(default_factory=list)
-    message: str = ""             # Last in-game message text
-    raw_obs: Any = None           # Original environment observation dict
+    message: str = ""  # Last in-game message text
+    raw_obs: Any = None  # Original environment observation dict
 
 
 @dataclass(slots=True, frozen=True)
 class Action:
     """Atomic or composite action emitted by policy."""
+
     name: str
     direction: tuple[int, int] | None = None  # (dy, dx)
-    char: str | None = None                  # Direct command character (e.g. ">", "<", "e", "q")
-    slot: str | None = None                  # Inventory slot letter (e.g. "a", "b")
+    char: str | None = None  # Direct command character (e.g. ">", "<", "e", "q")
+    slot: str | None = None  # Inventory slot letter (e.g. "a", "b")
     target_pos: tuple[int, int] | None = None
-    count: int = 1                           # Repeat count
-    subroutine: str = ""                     # Policy goal/subroutine name
+    count: int = 1  # Repeat count
+    subroutine: str = ""  # Policy goal/subroutine name
     extra: dict[str, Any] = field(default_factory=dict)

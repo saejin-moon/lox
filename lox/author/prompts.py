@@ -1,6 +1,7 @@
 """
 LOX Author Prompts: Complete NetHack Vocabulary, Class Agent Generator Paradigm, and Deep Telemetry Tools.
 """
+
 from __future__ import annotations
 
 from lox.dsl.schema import ALLOWED_ACTIONS, ENUM_CONSTANTS
@@ -362,7 +363,9 @@ Provide 1 brief rationale sentence, then your complete revised code in a single 
 """
 
 
-def build_user_prompt(current_policy: str, trigger_reason: str, status_report: str) -> str:
+def build_user_prompt(
+    current_policy: str, trigger_reason: str, status_report: str
+) -> str:
     """User prompt presenting the empirical autopsy, ranked mortality causes, and current policy."""
     return f"""### Empirical Incident Report:
 {status_report}

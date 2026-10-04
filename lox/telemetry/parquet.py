@@ -3,97 +3,110 @@ LOX Parquet Telemetry Logger.
 Streaming, zero-lock PyArrow Parquet writer for per-tick, per-episode, and per-event telemetry.
 Captures high-resolution tactical combat, spatial topology, and inventory state.
 """
+
 from __future__ import annotations
 
 import os
 from typing import Any
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+TICK_SCHEMA = pa.schema(
+    [
+        ("run_id", pa.string()),
+        ("episode_id", pa.string()),
+        ("turn", pa.int32()),
+        ("depth", pa.int32()),
+        ("hp", pa.int32()),
+        ("max_hp", pa.int32()),
+        ("hunger", pa.string()),
+        ("y", pa.int32()),
+        ("x", pa.int32()),
+        ("action", pa.string()),
+        ("message", pa.string()),
+        ("reward", pa.float32()),
+        ("closest_hostile_name", pa.string()),
+        ("closest_hostile_dist", pa.float32()),
+        ("hostiles_in_fov", pa.int32()),
+        ("tile_type", pa.string()),
+        ("dungeon_branch", pa.string()),
+        ("target_y", pa.int32()),
+        ("target_x", pa.int32()),
+        ("stairs_down_y", pa.int32()),
+        ("stairs_down_x", pa.int32()),
+        ("stairs_down_turn", pa.int32()),
+        ("tiles_visited_count", pa.int32()),
+        ("unvisited_frontier_count", pa.int32()),
+        ("dead_ends_count", pa.int32()),
+        ("adjacent_monsters", pa.string()),
+        ("ac", pa.int32()),
+        ("xl", pa.int32()),
+        ("active_subroutine", pa.string()),
+        ("food_count", pa.int32()),
+        ("potion_count", pa.int32()),
+        ("scroll_count", pa.int32()),
+        ("dagger_count", pa.int32()),
+        ("weapon_in_hand", pa.string()),
+    ]
+)
 
-TICK_SCHEMA = pa.schema([
-    ("run_id", pa.string()),
-    ("episode_id", pa.string()),
-    ("turn", pa.int32()),
-    ("depth", pa.int32()),
-    ("hp", pa.int32()),
-    ("max_hp", pa.int32()),
-    ("hunger", pa.string()),
-    ("y", pa.int32()),
-    ("x", pa.int32()),
-    ("action", pa.string()),
-    ("message", pa.string()),
-    ("reward", pa.float32()),
-    ("closest_hostile_name", pa.string()),
-    ("closest_hostile_dist", pa.float32()),
-    ("hostiles_in_fov", pa.int32()),
-    ("tile_type", pa.string()),
-    ("dungeon_branch", pa.string()),
-    ("target_y", pa.int32()),
-    ("target_x", pa.int32()),
-    ("stairs_down_y", pa.int32()),
-    ("stairs_down_x", pa.int32()),
-    ("stairs_down_turn", pa.int32()),
-    ("tiles_visited_count", pa.int32()),
-    ("unvisited_frontier_count", pa.int32()),
-    ("dead_ends_count", pa.int32()),
-    ("adjacent_monsters", pa.string()),
-    ("ac", pa.int32()),
-    ("xl", pa.int32()),
-    ("active_subroutine", pa.string()),
-    ("food_count", pa.int32()),
-    ("potion_count", pa.int32()),
-    ("scroll_count", pa.int32()),
-    ("dagger_count", pa.int32()),
-    ("weapon_in_hand", pa.string()),
-])
+EPISODE_SCHEMA = pa.schema(
+    [
+        ("run_id", pa.string()),
+        ("episode_id", pa.string()),
+        ("depth", pa.int32()),
+        ("score", pa.int32()),
+        ("turns", pa.int32()),
+        ("death_reason", pa.string()),
+        ("solved", pa.bool_()),
+        ("wall_sec", pa.float32()),
+        ("role", pa.string()),
+        ("gold", pa.int32()),
+        ("max_depth", pa.int32()),
+        ("steps", pa.int32()),
+        ("attacks", pa.int32()),
+        ("descents", pa.int32()),
+        ("searches", pa.int32()),
+        ("eats", pa.int32()),
+        ("prayers", pa.int32()),
+        ("death_category", pa.string()),
+        ("inventory_at_death", pa.string()),
+        ("last_5_actions", pa.string()),
+        ("turns_dl1", pa.int32()),
+        ("turns_dl2", pa.int32()),
+        ("turns_mines", pa.int32()),
+        ("killer", pa.string()),
+        ("ac_at_death", pa.int32()),
+        ("hp_at_death", pa.int32()),
+        ("max_hp_at_death", pa.int32()),
+        ("excalibur_forged", pa.bool_()),
+    ]
+)
 
-EPISODE_SCHEMA = pa.schema([
-    ("run_id", pa.string()),
-    ("episode_id", pa.string()),
-    ("depth", pa.int32()),
-    ("score", pa.int32()),
-    ("turns", pa.int32()),
-    ("death_reason", pa.string()),
-    ("solved", pa.bool_()),
-    ("wall_sec", pa.float32()),
-    ("role", pa.string()),
-    ("gold", pa.int32()),
-    ("max_depth", pa.int32()),
-    ("steps", pa.int32()),
-    ("attacks", pa.int32()),
-    ("descents", pa.int32()),
-    ("searches", pa.int32()),
-    ("eats", pa.int32()),
-    ("prayers", pa.int32()),
-    ("death_category", pa.string()),
-    ("inventory_at_death", pa.string()),
-    ("last_5_actions", pa.string()),
-    ("turns_dl1", pa.int32()),
-    ("turns_dl2", pa.int32()),
-    ("turns_mines", pa.int32()),
-    ("killer", pa.string()),
-    ("ac_at_death", pa.int32()),
-    ("hp_at_death", pa.int32()),
-    ("max_hp_at_death", pa.int32()),
-    ("excalibur_forged", pa.bool_()),
-])
-
-EVENT_SCHEMA = pa.schema([
-    ("run_id", pa.string()),
-    ("episode_id", pa.string()),
-    ("turn", pa.int32()),
-    ("depth", pa.int32()),
-    ("event_type", pa.string()),
-    ("message", pa.string()),
-    ("details", pa.string()),
-])
+EVENT_SCHEMA = pa.schema(
+    [
+        ("run_id", pa.string()),
+        ("episode_id", pa.string()),
+        ("turn", pa.int32()),
+        ("depth", pa.int32()),
+        ("event_type", pa.string()),
+        ("message", pa.string()),
+        ("details", pa.string()),
+    ]
+)
 
 
 class ParquetLogger:
     """Streams execution data into chunked Parquet partition files."""
 
-    def __init__(self, run_id: str, base_dir: str = "data/telemetry", flush_interval: int = 500, file_prefix: str = ""):
+    def __init__(
+        self,
+        run_id: str,
+        base_dir: str = "data/telemetry",
+        flush_interval: int = 500,
+        file_prefix: str = "",
+    ):
         self.run_id = run_id
         self.run_dir = os.path.join(base_dir, run_id)
         os.makedirs(self.run_dir, exist_ok=True)
@@ -141,42 +154,44 @@ class ParquetLogger:
         dagger_count: int = 0,
         weapon_in_hand: str = "",
     ) -> None:
-        self.tick_buffer.append({
-            "run_id": self.run_id,
-            "episode_id": episode_id,
-            "turn": int(turn),
-            "depth": int(depth),
-            "hp": int(hp),
-            "max_hp": int(max_hp),
-            "hunger": str(hunger),
-            "y": int(y),
-            "x": int(x),
-            "action": str(action),
-            "message": str(message)[:80],
-            "reward": float(reward),
-            "closest_hostile_name": str(closest_hostile_name),
-            "closest_hostile_dist": float(closest_hostile_dist),
-            "hostiles_in_fov": int(hostiles_in_fov),
-            "tile_type": str(tile_type),
-            "dungeon_branch": str(dungeon_branch),
-            "target_y": int(target_y),
-            "target_x": int(target_x),
-            "stairs_down_y": int(stairs_down_y),
-            "stairs_down_x": int(stairs_down_x),
-            "stairs_down_turn": int(stairs_down_turn),
-            "tiles_visited_count": int(tiles_visited_count),
-            "unvisited_frontier_count": int(unvisited_frontier_count),
-            "dead_ends_count": int(dead_ends_count),
-            "adjacent_monsters": str(adjacent_monsters),
-            "ac": int(ac),
-            "xl": int(xl),
-            "active_subroutine": str(active_subroutine),
-            "food_count": int(food_count),
-            "potion_count": int(potion_count),
-            "scroll_count": int(scroll_count),
-            "dagger_count": int(dagger_count),
-            "weapon_in_hand": str(weapon_in_hand),
-        })
+        self.tick_buffer.append(
+            {
+                "run_id": self.run_id,
+                "episode_id": episode_id,
+                "turn": int(turn),
+                "depth": int(depth),
+                "hp": int(hp),
+                "max_hp": int(max_hp),
+                "hunger": str(hunger),
+                "y": int(y),
+                "x": int(x),
+                "action": str(action),
+                "message": str(message)[:80],
+                "reward": float(reward),
+                "closest_hostile_name": str(closest_hostile_name),
+                "closest_hostile_dist": float(closest_hostile_dist),
+                "hostiles_in_fov": int(hostiles_in_fov),
+                "tile_type": str(tile_type),
+                "dungeon_branch": str(dungeon_branch),
+                "target_y": int(target_y),
+                "target_x": int(target_x),
+                "stairs_down_y": int(stairs_down_y),
+                "stairs_down_x": int(stairs_down_x),
+                "stairs_down_turn": int(stairs_down_turn),
+                "tiles_visited_count": int(tiles_visited_count),
+                "unvisited_frontier_count": int(unvisited_frontier_count),
+                "dead_ends_count": int(dead_ends_count),
+                "adjacent_monsters": str(adjacent_monsters),
+                "ac": int(ac),
+                "xl": int(xl),
+                "active_subroutine": str(active_subroutine),
+                "food_count": int(food_count),
+                "potion_count": int(potion_count),
+                "scroll_count": int(scroll_count),
+                "dagger_count": int(dagger_count),
+                "weapon_in_hand": str(weapon_in_hand),
+            }
+        )
 
         if len(self.tick_buffer) >= self.flush_interval:
             self.flush_ticks()
@@ -211,36 +226,38 @@ class ParquetLogger:
         max_hp_at_death: int = 0,
         excalibur_forged: bool = False,
     ) -> None:
-        self.episode_buffer.append({
-            "run_id": self.run_id,
-            "episode_id": episode_id,
-            "depth": int(depth),
-            "score": int(score),
-            "turns": int(turns),
-            "death_reason": str(death_reason),
-            "solved": bool(solved),
-            "wall_sec": float(wall_sec),
-            "role": str(role),
-            "gold": int(gold),
-            "max_depth": int(max_depth),
-            "steps": int(steps),
-            "attacks": int(attacks),
-            "descents": int(descents),
-            "searches": int(searches),
-            "eats": int(eats),
-            "prayers": int(prayers),
-            "death_category": str(death_category),
-            "inventory_at_death": str(inventory_at_death),
-            "last_5_actions": str(last_5_actions),
-            "turns_dl1": int(turns_dl1),
-            "turns_dl2": int(turns_dl2),
-            "turns_mines": int(turns_mines),
-            "killer": str(killer),
-            "ac_at_death": int(ac_at_death),
-            "hp_at_death": int(hp_at_death),
-            "max_hp_at_death": int(max_hp_at_death),
-            "excalibur_forged": bool(excalibur_forged),
-        })
+        self.episode_buffer.append(
+            {
+                "run_id": self.run_id,
+                "episode_id": episode_id,
+                "depth": int(depth),
+                "score": int(score),
+                "turns": int(turns),
+                "death_reason": str(death_reason),
+                "solved": bool(solved),
+                "wall_sec": float(wall_sec),
+                "role": str(role),
+                "gold": int(gold),
+                "max_depth": int(max_depth),
+                "steps": int(steps),
+                "attacks": int(attacks),
+                "descents": int(descents),
+                "searches": int(searches),
+                "eats": int(eats),
+                "prayers": int(prayers),
+                "death_category": str(death_category),
+                "inventory_at_death": str(inventory_at_death),
+                "last_5_actions": str(last_5_actions),
+                "turns_dl1": int(turns_dl1),
+                "turns_dl2": int(turns_dl2),
+                "turns_mines": int(turns_mines),
+                "killer": str(killer),
+                "ac_at_death": int(ac_at_death),
+                "hp_at_death": int(hp_at_death),
+                "max_hp_at_death": int(max_hp_at_death),
+                "excalibur_forged": bool(excalibur_forged),
+            }
+        )
 
     def log_event(
         self,
@@ -251,15 +268,17 @@ class ParquetLogger:
         message: str = "",
         details: str = "",
     ) -> None:
-        self.event_buffer.append({
-            "run_id": self.run_id,
-            "episode_id": episode_id,
-            "turn": int(turn),
-            "depth": int(depth),
-            "event_type": str(event_type),
-            "message": str(message),
-            "details": str(details),
-        })
+        self.event_buffer.append(
+            {
+                "run_id": self.run_id,
+                "episode_id": episode_id,
+                "turn": int(turn),
+                "depth": int(depth),
+                "event_type": str(event_type),
+                "message": str(message),
+                "details": str(details),
+            }
+        )
 
     def flush_ticks(self) -> None:
         if not self.tick_buffer:

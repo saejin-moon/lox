@@ -1,7 +1,6 @@
 import os
-import duckdb
-import pytest
-from lox.author.requests import queue_macro_request, list_macro_requests
+
+from lox.author.requests import list_macro_requests, queue_macro_request
 from lox.author.tools import DuckDBToolRegistry
 
 

@@ -91,6 +91,7 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
+                # Prevent EpisodeWallTimeout by ensuring we don't just search in place
                 obs = yield from self.handle_dead_end(obs)
 
     def handle_combat(self, obs):
@@ -116,7 +117,7 @@ class Agent:
                 obs = yield pray()
                 continue
 
-            # 1. Tactical Healing
+            # 1. Tactical Healing (Crucial for Mimics/Fast Attackers)
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
@@ -141,7 +142,6 @@ class Agent:
                     obs = yield step_away_from_hostile()
                     continue
                 else:
-                    # Absolute last resort: kill the eye to avoid starvation/timeout
                     obs = yield melee_attack_hostile()
                     continue
 

@@ -7,18 +7,20 @@ Sequence:
 3. AltarListener captures flash messages and collapses BUC distribution.
 4. Pick up all items back into inventory.
 """
+
 from __future__ import annotations
 
-from typing import Any
-from lox.core.types import Action, Observation
 from lox.core.epistemic import EpistemicEngine
+from lox.core.types import Action, Observation
 
 
 class AltarBUCSolver:
     """Stateful macro solver for testing inventory BUC beatitude on altars."""
 
     def __init__(self):
-        self.state: str = "IDLE"  # "IDLE", "NAVIGATING", "DROPPING", "PICKING_UP", "DONE"
+        self.state: str = (
+            "IDLE"  # "IDLE", "NAVIGATING", "DROPPING", "PICKING_UP", "DONE"
+        )
         self.drop_queue: list[str] = []
         self.dropped_count: int = 0
         self.altar_pos: tuple[int, int] | None = None
@@ -48,7 +50,11 @@ class AltarBUCSolver:
         elif obs.dungeon.standing_on_altar:
             self.altar_pos = (hy, hx)
 
-        if self.altar_pos is None and not obs.dungeon.standing_on_altar and not obs.dungeon.adjacent_altar:
+        if (
+            self.altar_pos is None
+            and not obs.dungeon.standing_on_altar
+            and not obs.dungeon.adjacent_altar
+        ):
             return None
 
         # 1. Navigate to Altar

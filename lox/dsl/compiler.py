@@ -5,26 +5,27 @@ Supports:
 2. Functional Generators (`def episode_policy(obs): ... yield action`)
 3. High-Performance microsecond Behavior Trees (`plan = [...]`)
 """
+
 from __future__ import annotations
 
 import ast
 import inspect
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from lox.core.types import Status, Action, Observation, HeroState, HungerState
-from lox.core.agenda import GoalDirective, GoalAgenda
+from lox.core.agenda import GoalAgenda, GoalDirective
 from lox.core.tree import (
-    BehaviorTree,
+    ActionNode,
     BehaviorNode,
+    BehaviorTree,
+    Blackboard,
+    Condition,
     Selector,
     Sequence,
-    Condition,
-    ActionNode,
-    Blackboard,
 )
-from lox.dsl.parser import parse_and_validate, normalize_code
-from lox.dsl.schema import ENUM_CONSTANTS, ALLOWED_ACTIONS
-
+from lox.core.types import Action, HeroState, HungerState, Observation, Status
+from lox.dsl.parser import normalize_code, parse_and_validate
+from lox.dsl.schema import ALLOWED_ACTIONS, ENUM_CONSTANTS
 
 # Map AST comparison operators to python functions
 _CMP_OPS = {
@@ -39,6 +40,7 @@ _CMP_OPS = {
 
 def _create_action_builder(name: str) -> Callable[..., Action]:
     """Creates an Action factory for policy scripts."""
+
     def action_fn(*args, **kwargs) -> Action:
         direction = kwargs.get("direction")
         slot = kwargs.get("slot")
@@ -52,12 +54,22 @@ def _create_action_builder(name: str) -> Callable[..., Action]:
                 direction = args[0]
         elif args and isinstance(args[0], str):
             slot = args[0]
-        return Action(name=name, direction=direction, slot=slot, target_pos=target_pos, subroutine=subroutine, extra=kwargs)
+        return Action(
+            name=name,
+            direction=direction,
+            slot=slot,
+            target_pos=target_pos,
+            subroutine=subroutine,
+            extra=kwargs,
+        )
+
     return action_fn
 
 
 # Default action constructors available inside policy scripts
-DEFAULT_ACTION_BUILDERS = {act_name: _create_action_builder(act_name) for act_name in ALLOWED_ACTIONS}
+DEFAULT_ACTION_BUILDERS = {
+    act_name: _create_action_builder(act_name) for act_name in ALLOWED_ACTIONS
+}
 
 
 def _extract_val(node: ast.AST, bb: Blackboard) -> Any:
@@ -119,14 +131,18 @@ def _compile_condition_node(node: ast.AST) -> Callable[[Blackboard], bool]:
             return lambda bb: False
         left_node = node.left
         right_node = node.comparators[0]
-        return lambda bb: op_fn(_extract_val(left_node, bb), _extract_val(right_node, bb))
+        return lambda bb: op_fn(
+            _extract_val(left_node, bb), _extract_val(right_node, bb)
+        )
 
     return lambda bb: False
 
 
 def _compile_action_call(
     call_node: ast.Call,
-    action_handlers: dict[str, Callable[[Blackboard, dict[str, Any]], Status | Action | None]],
+    action_handlers: dict[
+        str, Callable[[Blackboard, dict[str, Any]], Status | Action | None]
+    ],
 ) -> ActionNode:
     """Compiles a function call into an ActionNode."""
     action_name = call_node.func.id if isinstance(call_node.func, ast.Name) else "wait"
@@ -187,7 +203,9 @@ class ExecutionGuard:
     def tick(self) -> None:
         self.count += 1
         if self.count > self.limit:
-            raise RuntimeError(f"Infinite loop detected: Policy looped {self.limit} times without yielding an action!")
+            raise RuntimeError(
+                f"Infinite loop detected: Policy looped {self.limit} times without yielding an action!"
+            )
 
     def reset(self) -> None:
         self.count = 0
@@ -273,7 +291,13 @@ class PolicyRunner:
 class PolicyExecutor:
     """Unified wrapper around classes, generators, and behavior trees."""
 
-    def __init__(self, target_callable: Any, is_class: bool = False, is_tree: bool = False, guard: ExecutionGuard | None = None):
+    def __init__(
+        self,
+        target_callable: Any,
+        is_class: bool = False,
+        is_tree: bool = False,
+        guard: ExecutionGuard | None = None,
+    ):
         self.target_callable = target_callable
         self.is_class = is_class
         self.is_tree = is_tree
@@ -284,13 +308,17 @@ class PolicyExecutor:
         """Instantiates a fresh agent / generator for an episode."""
         if self.is_tree:
             tree = self.target_callable
-            bb = Blackboard(initial_obs or Observation(chars=None, glyphs=None, hero=HeroState()))
+            bb = Blackboard(
+                initial_obs or Observation(chars=None, glyphs=None, hero=HeroState())
+            )
+
             def tree_generator(obs):
                 while True:
                     bb.obs = obs
                     status = tree.tick(bb)
                     act = bb.last_action or Action(name="wait")
                     obs = yield act
+
             gen = tree_generator(initial_obs)
             return PolicyRunner(gen, guard=self.guard)
 
@@ -305,9 +333,11 @@ class PolicyExecutor:
                     gen = agent(initial_obs)
             except RuntimeError as exc:
                 if "Infinite loop detected" in str(exc):
+
                     def fallback_gen(obs):
                         while True:
                             obs = yield Action(name="wait")
+
                     return PolicyRunner(fallback_gen(initial_obs), guard=self.guard)
                 raise
             return PolicyRunner(gen, guard=self.guard)
@@ -317,9 +347,11 @@ class PolicyExecutor:
                 gen = self.target_callable(initial_obs)
             except RuntimeError as exc:
                 if "Infinite loop detected" in str(exc):
+
                     def fallback_gen(obs):
                         while True:
                             obs = yield Action(name="wait")
+
                     return PolicyRunner(fallback_gen(initial_obs), guard=self.guard)
                 raise
             return PolicyRunner(gen, guard=self.guard)

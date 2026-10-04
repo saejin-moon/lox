@@ -1,8 +1,8 @@
 import json
-import os
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 import httpx
+import pytest
 
 from lox.author.agent import AuthorAgent
 
@@ -41,12 +41,14 @@ def test_openrouter_http_error_parsing():
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.is_error = True
     mock_resp.status_code = 401
-    mock_resp.text = json.dumps({
-        "error": {
-            "message": "API key expired.",
-            "code": 401,
+    mock_resp.text = json.dumps(
+        {
+            "error": {
+                "message": "API key expired.",
+                "code": 401,
+            }
         }
-    })
+    )
     mock_resp.json.return_value = {
         "error": {
             "message": "API key expired.",
@@ -55,7 +57,9 @@ def test_openrouter_http_error_parsing():
     }
 
     with patch("httpx.Client.post", return_value=mock_resp):
-        with pytest.raises(RuntimeError, match="OpenRouter API error \\(401\\): API key expired."):
+        with pytest.raises(
+            RuntimeError, match="OpenRouter API error \\(401\\): API key expired."
+        ):
             agent.synthesize_policy(
                 current_policy="plan = []",
                 trigger_reason="stall",
@@ -71,20 +75,24 @@ def test_openrouter_tool_calling_and_code_synthesis():
     turn1_resp.is_error = False
     turn1_resp.json.return_value = {
         "usage": {"prompt_tokens": 120, "completion_tokens": 25},
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": "call_123",
-                    "type": "function",
-                    "function": {
-                        "name": "get_death_taxonomy",
-                        "arguments": json.dumps({"window": 5})
-                    }
-                }]
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "get_death_taxonomy",
+                                "arguments": json.dumps({"window": 5}),
+                            },
+                        }
+                    ],
+                }
             }
-        }]
+        ],
     }
 
     # Turn 2: Model finishes with synthesized Python policy
@@ -92,12 +100,14 @@ def test_openrouter_tool_calling_and_code_synthesis():
     turn2_resp.is_error = False
     turn2_resp.json.return_value = {
         "usage": {"prompt_tokens": 180, "completion_tokens": 50},
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "```python\ndef combat():\n    if floating_eye_in_fov:\n        step_away_from_hostile()\n    elif adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "```python\ndef combat():\n    if floating_eye_in_fov:\n        step_away_from_hostile()\n    elif adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```",
+                }
             }
-        }]
+        ],
     }
 
     with patch("httpx.Client.post", side_effect=[turn1_resp, turn2_resp]):
@@ -122,17 +132,24 @@ def test_openrouter_tool_ceiling_wrap_up():
         r.is_error = False
         r.json.return_value = {
             "usage": {"prompt_tokens": 50, "completion_tokens": 10},
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": f"call_{call_id}",
-                        "type": "function",
-                        "function": {"name": "get_death_taxonomy", "arguments": "{}"}
-                    }]
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"call_{call_id}",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_death_taxonomy",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    }
                 }
-            }]
+            ],
         }
         return r
 
@@ -141,15 +158,19 @@ def test_openrouter_tool_ceiling_wrap_up():
     final_resp.is_error = False
     final_resp.json.return_value = {
         "usage": {"prompt_tokens": 200, "completion_tokens": 40},
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "```python\ndef explore():\n    step_to_frontier()\n\nplan = [explore]\n```"
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "```python\ndef explore():\n    step_to_frontier()\n\nplan = [explore]\n```",
+                }
             }
-        }]
+        ],
     }
 
-    with patch("httpx.Client.post", side_effect=tool_responses + [final_resp]) as mock_post:
+    with patch(
+        "httpx.Client.post", side_effect=tool_responses + [final_resp]
+    ) as mock_post:
         code, tree, error = agent.synthesize_policy(
             current_policy="plan = []",
             trigger_reason="Stall",
@@ -176,12 +197,14 @@ def test_openrouter_ast_self_repair():
     bad_resp.is_error = False
     bad_resp.json.return_value = {
         "usage": {"prompt_tokens": 100, "completion_tokens": 30},
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "```python\ndef combat():\n    if invalid_pred_xyz:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "```python\ndef combat():\n    if invalid_pred_xyz:\n        melee_attack_hostile()\n\nplan = [combat]\n```",
+                }
             }
-        }]
+        ],
     }
 
     # Repair Turn: Model receives AST validation feedback and fixes the predicate
@@ -189,12 +212,14 @@ def test_openrouter_ast_self_repair():
     repair_resp.is_error = False
     repair_resp.json.return_value = {
         "usage": {"prompt_tokens": 150, "completion_tokens": 30},
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "```python\ndef combat():\n    if floating_eye_in_fov:\n        step_away_from_hostile()\n    elif adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```"
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "```python\ndef combat():\n    if floating_eye_in_fov:\n        step_away_from_hostile()\n    elif adjacent_hostile:\n        melee_attack_hostile()\n\nplan = [combat]\n```",
+                }
             }
-        }]
+        ],
     }
 
     with patch("httpx.Client.post", side_effect=[bad_resp, repair_resp]) as mock_post:

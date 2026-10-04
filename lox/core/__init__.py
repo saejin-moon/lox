@@ -1,10 +1,10 @@
-from lox.core.types import Status, HungerState, HeroState, Item, Observation, Action
+from lox.core.types import Action, HeroState, HungerState, Item, Observation, Status
 
 __all__ = [
-    "Status",
-    "HungerState",
+    "Action",
     "HeroState",
+    "HungerState",
     "Item",
     "Observation",
-    "Action",
+    "Status",
 ]

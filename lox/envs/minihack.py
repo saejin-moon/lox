@@ -2,27 +2,28 @@
 LOX MiniHack Adapter: Clean, high-throughput Gymnasium MiniHack wrapper.
 Translates atomic Behavior Tree actions into gym actions and extracts standardized Observations.
 """
+
 from __future__ import annotations
 
 from typing import Any
-import numpy as np
+
 import gymnasium
 import minihack  # noqa: F401
+import numpy as np
 
-from lox.core.types import Observation, HeroState, HungerState, Action
+from lox.core.types import Action, HeroState, HungerState, Observation
 from lox.envs.base import EnvironmentAdapter
-
 
 # Direction offsets mapped to standard NetHack direction characters
 CHAR_DIR_MAP: dict[tuple[int, int], str] = {
     (-1, 0): "k",  # North
-    (0, 1): "l",   # East
-    (1, 0): "j",   # South
+    (0, 1): "l",  # East
+    (1, 0): "j",  # South
     (0, -1): "h",  # West
     (-1, 1): "u",  # North-East
-    (1, 1): "n",   # South-East
+    (1, 1): "n",  # South-East
     (1, -1): "b",  # South-West
-    (-1, -1): "y", # North-West
+    (-1, -1): "y",  # North-West
 }
 
 
@@ -98,7 +99,9 @@ class MiniHackAdapter(EnvironmentAdapter):
         raw_obs, _ = self.env.reset(seed=seed)
         return self._extract_obs(raw_obs)
 
-    def step(self, action: Action) -> tuple[Observation, float, bool, bool, dict[str, Any]]:
+    def step(
+        self, action: Action
+    ) -> tuple[Observation, float, bool, bool, dict[str, Any]]:
         target_char = "s"  # default safe search/rest
         if action.direction is not None and action.direction in CHAR_DIR_MAP:
             target_char = CHAR_DIR_MAP[action.direction]

@@ -2,8 +2,9 @@
 Tests for ExecutionGuard, LoopGuardTransformer, and infinite loop protections.
 Ensures zero-yield busy loops in policies cannot hang worker processes or dry-run validation.
 """
-from lox.dsl.compiler import compile_policy, ExecutionGuard, LoopGuardTransformer
-from lox.core.types import Observation, HeroState, Action
+
+from lox.core.types import HeroState, Observation
+from lox.dsl.compiler import compile_policy
 
 
 def test_infinite_loop_guard_interception():

@@ -3,15 +3,16 @@ LOX Hybrid HTN-BT Goal Agenda:
 Provides high-level strategic goal management above low-latency reactive reflex nodes.
 Directs non-emergency macro selection across long dungeon horizons.
 """
+
 from __future__ import annotations
 
 from enum import Enum
-from dataclasses import dataclass
 from typing import Any
 
 
 class GoalDirective(str, Enum):
     """Core strategic milestones in NetHack progression."""
+
     EXPLORE_FLOOR = "explore_floor"
     COLLECT_POISON_RES = "collect_poison_res"
     FORGE_EXCALIBUR = "forge_excalibur"
@@ -87,7 +88,9 @@ class GoalAgenda:
 
         # 2. Poison resistance acquired
         elif active == GoalDirective.COLLECT_POISON_RES:
-            has_poison_res = getattr(obs.hero, "has_poison_res", False) or getattr(obs.status, "has_poison_res", False)
+            has_poison_res = getattr(obs.hero, "has_poison_res", False) or getattr(
+                obs.status, "has_poison_res", False
+            )
             if has_poison_res:
                 self.pop()
 

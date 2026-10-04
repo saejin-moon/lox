@@ -5,6 +5,7 @@ Executes autonomous runs using compiled Pythonic Behavior Trees,
 records flight telemetry to streaming Parquet partitions,
 monitors dynamic triggers, and consolidates into DuckDB post-run.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -13,20 +14,19 @@ import os
 import sys
 import time
 from typing import Any
+
 import duckdb
 import numpy as np
-import nle.nethack as nh
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lox.core.types import Action, HeroState, HungerState, Item, Observation, Status
-from lox.core.spatial import SpatialEngine
+from lox.core.types import Action
 from lox.dsl.compiler import compile_policy
-from lox.envs.nethack import NetHackAdapter, DIR_CHARS
-from lox.telemetry.parquet import ParquetLogger
+from lox.envs.nethack import NetHackAdapter
 from lox.telemetry.consolidator import consolidate_run
-from lox.telemetry.triggers import DynamicTriggerEngine, TriggerType
+from lox.telemetry.parquet import ParquetLogger
 from lox.telemetry.recorder import FlightRecorder
+from lox.telemetry.triggers import DynamicTriggerEngine, TriggerType
 
 
 def run_nethack_eval(
@@ -45,7 +45,7 @@ def run_nethack_eval(
         run_id = f"nethack_{role}_{ts}"
 
     print("=" * 65)
-    print(f"LOX NetHack Autonomous Evaluation")
+    print("LOX NetHack Autonomous Evaluation")
     print(f"Run ID:      {run_id}")
     print(f"Environment: {env_id} (Role: {role})")
     print(f"Episodes:    {episodes} | Max Turns: {max_turns}")
@@ -59,7 +59,9 @@ def run_nethack_eval(
 
     logger = None
     if record_telemetry:
-        logger = ParquetLogger(run_id=run_id, base_dir=telemetry_dir, flush_interval=100)
+        logger = ParquetLogger(
+            run_id=run_id, base_dir=telemetry_dir, flush_interval=100
+        )
 
     # Load policy from policy_path or fallback to default
     if os.path.exists(policy_path):
@@ -121,7 +123,7 @@ class Agent:
     t_start = time.perf_counter()
 
     for ep in range(episodes):
-        ep_id = f"ep_{ep+1:03d}"
+        ep_id = f"ep_{ep + 1:03d}"
         ep_t0 = time.perf_counter()
         obs = adapter.reset(seed=ep + 2000)
 
@@ -178,11 +180,31 @@ class Agent:
             if len(last_5_actions) > 5:
                 last_5_actions.pop(0)
 
-            tile_type = getattr(obs.dungeon, "tile_type", "room") if hasattr(obs, "dungeon") else "room"
-            closest_name = getattr(obs.combat, "closest_hostile_name", "") if hasattr(obs, "combat") else ""
-            closest_dist = getattr(obs.combat, "closest_hostile_dist", 99.0) if hasattr(obs, "combat") else 99.0
-            hostiles_fov = getattr(obs.combat, "hostile_count_fov", 0) if hasattr(obs, "combat") else 0
-            dungeon_branch = getattr(obs.hero, "dungeon_branch", "dungeon") if hasattr(obs, "hero") else "dungeon"
+            tile_type = (
+                getattr(obs.dungeon, "tile_type", "room")
+                if hasattr(obs, "dungeon")
+                else "room"
+            )
+            closest_name = (
+                getattr(obs.combat, "closest_hostile_name", "")
+                if hasattr(obs, "combat")
+                else ""
+            )
+            closest_dist = (
+                getattr(obs.combat, "closest_hostile_dist", 99.0)
+                if hasattr(obs, "combat")
+                else 99.0
+            )
+            hostiles_fov = (
+                getattr(obs.combat, "hostile_count_fov", 0)
+                if hasattr(obs, "combat")
+                else 0
+            )
+            dungeon_branch = (
+                getattr(obs.hero, "dungeon_branch", "dungeon")
+                if hasattr(obs, "hero")
+                else "dungeon"
+            )
 
             # Track action metrics
             if action.name == "step":
@@ -192,17 +214,27 @@ class Agent:
             elif action.name == "descend":
                 total_descents += 1
                 if logger is not None:
-                    logger.log_event(ep_id, hero.turn, hero.depth, "descend", message="Hero descended stairs")
+                    logger.log_event(
+                        ep_id,
+                        hero.turn,
+                        hero.depth,
+                        "descend",
+                        message="Hero descended stairs",
+                    )
             elif action.name == "search":
                 total_searches += 1
             elif action.name == "eat_carried_food":
                 total_eats += 1
                 if logger is not None:
-                    logger.log_event(ep_id, hero.turn, hero.depth, "eat", message="Hero ate food")
+                    logger.log_event(
+                        ep_id, hero.turn, hero.depth, "eat", message="Hero ate food"
+                    )
             elif action.name == "pray":
                 total_prayers += 1
                 if logger is not None:
-                    logger.log_event(ep_id, hero.turn, hero.depth, "pray", message="Hero prayed")
+                    logger.log_event(
+                        ep_id, hero.turn, hero.depth, "pray", message="Hero prayed"
+                    )
 
             flight_recorder.record_turn(
                 turn=hero.turn,
@@ -232,18 +264,47 @@ class Agent:
             )
             if trig in (TriggerType.STALL, TriggerType.STARVATION):
                 if logger is not None:
-                    logger.log_event(ep_id, hero.turn, hero.depth, "trigger", message=trig_reason)
+                    logger.log_event(
+                        ep_id, hero.turn, hero.depth, "trigger", message=trig_reason
+                    )
                 if hero.turns_on_level % 80 == 0:
-                    print(f"  [Dynamic Trigger: {trig.name}] {trig_reason} at turn {hero.turn}")
+                    print(
+                        f"  [Dynamic Trigger: {trig.name}] {trig_reason} at turn {hero.turn}"
+                    )
 
             # Telemetry tick logging
             if logger is not None:
-                stairs_y = adapter.known_stairs_down[0] if getattr(adapter, "known_stairs_down", None) is not None else -1
-                stairs_x = adapter.known_stairs_down[1] if getattr(adapter, "known_stairs_down", None) is not None else -1
-                target_y = adapter.last_target_pos[0] if getattr(adapter, "last_target_pos", None) is not None else -1
-                target_x = adapter.last_target_pos[1] if getattr(adapter, "last_target_pos", None) is not None else -1
-                tiles_vis = int(np.sum(adapter.visited)) if hasattr(adapter, "visited") and adapter.visited is not None else 0
-                adj_monsters = ",".join(obs.combat.adjacent_monsters) if hasattr(obs, "combat") and hasattr(obs.combat, "adjacent_monsters") else ""
+                stairs_y = (
+                    adapter.known_stairs_down[0]
+                    if getattr(adapter, "known_stairs_down", None) is not None
+                    else -1
+                )
+                stairs_x = (
+                    adapter.known_stairs_down[1]
+                    if getattr(adapter, "known_stairs_down", None) is not None
+                    else -1
+                )
+                target_y = (
+                    adapter.last_target_pos[0]
+                    if getattr(adapter, "last_target_pos", None) is not None
+                    else -1
+                )
+                target_x = (
+                    adapter.last_target_pos[1]
+                    if getattr(adapter, "last_target_pos", None) is not None
+                    else -1
+                )
+                tiles_vis = (
+                    int(np.sum(adapter.visited))
+                    if hasattr(adapter, "visited") and adapter.visited is not None
+                    else 0
+                )
+                adj_monsters = (
+                    ",".join(obs.combat.adjacent_monsters)
+                    if hasattr(obs, "combat")
+                    and hasattr(obs.combat, "adjacent_monsters")
+                    else ""
+                )
                 act_subroutine = getattr(action, "subroutine", "") or action.name
 
                 logger.log_tick(
@@ -269,7 +330,9 @@ class Agent:
                     stairs_down_x=stairs_x,
                     stairs_down_turn=getattr(adapter, "stairs_down_discovery_turn", -1),
                     tiles_visited_count=tiles_vis,
-                    unvisited_frontier_count=getattr(obs.spatial, "unvisited_frontier_count", 0),
+                    unvisited_frontier_count=getattr(
+                        obs.spatial, "unvisited_frontier_count", 0
+                    ),
                     dead_ends_count=getattr(obs.spatial, "dead_ends_count", 0),
                     adjacent_monsters=adj_monsters,
                     ac=hero.ac,
@@ -286,20 +349,34 @@ class Agent:
             obs, reward, term, trunc, info = adapter.step(action)
 
             # Check for kill event
-            if "you kill" in obs.message.lower() or "you destroy" in obs.message.lower():
+            if (
+                "you kill" in obs.message.lower()
+                or "you destroy" in obs.message.lower()
+            ):
                 if logger is not None:
-                    logger.log_event(ep_id, hero.turn, hero.depth, "combat_kill", message=obs.message)
+                    logger.log_event(
+                        ep_id, hero.turn, hero.depth, "combat_kill", message=obs.message
+                    )
 
             if term or trunc:
                 end_msg = obs.message.lower()
-                if "died" in end_msg or "killed" in end_msg or "choked" in end_msg or "starved" in end_msg:
+                if (
+                    "died" in end_msg
+                    or "killed" in end_msg
+                    or "choked" in end_msg
+                    or "starved" in end_msg
+                ):
                     death_reason = obs.message
                 elif hero.hp <= 0:
                     death_reason = "ZeroHP (Killed)"
                 else:
                     death_reason = "Terminated"
 
-                inventory_items = [f"{it.name} ({it.category})" for it in obs.inventory] if hasattr(obs, "inventory") else []
+                inventory_items = (
+                    [f"{it.name} ({it.category})" for it in obs.inventory]
+                    if hasattr(obs, "inventory")
+                    else []
+                )
                 inventory_at_death_str = ", ".join(inventory_items[:10])
 
                 # Check cluster fatality trigger
@@ -312,7 +389,7 @@ class Agent:
         ep_wall = time.perf_counter() - ep_t0
         final_depth = obs.hero.depth if obs.hero.depth > 0 else max_depth_reached
         final_turns = obs.hero.turn if obs.hero.turn > 0 else last_valid_turns
-        final_hp = obs.hero.hp if obs.hero.hp > 0 else 0
+        final_hp = max(0, obs.hero.hp)
         final_max_hp = obs.hero.max_hp if obs.hero.max_hp > 0 else last_valid_max_hp
         score = obs.hero.gold + (final_depth * 100)
 
@@ -355,17 +432,19 @@ class Agent:
                 turns_mines=turns_mines,
             )
 
-        episode_summaries.append({
-            "episode": ep + 1,
-            "depth": final_depth,
-            "turns": final_turns,
-            "hp": f"{final_hp}/{final_max_hp}",
-            "reason": death_reason[:40],
-            "wall_sec": ep_wall,
-        })
+        episode_summaries.append(
+            {
+                "episode": ep + 1,
+                "depth": final_depth,
+                "turns": final_turns,
+                "hp": f"{final_hp}/{final_max_hp}",
+                "reason": death_reason[:40],
+                "wall_sec": ep_wall,
+            }
+        )
 
         print(
-            f"Ep {ep+1:2d}/{episodes:2d}: Depth {final_depth} | Turns {final_turns:4d} | "
+            f"Ep {ep + 1:2d}/{episodes:2d}: Depth {final_depth} | Turns {final_turns:4d} | "
             f"HP {final_hp:2d}/{final_max_hp:2d} | End: {death_reason[:35]} ({ep_wall:.2f}s)"
         )
 
@@ -385,12 +464,19 @@ class Agent:
             telemetry_dir=telemetry_dir,
             cleanup=True,
         )
-        print(f"[Telemetry] Successfully consolidated {consolidation_stats['ticks_added']} ticks and {consolidation_stats['episodes_added']} episodes into {db_path}")
-        print(f"[Telemetry] Raw Parquet files safely cleaned up: {consolidation_stats['cleaned_up']}")
+        print(
+            f"[Telemetry] Successfully consolidated {consolidation_stats['ticks_added']} ticks and {consolidation_stats['episodes_added']} episodes into {db_path}"
+        )
+        print(
+            f"[Telemetry] Raw Parquet files safely cleaned up: {consolidation_stats['cleaned_up']}"
+        )
 
         # Query DuckDB summary statistics
         con = duckdb.connect(db_path, read_only=True)
-        res = con.execute("SELECT AVG(depth), MAX(depth), AVG(turns), COUNT(*) FROM episodes WHERE run_id = ?", [run_id]).fetchone()
+        res = con.execute(
+            "SELECT AVG(depth), MAX(depth), AVG(turns), COUNT(*) FROM episodes WHERE run_id = ?",
+            [run_id],
+        ).fetchone()
         con.close()
         avg_depth, max_depth, avg_turns, ep_count = res if res else (0.0, 0, 0.0, 0)
         print("\n" + "=" * 65)
@@ -412,13 +498,25 @@ class Agent:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to evaluate")
-    parser.add_argument("--max-turns", type=int, default=10000, help="Max turns per episode")
-    parser.add_argument("--policy-path", default="data/latest_policy.py", help="Path to policy file to evaluate")
+    parser.add_argument(
+        "--episodes", type=int, default=10, help="Number of episodes to evaluate"
+    )
+    parser.add_argument(
+        "--max-turns", type=int, default=10000, help="Max turns per episode"
+    )
+    parser.add_argument(
+        "--policy-path",
+        default="data/latest_policy.py",
+        help="Path to policy file to evaluate",
+    )
     parser.add_argument("--role", default="valkyrie", help="NetHack hero role")
     parser.add_argument("--run-id", default=None, help="Custom run identifier")
-    parser.add_argument("--db-path", default="data/lox.duckdb", help="Path to DuckDB database")
-    parser.add_argument("--no-telemetry", action="store_true", help="Disable Parquet/DuckDB telemetry")
+    parser.add_argument(
+        "--db-path", default="data/lox.duckdb", help="Path to DuckDB database"
+    )
+    parser.add_argument(
+        "--no-telemetry", action="store_true", help="Disable Parquet/DuckDB telemetry"
+    )
     args = parser.parse_args()
 
     run_nethack_eval(

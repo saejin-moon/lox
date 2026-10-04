@@ -4,9 +4,11 @@ Tracks BUC beatitude distributions (P(blessed), P(uncursed), P(cursed)),
 candidate item identities, charges/enchantment bounds, and sensory message listeners.
 Exposes Shannon entropy safe-gates to inform policy predicates without engine-level hard stops.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
 import numpy as np
 import numpy.typing as npt
 
@@ -16,6 +18,7 @@ class ItemBeliefState:
     """
     Tracks epistemic uncertainty over an individual item's latent properties.
     """
+
     uid: str
     name: str = ""
     item_class: str = ""  # "potion", "scroll", "wand", "ring", "amulet", "armor", "weapon", "food", "tool"
@@ -124,7 +127,9 @@ class ItemBeliefState:
         total = sum(new_mass)
         self.candidate_identities = new_names
         if total > 1e-12:
-            self.identity_probs = np.array([m / total for m in new_mass], dtype=np.float64)
+            self.identity_probs = np.array(
+                [m / total for m in new_mass], dtype=np.float64
+            )
         else:
             k = len(new_names)
             self.identity_probs = np.full(k, 1.0 / k, dtype=np.float64)
@@ -252,43 +257,72 @@ class ShannonSafeGate:
     }
 
     @classmethod
-    def can_safely_equip(cls, belief: ItemBeliefState, max_cursed_prob: float = 0.05) -> tuple[bool, str]:
+    def can_safely_equip(
+        cls, belief: ItemBeliefState, max_cursed_prob: float = 0.05
+    ) -> tuple[bool, str]:
         """
         Equipping cursed armor or weapons welds/locks them to the hero, preventing removal.
         Random dungeon armor has an 80% uncursed, 10% blessed, 10% cursed prior (90% safe).
         """
         if belief.p_cursed > max_cursed_prob:
-            return False, f"VETO: P(Cursed)={belief.p_cursed:.2f} > {max_cursed_prob:.2f}"
+            return (
+                False,
+                f"VETO: P(Cursed)={belief.p_cursed:.2f} > {max_cursed_prob:.2f}",
+            )
         return True, "SAFE"
 
     @classmethod
-    def can_safely_quaff(cls, belief: ItemBeliefState, max_cursed_prob: float = 0.05) -> tuple[bool, str]:
+    def can_safely_quaff(
+        cls, belief: ItemBeliefState, max_cursed_prob: float = 0.05
+    ) -> tuple[bool, str]:
         """
         Quaffing unknown potions risks paralysis, poison, or blindness.
         """
         if belief.p_cursed > max_cursed_prob:
-            return False, f"VETO: P(Cursed)={belief.p_cursed:.2f} > {max_cursed_prob:.2f}"
+            return (
+                False,
+                f"VETO: P(Cursed)={belief.p_cursed:.2f} > {max_cursed_prob:.2f}",
+            )
 
         # If identity is uncollapsed, verify no lethal candidates exist in candidate pool
         if not belief.is_formally_identified():
-            lethal_in_pool = [c for c in belief.candidate_identities if c.lower() in cls.LETHAL_POTIONS]
+            lethal_in_pool = [
+                c
+                for c in belief.candidate_identities
+                if c.lower() in cls.LETHAL_POTIONS
+            ]
             if lethal_in_pool:
-                return False, f"VETO: Lethal candidate identities in pool: {lethal_in_pool}"
+                return (
+                    False,
+                    f"VETO: Lethal candidate identities in pool: {lethal_in_pool}",
+                )
 
         return True, "SAFE"
 
     @classmethod
-    def can_safely_read(cls, belief: ItemBeliefState, max_cursed_prob: float = 0.05) -> tuple[bool, str]:
+    def can_safely_read(
+        cls, belief: ItemBeliefState, max_cursed_prob: float = 0.05
+    ) -> tuple[bool, str]:
         """
         Reading scrolls: cursed scrolls often backfire or curse other inventory items.
         """
         if belief.p_cursed > max_cursed_prob:
-            return False, f"VETO: P(Cursed)={belief.p_cursed:.2f} > {max_cursed_prob:.2f}"
+            return (
+                False,
+                f"VETO: P(Cursed)={belief.p_cursed:.2f} > {max_cursed_prob:.2f}",
+            )
 
         if not belief.is_formally_identified():
-            lethal_in_pool = [c for c in belief.candidate_identities if c.lower() in cls.LETHAL_SCROLLS]
+            lethal_in_pool = [
+                c
+                for c in belief.candidate_identities
+                if c.lower() in cls.LETHAL_SCROLLS
+            ]
             if lethal_in_pool:
-                return False, f"VETO: Lethal candidate identities in pool: {lethal_in_pool}"
+                return (
+                    False,
+                    f"VETO: Lethal candidate identities in pool: {lethal_in_pool}",
+                )
 
         return True, "SAFE"
 
@@ -363,7 +397,9 @@ class EpistemicEngine:
 
     def can_safely_wear(self, uid: str, max_cursed_prob: float = 0.05) -> bool:
         if uid in self.beliefs:
-            safe, _ = ShannonSafeGate.can_safely_equip(self.beliefs[uid], max_cursed_prob=max_cursed_prob)
+            safe, _ = ShannonSafeGate.can_safely_equip(
+                self.beliefs[uid], max_cursed_prob=max_cursed_prob
+            )
             return safe
         return False
 

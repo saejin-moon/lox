@@ -5,6 +5,7 @@ Executes real episodes in NetHack or MiniHack, streams flight telemetry to Parqu
 consolidates into DuckDB, detects real pacing stalls and fatalities, invokes the Author Agent,
 and evolves the compiled Behavior Tree.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -13,18 +14,22 @@ import os
 import sys
 import time
 from typing import Any
+
 import duckdb
 import numpy as np
-import nle.nethack as nh
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import multiprocessing as mp
 import resource
 import signal
-import multiprocessing as mp
+
 
 def _sigalrm_policy_timeout_handler(signum, frame):
-    raise TimeoutError("Policy execution timed out (infinite zero-yield generator loop detected)")
+    raise TimeoutError(
+        "Policy execution timed out (infinite zero-yield generator loop detected)"
+    )
+
 
 try:
     signal.signal(signal.SIGALRM, _sigalrm_policy_timeout_handler)
@@ -33,28 +38,31 @@ except Exception:
 
 # Expand stack allocation to 256MB and recursion limit to 100k
 try:
-    resource.setrlimit(resource.RLIMIT_STACK, (256 * 1024 * 1024, resource.RLIM_INFINITY))
+    resource.setrlimit(
+        resource.RLIMIT_STACK, (256 * 1024 * 1024, resource.RLIM_INFINITY)
+    )
 except Exception:
     pass
 sys.setrecursionlimit(100000)
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
 
-from lox.core.types import Action, HeroState, HungerState, Observation, Status
-from lox.core.spatial import SpatialEngine
-from lox.dsl.compiler import compile_policy
-from lox.envs.nethack import NetHackAdapter, DIR_CHARS
-from lox.envs.minihack import MiniHackAdapter
 from lox.author.agent import AuthorAgent
-from lox.telemetry.recorder import FlightRecorder
-from lox.telemetry.triggers import DynamicTriggerEngine, TriggerType
-from lox.telemetry.parquet import ParquetLogger
+from lox.core.spatial import SpatialEngine
+from lox.core.types import Action
+from lox.dsl.compiler import compile_policy
+from lox.envs.minihack import MiniHackAdapter
+from lox.envs.nethack import NetHackAdapter
 from lox.telemetry.consolidator import consolidate_run
+from lox.telemetry.parquet import ParquetLogger
+from lox.telemetry.recorder import FlightRecorder
 from lox.telemetry.tokens import get_token_usage_summary
+from lox.telemetry.triggers import DynamicTriggerEngine
 
 
 def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
@@ -74,7 +82,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         adapter = MiniHackAdapter(task=task)
 
     tree = compile_policy(policy_code)
-    ep_id = f"{gen_dir_id}_e{ep_idx+1:03d}"
+    ep_id = f"{gen_dir_id}_e{ep_idx + 1:03d}"
     obs = adapter.reset(seed=(gen * 1000 + ep_idx))
     ep_turns = 0
     death_reason = "active"
@@ -98,7 +106,12 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
     MAX_EPISODE_WALL_SEC = 90.0
 
     recorder = FlightRecorder(capacity=100)
-    logger = ParquetLogger(run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=5000, file_prefix=f"ep{ep_idx+1:03d}")
+    logger = ParquetLogger(
+        run_id=gen_dir_id,
+        base_dir="data/telemetry",
+        flush_interval=5000,
+        file_prefix=f"ep{ep_idx + 1:03d}",
+    )
 
     policy_runner = tree.create_runner(obs)
 
@@ -146,11 +159,29 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         if len(last_5_actions) > 5:
             last_5_actions.pop(0)
 
-        tile_type = getattr(obs.dungeon, "tile_type", "room") if hasattr(obs, "dungeon") else "room"
-        closest_name = getattr(obs.combat, "closest_hostile_name", "") if hasattr(obs, "combat") else ""
-        closest_dist = getattr(obs.combat, "closest_hostile_dist", 99.0) if hasattr(obs, "combat") else 99.0
-        hostiles_fov = getattr(obs.combat, "hostile_count_fov", 0) if hasattr(obs, "combat") else 0
-        dungeon_branch = getattr(obs.hero, "dungeon_branch", "dungeon") if hasattr(obs, "hero") else "dungeon"
+        tile_type = (
+            getattr(obs.dungeon, "tile_type", "room")
+            if hasattr(obs, "dungeon")
+            else "room"
+        )
+        closest_name = (
+            getattr(obs.combat, "closest_hostile_name", "")
+            if hasattr(obs, "combat")
+            else ""
+        )
+        closest_dist = (
+            getattr(obs.combat, "closest_hostile_dist", 99.0)
+            if hasattr(obs, "combat")
+            else 99.0
+        )
+        hostiles_fov = (
+            getattr(obs.combat, "hostile_count_fov", 0) if hasattr(obs, "combat") else 0
+        )
+        dungeon_branch = (
+            getattr(obs.hero, "dungeon_branch", "dungeon")
+            if hasattr(obs, "hero")
+            else "dungeon"
+        )
 
         if hasattr(hero, "ac") and hero.ac is not None:
             last_valid_ac = hero.ac
@@ -177,12 +208,36 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             dungeon_branch=dungeon_branch,
         )
 
-        stairs_y = adapter.known_stairs_down[0] if getattr(adapter, "known_stairs_down", None) is not None else -1
-        stairs_x = adapter.known_stairs_down[1] if getattr(adapter, "known_stairs_down", None) is not None else -1
-        target_y = adapter.last_target_pos[0] if getattr(adapter, "last_target_pos", None) is not None else -1
-        target_x = adapter.last_target_pos[1] if getattr(adapter, "last_target_pos", None) is not None else -1
-        tiles_vis = int(np.sum(adapter.visited)) if hasattr(adapter, "visited") and adapter.visited is not None else 0
-        adj_monsters = ",".join(obs.combat.adjacent_monsters) if hasattr(obs, "combat") and hasattr(obs.combat, "adjacent_monsters") else ""
+        stairs_y = (
+            adapter.known_stairs_down[0]
+            if getattr(adapter, "known_stairs_down", None) is not None
+            else -1
+        )
+        stairs_x = (
+            adapter.known_stairs_down[1]
+            if getattr(adapter, "known_stairs_down", None) is not None
+            else -1
+        )
+        target_y = (
+            adapter.last_target_pos[0]
+            if getattr(adapter, "last_target_pos", None) is not None
+            else -1
+        )
+        target_x = (
+            adapter.last_target_pos[1]
+            if getattr(adapter, "last_target_pos", None) is not None
+            else -1
+        )
+        tiles_vis = (
+            int(np.sum(adapter.visited))
+            if hasattr(adapter, "visited") and adapter.visited is not None
+            else 0
+        )
+        adj_monsters = (
+            ",".join(obs.combat.adjacent_monsters)
+            if hasattr(obs, "combat") and hasattr(obs.combat, "adjacent_monsters")
+            else ""
+        )
         act_subroutine = getattr(action, "subroutine", "") or action.name
 
         logger.log_tick(
@@ -208,7 +263,9 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             stairs_down_x=stairs_x,
             stairs_down_turn=getattr(adapter, "stairs_down_discovery_turn", -1),
             tiles_visited_count=tiles_vis,
-            unvisited_frontier_count=getattr(obs.spatial, "unvisited_frontier_count", 0),
+            unvisited_frontier_count=getattr(
+                obs.spatial, "unvisited_frontier_count", 0
+            ),
             dead_ends_count=getattr(obs.spatial, "dead_ends_count", 0),
             adjacent_monsters=adj_monsters,
             ac=hero.ac,
@@ -227,12 +284,16 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             done = bool(term or trunc)
         else:
             obs, reward, done, info = step_res
-            trunc = (step >= max_turns - 1)
+            trunc = step >= max_turns - 1
             term = done and not trunc
 
         if done:
-            end_status = info.get("end_status", None) if isinstance(info, dict) else None
-            is_aborted = (end_status is not None and getattr(end_status, "name", "") == "ABORTED")
+            end_status = (
+                info.get("end_status", None) if isinstance(info, dict) else None
+            )
+            is_aborted = (
+                end_status is not None and getattr(end_status, "name", "") == "ABORTED"
+            )
 
             if getattr(obs.hero, "hp", 0) <= 0:
                 msg = getattr(obs, "message", "").strip()
@@ -245,7 +306,19 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
                     death_reason = "Poison"
                 elif "petrif" in msg_l:
                     death_reason = "Petrification"
-                elif any(k in msg_l for k in ("bites", "stings", "hits", "kills", "killed", "claws", "shoots", "strikes")):
+                elif any(
+                    k in msg_l
+                    for k in (
+                        "bites",
+                        "stings",
+                        "hits",
+                        "kills",
+                        "killed",
+                        "claws",
+                        "shoots",
+                        "strikes",
+                    )
+                ):
                     death_reason = msg.split(".")[0][:45] if msg else "Combat fatality"
                 elif msg:
                     death_reason = msg[:45]
@@ -256,17 +329,41 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             elif step >= max_turns - 1 or trunc:
                 death_reason = f"MaxTurnsReached (Depth {max_depth_reached})"
             else:
-                death_reason = info.get("death_reason", "ended") if hasattr(info, "get") else "ended"
+                death_reason = (
+                    info.get("death_reason", "ended")
+                    if hasattr(info, "get")
+                    else "ended"
+                )
 
-            inventory_items = [f"{it.name} ({it.category})" for it in obs.inventory] if hasattr(obs, "inventory") else []
+            inventory_items = (
+                [f"{it.name} ({it.category})" for it in obs.inventory]
+                if hasattr(obs, "inventory")
+                else []
+            )
             inventory_at_death_str = ", ".join(inventory_items[:10])
             recorder.record_death(death_reason)
             break
 
     killer = ""
-    if obs.hero.is_dead or "combat" in death_reason.lower() or "fatality" in death_reason.lower():
+    if (
+        obs.hero.is_dead
+        or "combat" in death_reason.lower()
+        or "fatality" in death_reason.lower()
+    ):
         m = obs.message.lower()
-        for hit_verb in (" bites!", " hits!", " stings!", " claws!", " shoots!", " strikes!", " kicks!", " zaps!", " bites.", " hits.", " stings."):
+        for hit_verb in (
+            " bites!",
+            " hits!",
+            " stings!",
+            " claws!",
+            " shoots!",
+            " strikes!",
+            " kicks!",
+            " zaps!",
+            " bites.",
+            " hits.",
+            " stings.",
+        ):
             if hit_verb in m:
                 part = m.split(hit_verb)[0].strip()
                 words = part.split()
@@ -287,10 +384,18 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
     ac_at_death = last_valid_ac
     hp_at_death = getattr(obs.hero, "hp", 0)
     max_hp_at_death = last_valid_max_hp
-    excalibur_forged = any("excalibur" in it.name.lower() for it in obs.inventory) if hasattr(obs, "inventory") else False
+    excalibur_forged = (
+        any("excalibur" in it.name.lower() for it in obs.inventory)
+        if hasattr(obs, "inventory")
+        else False
+    )
 
     final_depth = max_depth_reached
-    final_score = last_valid_score if last_valid_score > 0 else (last_valid_gold + (final_depth * 100))
+    final_score = (
+        last_valid_score
+        if last_valid_score > 0
+        else (last_valid_gold + (final_depth * 100))
+    )
 
     logger.flush_ticks()
     adapter.close()
@@ -346,9 +451,13 @@ def run_synthesis_loop(
     print("=" * 65)
     print("LOX Embodied Batched Empirical Policy Synthesis Engine")
     print(f"Provider:    {provider} | Model: {model or 'default'}")
-    print(f"Environment: {env_type.upper()} ({role if env_type == 'nethack' else task})")
+    print(
+        f"Environment: {env_type.upper()} ({role if env_type == 'nethack' else task})"
+    )
     print(f"Database:    {db_path}")
-    print(f"Config:      {max_generations} gens | {eval_episodes} eps/gen | {max_turns} max turns")
+    print(
+        f"Config:      {max_generations} gens | {eval_episodes} eps/gen | {max_turns} max turns"
+    )
     print(f"Parallelism: {workers} workers ({min(workers, eval_episodes)} concurrent)")
     if target_depth is not None:
         print(f"Target:      Avg Depth >= {target_depth:.1f}")
@@ -356,8 +465,12 @@ def run_synthesis_loop(
     print("=" * 65)
 
     run_id = f"synth_{provider}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    author = AuthorAgent(provider=provider, model=model, api_key=api_key, db_path=db_path)
-    trigger_engine = DynamicTriggerEngine(stall_threshold=stall_threshold, cluster_threshold=cluster_threshold)
+    author = AuthorAgent(
+        provider=provider, model=model, api_key=api_key, db_path=db_path
+    )
+    trigger_engine = DynamicTriggerEngine(
+        stall_threshold=stall_threshold, cluster_threshold=cluster_threshold
+    )
     recorder = FlightRecorder(capacity=100)
 
     # Initialize DuckDB evolved_policies table
@@ -442,14 +555,18 @@ class Agent:
     current_tree = compile_policy(current_policy)
 
     for gen in range(1, max_generations + 1):
-        print(f"\n--- Running Generation {gen} Evaluation ({eval_episodes} real episodes) ---")
+        print(
+            f"\n--- Running Generation {gen} Evaluation ({eval_episodes} real episodes) ---"
+        )
         gen_start_t = time.perf_counter()
         trigger_fired = False
         trigger_reason = ""
         gen_depths = []
         gen_turns = []
         gen_dir_id = f"{run_id}_g{gen:03d}"
-        logger = ParquetLogger(run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=100)
+        logger = ParquetLogger(
+            run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=100
+        )
 
         payloads = [
             {
@@ -472,12 +589,14 @@ class Agent:
                 try:
                     ep_results = async_res.get(timeout=180.0)
                 except mp.TimeoutError:
-                    print(f"\n[Warning] Generation {gen} worker pool timed out after 180s! Terminating hung worker processes...")
+                    print(
+                        f"\n[Warning] Generation {gen} worker pool timed out after 180s! Terminating hung worker processes..."
+                    )
                     pool.terminate()
                     pool.join()
                     ep_results = [
                         {
-                            "episode_id": f"{gen_dir_id}_e{i+1:03d}",
+                            "episode_id": f"{gen_dir_id}_e{i + 1:03d}",
                             "final_depth": 1,
                             "final_score": 0,
                             "ep_turns": 100,
@@ -513,7 +632,9 @@ class Agent:
         for r in ep_results:
             gen_depths.append(r["final_depth"])
             gen_turns.append(r["ep_turns"])
-            if r["death_reason"] not in ("active", "MaxTurnsReached") and r.get("trajectory"):
+            if r["death_reason"] not in ("active", "MaxTurnsReached") and r.get(
+                "trajectory"
+            ):
                 recent_trajectory = r["trajectory"]
 
             logger.log_episode(
@@ -548,7 +669,12 @@ class Agent:
 
         # Consolidate raw telemetry into DuckDB so LLM tools query live empirical state
         logger.flush()
-        consolidate_run(run_id=gen_dir_id, db_path=db_path, telemetry_dir="data/telemetry", cleanup=True)
+        consolidate_run(
+            run_id=gen_dir_id,
+            db_path=db_path,
+            telemetry_dir="data/telemetry",
+            cleanup=True,
+        )
 
         avg_d = float(np.mean(gen_depths))
         max_d = int(np.max(gen_depths))
@@ -578,16 +704,22 @@ class Agent:
         except Exception:
             pass
 
-        death_summary_str = ", ".join(f"{r[0]} ({r[2]}%)" for r in top_deaths) if top_deaths else "None"
+        death_summary_str = (
+            ", ".join(f"{r[0]} ({r[2]}%)" for r in top_deaths) if top_deaths else "None"
+        )
         primary_cause = top_deaths[0][0] if top_deaths else "Floor Stagnation"
         primary_pct = top_deaths[0][2] if top_deaths else 0.0
 
-        print(f"\n[Gen {gen} Batch Metrics ({eval_episodes} eps)] Avg Depth: {avg_d:.2f} | Max Depth: {max_d} | Avg Turns: {avg_t:.1f}")
+        print(
+            f"\n[Gen {gen} Batch Metrics ({eval_episodes} eps)] Avg Depth: {avg_d:.2f} | Max Depth: {max_d} | Avg Turns: {avg_t:.1f}"
+        )
         print(f"[Gen {gen} Ranked Fatalities] {death_summary_str}")
 
         if target_depth is not None and avg_d >= target_depth:
             print("\n" + "=" * 65)
-            print(f"[CAMPAIGN GOAL ACHIEVED] Generation {gen} reached target average depth {avg_d:.2f} >= {target_depth:.2f}!")
+            print(
+                f"[CAMPAIGN GOAL ACHIEVED] Generation {gen} reached target average depth {avg_d:.2f} >= {target_depth:.2f}!"
+            )
             print(f"Max Depth: {max_d} | Average Turns: {avg_t:.1f}")
             print("=" * 65)
             break
@@ -613,7 +745,7 @@ class Agent:
         )
         if recent_fatal_samples:
             sample_lines = [
-                f"  - Incident: \"{s[0]}\" at Depth {s[1]}, Turn {s[2]}\n    Inventory at Death: {s[3] or 'Empty'}\n    Action Sequence: {s[4] or 'N/A'}"
+                f'  - Incident: "{s[0]}" at Depth {s[1]}, Turn {s[2]}\n    Inventory at Death: {s[3] or "Empty"}\n    Action Sequence: {s[4] or "N/A"}'
                 for s in recent_fatal_samples
             ]
             status_rep += "\n\nRecent Fatal Incident Logs:\n" + "\n".join(sample_lines)
@@ -621,7 +753,9 @@ class Agent:
         if recent_trajectory:
             status_rep += f"\n\nPre-Death Diagnostic Trace:\n{recent_trajectory}"
 
-        print(f"\n[Author Agent] Initiating empirical synthesis session (querying DuckDB & evaluating)...")
+        print(
+            "\n[Author Agent] Initiating empirical synthesis session (querying DuckDB & evaluating)..."
+        )
         new_code, tree, error = author.synthesize_policy(
             current_policy=current_policy,
             trigger_reason=trigger_reason,
@@ -654,13 +788,23 @@ class Agent:
                     con = duckdb.connect(db_path)
                     con.execute(
                         "INSERT INTO evolved_policies VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        [gen, run_id, float(avg_d), int(max_d), float(avg_t), new_code.strip(), datetime.datetime.now()],
+                        [
+                            gen,
+                            run_id,
+                            float(avg_d),
+                            int(max_d),
+                            float(avg_t),
+                            new_code.strip(),
+                            datetime.datetime.now(),
+                        ],
                     )
                     con.close()
                     break
                 except Exception as e:
                     if attempt == 2:
-                        print(f"[Warning] Could not record evolved policy in DuckDB: {e}")
+                        print(
+                            f"[Warning] Could not record evolved policy in DuckDB: {e}"
+                        )
                     time.sleep(0.5)
 
     # Final report of token expenditure
@@ -677,22 +821,74 @@ class Agent:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", default="mock", choices=["mock", "gemini", "openrouter"])
+    parser.add_argument(
+        "--provider", default="mock", choices=["mock", "gemini", "openrouter"]
+    )
     parser.add_argument("--model", default=None)
-    parser.add_argument("--api-key", default=None, help="Explicit API key (overrides environment and .env)")
-    parser.add_argument("--env", default="nethack", choices=["nethack", "minihack"], help="Execution environment")
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="Explicit API key (overrides environment and .env)",
+    )
+    parser.add_argument(
+        "--env",
+        default="nethack",
+        choices=["nethack", "minihack"],
+        help="Execution environment",
+    )
     parser.add_argument("--role", default="valkyrie", help="Hero role for NetHack")
-    parser.add_argument("--task", default="MiniHack-ExploreMaze-Easy-Mapped-v0", help="Task for MiniHack")
-    parser.add_argument("--generations", type=int, default=500, help="Total synthesis generations")
-    parser.add_argument("--eval-episodes", type=int, default=50, help="Real evaluation episodes per generation batch")
-    parser.add_argument("--max-turns", type=int, default=10000, help="Max turns per episode")
-    parser.add_argument("--policy-path", default="data/latest_policy.py", help="Path to persisted latest policy")
-    parser.add_argument("--fresh", action="store_true", help="Force fresh start instead of resuming latest policy")
-    parser.add_argument("--stall-threshold", type=int, default=80, help="Turns without progress to trigger stall autopsy")
-    parser.add_argument("--cluster-threshold", type=int, default=2, help="Deaths of same cause to trigger cluster autopsy")
+    parser.add_argument(
+        "--task",
+        default="MiniHack-ExploreMaze-Easy-Mapped-v0",
+        help="Task for MiniHack",
+    )
+    parser.add_argument(
+        "--generations", type=int, default=500, help="Total synthesis generations"
+    )
+    parser.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=50,
+        help="Real evaluation episodes per generation batch",
+    )
+    parser.add_argument(
+        "--max-turns", type=int, default=10000, help="Max turns per episode"
+    )
+    parser.add_argument(
+        "--policy-path",
+        default="data/latest_policy.py",
+        help="Path to persisted latest policy",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Force fresh start instead of resuming latest policy",
+    )
+    parser.add_argument(
+        "--stall-threshold",
+        type=int,
+        default=80,
+        help="Turns without progress to trigger stall autopsy",
+    )
+    parser.add_argument(
+        "--cluster-threshold",
+        type=int,
+        default=2,
+        help="Deaths of same cause to trigger cluster autopsy",
+    )
     parser.add_argument("--db-path", default="data/lox.duckdb")
-    parser.add_argument("--target-depth", type=float, default=None, help="Target average depth to reach before stopping")
-    parser.add_argument("--workers", type=int, default=10, help="Number of parallel worker processes for episode evaluation")
+    parser.add_argument(
+        "--target-depth",
+        type=float,
+        default=None,
+        help="Target average depth to reach before stopping",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=10,
+        help="Number of parallel worker processes for episode evaluation",
+    )
     args = parser.parse_args()
 
     run_synthesis_loop(

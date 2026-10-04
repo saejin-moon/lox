@@ -1,9 +1,9 @@
 import math
-import numpy as np
-import pytest
-from lox.envs.nethack import NetHackAdapter
-from lox.core.types import Action
+
 from nle import nethack
+
+from lox.core.types import Action
+from lox.envs.nethack import NetHackAdapter
 
 
 def test_tactical_primitives_execution():
@@ -18,11 +18,15 @@ def test_tactical_primitives_execution():
     assert obs.hero.turn > initial_turn
 
     # 2. Test kick closed door (in east direction)
-    obs, reward, term, trunc, _ = adapter.step(Action(name="kick_closed_door", direction=(0, 1)))
+    obs, reward, term, trunc, _ = adapter.step(
+        Action(name="kick_closed_door", direction=(0, 1))
+    )
     assert obs.hero.hp > 0
 
     # 3. Test open door (in east direction)
-    obs, reward, term, trunc, _ = adapter.step(Action(name="open_door", direction=(0, 1)))
+    obs, reward, term, trunc, _ = adapter.step(
+        Action(name="open_door", direction=(0, 1))
+    )
     assert obs.hero.turn >= initial_turn
 
     # 4. Test eat floor corpse (safe fallback when empty)
@@ -30,7 +34,9 @@ def test_tactical_primitives_execution():
     assert obs is not None
 
     # 5. Test step_to coordinate navigation
-    obs, reward, term, trunc, _ = adapter.step(Action(name="step_to", target_pos=(obs.hero.y, obs.hero.x + 1)))
+    obs, reward, term, trunc, _ = adapter.step(
+        Action(name="step_to", target_pos=(obs.hero.y, obs.hero.x + 1))
+    )
     assert obs is not None
 
     # 6. Test peaceful positions and blocked tiles memory tracking
@@ -44,7 +50,7 @@ def test_tactical_primitives_execution():
 
 
 def test_wear_armor_failed_slot_tracking():
-    from lox.core.types import Item, InventoryView
+    from lox.core.types import InventoryView, Item
 
     item1 = Item(slot="b", name="scale mail", category="armor", is_equipped=True)
     item2 = Item(slot="f", name="ring mail", category="armor", is_equipped=False)
@@ -66,7 +72,7 @@ def test_wear_armor_failed_slot_tracking():
 
 
 def test_throw_dagger_and_elbereth_tactics():
-    from lox.core.types import Item, InventoryView
+    from lox.core.types import InventoryView, Item
 
     # 1. Test InventoryView daggers queries
     sword = Item(slot="a", name="long sword", category="weapon", is_equipped=True)
@@ -83,10 +89,15 @@ def test_throw_dagger_and_elbereth_tactics():
     t_start = obs.hero.turn
     obs, reward, term, trunc, _ = adapter.step(Action(name="engrave_dust_elbereth"))
     assert obs.hero.turn >= t_start
-    assert (obs.hero.y, obs.hero.x) in adapter.elbereth_positions or obs.combat.standing_on_elbereth
+    assert (
+        obs.hero.y,
+        obs.hero.x,
+    ) in adapter.elbereth_positions or obs.combat.standing_on_elbereth
 
     # Test throw_dagger execution
-    obs, reward, term, trunc, _ = adapter.step(Action(name="throw_dagger", target_pos=(obs.hero.y, obs.hero.x + 2)))
+    obs, reward, term, trunc, _ = adapter.step(
+        Action(name="throw_dagger", target_pos=(obs.hero.y, obs.hero.x + 2))
+    )
     assert obs is not None
     assert obs.hero.hp > 0
 
@@ -140,23 +151,35 @@ def test_nearby_loot_and_step_to_loot():
     _, walkable_nav = adapter._build_walkable_nav(obs.raw_obs)
     candidates = [
         (obs.hero.y + dy, obs.hero.x + dx)
-        for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dx in (-1, 0, 1)
         if (dy != 0 or dx != 0)
-        and 0 <= obs.hero.y + dy < 21 and 0 <= obs.hero.x + dx < 79
+        and 0 <= obs.hero.y + dy < 21
+        and 0 <= obs.hero.x + dx < 79
         and walkable_nav[obs.hero.y + dy, obs.hero.x + dx]
-        and not nethack.glyph_is_monster(int(obs.glyphs[obs.hero.y + dy, obs.hero.x + dx]))
+        and not nethack.glyph_is_monster(
+            int(obs.glyphs[obs.hero.y + dy, obs.hero.x + dx])
+        )
     ]
     target_loot = candidates[0] if candidates else (obs.hero.y, obs.hero.x + 1)
     raw_obs_mock = obs.raw_obs.copy()
     raw_obs_mock["chars"] = obs.chars.copy()
     raw_obs_mock["chars"][target_loot[0], target_loot[1]] = ord("[")
     raw_obs_mock["glyphs"] = obs.glyphs.copy()
-    raw_obs_mock["glyphs"][target_loot[0], target_loot[1]] = 2359  # non-monster floor/object glyph
+    raw_obs_mock["glyphs"][target_loot[0], target_loot[1]] = (
+        2359  # non-monster floor/object glyph
+    )
     obs_loot = adapter._extract_obs(raw_obs_mock)
 
     assert obs_loot.spatial.has_nearby_loot is True
     assert obs_loot.spatial.nearby_loot_pos is not None
-    assert math.hypot(obs_loot.spatial.nearby_loot_pos[0] - obs.hero.y, obs_loot.spatial.nearby_loot_pos[1] - obs.hero.x) <= 4
+    assert (
+        math.hypot(
+            obs_loot.spatial.nearby_loot_pos[0] - obs.hero.y,
+            obs_loot.spatial.nearby_loot_pos[1] - obs.hero.x,
+        )
+        <= 4
+    )
 
     # Step to loot
     obs_after, _, _, _, _ = adapter.step(Action(name="step_to_loot"))
@@ -170,13 +193,40 @@ def test_wand_actions_and_teleport_panic_escape():
     obs = adapter.reset(seed=109)
 
     # Inject teleport scroll and wand of striking into inventory
-    from lox.core.types import Item, InventoryView
-    test_inv = InventoryView([
-        Item(slot="a", name="+1 long sword", category="weapon", is_equipped=True, buc="uncursed"),
-        Item(slot="b", name="scroll of teleportation", category="scroll", is_equipped=False, buc="uncursed"),
-        Item(slot="c", name="wand of striking", category="wand", is_equipped=False, buc="uncursed"),
-        Item(slot="d", name="wand of teleportation", category="wand", is_equipped=False, buc="uncursed"),
-    ])
+    from lox.core.types import InventoryView, Item
+
+    test_inv = InventoryView(
+        [
+            Item(
+                slot="a",
+                name="+1 long sword",
+                category="weapon",
+                is_equipped=True,
+                buc="uncursed",
+            ),
+            Item(
+                slot="b",
+                name="scroll of teleportation",
+                category="scroll",
+                is_equipped=False,
+                buc="uncursed",
+            ),
+            Item(
+                slot="c",
+                name="wand of striking",
+                category="wand",
+                is_equipped=False,
+                buc="uncursed",
+            ),
+            Item(
+                slot="d",
+                name="wand of teleportation",
+                category="wand",
+                is_equipped=False,
+                buc="uncursed",
+            ),
+        ]
+    )
     assert test_inv.has_scroll_of_teleport is True
     assert test_inv.get_scroll_of_teleport_slot() == "b"
     assert test_inv.has_offensive_wand is True
@@ -185,7 +235,11 @@ def test_wand_actions_and_teleport_panic_escape():
     assert test_inv.get_wand_of_teleport_slot() == "d"
 
     # Test action dispatching
-    obs_zap, _, _, _, _ = adapter.step(Action(name="zap_offensive_wand", slot="c", target_pos=(obs.hero.y, obs.hero.x + 2)))
+    obs_zap, _, _, _, _ = adapter.step(
+        Action(
+            name="zap_offensive_wand", slot="c", target_pos=(obs.hero.y, obs.hero.x + 2)
+        )
+    )
     assert obs_zap is not None
 
     obs_tele, _, _, _, _ = adapter.step(Action(name="zap_wand_teleport", slot="d"))
@@ -199,6 +253,7 @@ def test_passive_hazard_nav_mask_and_cornered_retreat_safety():
     """Verify that passive hazards (floating eyes, gas spores, molds) are excluded from walkable_nav
     and that cornered retreat falls back to wait() rather than bumping/attacking them."""
     import nle.nethack as nh
+
     adapter = NetHackAdapter()
     obs = adapter.reset(seed=123)
 
@@ -219,7 +274,10 @@ def test_passive_hazard_nav_mask_and_cornered_retreat_safety():
 
     # Verify _build_walkable_nav excludes the floating eye
     walkable, walkable_nav = adapter._build_walkable_nav(obs)
-    assert walkable_nav[eye_pos[0], eye_pos[1]] is False or walkable_nav[eye_pos[0], eye_pos[1]] == 0
+    assert (
+        walkable_nav[eye_pos[0], eye_pos[1]] is False
+        or walkable_nav[eye_pos[0], eye_pos[1]] == 0
+    )
 
     # Set up observation with adjacent_floating_eye and no open retreat
     obs.combat.closest_hostile_name = "floating eye"
@@ -246,6 +304,7 @@ def test_peaceful_guard_and_active_hostile_discrimination():
     """Verify that Vault Guards and priests are recognized as peaceful species
     and that has_active_hostile correctly differentiates active predators from passive hazards."""
     import nle.nethack as nh
+
     adapter = NetHackAdapter()
     obs = adapter.reset(seed=456)
 
@@ -279,7 +338,7 @@ def test_peaceful_guard_and_active_hostile_discrimination():
 def test_food_poisoning_shield_and_universal_missiles():
     """Verify that corpses in inventory are excluded from has_food and get_food_slot,
     and that darts, arrows, and rocks are recognized as ranged missile ammunition."""
-    from lox.core.types import Item, InventoryView
+    from lox.core.types import InventoryView, Item
 
     corpse_item = Item(slot="d", name="a lichen corpse", category="food")
     food_ration = Item(slot="e", name="an uncursed food ration", category="food")
@@ -329,17 +388,18 @@ def test_adjacent_floating_eye_and_proactive_nutrition():
                 break
         except Exception:
             continue
-    raw_obs_mock["glyphs"][target_pos[0], target_pos[1]] = nethack.GLYPH_MON_OFF + eye_mon_id
+    raw_obs_mock["glyphs"][target_pos[0], target_pos[1]] = (
+        nethack.GLYPH_MON_OFF + eye_mon_id
+    )
     obs_extracted = adapter._extract_obs(raw_obs_mock)
 
     assert obs_extracted.combat.adjacent_floating_eye is True
     assert obs_extracted.combat.closest_hostile_name.lower() == "floating eye"
 
     # Throwing dagger at adjacent floating eye must execute throw sequence, not melee bump
-    obs_res, _, _, _, _ = adapter.step(Action(name="throw_dagger", target_pos=target_pos))
+    obs_res, _, _, _, _ = adapter.step(
+        Action(name="throw_dagger", target_pos=target_pos)
+    )
     assert obs_res is not None
 
     adapter.close()
-
-
-

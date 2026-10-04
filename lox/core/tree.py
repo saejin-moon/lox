@@ -2,18 +2,21 @@
 LOX Behavior Tree Core: Ultra-Fast Hierarchical Policy Engine.
 Composable, deterministic, microsecond execution tree.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from lox.core.types import Status, Action, Observation
+from lox.core.types import Action, Observation, Status
 
 
 @dataclass
 class Blackboard:
     """Shared state between nodes during a single turn's execution."""
+
     obs: Observation
     selected_action: Action | None = None
     target_pos: tuple[int, int] | None = None
@@ -75,7 +78,9 @@ class Condition(BehaviorNode):
     Returns SUCCESS if true, FAILURE if false.
     """
 
-    def __init__(self, predicate_fn: Callable[[Blackboard], bool], name: str = "Condition"):
+    def __init__(
+        self, predicate_fn: Callable[[Blackboard], bool], name: str = "Condition"
+    ):
         super().__init__(name)
         self.predicate_fn = predicate_fn
 
@@ -89,7 +94,11 @@ class ActionNode(BehaviorNode):
     Returns SUCCESS (action selected), FAILURE (cannot perform action), or RUNNING.
     """
 
-    def __init__(self, action_fn: Callable[[Blackboard], Status | Action | None], name: str = "Action"):
+    def __init__(
+        self,
+        action_fn: Callable[[Blackboard], Status | Action | None],
+        name: str = "Action",
+    ):
         super().__init__(name)
         self.action_fn = action_fn
 
@@ -128,7 +137,9 @@ class BehaviorTree:
         self.root = root
         self.name = name
 
-    def execute(self, obs: Observation, memory: dict[str, Any] | None = None) -> Action | None:
+    def execute(
+        self, obs: Observation, memory: dict[str, Any] | None = None
+    ) -> Action | None:
         """Evaluates the behavior tree for the current observation and returns the chosen Action."""
         bb = Blackboard(obs=obs, memory=memory or {})
         self.root.tick(bb)
@@ -136,10 +147,13 @@ class BehaviorTree:
 
     def create_runner(self, initial_obs: Observation | None = None) -> Any:
         """Provides a runner interface matching PolicyRunner for generator compatibility."""
+
         class BTRunner:
             def __init__(self, tree):
                 self.tree = tree
+
             def send(self, obs: Observation | None = None) -> Action:
                 act = self.tree.execute(obs)
                 return act if act is not None else Action(name="wait")
+
         return BTRunner(self)

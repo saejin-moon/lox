@@ -1,20 +1,21 @@
 """
 Unit tests for LOX Algorithmic Sub-Solvers (Altar BUC and Poison Harvesting).
 """
+
 from __future__ import annotations
 
 import numpy as np
-import pytest
+
+from lox.core.epistemic import EpistemicEngine
 from lox.core.types import (
-    Observation,
-    HeroState,
+    CombatView,
     DungeonView,
     FloorCorpse,
-    Item,
+    HeroState,
     InventoryView,
-    CombatView,
+    Item,
+    Observation,
 )
-from lox.core.epistemic import EpistemicEngine
 from lox.envs.solvers.altar_solver import AltarBUCSolver
 from lox.envs.solvers.poison_solver import PoisonResHarvestSolver
 
@@ -67,8 +68,23 @@ def test_poison_harvest_solver():
         hero=HeroState(y=10, x=10, has_poison_res=False),
         combat=CombatView(hostile_count_fov=0),
         corpses=[
-            FloorCorpse(name="soldier ant corpse", y=10, x=12, drop_turn=10, age_turns=5, is_poisonous=True, is_fresh=True),
-            FloorCorpse(name="jackal corpse", y=10, x=15, drop_turn=10, age_turns=5, is_fresh=True),
+            FloorCorpse(
+                name="soldier ant corpse",
+                y=10,
+                x=12,
+                drop_turn=10,
+                age_turns=5,
+                is_poisonous=True,
+                is_fresh=True,
+            ),
+            FloorCorpse(
+                name="jackal corpse",
+                y=10,
+                x=15,
+                drop_turn=10,
+                age_turns=5,
+                is_fresh=True,
+            ),
         ],
     )
     act = PoisonResHarvestSolver.plan_step(obs)
@@ -83,7 +99,15 @@ def test_poison_harvest_solver():
         hero=HeroState(y=10, x=12, has_poison_res=False),
         combat=CombatView(hostile_count_fov=0),
         corpses=[
-            FloorCorpse(name="soldier ant corpse", y=10, x=12, drop_turn=10, age_turns=5, is_poisonous=True, is_fresh=True),
+            FloorCorpse(
+                name="soldier ant corpse",
+                y=10,
+                x=12,
+                drop_turn=10,
+                age_turns=5,
+                is_poisonous=True,
+                is_fresh=True,
+            ),
         ],
     )
     act_standing = PoisonResHarvestSolver.plan_step(obs_standing)

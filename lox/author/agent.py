@@ -4,31 +4,35 @@ Queries LLMs across multiple providers (Gemini, OpenRouter, local vLLM, or Mock)
 enables interactive empirical data investigation (ReAct),
 logs token usage directly into DuckDB, and validates proposed policies against AST invariants.
 """
+
 from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import signal
 import threading
+import time
 import uuid
 from typing import Any
-import time
-import random
+
 import httpx
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
 
-from lox.author.prompts import build_system_prompt, build_user_prompt
-from lox.author.tools import DuckDBToolRegistry, OPENAI_TOOL_SPECS
-from lox.telemetry.tokens import log_token_usage
-from lox.dsl.compiler import compile_policy
-from lox.core.types import Observation, HeroState, Action
 import numpy as np
+
+from lox.author.prompts import build_system_prompt, build_user_prompt
+from lox.author.tools import OPENAI_TOOL_SPECS, DuckDBToolRegistry
+from lox.core.types import Action, HeroState, Observation
+from lox.dsl.compiler import compile_policy
+from lox.telemetry.tokens import log_token_usage
 
 
 class AuthorAgent:
@@ -52,7 +56,9 @@ class AuthorAgent:
         elif provider == "gemini":
             self.api_key = os.environ.get("GEMINI_API_KEY")
         else:
-            self.api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            self.api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get(
+                "GEMINI_API_KEY"
+            )
         self.base_url = base_url
         self.db_path = db_path
         self.max_tool_turns = max_tool_turns
@@ -72,7 +78,9 @@ class AuthorAgent:
             elif tool_name == "get_action_distribution":
                 return self.tools.get_action_distribution(run_id=args.get("run_id", ""))
             elif tool_name == "query_wiki":
-                return self.tools.query_wiki(args.get("query", ""), top_k=args.get("top_k", 2))
+                return self.tools.query_wiki(
+                    args.get("query", ""), top_k=args.get("top_k", 2)
+                )
             elif tool_name == "request_macro":
                 run_id = getattr(self, "_current_run_id", "synth_session")
                 return self.tools.request_macro(
@@ -89,7 +97,9 @@ class AuthorAgent:
             elif tool_name == "get_floor_stash_report":
                 return self.tools.get_floor_stash_report()
             elif tool_name == "get_death_autopsy_trace":
-                return self.tools.get_death_autopsy_trace(episode_id=args.get("episode_id", ""))
+                return self.tools.get_death_autopsy_trace(
+                    episode_id=args.get("episode_id", "")
+                )
             elif tool_name == "get_macro_requests":
                 return self.tools.get_macro_requests()
             return f"Unknown tool '{tool_name}'."
@@ -177,6 +187,7 @@ class Agent:
         trigger_reason: str,
     ) -> str:
         from google import genai
+
         client = genai.Client(api_key=self.api_key)
         model_name = self.model or "gemini-2.5-flash"
 
@@ -208,8 +219,12 @@ class Agent:
         prompt_tokens = 0
         completion_tokens = 0
         if hasattr(response, "usage_metadata") and response.usage_metadata:
-            prompt_tokens = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
-            completion_tokens = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            prompt_tokens = (
+                getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+            )
+            completion_tokens = (
+                getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            )
 
         log_token_usage(
             run_id=run_id,
@@ -238,7 +253,9 @@ class Agent:
                 f"Please pass --api-key or set {self.provider.upper()}_API_KEY in your environment or .env file."
             )
 
-        url = (self.base_url or "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions"
+        url = (self.base_url or "https://openrouter.ai/api/v1").rstrip(
+            "/"
+        ) + "/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key.strip()}",
             "HTTP-Referer": "https://github.com/saejin-moon/lox",
@@ -273,17 +290,26 @@ class Agent:
                     try:
                         resp = client.post(url, headers=headers, json=payload)
                         status = getattr(resp, "status_code", 200)
-                        if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
-                            backoff = (2 ** attempt) + random.uniform(1.0, 3.0)
+                        if (
+                            status in (429, 500, 502, 503, 504)
+                            and attempt < max_retries - 1
+                        ):
+                            backoff = (2**attempt) + random.uniform(1.0, 3.0)
                             time.sleep(backoff)
                             continue
                         break
-                    except (httpx.RemoteProtocolError, httpx.NetworkError, httpx.TimeoutException) as exc:
+                    except (
+                        httpx.RemoteProtocolError,
+                        httpx.NetworkError,
+                        httpx.TimeoutException,
+                    ) as exc:
                         if attempt < max_retries - 1:
-                            backoff = (2 ** attempt) + random.uniform(1.0, 3.0)
+                            backoff = (2**attempt) + random.uniform(1.0, 3.0)
                             time.sleep(backoff)
                             continue
-                        raise RuntimeError(f"OpenRouter network error after {max_retries} attempts: {exc}") from exc
+                        raise RuntimeError(
+                            f"OpenRouter network error after {max_retries} attempts: {exc}"
+                        ) from exc
 
                 if resp is None:
                     raise RuntimeError("No response received from OpenRouter API")
@@ -302,7 +328,14 @@ class Agent:
                         pass
 
                     # If model doesn't support tools, fallback to no-tools
-                    if use_tools and resp.status_code == 400 and ("tool" in err_msg.lower() or "not supported" in err_msg.lower()):
+                    if (
+                        use_tools
+                        and resp.status_code == 400
+                        and (
+                            "tool" in err_msg.lower()
+                            or "not supported" in err_msg.lower()
+                        )
+                    ):
                         use_tools = False
                         continue
 
@@ -328,24 +361,28 @@ class Agent:
                         fn_args = json.loads(tc["function"].get("arguments", "{}"))
                         tools_invoked.append(fn_name)
                         result_text = self._execute_tool(fn_name, fn_args)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": result_text,
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": result_text,
+                            }
+                        )
                 else:
                     # Model provided text/code without requesting more tools
                     break
             else:
                 # If tool budget ceiling was reached without dynamic exit, prompt for final code synthesis
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "You have concluded your empirical tool investigation. "
-                        "Based on all telemetry, incident logs, and knowledge retrieved above, "
-                        "synthesize your complete revised policy program now in a single ```python ... ``` block."
-                    ),
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You have concluded your empirical tool investigation. "
+                            "Based on all telemetry, incident logs, and knowledge retrieved above, "
+                            "synthesize your complete revised policy program now in a single ```python ... ``` block."
+                        ),
+                    }
+                )
                 payload = {
                     "model": model_name,
                     "messages": messages,
@@ -402,7 +439,9 @@ class Agent:
         )
 
         if self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):
-            url = (self.base_url or "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions"
+            url = (self.base_url or "https://openrouter.ai/api/v1").rstrip(
+                "/"
+            ) + "/chat/completions"
             headers = {
                 "Authorization": f"Bearer {self.api_key.strip()}",
                 "HTTP-Referer": "https://github.com/saejin-moon/lox",
@@ -410,7 +449,9 @@ class Agent:
             }
             messages = getattr(self, "_last_messages", [])
             messages.append({"role": "user", "content": repair_user_msg})
-            model_name = getattr(self, "_last_model_name", self.model or "google/gemini-2.5-flash")
+            model_name = getattr(
+                self, "_last_model_name", self.model or "google/gemini-2.5-flash"
+            )
 
             with httpx.Client(timeout=120.0) as client:
                 payload = {
@@ -455,7 +496,9 @@ class Agent:
                 return block.strip()
 
         # 2. Unclosed python code block containing policy code
-        match_unclosed = re.search(r"```(?:python)?\s*\n(.*?)(?:```|$)", response_text, re.DOTALL)
+        match_unclosed = re.search(
+            r"```(?:python)?\s*\n(.*?)(?:```|$)", response_text, re.DOTALL
+        )
         if match_unclosed:
             code = match_unclosed.group(1).strip()
             if "class " in code or "def " in code:
@@ -491,11 +534,17 @@ class Agent:
         user_prompt = build_user_prompt(current_policy, trigger_reason, status_report)
 
         if self.provider == "gemini":
-            raw_response = self._call_gemini(system_prompt, user_prompt, run_id, session_id, trigger_reason)
+            raw_response = self._call_gemini(
+                system_prompt, user_prompt, run_id, session_id, trigger_reason
+            )
         elif self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):
-            raw_response = self._call_openai_compatible(system_prompt, user_prompt, run_id, session_id, trigger_reason)
+            raw_response = self._call_openai_compatible(
+                system_prompt, user_prompt, run_id, session_id, trigger_reason
+            )
         else:
-            raw_response = self._call_mock(current_policy, trigger_reason, run_id, session_id)
+            raw_response = self._call_mock(
+                current_policy, trigger_reason, run_id, session_id
+            )
 
         # Compilation and Self-Repair Loop
         candidate_code = self.extract_code(raw_response)
@@ -503,55 +552,117 @@ class Agent:
 
         for attempt in range(max_repairs + 1):
             is_valid_structure = (
-                ("class " in candidate_code and ("def " in candidate_code or "run" in candidate_code))
-                or ("def " in candidate_code and ("yield" in candidate_code or "plan" in candidate_code or "return" in candidate_code))
+                "class " in candidate_code
+                and ("def " in candidate_code or "run" in candidate_code)
+            ) or (
+                "def " in candidate_code
+                and (
+                    "yield" in candidate_code
+                    or "plan" in candidate_code
+                    or "return" in candidate_code
+                )
             )
             if is_valid_structure:
                 try:
-                    tree = compile_policy(candidate_code, action_handlers=action_handlers)
+                    tree = compile_policy(
+                        candidate_code, action_handlers=action_handlers
+                    )
                     # Multi-scenario dry-run validation: execute test steps across scenarios with timeout shield
-                    from lox.core.types import HungerState, CombatView, FloorCorpse, SpatialView
+                    from lox.core.types import (
+                        CombatView,
+                        FloorCorpse,
+                        HungerState,
+                        SpatialView,
+                    )
 
                     test_scenarios = [
-                        ("normal", Observation(
-                            chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                            glyphs=np.zeros((21, 79), dtype=np.int16),
-                            hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
-                        )),
-                        ("hungry_unsafe_corpse", Observation(
-                            chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                            glyphs=np.zeros((21, 79), dtype=np.int16),
-                            hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=750, hunger_state=HungerState.HUNGRY),
-                            corpses=[FloorCorpse(name="kobold corpse", y=11, x=11, drop_turn=10, age_turns=100, is_poisonous=True, is_deadly=True, is_fresh=False)],
-                        )),
-                        ("floating_eye_combat", Observation(
-                            chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                            glyphs=np.zeros((21, 79), dtype=np.int16),
-                            hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
-                            combat=CombatView(
-                                hostile_count_fov=1,
-                                adjacent_hostile=True,
-                                adjacent_floating_eye=True,
-                                closest_hostile_name="floating eye",
-                                floating_eye_in_fov=True,
+                        (
+                            "normal",
+                            Observation(
+                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                                glyphs=np.zeros((21, 79), dtype=np.int16),
+                                hero=HeroState(
+                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
+                                ),
                             ),
-                        )),
-                        ("combat", Observation(
-                            chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                            glyphs=np.zeros((21, 79), dtype=np.int16),
-                            hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
-                            combat=CombatView(hostile_count_fov=1, adjacent_hostile=True),
-                        )),
-                        ("dead_end", Observation(
-                            chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                            glyphs=np.zeros((21, 79), dtype=np.int16),
-                            hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
-                            spatial=SpatialView(has_unsearched_dead_end=True),
-                        )),
+                        ),
+                        (
+                            "hungry_unsafe_corpse",
+                            Observation(
+                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                                glyphs=np.zeros((21, 79), dtype=np.int16),
+                                hero=HeroState(
+                                    y=10,
+                                    x=10,
+                                    hp=16,
+                                    max_hp=16,
+                                    depth=1,
+                                    turn=750,
+                                    hunger_state=HungerState.HUNGRY,
+                                ),
+                                corpses=[
+                                    FloorCorpse(
+                                        name="kobold corpse",
+                                        y=11,
+                                        x=11,
+                                        drop_turn=10,
+                                        age_turns=100,
+                                        is_poisonous=True,
+                                        is_deadly=True,
+                                        is_fresh=False,
+                                    )
+                                ],
+                            ),
+                        ),
+                        (
+                            "floating_eye_combat",
+                            Observation(
+                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                                glyphs=np.zeros((21, 79), dtype=np.int16),
+                                hero=HeroState(
+                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
+                                ),
+                                combat=CombatView(
+                                    hostile_count_fov=1,
+                                    adjacent_hostile=True,
+                                    adjacent_floating_eye=True,
+                                    closest_hostile_name="floating eye",
+                                    floating_eye_in_fov=True,
+                                ),
+                            ),
+                        ),
+                        (
+                            "combat",
+                            Observation(
+                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                                glyphs=np.zeros((21, 79), dtype=np.int16),
+                                hero=HeroState(
+                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
+                                ),
+                                combat=CombatView(
+                                    hostile_count_fov=1, adjacent_hostile=True
+                                ),
+                            ),
+                        ),
+                        (
+                            "dead_end",
+                            Observation(
+                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                                glyphs=np.zeros((21, 79), dtype=np.int16),
+                                hero=HeroState(
+                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
+                                ),
+                                spatial=SpatialView(has_unsearched_dead_end=True),
+                            ),
+                        ),
                     ]
 
                     def _step_with_timeout(runner, s_obs, timeout=1.0):
-                        if threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM"):
+                        if (
+                            threading.current_thread() is threading.main_thread()
+                            and hasattr(signal, "SIGALRM")
+                        ):
+
                             def _alarm_handler(signum, frame):
                                 raise TimeoutError("Step execution timed out")
 
@@ -564,13 +675,16 @@ class Agent:
                                 signal.signal(signal.SIGALRM, old_handler)
                         else:
                             import multiprocessing as mp
+
                             q = mp.Queue()
+
                             def _sub_worker():
                                 try:
                                     res = runner.send(s_obs)
                                     q.put(("OK", res))
                                 except Exception as exc:
                                     q.put(("ERR", exc))
+
                             p = mp.Process(target=_sub_worker)
                             p.start()
                             p.join(timeout=timeout)
@@ -592,15 +706,27 @@ class Agent:
                                 act = _step_with_timeout(runner, s_obs, timeout=1.0)
                             except TimeoutError:
                                 raise ValueError(
-                                    f"Policy entered an infinite loop without yielding under {s_name} scenario (step {step_i+1}). "
+                                    f"Policy entered an infinite loop without yielding under {s_name} scenario (step {step_i + 1}). "
                                     f"Ensure all generator subroutines yield an action (e.g. obs = yield wait()) on all execution paths."
                                 )
                             if not isinstance(act, Action):
-                                raise ValueError(f"Policy runner produced non-Action under {s_name} state: {act}")
-                            if s_name == "hungry_unsafe_corpse" and act.name == "eat_floor_corpse":
-                                raise ValueError("Invariant regression: Policy attempted to eat unsafe/poisonous corpse! Check corpse.is_safe first.")
-                            if s_name == "floating_eye_combat" and act.name == "melee_attack_hostile":
-                                raise ValueError("Invariant regression: Policy attempted melee attack against floating eye! Gaze will paralyze hero.")
+                                raise ValueError(
+                                    f"Policy runner produced non-Action under {s_name} state: {act}"
+                                )
+                            if (
+                                s_name == "hungry_unsafe_corpse"
+                                and act.name == "eat_floor_corpse"
+                            ):
+                                raise ValueError(
+                                    "Invariant regression: Policy attempted to eat unsafe/poisonous corpse! Check corpse.is_safe first."
+                                )
+                            if (
+                                s_name == "floating_eye_combat"
+                                and act.name == "melee_attack_hostile"
+                            ):
+                                raise ValueError(
+                                    "Invariant regression: Policy attempted melee attack against floating eye! Gaze will paralyze hero."
+                                )
                     return candidate_code, tree, None
                 except Exception as e:
                     last_error = f"Policy compilation/validation failed: {e}"
@@ -608,8 +734,15 @@ class Agent:
                 last_error = "Policy compilation failed: Extracted response does not contain valid policy code structure ('class Agent:' or 'def' missing)."
 
             # If compilation failed and repair attempts remain, ask the model to self-correct
-            if attempt < max_repairs and self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):
-                print(f"[Author Agent] Compilation issue detected ({last_error}). Triggering self-repair turn {attempt + 1}/{max_repairs}...")
+            if attempt < max_repairs and self.provider in (
+                "openrouter",
+                "vllm",
+                "llama_cpp",
+                "openai",
+            ):
+                print(
+                    f"[Author Agent] Compilation issue detected ({last_error}). Triggering self-repair turn {attempt + 1}/{max_repairs}..."
+                )
                 repaired_response = self._repair_code(
                     candidate_code=candidate_code,
                     compile_err=last_error,

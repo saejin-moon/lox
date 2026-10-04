@@ -4,15 +4,16 @@ Provides safe analytical functions (DuckDB SQL, death taxonomy, pacing stats),
 offline NetHack 3.6.6 Wiki retrieval (BM25 search), and a macro request queue
 for human post-run implementation.
 """
+
 from __future__ import annotations
 
 import os
 import re
-from typing import Any
+
 import duckdb
 
-from lox.author.wiki import WikiEngine
 from lox.author.requests import queue_macro_request
+from lox.author.wiki import WikiEngine
 
 
 def _format_table(cursor) -> str:
@@ -25,14 +26,19 @@ def _format_table(cursor) -> str:
         return "Query returned 0 rows."
     header_line = "| " + " | ".join(str(h) for h in headers) + " |"
     separator = "| " + " | ".join("---" for _ in headers) + " |"
-    row_lines = ["| " + " | ".join(str(val) if val is not None else "-" for val in r) + " |" for r in rows]
+    row_lines = [
+        "| " + " | ".join(str(val) if val is not None else "-" for val in r) + " |"
+        for r in rows
+    ]
     return "\n".join([header_line, separator] + row_lines)
 
 
 class DuckDBToolRegistry:
     """Registry of analytical tools, wiki retrieval, and macro requests for the Author Agent."""
 
-    def __init__(self, db_path: str = "data/lox.duckdb", wiki_db_path: str = "data/wiki_index.db"):
+    def __init__(
+        self, db_path: str = "data/lox.duckdb", wiki_db_path: str = "data/wiki_index.db"
+    ):
         self.db_path = db_path
         self.wiki = WikiEngine(db_path=wiki_db_path)
 
@@ -68,7 +74,17 @@ class DuckDBToolRegistry:
 
         clean_sql = sql.strip().rstrip(";")
         low = clean_sql.lower()
-        disallowed = ["insert", "update", "delete", "drop", "alter", "truncate", "create", "replace", "execute"]
+        disallowed = [
+            "insert",
+            "update",
+            "delete",
+            "drop",
+            "alter",
+            "truncate",
+            "create",
+            "replace",
+            "execute",
+        ]
         for word in disallowed:
             if re.search(rf"\b{word}\b", low):
                 return f"Error: Mutative statement '{word.upper()}' is forbidden. Only SELECT queries are permitted."
@@ -217,7 +233,11 @@ class DuckDBToolRegistry:
         try:
             with open(path, "r") as f:
                 content = f.read().strip()
-            return f"### Macro Requests Backlog:\n{content}" if content else "Macro requests queue is empty."
+            return (
+                f"### Macro Requests Backlog:\n{content}"
+                if content
+                else "Macro requests queue is empty."
+            )
         except Exception as e:
             return f"Error reading macro requests: {e}"
 
@@ -248,12 +268,24 @@ class DuckDBToolRegistry:
         if not rows:
             return f"No visited tiles found for depth {depth_int}."
 
-        char_map = {"room": ".", "corridor": "#", "doorway": "+", "fountain": "{", "altar": "_", "trap": "^", "stairs_down": ">", "stairs_up": "<"}
+        char_map = {
+            "room": ".",
+            "corridor": "#",
+            "doorway": "+",
+            "fountain": "{",
+            "altar": "_",
+            "trap": "^",
+            "stairs_down": ">",
+            "stairs_up": "<",
+        }
         grid = [[" " for _ in range(79)] for _ in range(21)]
         for y, x, ttype in rows:
             grid[y][x] = char_map.get(ttype, ".")
 
-        lines = [f"### Dungeon Topology for Depth {depth_int} (Visited Footprint):", "```"]
+        lines = [
+            f"### Dungeon Topology for Depth {depth_int} (Visited Footprint):",
+            "```",
+        ]
         for row in grid:
             lines.append("".join(row).rstrip())
         lines.append("```")
@@ -319,7 +351,11 @@ class DuckDBToolRegistry:
 
         con = duckdb.connect(self.db_path, read_only=True)
         try:
-            where = f"WHERE episode_id = '{episode_id}'" if episode_id else "WHERE episode_id = (SELECT episode_id FROM episodes ORDER BY rowid DESC LIMIT 1)"
+            where = (
+                f"WHERE episode_id = '{episode_id}'"
+                if episode_id
+                else "WHERE episode_id = (SELECT episode_id FROM episodes ORDER BY rowid DESC LIMIT 1)"
+            )
             cur = con.execute(f"""
                 SELECT turn, depth, hp, max_hp, hunger, tile_type, action, closest_hostile_name, closest_hostile_dist, message
                 FROM ticks
@@ -329,7 +365,7 @@ class DuckDBToolRegistry:
             """)
             res = _format_table(cur)
             con.close()
-            return f"### Final 15 Ticks Autopsy Trace:\n" + res
+            return "### Final 15 Ticks Autopsy Trace:\n" + res
         except Exception as e:
             con.close()
             return f"Error querying autopsy trace: {e}"

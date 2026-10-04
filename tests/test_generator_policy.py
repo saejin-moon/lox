@@ -1,6 +1,4 @@
-import numpy as np
-import pytest
-from lox.core.types import Observation, HeroState, Action
+from lox.core.types import HeroState, Observation
 from lox.dsl.compiler import compile_policy
 
 

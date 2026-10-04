@@ -4,6 +4,7 @@ LOX High-Volume Telemetry Collector.
 Runs multi-episode, multi-role NetHack campaigns to amass comprehensive telemetry
 in data/lox.duckdb for deep empirical analysis by the LLM Author Agent.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -14,9 +15,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.run_nethack import run_nethack_eval
 from lox.author.tools import DuckDBToolRegistry
 from lox.telemetry.tokens import get_token_usage_summary
+from scripts.run_nethack import run_nethack_eval
 
 
 def collect_campaign(
@@ -28,7 +29,9 @@ def collect_campaign(
     print("=" * 70)
     print("LOX High-Volume Telemetry Data Collection Campaign")
     print(f"Target Roles: {roles}")
-    print(f"Episodes per role: {episodes_per_role} (Total: {len(roles) * episodes_per_role})")
+    print(
+        f"Episodes per role: {episodes_per_role} (Total: {len(roles) * episodes_per_role})"
+    )
     print(f"Max turns per episode: {max_turns}")
     print(f"Database Target: {db_path}")
     print("=" * 70)
@@ -38,7 +41,9 @@ def collect_campaign(
     for idx, role in enumerate(roles):
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"collect_{role}_{ts}"
-        print(f"\n[{idx+1}/{len(roles)}] Launching collection batch for role: {role.upper()} (Run ID: {run_id})...")
+        print(
+            f"\n[{idx + 1}/{len(roles)}] Launching collection batch for role: {role.upper()} (Run ID: {run_id})..."
+        )
         run_nethack_eval(
             episodes=episodes_per_role,
             max_turns=max_turns,
@@ -74,10 +79,16 @@ def collect_campaign(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--roles", default="valkyrie,barbarian", help="Comma-separated roles")
+    parser.add_argument(
+        "--roles", default="valkyrie,barbarian", help="Comma-separated roles"
+    )
     parser.add_argument("--episodes", type=int, default=10, help="Episodes per role")
-    parser.add_argument("--max-turns", type=int, default=400, help="Max turns per episode")
-    parser.add_argument("--db-path", default="data/lox.duckdb", help="Path to DuckDB database")
+    parser.add_argument(
+        "--max-turns", type=int, default=400, help="Max turns per episode"
+    )
+    parser.add_argument(
+        "--db-path", default="data/lox.duckdb", help="Path to DuckDB database"
+    )
     args = parser.parse_args()
 
     role_list = [r.strip().lower() for r in args.roles.split(",") if r.strip()]

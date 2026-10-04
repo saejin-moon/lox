@@ -1,6 +1,6 @@
 import numpy as np
-import pytest
-import nle.nethack as nethack
+from nle import nethack
+
 from lox.core.types import Action, Observation
 from lox.envs.nethack import NetHackAdapter
 
@@ -35,13 +35,14 @@ def test_nethack_interlocks():
     assert adapter.can_safely_pray(turn=500) is True
     adapter.last_prayer_turn = 450
     assert adapter.can_safely_pray(turn=500) is False  # 50 turns < 350
-    assert adapter.can_safely_pray(turn=850) is True   # 400 turns >= 350
+    assert adapter.can_safely_pray(turn=850) is True  # 400 turns >= 350
 
     adapter.close()
 
 
 def test_door_glyph_discrimination_and_open_fallback():
     import nle.nethack as nh
+
     adapter = NetHackAdapter()
     obs = adapter.reset(seed=42)
 
@@ -123,17 +124,26 @@ def test_dismiss_more_ynq_prompts():
     obs = adapter.reset(seed=42)
 
     # Test that [ynq] prompts are auto-dismissed with 'n'
-    fake_obs = {"message": "Do you want your possessions identified? [ynq] (n)", "misc": [0, 0, 0]}
+    fake_obs = {
+        "message": "Do you want your possessions identified? [ynq] (n)",
+        "misc": [0, 0, 0],
+    }
     cleaned_obs, term, trunc = adapter._dismiss_more(fake_obs, False, False)
     assert cleaned_obs is not None
 
     # Test that [ynaq] post-death prompts are auto-dismissed with 'n'
-    fake_obs2 = {"message": "Do you want an account of creatures vanquished? [ynaq] (n)", "misc": [0, 0, 0]}
+    fake_obs2 = {
+        "message": "Do you want an account of creatures vanquished? [ynaq] (n)",
+        "misc": [0, 0, 0],
+    }
     cleaned_obs2, term2, trunc2 = adapter._dismiss_more(fake_obs2, False, False)
     assert cleaned_obs2 is not None
 
     # Test that floor corpse eating prompt is answered with 'y' (not rejected with 'n')
-    fake_obs3 = {"message": "There is a goblin corpse here; eat it? [ynq] (n)", "misc": [0, 0, 0]}
+    fake_obs3 = {
+        "message": "There is a goblin corpse here; eat it? [ynq] (n)",
+        "misc": [0, 0, 0],
+    }
     cleaned_obs3, term3, trunc3 = adapter._dismiss_more(fake_obs3, False, False)
     assert cleaned_obs3 is not None
 
@@ -171,11 +181,13 @@ def test_locked_door_breach_and_poison_gating():
     # Mock step to record action
     recorded_actions = []
     orig_step = adapter.step
+
     def mock_step(action):
         recorded_actions.append(action.name)
         if action.name in ("kick_closed_door", "open_door"):
             return obs_test, 0.0, False, False, {}
         return orig_step(action)
+
     adapter.step = mock_step
 
     adapter._step_or_breach(obs_test, 0, 1)
@@ -205,5 +217,3 @@ def test_hero_position_walkability_and_dead_end_stagnation_recovery():
     assert obs_next is not None
 
     adapter.close()
-
-

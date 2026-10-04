@@ -4,6 +4,7 @@ Safely validates policy programs (classes, generators, and behavior trees).
 Rejects dangerous system calls (import, eval, exec, filesystem access) while
 allowing full procedural flow (while, for, classes, methods, yield, self).
 """
+
 from __future__ import annotations
 
 import ast
@@ -11,27 +12,65 @@ import re
 import threading
 from typing import Any
 
-from lox.dsl.schema import ALLOWED_PREDICATES, ALLOWED_ACTIONS, ENUM_CONSTANTS
+from lox.dsl.schema import ALLOWED_ACTIONS, ALLOWED_PREDICATES, ENUM_CONSTANTS
 
 
 class DSLValidationError(Exception):
     """Raised when policy code violates grammar, schema, or safety invariants."""
-    pass
 
 
 # Whitelist of safe Python built-in identifiers
 SAFE_BUILTINS = {
-    "range", "len", "min", "max", "abs", "sum", "enumerate", "zip",
-    "int", "float", "str", "bool", "list", "dict", "set", "tuple",
-    "print", "round", "isinstance", "getattr", "hasattr", "any", "all",
-    "sorted", "reversed", "chr", "ord", "True", "False", "None",
+    "range",
+    "len",
+    "min",
+    "max",
+    "abs",
+    "sum",
+    "enumerate",
+    "zip",
+    "int",
+    "float",
+    "str",
+    "bool",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "print",
+    "round",
+    "isinstance",
+    "getattr",
+    "hasattr",
+    "any",
+    "all",
+    "sorted",
+    "reversed",
+    "chr",
+    "ord",
+    "True",
+    "False",
+    "None",
 }
 
 # Special framework keywords and type names
 SPECIAL_NAMES = {
-    "plan", "self", "args", "kwargs", "Action", "Status", "Agent", "Policy",
-    "Blackboard", "obs", "Observation", "Item", "HeroState",
-    "GoalDirective", "GoalAgenda", "ItemBeliefState",
+    "plan",
+    "self",
+    "args",
+    "kwargs",
+    "Action",
+    "Status",
+    "Agent",
+    "Policy",
+    "Blackboard",
+    "obs",
+    "Observation",
+    "Item",
+    "HeroState",
+    "GoalDirective",
+    "GoalAgenda",
+    "ItemBeliefState",
 }
 
 
@@ -139,11 +178,15 @@ class SafeASTVisitor(ast.NodeVisitor):
     def visit_FunctionDef(self, node: ast.FunctionDef):
         self.functions[node.name] = node
         # Check if function is a generator subroutine (contains yield/yield from)
-        has_yield = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node))
+        has_yield = any(
+            isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node)
+        )
         if has_yield:
             for n in ast.walk(node):
                 if isinstance(n, ast.Return) and n.value is not None:
-                    if isinstance(n.value, ast.Constant) and isinstance(n.value.value, bool):
+                    if isinstance(n.value, ast.Constant) and isinstance(
+                        n.value.value, bool
+                    ):
                         raise DSLValidationError(
                             f"Generator subroutine '{node.name}' contains 'return {n.value.value}'. "
                             f"Generator subroutines called via 'obs = yield from self.{node.name}(obs)' must 'return obs' "
@@ -168,7 +211,9 @@ class SafeASTVisitor(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute):
         # Strict anti-dunder exploit guard (blocks __class__, __subclasses__, __globals__)
         if node.attr.startswith("__"):
-            raise DSLValidationError(f"Access to private dunder attribute '{node.attr}' is strictly forbidden.")
+            raise DSLValidationError(
+                f"Access to private dunder attribute '{node.attr}' is strictly forbidden."
+            )
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign):
@@ -233,8 +278,18 @@ class SafeASTVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call):
         if isinstance(node.func, ast.Name):
             name = node.func.id
-            if name in ("eval", "exec", "open", "__import__", "globals", "locals", "compile"):
-                raise DSLValidationError(f"Execution of unsafe builtin '{name}()' is strictly forbidden.")
+            if name in (
+                "eval",
+                "exec",
+                "open",
+                "__import__",
+                "globals",
+                "locals",
+                "compile",
+            ):
+                raise DSLValidationError(
+                    f"Execution of unsafe builtin '{name}()' is strictly forbidden."
+                )
             if (
                 name not in ALLOWED_ACTIONS
                 and name not in self.functions
@@ -243,12 +298,22 @@ class SafeASTVisitor(ast.NodeVisitor):
                 and name not in SAFE_BUILTINS
                 and name not in SPECIAL_NAMES
             ):
-                raise DSLValidationError(f"Unknown or unapproved action/function call: '{name}()'.")
+                raise DSLValidationError(
+                    f"Unknown or unapproved action/function call: '{name}()'."
+                )
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name):
         var_name = node.id
-        if var_name in ("eval", "exec", "open", "__import__", "globals", "locals", "compile"):
+        if var_name in (
+            "eval",
+            "exec",
+            "open",
+            "__import__",
+            "globals",
+            "locals",
+            "compile",
+        ):
             raise DSLValidationError(f"Identifier '{var_name}' is forbidden.")
         if (
             var_name not in ALLOWED_PREDICATES
@@ -324,11 +389,15 @@ def _parse_with_expanded_stack(code: str) -> ast.Module:
         if result[1]:
             raise result[1]
         if result[0] is None:
-            raise MemoryError("Parser stack overflowed - Python source too complex to parse")
+            raise MemoryError(
+                "Parser stack overflowed - Python source too complex to parse"
+            )
         return result[0]
 
 
-def parse_and_validate(code_str: str) -> tuple[ast.Module, list[str], dict[str, ast.FunctionDef], SafeASTVisitor]:
+def parse_and_validate(
+    code_str: str,
+) -> tuple[ast.Module, list[str], dict[str, ast.FunctionDef], SafeASTVisitor]:
     """
     Parses policy string and executes strict AST validation.
     Returns (AST module, plan_order list, dictionary of macro FunctionDefs, visitor instance).
@@ -346,7 +415,9 @@ def parse_and_validate(code_str: str) -> tuple[ast.Module, list[str], dict[str, 
     visitor.visit(tree)
 
     if not visitor.functions and not visitor.classes:
-        raise DSLValidationError("Policy program must define at least one function or class.")
+        raise DSLValidationError(
+            "Policy program must define at least one function or class."
+        )
 
     plan_order = visitor.plan_order
     if not plan_order and not visitor.classes and not visitor.has_generator:

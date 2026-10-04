@@ -4,16 +4,17 @@ Allows the LLM Author Agent to formally request new atomic primitives and macros
 that are not yet implemented in the engine, logging them to DuckDB and a markdown queue
 for human developer implementation post-run.
 """
+
 from __future__ import annotations
 
 import datetime
 import os
 import uuid
 from typing import Any
+
 import duckdb
 
 from lox.telemetry.consolidator import init_db
-
 
 QUEUE_FILE = "data/macro_requests.md"
 
@@ -79,9 +80,9 @@ def queue_macro_request(
     os.makedirs(os.path.dirname(os.path.abspath(queue_file)), exist_ok=True)
     md_entry = f"""
 ### [MACRO REQUEST] `{macro_name}` (Priority: {clean_priority})
-- **Request ID**: `{req_id}` | **Run ID**: `{run_id}` | **Timestamp**: {ts.strftime('%Y-%m-%d %H:%M:%S')}
+- **Request ID**: `{req_id}` | **Run ID**: `{run_id}` | **Timestamp**: {ts.strftime("%Y-%m-%d %H:%M:%S")}
 - **Rationale**: {rationale}
-- **Proposed Interface**: `{proposed_interface or 'N/A'}`
+- **Proposed Interface**: `{proposed_interface or "N/A"}`
 - **Status**: `pending`
 
 ---
@@ -101,7 +102,9 @@ def queue_macro_request(
     }
 
 
-def list_macro_requests(status: str = "pending", db_path: str = "data/lox.duckdb") -> list[dict[str, Any]]:
+def list_macro_requests(
+    status: str = "pending", db_path: str = "data/lox.duckdb"
+) -> list[dict[str, Any]]:
     """Returns all queued macro requests matching status."""
     if not os.path.exists(db_path):
         return []

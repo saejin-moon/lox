@@ -1,8 +1,7 @@
-import os
-import duckdb
 import pytest
-from lox.author.tools import DuckDBToolRegistry
+
 from lox.author.agent import AuthorAgent
+from lox.author.tools import DuckDBToolRegistry
 from lox.telemetry.consolidator import init_db
 from lox.telemetry.tokens import get_token_usage_summary
 
@@ -37,7 +36,9 @@ def test_duckdb_tool_registry(populated_db):
     assert "3 rows" in schema
 
     # 2. Test query_duckdb with safe SELECT
-    res = registry.query_duckdb("SELECT death_reason, count(*) as count FROM episodes GROUP BY 1")
+    res = registry.query_duckdb(
+        "SELECT death_reason, count(*) as count FROM episodes GROUP BY 1"
+    )
     assert "starved to death" in res
     assert "2" in res
 
@@ -65,7 +66,7 @@ def test_duckdb_tool_registry(populated_db):
 
 def test_author_agent_synthesis_and_token_tracking(populated_db):
     agent = AuthorAgent(provider="mock", db_path=populated_db)
-    
+
     current_code = """
 def explore():
     step_to_frontier()
@@ -89,5 +90,7 @@ plan = [explore]
     assert tokens["total_calls"] == 1
     assert tokens["prompt_tokens"] > 0
     assert tokens["completion_tokens"] > 0
-    assert tokens["total_tokens"] == tokens["prompt_tokens"] + tokens["completion_tokens"]
+    assert (
+        tokens["total_tokens"] == tokens["prompt_tokens"] + tokens["completion_tokens"]
+    )
     assert tokens["total_cost_usd"] > 0

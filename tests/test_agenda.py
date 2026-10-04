@@ -1,12 +1,17 @@
 """
 Unit tests for LOX Hybrid HTN-BT Goal Agenda and DSL integration.
 """
+
 from __future__ import annotations
 
 import numpy as np
-import pytest
-from lox.core.agenda import GoalAgenda, GoalDirective, AgendaView
-from lox.core.types import Observation, HeroState, DungeonView, HeroStatus, EpistemicView
+
+from lox.core.agenda import AgendaView, GoalAgenda, GoalDirective
+from lox.core.types import (
+    EpistemicView,
+    HeroState,
+    Observation,
+)
 from lox.dsl.compiler import compile_policy
 
 
@@ -26,7 +31,9 @@ def test_goal_agenda_stack_operations():
 
 
 def test_goal_agenda_milestone_evaluation():
-    agenda = GoalAgenda([GoalDirective.DESCEND_STAIRS, GoalDirective.COLLECT_POISON_RES])
+    agenda = GoalAgenda(
+        [GoalDirective.DESCEND_STAIRS, GoalDirective.COLLECT_POISON_RES]
+    )
     assert agenda.active_goal == GoalDirective.COLLECT_POISON_RES
 
     obs_no_res = Observation(

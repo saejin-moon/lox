@@ -3,17 +3,21 @@ LOX Spatial Engine: High-Performance Standalone Spatial Operations.
 Pure NumPy and Numba-accelerated algorithms with zero environment coupling.
 Achieves <15 µs latency for pathfinding and frontier discovery.
 """
+
 from __future__ import annotations
 
 from typing import Any
+
 import numpy as np
 
 try:
     from numba import njit
 except ImportError:
+
     def njit(*args, **kwargs):
         def decorator(fn):
             return fn
+
         return decorator
 
 
@@ -236,7 +240,6 @@ def _astar_path(
     return path
 
 
-
 @njit(fastmath=True, nogil=True, cache=True)
 def _compute_dead_ends_mask_kernel(
     chars: np.ndarray,
@@ -251,10 +254,10 @@ def _compute_dead_ends_mask_kernel(
     card_dy = np.array([-1, 1, 0, 0], dtype=np.int32)
     card_dx = np.array([0, 0, -1, 1], dtype=np.int32)
 
-    ord_plus = 43   # '+'
-    ord_hash = 35   # '#'
-    ord_dash = 45   # '-'
-    ord_bar = 124   # '|'
+    ord_plus = 43  # '+'
+    ord_hash = 35  # '#'
+    ord_dash = 45  # '-'
+    ord_bar = 124  # '|'
     ord_space = 32  # ' '
 
     for cy in range(h):
@@ -285,7 +288,12 @@ def _compute_dead_ends_mask_kernel(
                     nx = cx + card_dx[i]
                     if 0 <= ny < h and 0 <= nx < w:
                         c_adj = chars[ny, nx]
-                        if c_adj == ord_dash or c_adj == ord_bar or c_adj == ord_space or c_adj == 0:
+                        if (
+                            c_adj == ord_dash
+                            or c_adj == ord_bar
+                            or c_adj == ord_space
+                            or c_adj == 0
+                        ):
                             adj_wall += 1
                 if adj_wall > 0 and (((cy + cx) % 2 == 0) or adj_wall >= 2):
                     dead_ends_mask[cy, cx] = True
@@ -297,9 +305,15 @@ class SpatialEngine:
     """Python-facing interface for all spatial operations."""
 
     @staticmethod
-    def distance_grid(start: tuple[int, int], walkable: np.ndarray, is_door: np.ndarray | None = None) -> np.ndarray:
+    def distance_grid(
+        start: tuple[int, int], walkable: np.ndarray, is_door: np.ndarray | None = None
+    ) -> np.ndarray:
         w = walkable.astype(np.bool_)
-        d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
+        d = (
+            is_door.astype(np.bool_)
+            if is_door is not None
+            else np.zeros(w.shape, dtype=np.bool_)
+        )
         return _bfs_distance_grid(int(start[0]), int(start[1]), w, d)
 
     @staticmethod
@@ -312,9 +326,19 @@ class SpatialEngine:
     ) -> list[tuple[int, int]]:
         """Returns list of (y, x) steps from start to goal (excluding start)."""
         w = walkable.astype(np.bool_)
-        c = cost_grid.astype(np.float32) if cost_grid is not None else np.zeros(w.shape, dtype=np.float32)
-        d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
-        arr = _astar_path(int(start[0]), int(start[1]), int(goal[0]), int(goal[1]), w, c, d)
+        c = (
+            cost_grid.astype(np.float32)
+            if cost_grid is not None
+            else np.zeros(w.shape, dtype=np.float32)
+        )
+        d = (
+            is_door.astype(np.bool_)
+            if is_door is not None
+            else np.zeros(w.shape, dtype=np.bool_)
+        )
+        arr = _astar_path(
+            int(start[0]), int(start[1]), int(goal[0]), int(goal[1]), w, c, d
+        )
         return [(int(arr[i, 0]), int(arr[i, 1])) for i in range(len(arr))]
 
     @staticmethod
@@ -332,7 +356,11 @@ class SpatialEngine:
         else:
             v = visited.astype(np.bool_)
             frontier_mask = w & (~v)
-        d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
+        d = (
+            is_door.astype(np.bool_)
+            if is_door is not None
+            else np.zeros(w.shape, dtype=np.bool_)
+        )
         ty, tx = _find_nearest_target(int(start[0]), int(start[1]), w, frontier_mask, d)
         return (ty, tx) if ty >= 0 else None
 
@@ -346,7 +374,11 @@ class SpatialEngine:
         """Finds closest tile matching target_mask reachable from start."""
         w = walkable.astype(np.bool_)
         t = target_mask.astype(np.bool_)
-        d = is_door.astype(np.bool_) if is_door is not None else np.zeros(w.shape, dtype=np.bool_)
+        d = (
+            is_door.astype(np.bool_)
+            if is_door is not None
+            else np.zeros(w.shape, dtype=np.bool_)
+        )
         ty, tx = _find_nearest_target(int(start[0]), int(start[1]), w, t, d)
         return (ty, tx) if ty >= 0 else None
 
@@ -415,6 +447,8 @@ def build_walkable_mask(obs_or_chars: Any) -> np.ndarray:
     # Open doorways in NetHack draw with '-' or '|' but have CMAP glyphs 12 (ndoor), 13 (vodoor), 14 (hodoor)
     if glyphs is not None:
         GLYPH_CMAP_OFF = 2359
-        open_doors = (glyphs >= (GLYPH_CMAP_OFF + 12)) & (glyphs <= (GLYPH_CMAP_OFF + 14))
+        open_doors = (glyphs >= (GLYPH_CMAP_OFF + 12)) & (
+            glyphs <= (GLYPH_CMAP_OFF + 14)
+        )
         walkable[open_doors] = True
     return walkable

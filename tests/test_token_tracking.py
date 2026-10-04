@@ -1,7 +1,6 @@
-import os
 import duckdb
-import pytest
-from lox.telemetry.tokens import log_token_usage, get_token_usage_summary
+
+from lox.telemetry.tokens import get_token_usage_summary, log_token_usage
 
 
 def test_token_usage_logging(tmp_path):
@@ -45,7 +44,9 @@ def test_token_usage_logging(tmp_path):
 
     # Verify DuckDB direct query
     con = duckdb.connect(db_file, read_only=True)
-    rows = con.execute("SELECT trigger_reason, total_tokens, tools_called FROM token_usage WHERE run_id = 'run_01'").fetchall()
+    rows = con.execute(
+        "SELECT trigger_reason, total_tokens, tools_called FROM token_usage WHERE run_id = 'run_01'"
+    ).fetchall()
     con.close()
     assert len(rows) == 2
     assert rows[0][0] == "Floor pacing stall"

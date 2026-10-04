@@ -2,30 +2,40 @@
 """
 LOX MiniHack Runner: High-throughput policy evaluation on MiniHack mazes.
 """
+
 from __future__ import annotations
 
 import argparse
 import os
 import sys
 import time
+
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lox.core.types import Action, Status
 from lox.core.spatial import SpatialEngine
 from lox.core.tree import Blackboard
+from lox.core.types import Action, Status
 from lox.dsl.compiler import compile_policy
 from lox.envs.minihack import MiniHackAdapter
 
-
-WALKABLE_CHARS = {ord("."), ord("#"), ord("+"), ord("'"), ord("@"), ord(">"), ord("<"), ord("$")}
+WALKABLE_CHARS = {
+    ord("."),
+    ord("#"),
+    ord("+"),
+    ord("'"),
+    ord("@"),
+    ord(">"),
+    ord("<"),
+    ord("$"),
+}
 
 
 def get_walkable(chars: np.ndarray) -> np.ndarray:
     mask = np.zeros(chars.shape, dtype=bool)
     for c in WALKABLE_CHARS:
-        mask |= (chars == c)
+        mask |= chars == c
     return mask
 
 
@@ -54,7 +64,9 @@ def run_minihack_eval(
         chars = bb.obs.chars
         hero_pos = (bb.obs.hero.y, bb.obs.hero.x)
         walkable = get_walkable(chars)
-        frontier = SpatialEngine.find_nearest_frontier(hero_pos, walkable, adapter.visited)
+        frontier = SpatialEngine.find_nearest_frontier(
+            hero_pos, walkable, adapter.visited
+        )
         if frontier is not None:
             path = SpatialEngine.find_path(hero_pos, frontier, walkable)
             if path:
@@ -113,7 +125,7 @@ plan = [
             success_steps.append(ep_steps)
 
         status_str = "SOLVED" if ep_solved else "FAILED"
-        print(f"Episode {ep+1:2d}/{episodes}: {status_str} in {ep_steps:3d} steps")
+        print(f"Episode {ep + 1:2d}/{episodes}: {status_str} in {ep_steps:3d} steps")
 
     elapsed = time.perf_counter() - t0
     adapter.close()
@@ -124,7 +136,9 @@ plan = [
 
     print("\n" + "=" * 50)
     print(f"MiniHack Evaluation: {task}")
-    print(f"Episodes: {episodes} | Solved: {solved_count}/{episodes} ({success_rate:.1f}%)")
+    print(
+        f"Episodes: {episodes} | Solved: {solved_count}/{episodes} ({success_rate:.1f}%)"
+    )
     print(f"Mean Steps on Success: {mean_steps:.1f}")
     print(f"Total Time: {elapsed:.2f}s | Throughput: {sps:.1f} steps/second")
     print("=" * 50)

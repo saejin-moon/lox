@@ -5,20 +5,21 @@ Features a 2-Tier Reactive Trigger Architecture:
 1. Online Intra-Episode Interventions: Floor Stagnation, Starvation Crisis.
 2. Offline Cross-Episode Batch Interventions: Fatal Taxonomy Cluster, Milestone Breakthrough.
 """
+
 from __future__ import annotations
 
 from enum import Enum, auto
-from typing import Any
+
 from lox.telemetry.recorder import FlightRecorder
 
 
 class TriggerType(Enum):
     NONE = auto()
-    STALL = auto()           # >=80 turns on single level with no new frontier
-    STARVATION = auto()      # hunger >= WEAK with 0 food in inventory
-    CLUSTER_DEATH = auto()   # 3+ recent deaths sharing identical fatality cause
-    MILESTONE = auto()       # New depth or achievement milestone reached
-    BATCH_END = auto()       # Periodic evaluation batch boundary
+    STALL = auto()  # >=80 turns on single level with no new frontier
+    STARVATION = auto()  # hunger >= WEAK with 0 food in inventory
+    CLUSTER_DEATH = auto()  # 3+ recent deaths sharing identical fatality cause
+    MILESTONE = auto()  # New depth or achievement milestone reached
+    BATCH_END = auto()  # Periodic evaluation batch boundary
 
 
 class DynamicTriggerEngine:

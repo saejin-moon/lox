@@ -2,6 +2,7 @@
 LOX DSL Schema: Comprehensive NetHack Vocabulary Whitelist.
 Exposes full NetHack action primitives, rich tactical predicates, and constants.
 """
+
 from __future__ import annotations
 
 # Whitelist of allowed predicate identifiers and their valid types
@@ -22,7 +23,6 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "hunger_state": "enum",
     "dungeon_branch": "str",
     "is_dead": "bool",
-
     # Status Effects
     "is_blind": "bool",
     "is_poisoned": "bool",
@@ -36,7 +36,6 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "is_levitating": "bool",
     "is_encumbered": "bool",
     "encumbrance_level": "enum",
-
     # Tactical Combat Environment
     "adjacent_hostile": "bool",
     "hostile_count_fov": "int",
@@ -60,7 +59,6 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "has_safe_melee_target": "bool",
     "has_active_hostile": "bool",
     "active_hostile_count": "int",
-
     # Spatial Topology & Navigation
     "stairs_down_known": "bool",
     "stairs_up_known": "bool",
@@ -74,7 +72,6 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "unvisited_frontier_count": "int",
     "floor_explored": "bool",
     "has_nearby_loot": "bool",
-
     # Dungeon Features & Environment
     "tile_type": "str",
     "in_shop": "bool",
@@ -92,7 +89,6 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "altar_is_aligned": "bool",
     "adjacent_trap": "bool",
     "standing_on_trap": "bool",
-
     # Nutrition & Corpse Intrinsics
     "has_food": "bool",
     "has_healing": "bool",
@@ -103,7 +99,6 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "corpse_is_deadly": "bool",
     "has_poison_res": "bool",
     "can_harvest_poison": "bool",
-
     # Equipment & Item Intrinsics
     "has_wand_of_teleport": "bool",
     "has_wand_of_digging": "bool",
@@ -116,13 +111,11 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "weapon_is_cursed": "bool",
     "can_forge_excalibur": "bool",
     "fountain_in_fov": "bool",
-
     # Epistemic POMDP Belief & Safety Gates
     "untested_buc_count": "int",
     "has_untested_items": "bool",
     "can_safely_wear_armor": "bool",
     "can_safely_quaff_healing": "bool",
-
     # Strategic Goal Agenda
     "active_goal": "str",
 }
@@ -144,7 +137,6 @@ ALLOWED_ACTIONS: set[str] = {
     "step_direction",
     "descend",
     "ascend",
-
     # Tactical Combat & Defense
     "melee_attack_hostile",
     "melee_attack",
@@ -154,7 +146,6 @@ ALLOWED_ACTIONS: set[str] = {
     "engrave_dust_elbereth",
     "engrave_elbereth",
     "engrave",
-
     # Physical Environmental Manipulation
     "open_door",
     "kick_closed_door",
@@ -164,19 +155,16 @@ ALLOWED_ACTIONS: set[str] = {
     "drop",
     "pay",
     "chat",
-
     # Nutrition & Safe Corpse Eating
     "eat_carried_food",
     "eat_food",
     "eat_floor_corpse",
     "harvest_poison_res",
-
     # Divine, Rituals & Epistemic Testing
     "pray",
     "dip_excalibur",
     "dip_in_fountain",
     "test_altar_buc",
-
     # Equipment & Consumables
     "quaff_healing",
     "quaff",
@@ -201,7 +189,6 @@ ENUM_CONSTANTS: dict[str, int | str] = {
     "HUNGRY": 2,
     "WEAK": 3,
     "FAINTING": 4,
-
     # Encumbrance States
     "UNENCUMBERED": 0,
     "BURDENED": 1,
@@ -209,13 +196,11 @@ ENUM_CONSTANTS: dict[str, int | str] = {
     "STRAINED": 3,
     "OVERTAXED": 4,
     "OVERLOADED": 5,
-
     # Branches
     "BRANCH_DUNGEON": "dungeon",
     "BRANCH_MINES": "mines",
     "BRANCH_SOKOBAN": "sokoban",
     "BRANCH_QUEST": "quest",
-
     # Strategic Goal Directives
     "GOAL_EXPLORE_FLOOR": "explore_floor",
     "GOAL_COLLECT_POISON_RES": "collect_poison_res",

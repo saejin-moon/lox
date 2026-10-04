@@ -3,12 +3,12 @@ LOX Poison Resistance Harvest Solver:
 Prioritizes and navigates to safe corpses that confer permanent poison resistance (killer bees, soldier ants, snakes)
 before descending to deeper dungeon levels (depth >= 4).
 """
+
 from __future__ import annotations
 
 from typing import Any
 
 from lox.core.types import Action, Observation
-
 
 # Monsters granting poison resistance upon eating corpse (with high probability in NetHack 3.6.6)
 POISON_RES_PROVIDERS: set[str] = {
@@ -43,7 +43,9 @@ class PoisonResHarvestSolver:
         if has_poison_res or hostile_count > 0 or adjacent_hostile:
             return False
         for corpse in corpses:
-            if getattr(corpse, "is_deadly", False) or not getattr(corpse, "is_fresh", True):
+            if getattr(corpse, "is_deadly", False) or not getattr(
+                corpse, "is_fresh", True
+            ):
                 continue
             name_lower = getattr(corpse, "name", "").lower()
             if any(prov in name_lower for prov in POISON_RES_PROVIDERS):
@@ -56,7 +58,9 @@ class PoisonResHarvestSolver:
         If hero lacks poison resistance and enemies are not threatening immediately,
         steps to or consumes candidate corpses.
         """
-        has_res = getattr(obs.hero, "has_poison_res", False) or getattr(obs.status, "has_poison_res", False)
+        has_res = getattr(obs.hero, "has_poison_res", False) or getattr(
+            obs.status, "has_poison_res", False
+        )
         if has_res:
             return None
 

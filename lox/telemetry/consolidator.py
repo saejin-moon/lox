@@ -3,12 +3,14 @@ LOX Telemetry Consolidator.
 Consolidates raw partitioned Parquet telemetry files into a single, high-performance DuckDB database.
 Safely cleans up raw parquet partition directories post-run.
 """
+
 from __future__ import annotations
 
 import glob
 import os
 import shutil
 from typing import Any
+
 import duckdb
 
 
@@ -181,7 +183,9 @@ def consolidate_run(
     ticks_added = 0
     if ticks_files:
         con.execute(f"INSERT INTO ticks SELECT * FROM read_parquet('{ticks_pattern}')")
-        res = con.execute("SELECT COUNT(*) FROM ticks WHERE run_id = ?", [run_id]).fetchone()
+        res = con.execute(
+            "SELECT COUNT(*) FROM ticks WHERE run_id = ?", [run_id]
+        ).fetchone()
         ticks_added = res[0] if res else 0
 
     # Vectorized SQL merge for episodes
@@ -189,7 +193,9 @@ def consolidate_run(
     episodes_added = 0
     if os.path.exists(ep_file):
         con.execute(f"INSERT INTO episodes SELECT * FROM read_parquet('{ep_file}')")
-        res = con.execute("SELECT COUNT(*) FROM episodes WHERE run_id = ?", [run_id]).fetchone()
+        res = con.execute(
+            "SELECT COUNT(*) FROM episodes WHERE run_id = ?", [run_id]
+        ).fetchone()
         episodes_added = res[0] if res else 0
 
     # Vectorized SQL merge for events
@@ -197,7 +203,9 @@ def consolidate_run(
     events_added = 0
     if os.path.exists(ev_file):
         con.execute(f"INSERT INTO events SELECT * FROM read_parquet('{ev_file}')")
-        res = con.execute("SELECT COUNT(*) FROM events WHERE run_id = ?", [run_id]).fetchone()
+        res = con.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id = ?", [run_id]
+        ).fetchone()
         events_added = res[0] if res else 0
 
     con.close()

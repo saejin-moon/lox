@@ -2,11 +2,11 @@
 LOX Flight Recorder: Lightweight in-memory circular telemetry.
 Stores the last 100 turns of execution state to generate high-signal tactical autopsies for the LLM.
 """
+
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 
 @dataclass(slots=True)
@@ -85,15 +85,21 @@ class FlightRecorder:
         recent = list(self.buffer)[-10:]
         hp_traj = " -> ".join(f"{s.hp}" for s in recent)
         last_s = recent[-1]
-        threat_desc = f"{last_s.closest_hostile_name} (dist {last_s.closest_hostile_dist:.1f})" if last_s.closest_hostile_name else "none in FOV"
+        threat_desc = (
+            f"{last_s.closest_hostile_name} (dist {last_s.closest_hostile_dist:.1f})"
+            if last_s.closest_hostile_name
+            else "none in FOV"
+        )
         return (
             f"Pre-Death HP Trajectory (last 10 ticks): {hp_traj}\n"
             f"Action at Death: `{last_s.action_name}` on tile type `{last_s.tile_type}` in branch `{last_s.dungeon_branch}`\n"
             f"Closest Threat at Death: {threat_desc}\n"
-            f"Last Game Message: \"{last_s.message or 'None'}\""
+            f'Last Game Message: "{last_s.message or "None"}"'
         )
 
-    def generate_compact_status_report(self, trigger_reason: str, cluster_note: str = "") -> str:
+    def generate_compact_status_report(
+        self, trigger_reason: str, cluster_note: str = ""
+    ) -> str:
         """Generates compact status report with recent steps and tactical details."""
         if not self.buffer:
             return f"[INCIDENT: {trigger_reason}]\nNo turn telemetry recorded."
@@ -111,8 +117,14 @@ class FlightRecorder:
         recent_snaps = list(self.buffer)[-5:]
         for s in recent_snaps:
             msg = s.message.replace("|", "/") if s.message else "-"
-            threat = f"{s.closest_hostile_name[:10]} ({s.closest_hostile_dist:.1f})" if s.closest_hostile_name else "-"
-            lines.append(f"| {s.turn} | {s.hp}/{s.max_hp} | `{s.action_name}` | {threat} | {msg} |")
+            threat = (
+                f"{s.closest_hostile_name[:10]} ({s.closest_hostile_dist:.1f})"
+                if s.closest_hostile_name
+                else "-"
+            )
+            lines.append(
+                f"| {s.turn} | {s.hp}/{s.max_hp} | `{s.action_name}` | {threat} | {msg} |"
+            )
 
         if cluster_note:
             lines.append(f"\n{cluster_note}")

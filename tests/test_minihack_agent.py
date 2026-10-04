@@ -1,21 +1,28 @@
 import numpy as np
-import pytest
 
-from lox.core.types import Action, Observation, Status
 from lox.core.spatial import SpatialEngine
 from lox.core.tree import Blackboard
+from lox.core.types import Action, Status
 from lox.dsl.compiler import compile_policy
 from lox.envs.minihack import MiniHackAdapter
 
-
 # Set of walkable ASCII characters in MiniHack / NetHack
-WALKABLE_CHARS = {ord("."), ord("#"), ord("+"), ord("'"), ord("@"), ord(">"), ord("<"), ord("$")}
+WALKABLE_CHARS = {
+    ord("."),
+    ord("#"),
+    ord("+"),
+    ord("'"),
+    ord("@"),
+    ord(">"),
+    ord("<"),
+    ord("$"),
+}
 
 
 def get_walkable_mask(chars: np.ndarray) -> np.ndarray:
     mask = np.zeros(chars.shape, dtype=bool)
     for c in WALKABLE_CHARS:
-        mask |= (chars == c)
+        mask |= chars == c
     return mask
 
 
