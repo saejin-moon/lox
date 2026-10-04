@@ -268,6 +268,7 @@ class CombatView:
     adjacent_floating_eye: bool = False
     hostile_ignores_elbereth: bool = False
     has_panic_escape: bool = False
+    has_safe_melee_target: bool = False
     adjacent_monsters: list[str] = field(default_factory=list)
 
 

@@ -520,6 +520,7 @@ class NetHackAdapter(EnvironmentAdapter):
 
         adjacent_monsters: list[str] = []
         hostile_ignores_elbereth = False
+        has_safe_melee_target = False
         if glyphs is not None:
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
                 ny, nx = y + dy, x + dx
@@ -541,6 +542,8 @@ class NetHackAdapter(EnvironmentAdapter):
                         ml = mname.lower()
                         if any(ign in ml for ign in IGNORES_ELBERETH_SPECIES):
                             hostile_ignores_elbereth = True
+                        if ml not in ("floating eye", "gas spore") and "mold" not in ml and "jelly" not in ml and "sphere" not in ml:
+                            has_safe_melee_target = True
 
         adjacent_peaceful = any(
             abs(py - y) <= 1 and abs(px - x) <= 1
@@ -634,6 +637,7 @@ class NetHackAdapter(EnvironmentAdapter):
             adjacent_floating_eye=adjacent_floating_eye,
             hostile_ignores_elbereth=hostile_ignores_elbereth,
             has_panic_escape=bool(inv_view.has_scroll_of_teleport or inv_view.has_wand_of_teleport),
+            has_safe_melee_target=has_safe_melee_target,
             adjacent_monsters=adjacent_monsters,
         )
 
