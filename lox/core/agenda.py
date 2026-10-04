@@ -1,5 +1,5 @@
 """
-LOX 2.0 Hybrid HTN-BT Goal Agenda:
+LOX Hybrid HTN-BT Goal Agenda:
 Provides high-level strategic goal management above low-latency reactive reflex nodes.
 Directs non-emergency macro selection across long dungeon horizons.
 """

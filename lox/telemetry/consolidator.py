@@ -1,5 +1,5 @@
 """
-LOX 2.0 Telemetry Consolidator.
+LOX Telemetry Consolidator.
 Consolidates raw partitioned Parquet telemetry files into a single, high-performance DuckDB database.
 Safely cleans up raw parquet partition directories post-run.
 """

@@ -1,4 +1,4 @@
-# LOX 2.0 Campaign Action Plan & Roadmap (`TODO.md`)
+# LOX Campaign Action Plan & Roadmap (`TODO.md`)
 
 This living document tracks empirical progress, critical discoveries, immediate next actions, and long-term milestones toward the campaign goal: **Average Dungeon Depth $\ge 20.0$** over 20 consecutive NetHack episodes.
 
@@ -97,12 +97,13 @@ All tactical, spatial, and execution rules are systematically documented and mai
 - **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter ensures uninterrupted overnight synthesis.
 
 ### Current Campaign Status
-- **Campaign Synthesis Loop: Paused as requested by user**.
+- **Campaign Synthesis Loop: Active (Campaign 28+ Resumed)**.
+  - **Overarching Goal**: Continuous evolutionary synthesis until reaching average ascending (and Average Depth $\ge 20.0$).
   - **Completed Campaigns**: 27 campaigns completed (5,725 episodes evaluated).
   - **Peak Depth Achieved**: **Dungeon Depth 14** (Campaign 25).
   - **Peak Batch Average Depth**: **5.10** (Campaign 27 Gen 5).
   - **Peak Score**: **4,612** (Campaign 24).
-  - **Checkpoint Status**: Resumes seamlessly from `data/latest_policy.py`.
+  - **Checkpoint Status**: Resuming from `data/latest_policy.py`.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 20+)
 

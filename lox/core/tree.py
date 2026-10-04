@@ -1,5 +1,5 @@
 """
-LOX 2.0 Behavior Tree Core: Ultra-Fast Hierarchical Policy Engine.
+LOX Behavior Tree Core: Ultra-Fast Hierarchical Policy Engine.
 Composable, deterministic, microsecond execution tree.
 """
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-LOX 2.0 DSL Compiler: Compiles AST into an Executable Policy.
+LOX DSL Compiler: Compiles AST into an Executable Policy.
 Supports:
 1. Object-Oriented Classes (`class Agent:` with generator methods)
 2. Functional Generators (`def episode_policy(obs): ... yield action`)

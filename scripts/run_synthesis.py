@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LOX 2.0 Embodied Policy Synthesis Engine: Dynamic Trigger Outer Loop.
+LOX Embodied Policy Synthesis Engine: Dynamic Trigger Outer Loop.
 Executes real episodes in NetHack or MiniHack, streams flight telemetry to Parquet,
 consolidates into DuckDB, detects real pacing stalls and fatalities, invokes the Author Agent,
 and evolves the compiled Behavior Tree.
@@ -344,7 +344,7 @@ def run_synthesis_loop(
     workers: int = 10,
 ):
     print("=" * 65)
-    print("LOX 2.0 Embodied Batched Empirical Policy Synthesis Engine")
+    print("LOX Embodied Batched Empirical Policy Synthesis Engine")
     print(f"Provider:    {provider} | Model: {model or 'default'}")
     print(f"Environment: {env_type.upper()} ({role if env_type == 'nethack' else task})")
     print(f"Database:    {db_path}")

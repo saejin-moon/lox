@@ -1,5 +1,5 @@
 """
-LOX 2.0 Macro Request Queue.
+LOX Macro Request Queue.
 Allows the LLM Author Agent to formally request new atomic primitives and macros
 that are not yet implemented in the engine, logging them to DuckDB and a markdown queue
 for human developer implementation post-run.

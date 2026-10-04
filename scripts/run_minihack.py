@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LOX 2.0 MiniHack Runner: High-throughput policy evaluation on MiniHack mazes.
+LOX MiniHack Runner: High-throughput policy evaluation on MiniHack mazes.
 """
 from __future__ import annotations
 

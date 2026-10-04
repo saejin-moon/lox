@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LOX 2.0 NetHack Runner & Evaluator.
+LOX NetHack Runner & Evaluator.
 Executes autonomous runs using compiled Pythonic Behavior Trees,
 records flight telemetry to streaming Parquet partitions,
 monitors dynamic triggers, and consolidates into DuckDB post-run.
@@ -45,7 +45,7 @@ def run_nethack_eval(
         run_id = f"nethack_{role}_{ts}"
 
     print("=" * 65)
-    print(f"LOX 2.0 NetHack Autonomous Evaluation")
+    print(f"LOX NetHack Autonomous Evaluation")
     print(f"Run ID:      {run_id}")
     print(f"Environment: {env_id} (Role: {role})")
     print(f"Episodes:    {episodes} | Max Turns: {max_turns}")

@@ -1,5 +1,5 @@
 """
-LOX 2.0 Author Prompts: Complete NetHack Vocabulary, Class Agent Generator Paradigm, and Deep Telemetry Tools.
+LOX Author Prompts: Complete NetHack Vocabulary, Class Agent Generator Paradigm, and Deep Telemetry Tools.
 """
 from __future__ import annotations
 

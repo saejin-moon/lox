@@ -1,5 +1,5 @@
 """
-LOX 2.0 DSL Parser: Pythonic AST Parser and Validator.
+LOX DSL Parser: Pythonic AST Parser and Validator.
 Safely validates policy programs (classes, generators, and behavior trees).
 Rejects dangerous system calls (import, eval, exec, filesystem access) while
 allowing full procedural flow (while, for, classes, methods, yield, self).

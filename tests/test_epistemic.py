@@ -1,5 +1,5 @@
 """
-Unit tests for LOX 2.0 Epistemic POMDP Engine, Shannon Entropy Safe-Gates,
+Unit tests for LOX Epistemic POMDP Engine, Shannon Entropy Safe-Gates,
 and Altar/Pet/Price listeners.
 """
 from __future__ import annotations

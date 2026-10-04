@@ -1,5 +1,5 @@
 """
-Unit tests for LOX 2.0 Algorithmic Sub-Solvers (Altar BUC and Poison Harvesting).
+Unit tests for LOX Algorithmic Sub-Solvers (Altar BUC and Poison Harvesting).
 """
 from __future__ import annotations
 

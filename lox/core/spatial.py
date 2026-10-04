@@ -1,5 +1,5 @@
 """
-LOX 2.0 Spatial Engine: High-Performance Standalone Spatial Operations.
+LOX Spatial Engine: High-Performance Standalone Spatial Operations.
 Pure NumPy and Numba-accelerated algorithms with zero environment coupling.
 Achieves <15 µs latency for pathfinding and frontier discovery.
 """

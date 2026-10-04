@@ -1,5 +1,5 @@
 """
-LOX 2.0 Flight Recorder: Lightweight in-memory circular telemetry.
+LOX Flight Recorder: Lightweight in-memory circular telemetry.
 Stores the last 100 turns of execution state to generate high-signal tactical autopsies for the LLM.
 """
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-LOX 2.0 Epistemic Belief-State Engine: POMDP latent property tracking.
+LOX Epistemic Belief-State Engine: POMDP latent property tracking.
 Tracks BUC beatitude distributions (P(blessed), P(uncursed), P(cursed)),
 candidate item identities, charges/enchantment bounds, and sensory message listeners.
 Exposes Shannon entropy safe-gates to inform policy predicates without engine-level hard stops.

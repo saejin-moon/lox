@@ -1,5 +1,5 @@
 """
-LOX 2.0 DuckDB Analytical Tooling and Knowledge Retrieval for LLM Policy Authoring.
+LOX DuckDB Analytical Tooling and Knowledge Retrieval for LLM Policy Authoring.
 Provides safe analytical functions (DuckDB SQL, death taxonomy, pacing stats),
 offline NetHack 3.6.6 Wiki retrieval (BM25 search), and a macro request queue
 for human post-run implementation.

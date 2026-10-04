@@ -1,5 +1,5 @@
 """
-LOX 2.0 Core: Standardized Types and Interfaces.
+LOX Core: Standardized Types and Interfaces.
 Pure, lightweight dataclasses without circular dependencies or runtime overhead.
 Equipped with rich observation namespaces for Generator and Class-based policy execution.
 """

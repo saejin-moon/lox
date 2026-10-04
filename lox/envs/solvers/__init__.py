@@ -1,5 +1,5 @@
 """
-LOX 2.0 Algorithmic Sub-Solvers Package:
+LOX Algorithmic Sub-Solvers Package:
 Deterministic, stateful macro solvers for complex NetHack interactions
 (Altar BUC identification, poison resistance harvesting, Sokoban).
 """

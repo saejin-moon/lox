@@ -1,5 +1,5 @@
 """
-Unit tests for LOX 2.0 Hybrid HTN-BT Goal Agenda and DSL integration.
+Unit tests for LOX Hybrid HTN-BT Goal Agenda and DSL integration.
 """
 from __future__ import annotations
 

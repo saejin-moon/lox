@@ -1,5 +1,5 @@
 """
-LOX 2.0 Token Usage Tracking.
+LOX Token Usage Tracking.
 Records LLM prompt, completion, and total token usage directly into DuckDB.
 Computes estimated costs and maintains empirical audit trails of synthesis spend.
 """

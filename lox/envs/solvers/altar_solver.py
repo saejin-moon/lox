@@ -1,5 +1,5 @@
 """
-LOX 2.0 Altar BUC Solver:
+LOX Altar BUC Solver:
 Automates multi-turn batch item beatitude testing on altars.
 Sequence:
 1. Navigate to altar tile.

@@ -1,5 +1,5 @@
 """
-LOX 2.0 Poison Resistance Harvest Solver:
+LOX Poison Resistance Harvest Solver:
 Prioritizes and navigates to safe corpses that confer permanent poison resistance (killer bees, soldier ants, snakes)
 before descending to deeper dungeon levels (depth >= 4).
 """

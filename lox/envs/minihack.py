@@ -1,5 +1,5 @@
 """
-LOX 2.0 MiniHack Adapter: Clean, high-throughput Gymnasium MiniHack wrapper.
+LOX MiniHack Adapter: Clean, high-throughput Gymnasium MiniHack wrapper.
 Translates atomic Behavior Tree actions into gym actions and extracts standardized Observations.
 """
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-LOX 2.0 DSL Schema: Comprehensive NetHack Vocabulary Whitelist.
+LOX DSL Schema: Comprehensive NetHack Vocabulary Whitelist.
 Exposes full NetHack action primitives, rich tactical predicates, and constants.
 """
 from __future__ import annotations

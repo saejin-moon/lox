@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LOX 2.0 High-Volume Telemetry Collector.
+LOX High-Volume Telemetry Collector.
 Runs multi-episode, multi-role NetHack campaigns to amass comprehensive telemetry
 in data/lox.duckdb for deep empirical analysis by the LLM Author Agent.
 """
@@ -26,7 +26,7 @@ def collect_campaign(
     db_path: str = "data/lox.duckdb",
 ) -> None:
     print("=" * 70)
-    print("LOX 2.0 High-Volume Telemetry Data Collection Campaign")
+    print("LOX High-Volume Telemetry Data Collection Campaign")
     print(f"Target Roles: {roles}")
     print(f"Episodes per role: {episodes_per_role} (Total: {len(roles) * episodes_per_role})")
     print(f"Max turns per episode: {max_turns}")

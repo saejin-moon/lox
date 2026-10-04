@@ -1,5 +1,5 @@
 """
-LOX 2.0 Environment Layer: Standardized Environment Adapter Interface.
+LOX Environment Layer: Standardized Environment Adapter Interface.
 Decouples agent cognition and spatial reasoning from underlying Gym/NLE/JAX engines.
 """
 from __future__ import annotations

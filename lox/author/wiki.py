@@ -1,5 +1,5 @@
 """
-LOX 2.0 Offline NetHack 3.6.6 Wiki Knowledge Engine.
+LOX Offline NetHack 3.6.6 Wiki Knowledge Engine.
 Performs sub-5ms BM25 full-text search with match highlighting,
 alias redirect resolution, and exact article lookups against data/wiki_index.db.
 """

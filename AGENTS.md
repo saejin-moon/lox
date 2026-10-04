@@ -1,6 +1,6 @@
-# LOX 2.0 Agent Operational Guide (`AGENTS.md`)
+# LOX Agent Operational Guide (`AGENTS.md`)
 
-Welcome to LOX 2.0, an autonomous, empirical policy synthesis engine for NetHack.
+Welcome to LOX, an autonomous, empirical policy synthesis engine for NetHack.
 This document provides complete operational context, architectural foundations, critical invariants, and debugging toolchains for any agent working in this repository.
 
 ---

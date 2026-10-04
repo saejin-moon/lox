@@ -1,5 +1,5 @@
 """
-LOX 2.0 Optimal Dynamic Synthesis Trigger Engine.
+LOX Optimal Dynamic Synthesis Trigger Engine.
 Monitors execution events and fires LLM synthesis triggers only when needed.
 Features a 2-Tier Reactive Trigger Architecture:
 1. Online Intra-Episode Interventions: Floor Stagnation, Starvation Crisis.

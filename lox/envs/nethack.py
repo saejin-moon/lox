@@ -1,5 +1,5 @@
 """
-LOX 2.0 NetHack Adapter: High-performance, clean NLE wrapper.
+LOX NetHack Adapter: High-performance, clean NLE wrapper.
 Directly consumes structured NLE observation channels (blstats, inv_strs, inv_letters)
 with zero regex scraping and automatic --More-- prompt dismissal.
 Pure agentic autonomy: zero hardcoded safety interlocks or engine-level overrides.

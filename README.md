@@ -1,8 +1,8 @@
-# LOX 2.0: Autonomous Empirical Policy Synthesis for NetHack
+# LOX: Autonomous Empirical Policy Synthesis for NetHack
 
-**LOX 2.0** is an autonomous, empirical neuro-symbolic policy synthesis engine for NetHack. It enables large language models (such as `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on flight telemetry, DuckDB incident autopsies, and an offline NetHack encyclopedia.
+**LOX** is an autonomous, empirical neuro-symbolic policy synthesis engine for NetHack. It enables large language models (such as `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on flight telemetry, DuckDB incident autopsies, and an offline NetHack encyclopedia.
 
-LOX 2.0 achieves sub-50 microsecond execution latency (>1,000 game turns/second) by compiling generator policies alongside a standalone Numba-accelerated A* spatial navigation engine.
+LOX achieves sub-50 microsecond execution latency (>1,000 game turns/second) by compiling generator policies alongside a standalone Numba-accelerated A* spatial navigation engine. Across 27 continuous evolutionary campaigns and over 5,700 real episodes evaluated (18.2M game ticks), LOX has systematically eradicated zero-progress stalls, locked-door loops, and starvation blackouts, driving peak batch performance to **5.10 Average Depth** and peak exploration depth to **Dungeon Level 14**.
 
 ---
 
@@ -43,7 +43,7 @@ uv sync
 ```bash
 uv run pytest -v
 ```
-All 39 test suites should pass cleanly in ~4 seconds.
+All 63 test items pass cleanly in ~1.8 seconds.
 
 ---
 
@@ -59,18 +59,19 @@ uv run python -u -m scripts.run_synthesis \
   --max-turns 500
 ```
 
-#### Option B: Live OpenRouter Campaign (Targeting Depth 10+)
-Set your OpenRouter API key and launch the autonomous evolution loop (recommended: 15 generations per execution to inspect progress between batches):
+#### Option B: Live OpenRouter Campaign (Targeting Depth 20.0 / Endgame)
+Set your OpenRouter API key and launch the 20-worker parallel synthesis loop:
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."
 
 uv run python -u -m scripts.run_synthesis \
   --provider openrouter \
   --model google/gemma-4-31b-it \
-  --generations 15 \
-  --eval-episodes 10 \
+  --generations 10 \
+  --eval-episodes 20 \
   --max-turns 25000 \
-  --target-depth 10.0 \
+  --target-depth 20.0 \
+  --workers 20 \
   --policy-path data/latest_policy.py
 ```
 
@@ -81,9 +82,10 @@ nohup uv run python -u -m scripts.run_synthesis \
   --provider openrouter \
   --model google/gemma-4-31b-it \
   --generations 100 \
-  --eval-episodes 10 \
+  --eval-episodes 20 \
   --max-turns 25000 \
-  --target-depth 10.0 \
+  --target-depth 20.0 \
+  --workers 20 \
   --policy-path data/latest_policy.py > campaign.log 2>&1 &
 
 # Monitor live generation progress
@@ -94,7 +96,7 @@ tail -f campaign.log
 
 ### Step 4: Transferring Historical DuckDB Data Across Machines (Optional)
 
-Git tracks all source code and the latest evolved policy checkpoint ([`data/latest_policy.py`](file:///home/bae/lox/data/latest_policy.py)).
+Git tracks all source code and the latest evolved policy checkpoint ([`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py)).
 The DuckDB database (`data/lox.duckdb`) and archived generation snapshots (`data/policies/`) are excluded by `.gitignore` to keep git operations fast and prevent repository bloat.
 
 To carry over historical episode telemetry, incident logs, token accounting, and generation archives when moving to another machine:
@@ -124,10 +126,10 @@ uv run python -c "
 import duckdb
 conn = duckdb.connect('data/lox.duckdb', read_only=True)
 rows = conn.execute('''
-    SELECT run_id, count(*) as eps, round(avg(depth), 2) as avg_depth, max(max_depth) as max_depth, round(avg(turns), 1) as avg_turns
+    SELECT run_id, count(*) as eps, round(avg(max_depth), 2) as avg_depth, max(max_depth) as max_depth, round(avg(score), 1) as avg_score, max(score) as peak_score
     FROM episodes
     GROUP BY run_id
-    ORDER BY run_id DESC
+    ORDER BY min(episode_id) DESC
     LIMIT 10
 ''').fetchall()
 for r in rows:
@@ -141,7 +143,7 @@ uv run python -c "
 import duckdb
 conn = duckdb.connect('data/lox.duckdb', read_only=True)
 rows = conn.execute('''
-    SELECT episode_id, depth, max_depth, turns, death_reason
+    SELECT episode_id, depth, max_depth, score, turns, death_reason
     FROM episodes
     ORDER BY episode_id DESC
     LIMIT 10
@@ -166,7 +168,23 @@ print(conn.execute('''
 
 ---
 
-## 3. Architecture & Key Modules
+## 3. Empirical Milestones & Benchmark History
+
+LOX has evaluated **5,725 episodes** across **18,202,078 game turns** in DuckDB:
+
+| Metric | Campaign 1 Baseline | Mid-Campaigns (C10–C15) | Current Highs (C24–C27) |
+| :--- | :---: | :---: | :---: |
+| **Batch Avg Depth** | 1.91 | 3.51 – 3.66 | **5.10** (C27 Gen 5) / **4.07** (C27 avg) |
+| **Peak Max Depth** | 5 | 9 – 11 | **14** (C25 Gen 2) |
+| **Batch Avg Score** | 204.3 | 440 – 530 | **1,014.5** (C27 Gen 9) |
+| **Peak Single Score** | 922 | 2,645 | **4,612** (C24 Gen 6) |
+| **Batch Wall-Clock** | ~270s | ~180s | **~35s** (20 workers concurrent) |
+| **Starvation Mortality** | ~28% | ~12% | **0.0%** (Completely Eliminated) |
+| **Zero-Progress Aborts** | ~18% | ~4% | **0.0%** (Completely Eliminated) |
+
+---
+
+## 4. Architecture & Key Modules
 
 ```
 lox/
@@ -176,7 +194,7 @@ lox/
 │   └── tools.py          # DuckDBToolRegistry: query_duckdb, get_death_taxonomy, query_wiki
 ├── core/
 │   ├── types.py          # Dataclasses: Observation, HeroState, CombatView, SpatialView, DungeonView, Action
-│   └── spatial.py        # SpatialEngine: Numba-accelerated A*, Dijkstra, Frontier BFS (<150 LOC)
+│   └── spatial.py        # SpatialEngine: Numba JIT A*, Dijkstra, Frontier BFS, disk-cached kernels (<58 µs)
 ├── dsl/
 │   ├── schema.py         # Whitelist of sensory predicates, action primitives, and constants
 │   ├── parser.py         # Sandboxed AST validator (blocks imports, eval, exec, unauthorized nodes)
@@ -184,6 +202,8 @@ lox/
 ├── envs/
 │   ├── base.py           # EnvironmentAdapter base class
 │   └── nethack.py        # NetHackAdapter: NLE gym wrapper, menu handling, navigation/tactical macros
+├── eval/
+│   └── runner.py         # 20-worker parallel batch evaluation engine, Parquet telemetry streaming
 └── telemetry/
     ├── recorder.py       # In-memory flight recorder & autopsy generator
     ├── parquet.py        # Streaming zero-lock Parquet logger
@@ -193,10 +213,10 @@ lox/
 
 ---
 
-## 4. Policy Execution Paradigm & Critical Invariants
+## 5. Policy Execution Paradigm & Core Invariants
 
-1. **Python Generator Execution**:
-   Policies are written as clean Python classes:
+1. **Python Generator Protocol**:
+   Policies are written as clean Python classes yielding action primitives:
    ```python
    class Agent:
        def __init__(self):
@@ -204,40 +224,42 @@ lox/
 
        def run(self, obs):
            while True:
-               if obs.spatial.standing_on_stairs_down:
+               if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                    obs = yield descend()
                    continue
-               # Decisions yield actions and receive fresh observations
                obs = yield wait()
    ```
 
-2. **Zero-Yield Subroutine Invariant**:
-   Subroutines called via `obs = yield from self.my_subroutine(obs)` **must yield at least one action on every code path**, or the caller loop must not `continue` in a tight loop. Non-yielding paths cause a 100% CPU generator spin that freezes the environment. The `AuthorAgent` includes a hard 1.0s timeout-shielded dry-run validator that verifies this before deploying any policy.
+2. **Four-Layer Anti-Loop Shield Architecture**:
+   - **Layer 1 (AST `LoopGuardTransformer`)**: Automatically instruments all `while` and `for` loops with `_guard.tick()`. Triggers a `RuntimeError` if >2,000 iterations elapse without yielding.
+   - **Layer 2 (`PolicyRunner` Fallback)**: Catches infinite loop runtime errors and safely yields `Action(name="wait")` (`.`), advancing the NetHack turn clock.
+   - **Layer 3 (Episode Wall-Clock Ceiling)**: Enforces a 90-second ceiling per episode worker to break out of internal C-level NLE hangs.
+   - **Layer 4 (Batch Timeout Recovery)**: `map_async` with a 180-second batch ceiling terminates and cleans up stalled worker pool processes.
 
-3. **Peaceful Creature Prompt Immunity**:
-   Attacking peaceful creatures (hobbits, gnomes, acid blobs, peaceful humans) triggers confirmation prompts (`"Really attack the ...? [yn] (n)"`). NetHack directional movement answers "No" to prompts, advancing 0 turns. `NetHackAdapter` tracks `self.peaceful_positions`, auto-dismisses confirmation prompts, and excludes peaceful monsters from combat targeting.
+3. **Dust Elbereth Sanctuary Mechanics & Immune Discrimination**:
+   Finger-engraving `"Elbereth"` in the dust (`E` $\to$ `-` $\to$ `Elbereth\r`) creates an absolute ward against non-humanoids (spiders, dogs, ants, bees). `IGNORES_ELBERETH_SPECIES` discriminates orcs, elves, humans, and trolls who ignore the ward, forcing melee engagements or corridor retreats.
 
-4. **Dynamic Blocked Tile Learning**:
-   Obstacles such as iron bars, locked iron doors, boulders, and solid walls that reject movement are dynamically recorded in `self.blocked_tiles` per floor depth and immediately pruned from all future navigation graphs (`step_to_frontier`, `step_to_dead_end`, `step_to`, `step_to_stairs_down`).
+4. **Passive Hazard Distance-1 Projectile Elimination**:
+   Throwing projectiles (daggers, darts, arrows, rocks) at adjacent floating eyes (`obs.combat.adjacent_floating_eye`) is 100% safe at distance 1 without triggering passive paralysis. Cornered dead-end melee breaks eliminate floating eyes rather than starving in place.
 
-5. **Floor-Wide Dead-End Secret Door Navigation**:
-   NetHack procedural generation blocks access to deeper dungeon levels behind hidden secret doors located at dead-end corridors (`#`) and room perimeter walls (`-`, `|`). When visible frontiers are exhausted (`obs.spatial.has_unvisited_frontier == False`), `obs.spatial.has_unsearched_dead_end` evaluates floor-wide, allowing the hero to call `step_to_dead_end()` to pathfind to corridor dead-ends or room walls and `search()` repeatedly until the secret door is exposed.
+5. **Proactive In-Combat Nutrition & Rotten Corpse Shield**:
+   Rotten carried corpses are strictly filtered out of food slots. Rations are proactively consumed at `hunger_state >= 2` ("Weak") when on Elbereth or out of melee reach, preventing 30-turn unconscious fainting blackouts. Major trouble prayer (`hunger_state >= 3`) provides divine feeding when packaged food is exhausted.
 
-6. **Minetown & Dialog Auto-Dismissal (`ESC`)**:
-   Watchmen and temple priests in Minetown (Depths 5–9) greet the hero with text-entry dialogs (`"who are you"`, `"what is your name"`). `NetHackAdapter` intercepts these prompts and auto-dismisses them with ESC (`\x1b`), registering guards as peaceful and avoiding 2,500-keystroke timeout abortions.
+6. **350-Turn Safe Divine Favor Threshold**:
+   Enforces `turn - last_prayer_turn >= 350` before emergency or hunger prayer, guaranteeing safe divine intervention and avoiding deity anger ("Tyr is displeased").
 
-7. **Autopickup & Equipment Optimization (`wear_armor`)**:
-   NLE is configured with `options=("autopickup", "pickup_types:?!/%=[$")`, automatically collecting armor, potions, scrolls, and food as the hero steps over tiles. The policy executes `wear_armor()` during peaceful exploration to equip helmets, body armor, cloaks, and boots, driving Armor Class (AC) down and deflecting monster attacks.
+7. **Full-Floor Persistent Topological Memory**:
+   Terrain discovered across line-of-sight FOV boundaries (`self.visited`, `self.known_chars` for `#`, `.`, `<`, `>`, `_`, `{`, `+`) is permanently retained, providing unbroken pathfinding connectivity across entire levels.
 
-8. **In-Combat Emergency Healing & High-Speed Attackers (`is_fast_dangerous`)**:
-   Soldier ants and killer bees move at speed 18 with lethal poison stings. `obs.combat.is_fast_dangerous` flags lethal speedsters, triggering immediate retreat into 1-tile corridor chokepoints (`step_to_chokepoint()`). In-combat emergency healing (`quaff_healing()`) triggers at `< 50% HP` before trading further hits.
+8. **Dynamic Obstacle Learning**:
+   Impassable tiles (iron bars, solid walls, unbreachable doors) are dynamically added to `self.blocked_tiles` upon physical bump messages and pruned from all pathfinding kernels.
 
-9. **Exploration Pacing & Stagnation Auto-Recovery**:
-   To prevent heroes from burning thousands of turns in idle `wait()` loops (`MaxTurnsReached`), `NetHackAdapter` automatically decays search counters by 10 when frontiers stall, triggering an active second search sweep across candidate perimeter walls. Exploration policies banish idle `wait()`, continuously patrolling and searching candidate walls until stairs down are found.
+9. **Fast Speedster Chokepoints & Swarm Defense**:
+   Monsters with movement speed $> 12$ (killer bees, soldier ants, foxes, giant bats) trigger immediate retreat into 1-tile corridor chokepoints (`step_to_chokepoint()`). Facing multiple speed-18 predators triggers dust Elbereth engraving to panic and disperse the swarm.
 
 ---
 
-## 5. Operational Guides for Agents & Developers
+## 6. Operational Guides for Agents & Developers
 
-- **[`AGENTS.md`](file:///home/bae/lox/AGENTS.md)**: Complete operational context, system foundations, hard-learned lessons, and architectural invariants.
-- **[`AGENT_PLAN.md`](file:///home/bae/lox/AGENT_PLAN.md)**: Step-by-step campaign execution plan from current checkpoint to target average depth $\ge 10.0$.
+- **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Complete operational guide, architecture, 48 technical invariants, and synthesis protocols.
+- **[`TODO.md`](file:///home/moose/git/lox/TODO.md)**: Real-time campaign tracking, empirical benchmark progression, autopsy findings, and active roadmap.

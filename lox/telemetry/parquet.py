@@ -1,5 +1,5 @@
 """
-LOX 2.0 Parquet Telemetry Logger.
+LOX Parquet Telemetry Logger.
 Streaming, zero-lock PyArrow Parquet writer for per-tick, per-episode, and per-event telemetry.
 Captures high-resolution tactical combat, spatial topology, and inventory state.
 """

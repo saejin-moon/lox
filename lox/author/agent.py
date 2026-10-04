@@ -1,5 +1,5 @@
 """
-LOX 2.0 Author Agent: Asynchronous LLM policy synthesis engine with DuckDB analytical tooling.
+LOX Author Agent: Asynchronous LLM policy synthesis engine with DuckDB analytical tooling.
 Queries LLMs across multiple providers (Gemini, OpenRouter, local vLLM, or Mock),
 enables interactive empirical data investigation (ReAct),
 logs token usage directly into DuckDB, and validates proposed policies against AST invariants.
@@ -242,7 +242,7 @@ class Agent:
         headers = {
             "Authorization": f"Bearer {self.api_key.strip()}",
             "HTTP-Referer": "https://github.com/saejin-moon/lox",
-            "X-Title": "LOX 2.0 Policy Synthesis",
+            "X-Title": "LOX Policy Synthesis",
         }
         model_name = self.model or "google/gemini-2.5-flash"
 
@@ -406,7 +406,7 @@ class Agent:
             headers = {
                 "Authorization": f"Bearer {self.api_key.strip()}",
                 "HTTP-Referer": "https://github.com/saejin-moon/lox",
-                "X-Title": "LOX 2.0 Policy Synthesis",
+                "X-Title": "LOX Policy Synthesis",
             }
             messages = getattr(self, "_last_messages", [])
             messages.append({"role": "user", "content": repair_user_msg})
