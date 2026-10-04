@@ -105,25 +105,147 @@ All tactical, spatial, and execution rules are systematically documented and mai
 - **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter ensures uninterrupted overnight synthesis.
 
 ### Current Campaign Status
-- **Campaign Synthesis Loop: Active (Campaign 28+ Resumed)**.
+- **Campaign Synthesis Loop: Active (Campaign 33 Running)**.
   - **Overarching Goal**: Continuous evolutionary synthesis until reaching average ascending (and Average Depth $\ge 20.0$).
-  - **Completed Campaigns**: 27 campaigns completed (5,725 episodes evaluated).
-  - **Peak Depth Achieved**: **Dungeon Depth 14** (Campaign 25).
+  - **Completed Campaigns**: 32 campaigns completed (6,725+ episodes evaluated, 21.4M+ game turns).
+  - **Peak Depth Achieved**: **Dungeon Depth 14** (Campaign 25 `g002_e003` & Campaign 32 `g010_e017`).
   - **Peak Batch Average Depth**: **5.10** (Campaign 27 Gen 5).
   - **Peak Score**: **4,612** (Campaign 24).
+  - **Artifact Status**: Excalibur successfully forged in autonomous play (`g005_e006`, `g008_e013`).
   - **Checkpoint Status**: Resuming from `data/latest_policy.py`.
 
-## 4. Longer-Term Goals (Roadmap to Depth 20+)
+---
 
-1. **Autonomous LLM Synthesis Loop Execution**:
-   - Continue running iterative generations until batch average depth $\ge 20.0$.
-2. **Main Dungeon vs Gnomish Mines Branch Steering**:
-   - Prioritize descending the main dungeon staircase down to Depth 20 without entering the lethal dark Mines.
-3. **Container & Bag Stash Management**:
-   - Looting sacks and chests for additional scrolls and potions.
-4. **Mid-Game Ascension Prep & Medusa / Castle Breaching**:
-   - Gearing AC < -5, Excalibur forging, reflection, and poison/cold/fire resistance intrinsic stacking.
-5. **Campaign Completion Verification**:
-   - Batch average depth $\ge 20.0$ triggers `[CAMPAIGN GOAL ACHIEVED]`.
-   - Record final DuckDB telemetry and emit `<!-- GOAL_COMPLETE -->`.
+## 4. Master Ascension Milestones: The 7 Phases from Depth 1 to Astral
+
+To bridge the gap from early-game survival to average ascending, LOX must systematically master the 7 canonical NetHack progression phases documented on the [NetHack Wiki](https://nethackwiki.com/wiki/Ascension):
+
+### Phase 1: Early-Game Consolidation (Depths 1–10) [Active / Solved Baseline]
+- **Mines Evacuation (`dnum == 2`)**: Immediate ascent on `<` back to Dungeons of Doom upon hitting the Gnomish Mines staircase.
+- **Tactical Sanctuaries**: Dust Elbereth finger-engraving (`E - Elbereth\r`), 1-tile corridor chokepoints, 800-turn safe divine favor cooldown.
+- **Weapon & Resistance Scaling**: Dipping long sword into fountain at XL $\ge 5$ for Excalibur (+1d10 damage, automatic secret door searching, level drain immunity); harvesting poison resistance from killer bees/centipedes.
+- **Nutrition**: Proactive weakness eating (`hunger_state >= 2`), rotten carried corpse filtration.
+
+### Phase 2: Sokoban Branch & Tactical Ascension Kit (Depths 6–12)
+- **Sokoban Branch Transit (`dnum == 4`)**: Identifying the upward-leading staircase `<` located between DL 6 and 10.
+- **Deterministic Boulder Solver**: Navigating the 4 Sokoban levels without boulder-jumping, destroying boulders, or incurring Luck penalties.
+- **Top-Floor Prize Acquisition**: Securing the guaranteed prize chest:
+  - 50% chance: **Bag of Holding** (quadruples inventory weight efficiency).
+  - 50% chance: **Amulet of Reflection** (immunity to death rays, lightning, and breath attacks).
+- **Level Scaling**: Advancing Valkyrie experience level to **XL 14** (required for the Quest assignment).
+
+### Phase 3: Medusa's Island & The Castle Breach (Depths 14–25)
+- **Medusa's Gaze Bypass (DL 22–24)**:
+  - Traversing Medusa's Island using reflection, a blindfold/towel with telepathy, or zapping a wand of death.
+  - Avoiding moat drowning using levitation (ring/boots) or water walking.
+  - Slaying the statue of Perseus for potential Levitation boots or Shield of Reflection.
+- **The Castle & Drawbridge Breach (DL 25–29)**:
+  - Slaying the perimeter soldiers and dragons.
+  - Destroying the drawbridge portcullis safely by zapping a **Wand of Striking** or wand of opening (avoiding standing adjacent to avoid crushed-by-drawbridge instadeath).
+- **Castle Armory Conquest & Wand of Wishing**:
+  - Clearing the Castle barracks.
+  - Looting the back storage chests to secure the guaranteed **Wand of Wishing** ($1d3+1$ charges).
+
+### Phase 4: The Wishing & Armory Transformation
+- **Priority Wishing Protocol**:
+  1. `blessed +2 gray dragon scale mail` (grants permanent Magic Resistance against death rays, touch of death, and polymorph).
+  2. `blessed +2 speed boots` (permanent extrinsic speed: movement speed 24 vs baseline 12).
+  3. `blessed bag of holding` (if not obtained in Sokoban).
+  4. `blessed magic marker` (1:99 charges to write scrolls).
+- **Magic Marker Writing & Recharging**:
+  - Writing 2–3 scrolls of charging (blessed charging restores 3 charges to the wishing wand).
+  - Writing scrolls of genocide: genociding `L` (Liches, Demiliches, Master Liches, Arch-Liches) and `;` (Sea monsters: giant eels, krakens).
+  - Writing uncursed and cursed scrolls of gold detection (for magic mapping and finding the Vibrating Square).
+
+### Phase 5: Gehennom Traversal & The Three Invocation Relics (Depths 26–45)
+- **The Valley of the Dead (DL 26–30)**: Crossing the graveyard without graveyard amnesia.
+- **Gehennom Mazes & Straight-Line Digging**:
+  - In NetHack 3.6, walking Gehennom mazes wastes 15,000+ turns.
+  - Utilizing wands of digging and pickaxes to drill straight-line cardinal tunnels connecting stairs up and stairs down.
+- **Relic 1: The Candelabrum of Abernathy (Vlad's Tower)**:
+  - Branching into Vlad's Tower (DL 34–40, 3 levels).
+  - Slaying Vlad the Impaler (immune to drain, easily dispatched with Excalibur).
+  - Looting the *Candelabrum of Abernathy* and guaranteed water walking boots.
+- **Demon Lord Bypass / Execution**:
+  - Asmodeus & Baalzebub: Slaying or bribing with gold to pass peacefully.
+  - Juiblex & Orcus: Slaying with wands of digging/fire/death or Excalibur melee.
+- **Relic 2: The Book of the Dead (The Wizard's Tower)**:
+  - Entering the real Wizard's Tower via the magic portal on the fake tower level.
+  - Defeating the Wizard of Yendor in his sanctuary.
+  - Looting the *Book of the Dead*.
+- **Relic 3: The Bell of Opening (The Quest Nemesis)**:
+  - Completed on the Valkyrie quest by defeating Lord Surtur and securing the *Orb of Fate*.
+
+### Phase 6: The Vibrating Square, Moloch's Sanctum & The Amulet (Depths 45–53)
+- **Locating the Vibrating Square (`~`)**:
+  - The Vibrating Square is located on the second-to-bottom level of Gehennom (DL 45–53).
+  - Reading a cursed scroll of gold detection while confused reveals the exact `~` tile instantly.
+- **Performing The Invocation**:
+  - Standing directly on the Vibrating Square:
+    1. Attach 7 candles to the Candelabrum and `#apply` (light) it.
+    2. `#apply` the Bell of Opening.
+    3. `#read` the Book of the Dead.
+  - The ritual opens the stairs down into **Moloch's Sanctum**.
+- **Moloch's Sanctum Conquest**:
+  - Navigating the sanctum graveyard and temple moat.
+  - Executing the High Priest of Moloch.
+  - Picking up the **genuine Amulet of Yendor**.
+
+### Phase 7: The Ascension Run & The Astral Plane
+- **The Run Up through Gehennom**:
+  - Ascending back up with the Amulet: countering the *Mysterious Force* (which teleports the hero down 1–4 levels).
+  - Repelling the recurring Wizard of Yendor (who resurrects and teleports to the hero).
+- **The Four Elemental Planes**:
+  - **Plane of Earth**: Zapping wands of digging straight to the portal.
+  - **Plane of Air**: Cloud pathfinding, lightning reflection, avoiding air elementals.
+  - **Plane of Fire**: Levitation over lava seas to reach the portal.
+  - **Plane of Water**: Water walking boots or oilskin cloak, swimming inside air bubbles.
+- **The Astral Plane & Ascension**:
+  - Navigating three High Altars (Lawful, Neutral, Chaotic).
+  - Equipping the Ring of Conflict to turn angel and demon hordes against each other.
+  - Evading / disabling the Three Riders of the Apocalypse (**Death**, **Pestilence**, **Famine**):
+    - Death: Wand of teleportation or striking (never wand of death).
+    - Pestilence: Curing sickness immediately with a unicorn horn.
+    - Famine: Slaying at range or eating rations.
+  - Identifying the Lawful Altar.
+  - Stepping onto the high altar, invoking `#offer` with the Amulet of Yendor to **ASCEND**.
+
+---
+
+## 5. Domain Knowledge to Embed in Engine & Prompts
+
+1. **Resistance Stacking Matrix**:
+   - Intrinsic: Poison, Cold, Shock, Fire, Sleep, Telepathy (via corpses and level advancement).
+   - Extrinsic: Magic Resistance (Gray Dragon Scale Mail), Reflection (Amulet of Reflection or Silver Dragon Scale Mail).
+2. **Container Explosion Guard**:
+   - Never put a Wand of Cancellation, Bag of Tricks, or nested Bag of Holding inside a Bag of Holding (causes instantaneous catastrophic explosion and item destruction).
+3. **Instadeath Prevention**:
+   - Touch of Death: Protected 100% by Magic Resistance.
+   - Disintegration: Protected by Reflection or Disintegration resistance.
+   - Petrification: Never touch cockatrice/chickatrice without gloves; never stumble/blind walk over dead footrices.
+   - Drowning: Protected by Levitation, Water Walking Boots, or Oilskin Cloak.
+4. **Item Identification & Holy Water Chemistry**:
+   - Testing BUC (Blessed/Uncursed/Cursed) on altars.
+   - Crafting Holy Water: Dipping uncursed water on a co-aligned altar with positive divine favor.
+
+---
+
+## 6. Required Architectural Mechanisms to Construct
+
+1. **Sokoban BFS Graph Solver (`lox.core.sokoban`)**:
+   - Automated push-boulder pathfinding solving the 4 standard Sokoban levels.
+2. **Gehennom Digging Router (`lox.core.digging`)**:
+   - Bresenham line tunneling using wands of digging/pickaxes between stairs up and down.
+3. **The Castle Breach Macro (`lox.solvers.castle`)**:
+   - Automated drawbridge detection, striking wand execution, and perimeter clearance.
+4. **Invocation & Endgame State Machine (`lox.solvers.invocation`)**:
+   - Coordinated tracking of Candelabrum (7 candles), Bell, Book, Vibrating Square coordinates, and High Altar identification.
+
+---
+
+## 7. Key Operational Documents
+
+- **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Complete operational guide, architecture, 24 consolidated technical invariants across 6 operational domains, and synthesis protocols.
+- **[`README.md`](file:///home/moose/git/lox/README.md)**: System overview, 3-tier meta-optimization architecture, end-to-end lifecycle walkthrough, quickstart guide, and empirical milestones.
+
 

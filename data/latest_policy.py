@@ -8,7 +8,7 @@ class Agent:
         while True:
             # 1. Absolute Emergency Survival (Fainting or Critical HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
-                if obs.hero.turn - self.last_prayer_turn >= 800:
+                if obs.hero.turn - self.last_prayer_turn >= 350:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
@@ -32,7 +32,7 @@ class Agent:
                 if obs.inventory.has_healing:
                     obs = yield quaff_healing()
                     continue
-                elif obs.hero.hp_frac < 0.30 and (obs.hero.turn - self.last_prayer_turn >= 800):
+                elif obs.hero.hp_frac < 0.30 and (obs.hero.turn - self.last_prayer_turn >= 350):
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
@@ -125,13 +125,13 @@ class Agent:
                     continue
 
             # 0.2 Divine Intervention
-            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 800):
+            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 350):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
 
             # 1. Tactical Healing (Aggressive)
-            if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:
+            if obs.hero.hp_frac < 0.45 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
@@ -140,7 +140,7 @@ class Agent:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 3. Passive Hazards
+            # 3. Passive Hazard Mitigation (CRITICAL: Floating Eyes paralyze on melee)
             if obs.combat.adjacent_floating_eye:
                 if obs.inventory.has_daggers:
                     obs = yield throw_dagger()
@@ -155,6 +155,7 @@ class Agent:
                     obs = yield step_away_from_hostile()
                     continue
                 else:
+                    # Only melee if trapped in a dead end with no other choice
                     obs = yield melee_attack_hostile()
                     continue
 
@@ -218,13 +219,13 @@ class Agent:
                     continue
 
             # 7. Fast Dangerous Attackers
-            if obs.combat.is_fast_dangerous:
+            if obs.combat.is_fast_dangerous or obs.combat.closest_hostile_name in ("jaguar", "soldier ant", "killer bee"):
                 if (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2) and not obs.combat.standing_on_elbereth:
                     obs = yield engrave_dust_elbereth()
                     continue
 
                 if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
                         obs = yield melee_attack_hostile()
                         continue
                     else:
@@ -239,7 +240,7 @@ class Agent:
 
             # 8. Tactical Melee / Retreat
             if obs.combat.adjacent_hostile:
-                if obs.hero.hp_frac < 0.40:
+                if obs.hero.hp_frac < 0.35:
                     if not obs.combat.standing_on_elbereth and not (obs.combat.hostile_ignores_elbereth):
                         obs = yield engrave_dust_elbereth()
                         continue
