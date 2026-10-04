@@ -320,9 +320,26 @@ This living document tracks empirical progress, critical discoveries, immediate 
     3. Updated policy to immediately ascend back to Dungeons of Doom when `obs.hero.dungeon_branch == "mines"`.
     4. **Staircase Persistence Invariant**: Fixed bug where `self.known_stairs_down` was reset to `None` when stairs were not in immediate FOV. Preserving `known_stairs_down` allows the hero to navigate to the stairs from anywhere on the floor without forgetting their location.
 
-- **Campaign 14 (Active)**:
+- **Campaign 14 Results (Completed - 10 Gens x 20 Eps = 200 Episodes in 18 min)**:
+  - **Gen 1**: Avg Depth 3.20, Max Depth 8, Avg Turns 3,300.8
+  - **Gen 2**: Avg Depth 3.65, Max Depth 8, Avg Turns 3,236.2
+  - **Gen 3**: Avg Depth **4.00**, Max Depth 7, Avg Turns 2,071.8 (40% of batch reached Depths 5–7)
+  - **Gen 4**: Avg Depth 3.70, **Max Depth 11**! (`e018` penetrated to **Depth 11** in 1,702 turns!)
+  - **Gen 5**: Avg Depth **3.95**, **Max Depth 9**, Avg Turns 2,897.3 (`e001` reached DL9, `e003` DL8 with 1,938 score)
+  - **Gen 6**: Avg Depth 3.70, Max Depth 6, Avg Turns 3,268.4
+  - **Gen 7**: Avg Depth **3.90**, **Max Depth 9**, Avg Turns 3,770.1 (`e004` and `e011` reached DL9)
+  - **Gen 8**: Avg Depth 3.70, Max Depth 8, Avg Turns 3,687.9 (`e005` reached DL8)
+  - **Gen 9**: Avg Depth **3.95**, **Max Depth 10**!, Avg Turns 3,691.3 (`e012` reached **Depth 10** with 1,942 score)
+  - **Gen 10**: Avg Depth 3.30, Max Depth 7, Avg Turns 4,342.8
+  - **Token & Cost Accounting**: 10 LLM synthesis sessions, 137,669 total tokens, **$0.0220 USD** total cost.
+  - **Key Diagnoses & Invariant 46**:
+    - Discovered that involuntary floor transitions via trap doors (`^`) or holes drop the hero on arbitrary floor tiles (`.`), NOT stairs up (`<`).
+    - `NetHackAdapter` previously assumed all floor arrivals happen on stairs up (`self.known_stairs_up = (y, x)` on turn 0), which caused heroes falling into the Mines to repeatedly execute `ascend` on open floor tiles (`"You can't go up here."`), aborting after 2,500 consecutive 0-turn steps.
+    - Added `had_explicit_descent` tracking (only true if `descend` was taken), invalidated `known_stairs_up` upon trap door messages or `"You can't go up here."`, and added consecutive 0-turn shields to `ascend` falling back to `step_to_frontier`.
+
+- **Campaign 15 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 20.0$ leveraging Gnomish Mines avoidance, persistent staircase discovery, 4-layer infinite loop protection, and deep Dungeons of Doom exploration.
+  - **Target**: Average Depth $\ge 20.0$ leveraging trap door arrival discrimination, 0-turn ascend fallback, encumbrance-gated loot scooping, and deep Dungeons of Doom exploration.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 20+)
 

@@ -252,6 +252,11 @@ lox/
     - `NetHackAdapter` must strictly preserve `self.known_stairs_down` across turns once discovered on a level. Setting `self.known_stairs_down = None` when not currently visible in FOV causes the hero to forget the exit the moment they walk away, resulting in endless search loops and stalling on DL1 for 10,000+ turns.
     - Only level transitions or explicit branch staircase pruning (e.g. entering the Mines) may invalidate or clear `self.known_stairs_down`.
 
+46. **Trap-Door Arrival vs Genuine Staircase Discrimination & 0-Turn Ascend Protection**:
+    - Characters can descend floors involuntarily by stepping on trap doors (`^`) or holes, arriving on arbitrary floor tiles (`.`), NOT stairs up (`<`).
+    - `NetHackAdapter` previously assumed all floor transitions arrive on stairs up, setting `self.known_stairs_up = (y, x)` on turn 0. When in the Mines after a trap door fall, the policy yielded `ascend()` on open floor, which output `"You can't go up here."` (0 turns) and triggered NLE abort after 2,500 consecutive 0-turn steps.
+    - `NetHackAdapter` now records `had_explicit_descent` (only true if `descend` was issued), invalidates `known_stairs_up` upon trap door messages or `"You can't go up here."`, and shields `ascend` by falling back to `step_to_frontier` if consecutive 0-turn steps occur.
+
 ---
 
 ## 4. Key CLI Commands

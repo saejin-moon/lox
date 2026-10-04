@@ -299,6 +299,8 @@ class NetHackAdapter(EnvironmentAdapter):
         if depth != self.last_depth or dnum != self.last_dnum:
             if branch_name == "mines" and getattr(self, "_last_descended_stair", None) is not None:
                 self.mines_stairs_positions.add(self._last_descended_stair)
+            had_explicit_descent = getattr(self, "_last_descended_stair", None) is not None
+            self._last_descended_stair = None
             self.turns_on_level = 0
             self.visited.fill(False)
             self.searched_count.fill(0)
@@ -313,7 +315,7 @@ class NetHackAdapter(EnvironmentAdapter):
             self.known_fountain_pos = None
             self.known_altar_pos = None
             self.known_stairs_down = None
-            self.known_stairs_up = None
+            self.known_stairs_up = (y, x) if had_explicit_descent else None
             self.stairs_down_discovery_turn = -1
             self.last_target_pos = None
             self.known_chars.fill(0)
@@ -533,8 +535,8 @@ class NetHackAdapter(EnvironmentAdapter):
             if len(stairs_up) > 0:
                 self.known_stairs_up = (int(stairs_up[0][0]), int(stairs_up[0][1]))
 
-        if self.known_stairs_up is None and self.turns_on_level == 0:
-            self.known_stairs_up = (y, x)
+        if any(msg in message.lower() for msg in ("can't go up here", "cannot go up here", "trap door", "fall through a trap")):
+            self.known_stairs_up = None
 
         # Spatial topology & navigation analysis
         walkable, walkable_nav = self._build_walkable_nav(raw_obs)
@@ -1437,6 +1439,9 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "ascend":
             if obs_prev and getattr(obs_prev.status, "is_levitating", False):
                 return self.step(Action(name="wait"))
+            if obs_prev and getattr(self, "consecutive_zero_turns", 0) >= 2 and getattr(self, "_last_action_name", "") == "ascend":
+                self.known_stairs_up = None
+                return self.step(Action(name="step_to_frontier"))
             target_char = "<"
         elif action.name == "search":
             hero = obs_prev.hero if obs_prev else None

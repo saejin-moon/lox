@@ -13,17 +13,26 @@ class Agent:
                     obs = yield pray()
                     continue
 
-            # 2. Combat Logic (Highest Priority)
+            # 2. Gnomish Mines Avoidance: Immediate exit strategy
+            if obs.hero.dungeon_branch == "mines":
+                if obs.spatial.standing_on_stairs_up:
+                    obs = yield ascend()
+                    continue
+                elif obs.spatial.stairs_up_known:
+                    obs = yield step_to_stairs_up()
+                    continue
+
+            # 3. Combat Logic (Highest Priority)
             if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 3. Post-Combat Recovery (Heal before exploring)
+            # 4. Post-Combat Recovery (Heal before exploring)
             if obs.hero.hp_frac < 0.70 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # 4. Hunger Prevention
+            # 5. Hunger Prevention (Only when safe)
             if obs.hero.hunger_state >= 2:
                 if obs.inventory.has_food:
                     obs = yield eat_carried_food()
@@ -32,12 +41,12 @@ class Agent:
                     obs = yield from self.handle_corpse_consumption(obs)
                     continue
 
-            # 5. Equipment Optimization
+            # 6. Equipment Optimization
             if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
                 obs = yield wear_armor()
                 continue
 
-            # 6. Weapon Scaling (Forge Excalibur)
+            # 7. Weapon Scaling (Forge Excalibur)
             if obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
                 if obs.dungeon.standing_on_fountain:
                     obs = yield dip_excalibur()
@@ -46,12 +55,12 @@ class Agent:
                     obs = yield step_to_fountain()
                     continue
 
-            # 7. Nearby Floor Loot Scooping
+            # 8. Nearby Floor Loot Scooping
             if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile:
                 obs = yield step_to_loot()
                 continue
 
-            # 8. Altar BUC Testing
+            # 9. Altar BUC Testing
             if obs.dungeon.standing_on_altar and obs.epistemic.has_untested_items:
                 obs = yield test_altar_buc()
                 continue
@@ -59,12 +68,12 @@ class Agent:
                 obs = yield step_to_altar()
                 continue
 
-            # 9. Poison Resistance Harvesting
+            # 10. Poison Resistance Harvesting
             if obs.dungeon.can_harvest_poison and not obs.hero.has_poison_res and obs.hero.hp_frac > 0.90:
                 obs = yield harvest_poison_res()
                 continue
 
-            # 10. Navigation & Exploration
+            # 11. Navigation & Exploration
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                 obs = yield descend()
                 continue
@@ -88,8 +97,8 @@ class Agent:
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
-            # 0. Emergency Panic Escape
-            if (obs.hero.hp_frac < 0.20 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
+            # 0. Emergency Panic Escape (Critical HP or Surrounded)
+            if (obs.hero.hp_frac < 0.25 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
                     obs = yield read_scroll_teleport()
                     continue
@@ -97,12 +106,12 @@ class Agent:
                     obs = yield zap_wand_teleport()
                     continue
 
-            # 1. Immediate Tactical Healing
-            if obs.hero.hp_frac < 0.45 and obs.inventory.has_healing:
+            # 1. Immediate Tactical Healing (Aggressive healing at 40%)
+            if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # 2. Passive & Exploding Hazards
+            # 2. Passive & Exploding Hazards (NEVER melee)
             if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
                 if obs.inventory.has_offensive_wand:
                     obs = yield zap_offensive_wand()
@@ -114,13 +123,13 @@ class Agent:
                     obs = yield step_away_from_hostile()
                     continue
 
-            # 3. Non-Aggression
+            # 3. Non-Aggression (Shopkeepers/Town)
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain") or obs.dungeon.in_shop:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 4. Panic Sanctuary (Elbereth) - Lowered threshold for safer play
-            if (obs.hero.hp_frac < 0.40 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+            # 4. Panic Sanctuary (Elbereth) - Triggered at 30% or when surrounded
+            if (obs.hero.hp_frac < 0.30 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 obs = yield engrave_dust_elbereth()
                 continue
 
@@ -158,7 +167,7 @@ class Agent:
                     obs = yield melee_attack_hostile()
                     continue
 
-            # 6. Ranged Harassment (Prioritize before melee)
+            # 6. Ranged Harassment (Prioritize over melee if HP < 70%)
             if obs.combat.closest_hostile_dist >= 2:
                 if obs.inventory.has_offensive_wand:
                     obs = yield zap_offensive_wand()
@@ -167,18 +176,30 @@ class Agent:
                     obs = yield throw_dagger()
                     continue
 
-            # 7. Fast Dangerous Attackers
+            # 7. Fast Dangerous Attackers (Force Chokepoints)
             if obs.combat.is_fast_dangerous:
                 if not obs.combat.in_corridor and obs.combat.can_retreat:
                     obs = yield step_to_chokepoint()
                     continue
 
             # 8. Tactical Melee / Chokepoint Retreat
+            # STRICT HP GATE: Never melee attack if HP < 30% unless trapped
             if obs.combat.adjacent_hostile:
-                if obs.hero.hp_frac > 0.65 or not obs.combat.can_retreat:
-                    obs = yield melee_attack_hostile()
+                if obs.hero.hp_frac > 0.30:
+                    if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                        obs = yield melee_attack_hostile()
+                    else:
+                        obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
                 else:
-                    obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
+                    # Critically low HP: Retreat or pray, NEVER attack
+                    if obs.combat.can_retreat:
+                        obs = yield step_away_from_hostile()
+                    else:
+                        if obs.hero.turn - self.last_prayer_turn >= 150:
+                            self.last_prayer_turn = obs.hero.turn
+                            obs = yield pray()
+                        else:
+                            obs = yield wait()
             else:
                 if obs.hero.hp_frac > 0.60:
                     obs = yield melee_attack_hostile()
@@ -204,6 +225,10 @@ class Agent:
         return obs
 
     def handle_dead_end(self, obs):
+        if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
+            obs = yield from self.handle_combat(obs)
+            return obs
+
         current_pos = (obs.hero.y, obs.hero.x)
         if obs.spatial.standing_on_dead_end and current_pos != getattr(self, "last_searched_pos", None):
             self.last_searched_pos = current_pos
