@@ -223,9 +223,30 @@ This living document tracks empirical progress, critical discoveries, immediate 
        - Because `descend()` was only positioned at the bottom of navigation (after combat), the hero stood on the staircase fighting for 9 turns until dying on the stairs, rather than taking the 1-turn staircase descent to escape into Depth 10!
        - **Fix**: Elevate `descend()` to execute immediately whenever `obs.spatial.standing_on_stairs_down and not obs.status.is_levitating`, including within `handle_combat()` as an escape.
 
-- **Campaign 9 (Planned / Next)**:
+- **Campaign 9 Results (Completed - 10 Gens x 20 Eps = 200 Episodes in 18 mins)**:
+  - **Gen 1**: Avg Depth **3.35**, Max Depth 7, Avg Turns 3,829.1
+  - **Gen 2**: Avg Depth **3.20**, Max Depth 7, Avg Turns 3,547.3
+  - **Gen 3**: Avg Depth **3.00**, Max Depth 6, Avg Turns 3,843.3
+  - **Gen 4**: Avg Depth **4.05**, Max Depth 8, Avg Turns 2,805.5
+  - **Gen 5**: Avg Depth **3.30**, Max Depth 8, Avg Turns 3,760.4
+  - **Gen 6**: Avg Depth **3.70**, Max Depth 7, Avg Turns 2,708.6
+  - **Gen 7**: Avg Depth **4.05**, Max Depth 7, Avg Turns 2,155.8
+  - **Gen 8**: Avg Depth **4.15**, Max Depth 7, Avg Turns 4,290.4
+  - **Gen 9**: Avg Depth **4.35**, **Max Depth 10** (**DEPTH 10 REACHED! Episode `g009_e017` penetrated to Depth 10 at turn 8,612 with AC -2 and 51 HP!**)
+  - **Gen 10**: Avg Depth **3.45**, Max Depth 8, Avg Turns 2,549.2
+  - **Major Milestones Achieved**:
+    - **Campaign Depth 10 Milestone**: `g009_e017` successfully descended to **Dungeon Level 10**! Equipped full armor (AC -2) and held 51/65 HP.
+    - **Sustained 4.0+ Depth Generations**: Multiple generations reached average depths > 4.0 (Gen 4: 4.05, Gen 7: 4.05, Gen 8: 4.15, Gen 9: 4.35).
+  - **Autopsy Diagnoses & Key Discoveries**:
+    1. **Tactical Locked Door Bumping Abort on Depth 10**:
+       - Detailed tick inspection of `g009_e017` on Depth 10 revealed that at turn 2,589, `step_away_from_hostile` selected an adjacent locked door as `best_tile` because it maximized distance from the hostile.
+       - However, `step_away_from_hostile` dispatched `Action(name="step_direction", direction=best_tile)` directly rather than calling `_step_or_breach(obs_prev, dy, dx)`.
+       - Walking into a locked door returned `"This door is locked."` and consumed 0 turns. Because the hero position did not change and the door remained in `walkable_nav`, it repeated 2,500 consecutive zero-turn steps until NLE aborted the episode at turn 8,612 while the hero was alive with 51 HP!
+       - **Fix Applied**: Upgraded `step_away_from_hostile` in `NetHackAdapter` to strictly prefer open walkable floor tiles over closed/locked doors, and route any door retreat through `self._step_or_breach(obs_prev, dy, dx)` so locked doors are breached with kicking instead of endless zero-turn walking.
+
+- **Campaign 10 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 10.0$ leveraging staircase escape descent and tactical weapon progression.
+  - **Target**: Average Depth $\ge 10.0$ leveraging open-floor tactical retreat, staircase descent priority, and high-level armor scaling.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 

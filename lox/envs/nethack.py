@@ -1289,12 +1289,14 @@ class NetHackAdapter(EnvironmentAdapter):
                                 walkable_nav[ny, nx] = False
 
             best_tile = None
+            best_dist = -1.0
+            best_is_open = False
             closest_pos = obs_prev.combat.closest_hostile_pos
             if closest_pos:
                 hy, hx = closest_pos
                 curr_dist = math.hypot(hero.y - hy, hero.x - hx)
-                max_dist = curr_dist
                 dirs = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+                doors_mask = self._get_doors_mask(obs_prev.glyphs)
                 for i, (dy, dx) in enumerate(dirs):
                     ny, nx = hero.y + dy, hero.x + dx
                     if 0 <= ny < 21 and 0 <= nx < 79 and walkable_nav[ny, nx]:
@@ -1304,12 +1306,18 @@ class NetHackAdapter(EnvironmentAdapter):
                                 continue
                             if not walkable_nav[hero.y, nx] or not walkable_nav[ny, hero.x]:
                                 continue
+                        if (ny, nx) in self.locked_doors and obs_prev.dungeon.in_shop:
+                            continue
                         d = math.hypot(ny - hy, nx - hx)
-                        if d > max_dist:
-                            max_dist = d
-                            best_tile = (dy, dx)
+                        if d > curr_dist:
+                            is_open = not doors_mask[ny, nx]
+                            if (is_open and not best_is_open) or (is_open == best_is_open and d > best_dist):
+                                best_dist = d
+                                best_tile = (dy, dx)
+                                best_is_open = is_open
+
             if best_tile:
-                action = Action(name="step_direction", direction=best_tile)
+                return self._step_or_breach(obs_prev, best_tile[0], best_tile[1])
             elif not obs_prev.combat.closest_hostile_pos:
                 # No hostile in sight: safely fallback to navigation or search instead of engraving/waiting
                 if obs_prev.spatial.stairs_down_known:

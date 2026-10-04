@@ -218,6 +218,10 @@ lox/
     - Host CPU capacity is 22 cores. Episode evaluation runs with `--workers 20` to execute the full 20-episode batch simultaneously in a single wave.
     - Parquet telemetry logging is buffered to `flush_interval=5000` to eliminate SSD write-lock contention across concurrent processes.
 
+38. **Tactical Retreat Door Breaching & Open Floor Preference (`step_away_from_hostile`)**:
+    - When stepping away or retreating from hostiles, directional evaluation must strictly prefer open walkable floor tiles over closed or locked doors.
+    - If a closed or locked door must be breached during retreat, `NetHackAdapter` must dispatch via `self._step_or_breach(obs_prev, dy, dx)` to open or kick the door open rather than issuing raw `step_direction` (which bumps into locked doors and aborts after 2,500 consecutive 0-turn steps).
+
 ---
 
 ## 4. Key CLI Commands
