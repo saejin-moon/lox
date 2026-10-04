@@ -2,13 +2,12 @@ class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
         self.last_searched_pos = None
-        self.retreat_streak = 0
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
+            # 1. Absolute Emergency Survival (Fainting or Critical HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
-                if obs.hero.turn - self.last_prayer_turn >= 150:
+                if obs.hero.turn - self.last_prayer_turn >= 350:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
@@ -91,7 +90,6 @@ class Agent:
                 obs = yield from self.handle_dead_end(obs)
                 continue
             else:
-                # Prevent EpisodeWallTimeout by ensuring we don't just search in place
                 obs = yield from self.handle_dead_end(obs)
 
     def handle_combat(self, obs):
@@ -117,7 +115,7 @@ class Agent:
                 obs = yield pray()
                 continue
 
-            # 1. Tactical Healing (Crucial for Mimics/Fast Attackers)
+            # 1. CRITICAL TACTICAL HEALING: Aggressive threshold to prevent death-spirals
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
@@ -127,7 +125,7 @@ class Agent:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 3. Passive Hazards (Floating Eyes/Gas Spores) - STRICT NO-MELEE
+            # 3. Passive Hazards (Floating Eyes/Gas Spores)
             if obs.combat.adjacent_floating_eye:
                 if obs.inventory.has_daggers:
                     obs = yield throw_dagger()
@@ -160,7 +158,9 @@ class Agent:
                     continue
 
             # 4. Panic Sanctuary (Elbereth)
-            if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+            # Only engrave if we aren't already facing a humanoid who ignores it, 
+            # unless we are absolutely desperate (HP < 20%)
+            if (obs.hero.hp_frac < 0.30 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth) or obs.hero.hp_frac < 0.20:
                     obs = yield engrave_dust_elbereth()
                     continue
@@ -175,7 +175,7 @@ class Agent:
                         obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
                         continue
 
-                if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+                if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:
                     obs = yield quaff_healing()
                     continue
                 elif obs.combat.closest_hostile_dist >= 2:
@@ -227,12 +227,11 @@ class Agent:
             # 8. Tactical Melee / Retreat
             if obs.combat.adjacent_hostile:
                 if obs.hero.hp_frac < 0.40:
-                    if not obs.combat.standing_on_elbereth:
+                    if not obs.combat.standing_on_elbereth and not (obs.combat.hostile_ignores_elbereth):
                         obs = yield engrave_dust_elbereth()
                         continue
-                    if obs.combat.can_retreat and self.retreat_streak < 5:
+                    if obs.combat.can_retreat:
                         obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
-                        self.retreat_streak += 1
                         continue
                     else:
                         if obs.inventory.has_healing:
@@ -241,21 +240,14 @@ class Agent:
                         obs = yield pray()
                         continue
 
-                if obs.hero.hp_frac > 0.50 or self.retreat_streak >= 5 or not obs.combat.can_retreat:
+                if obs.hero.hp_frac > 0.50 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
-                    self.retreat_streak = 0
                     continue
                 
-                if obs.combat.in_corridor:
-                    obs = yield step_to_chokepoint()
-                    self.retreat_streak += 1
-                else:
-                    obs = yield step_to_chokepoint()
-                    self.retreat_streak += 1
+                obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
             else:
                 if obs.hero.hp_frac > 0.40:
                     obs = yield melee_attack_hostile()
-                    self.retreat_streak = 0
                 else:
                     obs = yield step_away_from_hostile()
             

@@ -170,14 +170,14 @@ print(conn.execute('''
 
 ## 3. Empirical Milestones & Benchmark History
 
-LOX has evaluated **5,925 episodes** across **18,921,897 game turns** in DuckDB:
+LOX has evaluated **6,125 episodes** across **19,827,565 game turns** in DuckDB:
 
-| Metric | Campaign 1 Baseline | Mid-Campaigns (C10–C15) | Current Highs (C24–C28) |
+| Metric | Campaign 1 Baseline | Mid-Campaigns (C10–C15) | Current Highs (C24–C29) |
 | :--- | :---: | :---: | :---: |
-| **Batch Avg Depth** | 1.91 | 3.51 – 3.66 | **5.10** (C27 Gen 5) / **4.65** (C28 Gen 8) |
-| **Peak Max Depth** | 5 | 9 – 11 | **14** (C25 Gen 2) / **12** (C28 Gen 7) |
-| **Batch Avg Score** | 204.3 | 440 – 530 | **1,124.8** (C28 Gen 4) / **1,014.5** (C27 Gen 9) |
-| **Peak Single Score** | 922 | 2,645 | **4,612** (C24 Gen 6) / **4,551** (C28 Gen 4) |
+| **Batch Avg Depth** | 1.91 | 3.51 – 3.66 | **5.10** (C27 Gen 5) / **4.65** (C28 Gen 8, C29 Gen 10) |
+| **Peak Max Depth** | 5 | 9 – 11 | **14** (C25 Gen 2) / **12** (C28 Gen 7) / **10** (C29 Gen 2) |
+| **Batch Avg Score** | 204.3 | 440 – 530 | **1,124.8** (C28 Gen 4) / **1,018.7** (C29 Gen 3) |
+| **Peak Single Score** | 922 | 2,645 | **4,612** (C24 Gen 6) / **4,551** (C28 Gen 4) / **4,368** (C29 Gen 3) |
 | **Turn Step Speed** | ~75 steps/s | ~75 steps/s | **826+ steps/s** (11x Vectorized LUT Speedup) |
 | **Batch Wall-Clock** | ~270s | ~180s | **~35s** (20 workers concurrent) |
 | **Starvation Mortality** | ~28% | ~12% | **0.0%** (Completely Eliminated) |
