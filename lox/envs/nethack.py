@@ -1310,6 +1310,16 @@ class NetHackAdapter(EnvironmentAdapter):
                             best_tile = (dy, dx)
             if best_tile:
                 action = Action(name="step_direction", direction=best_tile)
+            elif not obs_prev.combat.closest_hostile_pos:
+                # No hostile in sight: safely fallback to navigation or search instead of engraving/waiting
+                if obs_prev.spatial.stairs_down_known:
+                    return self.step(Action(name="step_to_stairs_down"))
+                elif obs_prev.spatial.has_unvisited_frontier:
+                    return self.step(Action(name="step_to_frontier"))
+                elif obs_prev.spatial.standing_on_dead_end:
+                    return self.step(Action(name="search"))
+                else:
+                    return self.step(Action(name="step_to_dead_end"))
             else:
                 closest_name = getattr(obs_prev.combat, "closest_hostile_name", "")
                 if closest_name in ("floating eye", "gas spore") or getattr(obs_prev.combat, "gas_spore_in_fov", False):

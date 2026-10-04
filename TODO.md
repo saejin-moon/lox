@@ -184,9 +184,27 @@ This living document tracks empirical progress, critical discoveries, immediate 
     4. **Hero Occlusion Mask Corruption**:
        - `self.known_chars` substitution in `_compute_dead_ends_mask` now strictly checks `(chars == ord("@")) & (self.known_chars > 0)`.
 
-- **Campaign 7 (Active)**:
-  - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 10 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 10.0$ with working nutrition, armor equipping, and truthful mortality telemetry.
+- **Campaign 7 Results & Autopsy Discoveries**:
+  - **Gen 1**: Avg Depth 2.90, Max Depth 8, Avg Turns 5,386.4
+  - **Gen 2**: Avg Depth 2.25, Max Depth 5, Avg Turns 2,790.2
+  - **Gen 3**: Avg Depth 2.95, Max Depth 5, Avg Turns 3,629.1
+  - **Gen 4**: Avg Depth 3.00, Max Depth 7, Avg Turns 3,069.2
+  - **Key Breakthroughs Verified**:
+    - Abort elimination: 0 zero-progress aborts! 100% of fatalities are genuine combat deaths.
+    - Turns surged 3x from 1,700 to 5,300+ turns per episode.
+  - **Autopsy Diagnoses & Fatal Traps Uncovered**:
+    1. **Dead-End No-Hostile Elbereth/Wait Oscillation**:
+       - Detailed tick inspection of episodes spending 6,000–8,000 turns on DL1/DL2 (e.g. `g003_e003` with 8,274 turns on DL2) revealed **3,945 `wait` actions** and **3,778 `step_away_from_hostile` actions** executed when `closest_hostile_dist == 999.0` (zero enemies in FOV).
+       - In `handle_dead_end`, when frontiers and stairs down were not visible, the policy fell back to `step_away_from_hostile()`.
+       - In `NetHackAdapter.step()`, when `step_away_from_hostile()` had no hostile target, it fell through to `engrave_dust_elbereth()`, followed by `wait()`.
+       - **Fix Applied**: In `NetHackAdapter`, if `not obs_prev.combat.closest_hostile_pos`, `step_away_from_hostile` immediately falls back to `step_to_stairs_down`, `step_to_frontier`, `search` (if standing on a dead end/perimeter candidate), or `step_to_dead_end`. In the policy `handle_dead_end`, fallback to `search()` to uncover secret doors.
+    2. **Host Parallelism & I/O Optimization**:
+       - Host has 22 CPU cores (`os.cpu_count() == 22`). Scaled worker pool from 10 to 20 (`--workers 20`), allowing all 20 episodes to evaluate in parallel in a single wave.
+       - Buffered Parquet logging to `flush_interval=5000` (cutting disk writes by 50x) and eliminated per-step `signal.alarm` syscalls.
+
+- **Campaign 8 (Active)**:
+  - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
+  - **Target**: Average Depth $\ge 10.0$ with active perimeter wall secret door searching, no-hostile tactical fallbacks, and 20-worker parallel speed.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 10+)
 

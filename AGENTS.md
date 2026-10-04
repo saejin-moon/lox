@@ -210,6 +210,14 @@ lox/
 35. **Episode Mortality Discrimination (HP <= 0 vs Zero-Progress Abort vs MaxTurnsReached)**:
     - Real fatalities (HP <= 0) must always be classified by their lethal cause (combat, starvation, poison), even if NLE triggers termination. Zero-progress aborts (`StepStatus.ABORTED`) must be logged as `Aborted / ZeroProgress` rather than `MaxTurnsReached`, reserving `MaxTurnsReached` exclusively for runs reaching `max_turns` while alive.
 
+36. **No-Hostile Tactical Fallback Protection (`step_away_from_hostile`)**:
+    - When `step_away_from_hostile()` is invoked without hostiles in field of view (`obs.combat.closest_hostile_pos is None`), falling through to Elbereth engraving and waiting traps heroes in 4,000-turn dead-end stagnation loops.
+    - `NetHackAdapter` must immediately fallback to `step_to_stairs_down`, `step_to_frontier`, `search` (if standing on a dead end/perimeter candidate), or `step_to_dead_end`. It must strictly avoid engraving or waiting when no hostiles exist.
+
+37. **Full-Core Worker Parallelism & I/O Buffering**:
+    - Host CPU capacity is 22 cores. Episode evaluation runs with `--workers 20` to execute the full 20-episode batch simultaneously in a single wave.
+    - Parquet telemetry logging is buffered to `flush_interval=5000` to eliminate SSD write-lock contention across concurrent processes.
+
 ---
 
 ## 4. Key CLI Commands

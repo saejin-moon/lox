@@ -93,7 +93,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
     inventory_at_death_str = ""
 
     recorder = FlightRecorder(capacity=100)
-    logger = ParquetLogger(run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=100, file_prefix=f"ep{ep_idx+1:03d}")
+    logger = ParquetLogger(run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=5000, file_prefix=f"ep{ep_idx+1:03d}")
 
     policy_runner = tree.create_runner(obs)
 
@@ -114,12 +114,11 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             turns_mines += 1
 
         try:
-            signal.alarm(2)
             action = policy_runner.send(obs)
-        except TimeoutError:
+        except StopIteration:
+            break
+        except Exception:
             action = Action(name="wait")
-        finally:
-            signal.alarm(0)
 
         if action is None:
             action = Action(name="search")
