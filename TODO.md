@@ -73,6 +73,7 @@ All tactical, spatial, and execution rules are systematically documented and mai
 | **C24** | 10 x 20 | **DL 11** | **5.00** | 16m / $0.025 | **Historic Milestone**: Gen 4 achieved **5.00 avg depth** and **1,148.0 avg score** (max 3,230); Gen 5 reached **DL 11**; Gen 6 reached max score **4,612**; overall 200-ep avg depth **4.17**! Diagnosed 2,700-turn dead-end floating eye wait locks & hunger state 3 fainting; added Invariants 44 & 45. |
 | **C25** | 10 x 20 | **DL 14** | 4.35 | 16m / $0.026 | **All-Time Max Depth Record**: Gen 2 reached **Dungeon Depth 14**! Gen 7 achieved max score **3,998**; sustained 3.86 avg depth & 4,029 avg turns across 200 eps. Diagnosed premature prayer divine anger (< 300 turns) & room-wide fountain approach; added Invariants 46 & 47. |
 | **C26** | 10 x 20 | **DL 9** | **4.85** | 16m / $0.026 | Gen 6 reached **4.85 avg depth** (759.1 score); Gen 5 achieved **3,966 max score**; sustained 3.84 avg depth across 200 eps. Diagnosed open-room multi-monster swarm surround deaths from speed-18 ants/bees; added Invariant 48. |
+| **C27** | 10 x 20 | **DL 10** | **5.10** | 16m / $0.026 | **Batch Average Record**: Gen 5 broke records with **5.10 avg depth** (max depth 10); Gen 9 achieved **1,014.5 avg score** (max 2,973); sustained 4.07 avg depth & 742 avg score across 200 episodes. |
 
 ### Recent Breakthroughs & Engine Hardening
 - **Fast Dangerous Swarm Elbereth Defense & Corridor Chokepoint Steering (Invariant 48)**: Killer bees (speed 18) and soldier/giant ants (speed 18) spawn in swarms of 3–8 members at Depths 4–10. In open rooms, engaging a swarm in melee results in multiple surrounding attacks per turn and rapid fatal poison stings. When facing multiple fast attackers or when surrounded (`obs.combat.is_fast_dangerous and (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2)`), policies MUST engrave Elbereth (`engrave_dust_elbereth`) immediately. As insects, ants and bees do not ignore Elbereth and flee in terror, allowing the hero to safely quaff healing or retreat to 1-tile corridor chokepoints (`step_to_chokepoint`) to fight them one at a time.
@@ -96,9 +97,12 @@ All tactical, spatial, and execution rules are systematically documented and mai
 - **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter ensures uninterrupted overnight synthesis.
 
 ### Current Campaign Status
-- **Campaign 27 (Upcoming / Active)**:
-  - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 20.0$.
+- **Campaign Synthesis Loop: Paused as requested by user**.
+  - **Completed Campaigns**: 27 campaigns completed (5,725 episodes evaluated).
+  - **Peak Depth Achieved**: **Dungeon Depth 14** (Campaign 25).
+  - **Peak Batch Average Depth**: **5.10** (Campaign 27 Gen 5).
+  - **Peak Score**: **4,612** (Campaign 24).
+  - **Checkpoint Status**: Resumes seamlessly from `data/latest_policy.py`.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 20+)
 
