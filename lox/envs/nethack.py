@@ -1812,36 +1812,8 @@ class NetHackAdapter(EnvironmentAdapter):
                         is_door=all_doors,
                     )
 
-            # If no reachable dead end target found, decay search counts and retry
+            # If no corridor dead end found, search for any unexhausted wall-adjacent perimeter tile
             if not target or target == (-1, -1):
-                self.searched_count = np.maximum(0, self.searched_count - 10)
-                dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
-                step_target_mask = dead_ends_mask.copy()
-                step_target_mask[hero.y, hero.x] = False
-                if np.any(step_target_mask):
-                    target = SpatialEngine.find_nearest_target(
-                        (hero.y, hero.x),
-                        walkable_nav,
-                        target_mask=step_target_mask,
-                        is_door=all_doors,
-                    )
-
-            # If still no reachable dead end found, find ANY reachable perimeter/wall-adjacent tile
-            if not target or target == (-1, -1):
-                # Search immediately if hero is already adjacent to an unexhausted wall
-                if self.searched_count[hero.y, hero.x] < 10:
-                    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                        ny, nx = hero.y + dy, hero.x + dx
-                        if 0 <= ny < 21 and 0 <= nx < 79:
-                            ch = (
-                                int(self.known_chars[ny, nx])
-                                if hasattr(self, "known_chars")
-                                and self.known_chars[ny, nx] > 0
-                                else int(chars[ny, nx])
-                            )
-                            if ch in (ord("-"), ord("|"), ord(" "), 0):
-                                return self.step(Action(name="search"))
-
                 wall_adj_mask = np.zeros((21, 79), dtype=bool)
                 for cy in range(21):
                     for cx in range(79):
@@ -1870,6 +1842,25 @@ class NetHackAdapter(EnvironmentAdapter):
                         is_door=all_doors,
                     )
 
+            # If still no reachable target found, decay search counts if stagnant (rate limited to 50 turns)
+            if not target or target == (-1, -1):
+                if (
+                    not hasattr(self, "_last_search_decay_turn")
+                    or obs_prev.hero.turn - self._last_search_decay_turn >= 50
+                ):
+                    self._last_search_decay_turn = obs_prev.hero.turn
+                    self.searched_count = np.maximum(0, self.searched_count - 10)
+                    dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
+                    step_target_mask = dead_ends_mask.copy()
+                    step_target_mask[hero.y, hero.x] = False
+                    if np.any(step_target_mask):
+                        target = SpatialEngine.find_nearest_target(
+                            (hero.y, hero.x),
+                            walkable_nav,
+                            target_mask=step_target_mask,
+                            is_door=all_doors,
+                        )
+
             self.last_target_pos = target if (target and target != (-1, -1)) else None
 
             if target and target != (-1, -1):
@@ -1880,7 +1871,12 @@ class NetHackAdapter(EnvironmentAdapter):
                     dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                     return self._step_or_breach(obs_prev, dy, dx)
 
-            return self.step(Action(name="search"))
+            # If no dead end target or wall target is reachable, step to any walkable tile to prevent standing still
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                ny, nx = hero.y + dy, hero.x + dx
+                if 0 <= ny < 21 and 0 <= nx < 79 and walkable_nav[ny, nx]:
+                    return self._step_or_breach(obs_prev, dy, dx)
+            return self.step(Action(name="wait"))
 
         elif action.name == "step_to" and obs_prev is not None:
             hero = obs_prev.hero

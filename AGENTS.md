@@ -159,6 +159,10 @@ lox/
    - Drinking a potion of (extra/full) healing (`quaff_healing()`) consumes 1 turn and restores 10–20 HP. It must be executed unconditionally whenever `hp_frac < 0.50` and healing potions are available. Gating healing on `not adjacent_hostile` is lethal against fast predators in open rooms where retreat grants enemies free hits.
 35. **Mindless Gas Spore Tactical Elimination**:
    - Gas spores are mindless (`M1_MINDLESS`) and explode on contact for 4d6 damage. They completely ignore dust Elbereth. Engraving Elbereth or waiting on Elbereth adjacent to a gas spore guarantees fatal blast damage. Policies must retreat from adjacent gas spores or eliminate them from distance $\ge 2$ using thrown missiles (daggers, rocks) or offensive wands with 0 damage.
+36. **Dead-End Navigation & Stagnation Decay Rate Limiting**:
+   - `step_to_dead_end()` is strictly a movement primitive and must NEVER return `Action(name="search")`. Searching is executed explicitly by `handle_dead_end()` or when `standing_on_dead_end` is true. `step_to_dead_end()` navigates to unsearched corridor dead ends or wall perimeters (`wall_adj_mask`). Search count decay (`searched_count - 10`) is strictly rate-limited to at most once per 50 turns to prevent resetting search counts every turn, which previously trapped heroes in 2,500-turn in-place search loops on Depth 1–2.
+37. **Proactive Divine Feeding at Weakness (`hunger_state >= 3`)**:
+   - In NetHack, `HungerState` transitions from `HUNGRY` (2) to `WEAK` (3) before `FAINTING` (4). At `FAINTING`, the hero randomly falls unconscious for 30 turns and cannot act or pray. Emergency prayer for food must trigger at `hunger_state >= 3` when packaged food is exhausted, ensuring divine feeding before the hero falls unconscious.
 
 ---
 

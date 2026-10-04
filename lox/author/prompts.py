@@ -27,8 +27,8 @@ class Agent:
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble: Fainting or <15% HP)
-            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
+            # 1. Absolute Emergency Survival (Major Trouble: Weak/Fainting without food or <15% HP)
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)):
                 if obs.hero.turn - self.last_prayer_turn >= 850:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
@@ -135,6 +135,11 @@ class Agent:
                 obs = yield pray()
                 continue
 
+            # 0.3 In-Combat Emergency Healing
+            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+                obs = yield quaff_healing()
+                continue
+
             # 1. Passive Hazards (Floating Eye): Safe to snipe with daggers/wands at distance 1! NEVER melee attack!
             if obs.combat.adjacent_floating_eye:
                 if obs.inventory.has_daggers:
@@ -151,7 +156,7 @@ class Agent:
                     obs = yield step_away_from_hostile()
                     continue
 
-            # 1.1 Exploding Hazards (Gas Spore): 4d6 explosion blast at distance 1; retreat or fight safe targets!
+            # 1.1 Exploding Hazards (Gas Spore): 4d6 explosion blast at distance 1; MINDLESS (ignores Elbereth)! Always retreat!
             if obs.combat.adjacent_gas_spore:
                 if obs.combat.can_retreat:
                     obs = yield step_away_from_hostile()
@@ -159,11 +164,8 @@ class Agent:
                 elif obs.combat.has_safe_melee_target:
                     obs = yield melee_attack_hostile()
                     continue
-                elif not obs.combat.standing_on_elbereth:
-                    obs = yield engrave_dust_elbereth()
-                    continue
                 else:
-                    obs = yield wait()
+                    obs = yield step_away_from_hostile()
                     continue
 
             if obs.combat.closest_hostile_name in ("shopkeeper", "watchman", "watch captain", "guard", "priest", "priestess", "oracle") or obs.dungeon.in_shop:
