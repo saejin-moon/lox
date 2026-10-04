@@ -231,6 +231,11 @@ lox/
 41. **Comprehensive Elbereth-Immune Species Discrimination (`IGNORES_ELBERETH_SPECIES`)**:
     - Goblins, hobgoblins, gnomes, dwarves, ogres, trolls, giants, zombies, mummies, and vampires ignore Elbereth or attack with ranged weapons. Checking both adjacent hostiles and closest hostile against `IGNORES_ELBERETH_SPECIES` prevents wasting turns attempting to engrave dust when pursued by immune hostiles.
 
+42. **`signal`-Based Policy Dry-Run Timeout vs `ThreadPoolExecutor` Deadlock**:
+    - In Python, `ThreadPoolExecutor.__exit__` calls `self.shutdown(wait=True)`. If a candidate policy contains a zero-yield infinite loop, the submitted worker thread runs forever, deadlocking `executor.__exit__` and freezing the synthesis process indefinitely while consuming 100% CPU.
+    - `AuthorAgent` uses `signal.setitimer(signal.ITIMER_REAL, timeout)` with SIGALRM in the main thread (and process termination fallback), which interrupts the infinite loop bytecode immediately by raising `TimeoutError` without lingering threads or shutdown deadlocks.
+    - `test_scenarios` explicitly flags `adjacent_floating_eye=True` in `floating_eye_combat` to prevent false invariant rejections.
+
 ---
 
 ## 4. Key CLI Commands

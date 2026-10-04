@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
+import threading
 import uuid
 from typing import Any
 import httpx
@@ -505,7 +507,13 @@ class Agent:
                             chars=np.full((21, 79), ord("."), dtype=np.uint8),
                             glyphs=np.zeros((21, 79), dtype=np.int16),
                             hero=HeroState(y=10, x=10, hp=16, max_hp=16, depth=1, turn=10),
-                            combat=CombatView(hostile_count_fov=1, adjacent_hostile=True, closest_hostile_name="floating eye", floating_eye_in_fov=True),
+                            combat=CombatView(
+                                hostile_count_fov=1,
+                                adjacent_hostile=True,
+                                adjacent_floating_eye=True,
+                                closest_hostile_name="floating eye",
+                                floating_eye_in_fov=True,
+                            ),
                         )),
                         ("combat", Observation(
                             chars=np.full((21, 79), ord("."), dtype=np.uint8),
@@ -521,24 +529,57 @@ class Agent:
                         )),
                     ]
 
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        for s_name, s_obs in test_scenarios:
-                            runner = tree.create_runner(s_obs)
-                            for step_i in range(3):
-                                future = executor.submit(runner.send, s_obs)
+                    def _step_with_timeout(runner, s_obs, timeout=1.0):
+                        if threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM"):
+                            def _alarm_handler(signum, frame):
+                                raise TimeoutError("Step execution timed out")
+
+                            old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+                            signal.setitimer(signal.ITIMER_REAL, timeout)
+                            try:
+                                return runner.send(s_obs)
+                            finally:
+                                signal.setitimer(signal.ITIMER_REAL, 0)
+                                signal.signal(signal.SIGALRM, old_handler)
+                        else:
+                            import multiprocessing as mp
+                            q = mp.Queue()
+                            def _sub_worker():
                                 try:
-                                    act = future.result(timeout=1.0)
-                                    if not isinstance(act, Action):
-                                        raise ValueError(f"Policy runner produced non-Action under {s_name} state: {act}")
-                                    if s_name == "hungry_unsafe_corpse" and act.name == "eat_floor_corpse":
-                                        raise ValueError("Invariant regression: Policy attempted to eat unsafe/poisonous corpse! Check corpse.is_safe first.")
-                                    if s_name == "floating_eye_combat" and act.name == "melee_attack_hostile":
-                                        raise ValueError("Invariant regression: Policy attempted melee attack against floating eye! Gaze will paralyze hero.")
-                                except concurrent.futures.TimeoutError:
-                                    raise ValueError(
-                                        f"Policy entered an infinite loop without yielding under {s_name} scenario (step {step_i+1}). "
-                                        f"Ensure all generator subroutines yield an action (e.g. obs = yield wait()) on all execution paths."
-                                    )
+                                    res = runner.send(s_obs)
+                                    q.put(("OK", res))
+                                except Exception as exc:
+                                    q.put(("ERR", exc))
+                            p = mp.Process(target=_sub_worker)
+                            p.start()
+                            p.join(timeout=timeout)
+                            if p.is_alive():
+                                p.kill()
+                                p.join()
+                                raise TimeoutError("Step execution timed out")
+                            if not q.empty():
+                                status, val = q.get()
+                                if status == "OK":
+                                    return val
+                                raise val
+                            raise TimeoutError("Step execution timed out")
+
+                    for s_name, s_obs in test_scenarios:
+                        runner = tree.create_runner(s_obs)
+                        for step_i in range(3):
+                            try:
+                                act = _step_with_timeout(runner, s_obs, timeout=1.0)
+                            except TimeoutError:
+                                raise ValueError(
+                                    f"Policy entered an infinite loop without yielding under {s_name} scenario (step {step_i+1}). "
+                                    f"Ensure all generator subroutines yield an action (e.g. obs = yield wait()) on all execution paths."
+                                )
+                            if not isinstance(act, Action):
+                                raise ValueError(f"Policy runner produced non-Action under {s_name} state: {act}")
+                            if s_name == "hungry_unsafe_corpse" and act.name == "eat_floor_corpse":
+                                raise ValueError("Invariant regression: Policy attempted to eat unsafe/poisonous corpse! Check corpse.is_safe first.")
+                            if s_name == "floating_eye_combat" and act.name == "melee_attack_hostile":
+                                raise ValueError("Invariant regression: Policy attempted melee attack against floating eye! Gaze will paralyze hero.")
                     return candidate_code, tree, None
                 except Exception as e:
                     last_error = f"Policy compilation/validation failed: {e}"

@@ -290,9 +290,14 @@ This living document tracks empirical progress, critical discoveries, immediate 
        - Episodes previously logged empty killer strings because death messages were cleared on the terminal screen.
        - Added tick-level persistence for `last_known_hostile`, `last_valid_ac`, and `last_valid_max_hp`, accurately logging killer species and real AC at death into DuckDB.
 
+    5. **`ThreadPoolExecutor` Shutdown Deadlock & Dry-Run Test Fix**:
+       - In Python, `ThreadPoolExecutor.__exit__` calls `self.shutdown(wait=True)`. When candidate policies entered zero-yield while loops during multi-scenario dry runs, the worker thread ran forever and `executor.shutdown(wait=True)` deadlocked the main synthesis process, consuming 100% CPU for 40+ minutes.
+       - Replaced `ThreadPoolExecutor` with a signal-based timeout runner (`signal.setitimer(signal.ITIMER_REAL, 1.0)`) in the main thread (and process termination fallback), which raises `TimeoutError` directly in the infinite loop bytecode, terminating it in milliseconds without thread lingering.
+       - Fixed `floating_eye_combat` test scenario in `AuthorAgent` which previously omitted `adjacent_floating_eye=True`, causing false invariant rejections.
+
 - **Campaign 13 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
-  - **Target**: Average Depth $\ge 20.0$ leveraging instant Elbereth state reporting, persistent ward durability, immune species discrimination, and staircase escape.
+  - **Target**: Average Depth $\ge 20.0$ leveraging instant Elbereth state reporting, persistent ward durability, immune species discrimination, signal-based dry-run validation, and staircase escape.
 
 ## 4. Longer-Term Goals (Roadmap to Depth 20+)
 
