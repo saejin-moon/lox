@@ -499,22 +499,27 @@ class NetHackAdapter(EnvironmentAdapter):
                             self.peaceful_positions.add((gy, gx))
                             continue
 
-                        hostile_count += 1
                         ml = mname.lower()
-                        if ml not in ("floating eye", "gas spore") and "mold" not in ml and "jelly" not in ml and "sphere" not in ml:
+                        is_passive_hazard = ml in ("floating eye", "gas spore") or "mold" in ml or "jelly" in ml or "sphere" in ml
+                        is_adjacent = (abs(gy - y) <= 1 and abs(gx - x) <= 1)
+
+                        if not is_passive_hazard or is_adjacent:
+                            hostile_count += 1
+                        if not is_passive_hazard:
                             active_hostile_count += 1
                         if mname == "floating eye":
                             floating_eye_fov = True
                         if mname == "gas spore":
                             gas_spore_fov = True
 
-                        dist = math.hypot(gy - y, gx - x)
-                        if dist < closest_dist:
-                            closest_dist = dist
-                            closest_name = mname
-                            closest_pos = (gy, gx)
+                        if not is_passive_hazard or is_adjacent:
+                            dist = math.hypot(gy - y, gx - x)
+                            if dist < closest_dist:
+                                closest_dist = dist
+                                closest_name = mname
+                                closest_pos = (gy, gx)
 
-                        if abs(gy - y) <= 1 and abs(gx - x) <= 1:
+                        if is_adjacent:
                             adjacent_hostile = True
                             adjacent_hostiles_count += 1
                             if mname == "gas spore":

@@ -26,7 +26,6 @@ class Agent:
                     continue
 
             # 3. Combat Logic (Highest Priority)
-            # We check hostile_count_fov first to prevent walking into mimics/ambushes via step_to_frontier
             if obs.combat.adjacent_hostile or obs.combat.has_active_hostile or obs.combat.hostile_count_fov > 0:
                 obs = yield from self.handle_combat(obs)
                 continue
@@ -98,11 +97,6 @@ class Agent:
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
-            # Exit combat if no active threats and no ranged options
-            if not obs.combat.adjacent_hostile and not obs.combat.has_active_hostile:
-                if not (obs.inventory.has_offensive_wand or obs.inventory.has_daggers):
-                    break
-
             # 0. Emergency Panic Escape
             if (obs.hero.hp_frac < 0.20 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
@@ -124,8 +118,8 @@ class Agent:
                 obs = yield pray()
                 continue
 
-            # 1. Tactical Healing (CRITICAL: Prevent burst death)
-            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+            # 1. Tactical Healing (CRITICAL: Lowered threshold to 0.40 to prevent burst death)
+            if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
@@ -152,11 +146,12 @@ class Agent:
                     if not obs.combat.standing_on_elbereth:
                         obs = yield engrave_dust_elbereth()
                         continue
-                    obs = yield wait()
-                    continue
+                    else:
+                        obs = yield step_away_from_hostile()
+                        continue
 
-            # 4. Panic Sanctuary
-            if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
+            # 4. Panic Sanctuary (Engrave if low HP or surrounded)
+            if (obs.hero.hp_frac < 0.30 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth) or obs.hero.hp_frac < 0.20:
                     obs = yield engrave_dust_elbereth()
                     continue
@@ -171,7 +166,7 @@ class Agent:
                         obs = yield step_to_chokepoint() if obs.combat.in_corridor else step_away_from_hostile()
                         continue
 
-                if obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
+                if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                     obs = yield quaff_healing()
                     continue
                 elif obs.combat.closest_hostile_dist >= 2:
@@ -259,6 +254,7 @@ class Agent:
                 obs = yield search()
         else:
             if obs.combat.hostile_count_fov > 0:
+                obs = yield from self.handle_combat(obs)
                 return obs
             obs = yield step_to_dead_end()
         return obs
