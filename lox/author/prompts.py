@@ -209,24 +209,35 @@ class Agent:
                 obs = yield throw_dagger()
                 continue
 
-            # 5. Fast Dangerous Attackers (Soldier ants, killer bees)
+            # 5. Fast Dangerous Attackers (Soldier ants, killer bees, giant bats, foxes)
             if obs.combat.is_fast_dangerous:
-                if not obs.combat.in_corridor and obs.combat.can_retreat:
+                # If adjacent, NEVER run in the open against faster predators! Strike in melee or engrave Elbereth
+                if obs.combat.adjacent_hostile:
+                    if obs.hero.hp_frac > 0.40 or not obs.combat.can_retreat:
+                        obs = yield melee_attack_hostile()
+                        continue
+                    else:
+                        if not obs.combat.standing_on_elbereth:
+                            obs = yield engrave_dust_elbereth()
+                        else:
+                            obs = yield melee_attack_hostile()
+                        continue
+                elif not obs.combat.in_corridor and obs.combat.can_retreat:
                     obs = yield step_to_chokepoint()
                     continue
 
             # 6. Tactical Melee / Chokepoint Retreat
             if obs.combat.adjacent_hostile:
-                if obs.hero.hp_frac > 0.60 or not obs.combat.can_retreat:
+                if obs.hero.hp_frac > 0.45 or not obs.combat.can_retreat:
                     obs = yield melee_attack_hostile()
                 else:
                     obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
             else:
-                if obs.hero.hp_frac > 0.50:
+                if obs.hero.hp_frac > 0.40:
                     obs = yield melee_attack_hostile()
                 else:
                     obs = yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()
-            if obs.combat.hostile_count_fov == 0:
+            if obs.combat.hostile_count_fov == 0 and not obs.combat.adjacent_hostile:
                 break
         return obs
 
