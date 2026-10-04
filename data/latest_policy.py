@@ -41,10 +41,11 @@ class Agent:
                     obs = yield step_to_fountain()
                     continue
 
-            # 6. Nearby Floor Loot Scooping
+            # 6. Safe Loot Scooping
             if obs.spatial.has_nearby_loot and not obs.combat.adjacent_hostile:
-                obs = yield step_to_loot()
-                continue
+                if obs.hero.hp_frac > 0.30:
+                    obs = yield step_to_loot()
+                    continue
 
             # 7. Altar BUC Testing
             if obs.epistemic.has_untested_items and obs.hero.hp_frac > 0.50:
@@ -75,12 +76,11 @@ class Agent:
             elif obs.spatial.has_unsearched_dead_end:
                 obs = yield from self.handle_dead_end(obs)
             else:
-                # Search perimeter walls to find secret doors/stairs
                 obs = yield from self.handle_dead_end(obs)
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0:
-            # 0. Emergency Panic Escape: Teleport if critically low or surrounded
+            # 0. Emergency Panic Escape
             if (obs.hero.hp_frac < 0.25 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
                     obs = yield read_scroll_teleport()
@@ -94,30 +94,44 @@ class Agent:
                 obs = yield retreat() if obs.combat.can_retreat else step_away_from_hostile()
                 continue
 
-            # 2. Critical Healing (Aggressive)
-            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
+            # 2. Critical Healing
+            if obs.hero.hp_frac < 0.60 and obs.inventory.has_healing:
                 obs = yield quaff_healing()
                 continue
 
-            # 3. Gaze/Touch Hazard Avoidance (Floating Eyes, Gas Spores)
+            # 3. Gaze/Touch Hazard Avoidance (STRICT)
+            # If a floating eye or gas spore is anywhere in FOV, we prioritize distance and ranged attacks.
             if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore or \
                obs.combat.closest_hostile_name in ("floating eye", "gas spore"):
-                if obs.combat.closest_hostile_dist >= 2:
-                    if obs.inventory.has_offensive_wand:
-                        obs = yield zap_offensive_wand()
-                        continue
-                    if obs.inventory.has_daggers:
-                        obs = yield throw_dagger()
-                        continue
-                obs = yield step_away_from_hostile()
-                continue
+                if obs.combat.closest_hostile_dist < 3:
+                    # Immediately create distance
+                    obs = yield step_away_from_hostile()
+                    continue
+                elif obs.inventory.has_offensive_wand:
+                    obs = yield zap_offensive_wand()
+                    continue
+                elif obs.inventory.has_daggers:
+                    obs = yield throw_dagger()
+                    continue
+                else:
+                    obs = yield step_away_from_hostile()
+                    continue
 
-            # 4. Panic Sanctuary (Elbereth)
+            # 4. Ranged Harassment
+            if not obs.combat.adjacent_hostile and obs.combat.closest_hostile_dist <= 4:
+                if obs.inventory.has_offensive_wand:
+                    obs = yield zap_offensive_wand()
+                    continue
+                elif obs.inventory.has_daggers:
+                    obs = yield throw_dagger()
+                    continue
+
+            # 5. Panic Sanctuary (Elbereth)
             if (obs.hero.hp_frac < 0.35 or obs.combat.is_surrounded) and not obs.combat.standing_on_elbereth:
                 obs = yield engrave_dust_elbereth()
                 continue
 
-            # 5. Elbereth Recovery Logic
+            # 6. Elbereth Recovery Logic
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth:
                     if obs.hero.hp_frac > 0.40:
@@ -142,19 +156,10 @@ class Agent:
                     elif obs.spatial.has_unvisited_frontier:
                         obs = yield step_to_frontier()
                         break
-                    obs = yield wait()
+                    obs = yield step_away_from_hostile()
                     continue
                 else:
                     obs = yield melee_attack_hostile()
-                    continue
-
-            # 6. Ranged Harassment
-            if 2 <= obs.combat.closest_hostile_dist <= 4:
-                if obs.inventory.has_offensive_wand:
-                    obs = yield zap_offensive_wand()
-                    continue
-                elif obs.inventory.has_daggers:
-                    obs = yield throw_dagger()
                     continue
 
             # 7. High-Speed Attackers / Tactical Retreat
@@ -191,11 +196,15 @@ class Agent:
         return obs
 
     def handle_dead_end(self, obs):
+        if obs.combat.hostile_count_fov > 0:
+            obs = yield step_away_from_hostile()
+            return obs
+
         current_pos = (obs.hero.y, obs.hero.x)
         if obs.spatial.standing_on_dead_end:
             if current_pos != self.last_searched_pos:
                 self.last_searched_pos = current_pos
-                for _ in range(5):
+                for _ in range(8):
                     if obs.combat.hostile_count_fov > 0 or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
                         break
                     obs = yield search()
