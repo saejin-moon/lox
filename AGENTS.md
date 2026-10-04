@@ -236,6 +236,12 @@ lox/
     - `AuthorAgent` uses `signal.setitimer(signal.ITIMER_REAL, timeout)` with SIGALRM in the main thread (and process termination fallback), which interrupts the infinite loop bytecode immediately by raising `TimeoutError` without lingering threads or shutdown deadlocks.
     - `test_scenarios` explicitly flags `adjacent_floating_eye=True` in `floating_eye_combat` to prevent false invariant rejections.
 
+43. **Four-Layer Anti-Infinite-Loop Execution & Worker Protection Architecture**:
+    - **Layer 1 (AST LoopGuardTransformer & ExecutionGuard)**: Automatically instruments every `while` and `for` loop in compiled policies with `_guard.tick()`. If any loop executes >2,000 iterations without yielding an action, `RuntimeError` is raised in $< 1\text{ms}$.
+    - **Layer 2 (PolicyRunner Graceful Fallback)**: Catches `Infinite loop detected` `RuntimeError` in `send(obs)` and `create_runner()`, safely falling back to `Action(name="wait")` rather than crashing or hanging the environment.
+    - **Layer 3 (Episode Wall-Clock Ceiling)**: Sets `MAX_EPISODE_WALL_SEC = 90.0` in `_run_single_episode_worker`, breaking out with `EpisodeWallTimeout` if unexpected C-level NLE lockups occur.
+    - **Layer 4 (Worker Pool Batch Ceiling)**: Dispatches `mp.Pool` via `map_async` with a 180s ceiling, automatically executing `pool.terminate()` and `pool.join()` to eliminate zombie worker processes if a batch stalls.
+
 ---
 
 ## 4. Key CLI Commands

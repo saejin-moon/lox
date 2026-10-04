@@ -295,6 +295,13 @@ This living document tracks empirical progress, critical discoveries, immediate 
        - Replaced `ThreadPoolExecutor` with a signal-based timeout runner (`signal.setitimer(signal.ITIMER_REAL, 1.0)`) in the main thread (and process termination fallback), which raises `TimeoutError` directly in the infinite loop bytecode, terminating it in milliseconds without thread lingering.
        - Fixed `floating_eye_combat` test scenario in `AuthorAgent` which previously omitted `adjacent_floating_eye=True`, causing false invariant rejections.
 
+    6. **Four-Layer Anti-Infinite-Loop Execution & Worker Protection Architecture**:
+       - Built and validated defense-in-depth protections across all execution layers:
+         1. **AST `LoopGuardTransformer`**: Every `while` and `for` loop in compiled policies is automatically instrumented with `_guard.tick()`. If any loop runs >2,000 iterations without yielding an action, `RuntimeError` is raised in $< 1\text{ms}$.
+         2. **`PolicyRunner.send(obs)` Safe Fallback**: Intercepts `Infinite loop detected` `RuntimeError`, safely falling back to `Action(name="wait")` to keep the episode moving.
+         3. **`MAX_EPISODE_WALL_SEC = 90.0`**: Enforces a strict 90s wall-clock ceiling per episode to catch unexpected C-level NLE hangs.
+         4. **`mp.Pool` Batch Ceiling (`180.0s`)**: Dispatches worker processes via `map_async` with a 180s timeout, automatically executing `pool.terminate()` and `pool.join()` to eliminate zombie worker processes.
+
 - **Campaign 13 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
   - **Target**: Average Depth $\ge 20.0$ leveraging instant Elbereth state reporting, persistent ward durability, immune species discrimination, signal-based dry-run validation, and staircase escape.

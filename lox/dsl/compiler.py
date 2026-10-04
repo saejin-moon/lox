@@ -177,15 +177,71 @@ def _compile_statements(
     return nodes
 
 
+class ExecutionGuard:
+    """Watchdog that bounds consecutive generator loop iterations without yielding."""
+
+    def __init__(self, limit: int = 2000):
+        self.count = 0
+        self.limit = limit
+
+    def tick(self) -> None:
+        self.count += 1
+        if self.count > self.limit:
+            raise RuntimeError(f"Infinite loop detected: Policy looped {self.limit} times without yielding an action!")
+
+    def reset(self) -> None:
+        self.count = 0
+
+
+class LoopGuardTransformer(ast.NodeTransformer):
+    """AST Transformer that instruments while and for loops with _guard.tick()."""
+
+    def visit_While(self, node: ast.While) -> ast.While:
+        self.generic_visit(node)
+        tick_stmt = ast.Expr(
+            value=ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="_guard", ctx=ast.Load()),
+                    attr="tick",
+                    ctx=ast.Load(),
+                ),
+                args=[],
+                keywords=[],
+            )
+        )
+        node.body.insert(0, tick_stmt)
+        return node
+
+    def visit_For(self, node: ast.For) -> ast.For:
+        self.generic_visit(node)
+        tick_stmt = ast.Expr(
+            value=ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="_guard", ctx=ast.Load()),
+                    attr="tick",
+                    ctx=ast.Load(),
+                ),
+                args=[],
+                keywords=[],
+            )
+        )
+        node.body.insert(0, tick_stmt)
+        return node
+
+
 class PolicyRunner:
     """Wrapper that smoothly drives Python generators, classes, or trees with .send(obs) or next()."""
 
-    def __init__(self, gen_or_callable: Any):
+    def __init__(self, gen_or_callable: Any, guard: ExecutionGuard | None = None):
         self.gen = gen_or_callable
         self.is_generator = inspect.isgenerator(gen_or_callable)
         self.started = False
+        self.guard = guard
 
     def send(self, obs: Observation | None = None) -> Action:
+        if self.guard is not None:
+            self.guard.reset()
+
         if not self.is_generator:
             if callable(self.gen):
                 res = self.gen(obs)
@@ -199,6 +255,11 @@ class PolicyRunner:
             else:
                 act = self.gen.send(obs)
             return act if isinstance(act, Action) else Action(name="wait")
+        except RuntimeError as exc:
+            if "Infinite loop detected" in str(exc):
+                # Fallback to wait rather than hanging or crashing the game process
+                return Action(name="wait")
+            raise
         except StopIteration:
             return Action(name="wait")
 
@@ -212,10 +273,11 @@ class PolicyRunner:
 class PolicyExecutor:
     """Unified wrapper around classes, generators, and behavior trees."""
 
-    def __init__(self, target_callable: Any, is_class: bool = False, is_tree: bool = False):
+    def __init__(self, target_callable: Any, is_class: bool = False, is_tree: bool = False, guard: ExecutionGuard | None = None):
         self.target_callable = target_callable
         self.is_class = is_class
         self.is_tree = is_tree
+        self.guard = guard
         self._default_runner: PolicyRunner | None = None
 
     def create_runner(self, initial_obs: Observation | None = None) -> PolicyRunner:
@@ -230,21 +292,37 @@ class PolicyExecutor:
                     act = bb.last_action or Action(name="wait")
                     obs = yield act
             gen = tree_generator(initial_obs)
-            return PolicyRunner(gen)
+            return PolicyRunner(gen, guard=self.guard)
 
         elif self.is_class:
             agent = self.target_callable()
-            if hasattr(agent, "run"):
-                gen = agent.run(initial_obs)
-            elif hasattr(agent, "episode_policy"):
-                gen = agent.episode_policy(initial_obs)
-            else:
-                gen = agent(initial_obs)
-            return PolicyRunner(gen)
+            try:
+                if hasattr(agent, "run"):
+                    gen = agent.run(initial_obs)
+                elif hasattr(agent, "episode_policy"):
+                    gen = agent.episode_policy(initial_obs)
+                else:
+                    gen = agent(initial_obs)
+            except RuntimeError as exc:
+                if "Infinite loop detected" in str(exc):
+                    def fallback_gen(obs):
+                        while True:
+                            obs = yield Action(name="wait")
+                    return PolicyRunner(fallback_gen(initial_obs), guard=self.guard)
+                raise
+            return PolicyRunner(gen, guard=self.guard)
 
         else:
-            gen = self.target_callable(initial_obs)
-            return PolicyRunner(gen)
+            try:
+                gen = self.target_callable(initial_obs)
+            except RuntimeError as exc:
+                if "Infinite loop detected" in str(exc):
+                    def fallback_gen(obs):
+                        while True:
+                            obs = yield Action(name="wait")
+                    return PolicyRunner(fallback_gen(initial_obs), guard=self.guard)
+                raise
+            return PolicyRunner(gen, guard=self.guard)
 
     def execute(self, obs: Observation, memory: dict[str, Any] | None = None) -> Action:
         """Ticking interface for single-step execution."""
@@ -267,15 +345,20 @@ def compile_policy(
 
     # 1. If policy defines classes or generators, compile into sandbox namespace
     if visitor.classes or visitor.has_generator:
+        guarded_ast = LoopGuardTransformer().visit(tree_ast)
+        ast.fix_missing_locations(guarded_ast)
+
+        guard = ExecutionGuard(limit=2000)
         sandbox: dict[str, Any] = {
             "Action": Action,
             "GoalDirective": GoalDirective,
             "GoalAgenda": GoalAgenda,
+            "_guard": guard,
             **ENUM_CONSTANTS,
             **DEFAULT_ACTION_BUILDERS,
         }
 
-        compiled_code = compile(tree_ast, "<policy>", "exec")
+        compiled_code = compile(guarded_ast, "<policy>", "exec")
         exec(compiled_code, sandbox)
 
         # Look for primary agent class (e.g. Agent, Policy, or first defined class)
@@ -291,7 +374,7 @@ def compile_policy(
                     break
 
         if target_cls is not None:
-            return PolicyExecutor(target_cls, is_class=True)
+            return PolicyExecutor(target_cls, is_class=True, guard=guard)
 
         # Look for generator function
         target_fn = None
@@ -306,7 +389,7 @@ def compile_policy(
                     break
 
         if target_fn is not None:
-            return PolicyExecutor(target_fn, is_class=False)
+            return PolicyExecutor(target_fn, is_class=False, guard=guard)
 
     # 2. Legacy Behavior Tree compilation
     handlers = action_handlers or {}

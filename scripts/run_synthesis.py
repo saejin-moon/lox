@@ -94,6 +94,8 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
     last_known_hostile = ""
     last_valid_ac = getattr(obs.hero, "ac", 10)
     last_valid_max_hp = getattr(obs.hero, "max_hp", 15)
+    ep_start_time = time.perf_counter()
+    MAX_EPISODE_WALL_SEC = 90.0
 
     recorder = FlightRecorder(capacity=100)
     logger = ParquetLogger(run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=5000, file_prefix=f"ep{ep_idx+1:03d}")
@@ -101,6 +103,9 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
     policy_runner = tree.create_runner(obs)
 
     for step in range(max_turns):
+        if time.perf_counter() - ep_start_time > MAX_EPISODE_WALL_SEC:
+            death_reason = f"EpisodeWallTimeout ({int(MAX_EPISODE_WALL_SEC)}s)"
+            break
         ep_turns += 1
         hero = obs.hero
         hy, hx = hero.y, hero.x
@@ -453,7 +458,44 @@ class Agent:
 
         if workers > 1:
             with mp.Pool(processes=min(workers, eval_episodes)) as pool:
-                ep_results = pool.map(_run_single_episode_worker, payloads)
+                async_res = pool.map_async(_run_single_episode_worker, payloads)
+                try:
+                    ep_results = async_res.get(timeout=180.0)
+                except mp.TimeoutError:
+                    print(f"\n[Warning] Generation {gen} worker pool timed out after 180s! Terminating hung worker processes...")
+                    pool.terminate()
+                    pool.join()
+                    ep_results = [
+                        {
+                            "episode_id": f"{gen_dir_id}_e{i+1:03d}",
+                            "final_depth": 1,
+                            "final_score": 0,
+                            "ep_turns": 100,
+                            "death_reason": "WorkerPoolTimeout",
+                            "wall_sec": 180.0,
+                            "role": role,
+                            "gold": 0,
+                            "max_depth": 1,
+                            "attacks": 0,
+                            "descents": 0,
+                            "searches": 0,
+                            "eats": 0,
+                            "prayers": 0,
+                            "death_category": "timeout",
+                            "inventory_at_death": "",
+                            "last_5_actions": ["wait"],
+                            "turns_dl1": 100,
+                            "turns_dl2": 0,
+                            "turns_mines": 0,
+                            "killer": "WorkerPoolTimeout",
+                            "ac_at_death": 10,
+                            "hp_at_death": 0,
+                            "max_hp_at_death": 15,
+                            "excalibur_forged": False,
+                            "trajectory": "",
+                        }
+                        for i in range(eval_episodes)
+                    ]
         else:
             ep_results = [_run_single_episode_worker(p) for p in payloads]
 
