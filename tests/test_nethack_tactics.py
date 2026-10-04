@@ -275,3 +275,33 @@ def test_peaceful_guard_and_active_hostile_discrimination():
 
     adapter.close()
 
+
+def test_food_poisoning_shield_and_universal_missiles():
+    """Verify that corpses in inventory are excluded from has_food and get_food_slot,
+    and that darts, arrows, and rocks are recognized as ranged missile ammunition."""
+    from lox.core.types import Item, InventoryView
+
+    corpse_item = Item(slot="d", name="a lichen corpse", category="food")
+    food_ration = Item(slot="e", name="an uncursed food ration", category="food")
+    dart_item = Item(slot="f", name="24 darts", category="weapon", quantity=24)
+    rock_item = Item(slot="g", name="5 rocks", category="gem", quantity=5)
+
+    # 1. Inventory with only corpse: has_food must be False and get_food_slot None
+    inv_corpse_only = InventoryView([corpse_item])
+    assert inv_corpse_only.has_food is False
+    assert inv_corpse_only.get_food_slot() is None
+    assert inv_corpse_only.food_count == 0
+
+    # 2. Inventory with food ration + corpse: get_food_slot must strictly return ration slot 'e'
+    inv_mixed = InventoryView([corpse_item, food_ration])
+    assert inv_mixed.has_food is True
+    assert inv_mixed.get_food_slot() == "e"
+    assert inv_mixed.food_count == 1
+
+    # 3. Universal missiles: darts and rocks must be recognized when daggers are absent
+    inv_missiles = InventoryView([dart_item, rock_item])
+    assert inv_missiles.has_daggers is True
+    assert inv_missiles.get_dagger_slot() == "f"
+    assert inv_missiles.dagger_count == 29
+
+

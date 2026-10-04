@@ -118,7 +118,7 @@ class InventoryView(list):
 
     @property
     def has_food(self) -> bool:
-        return any(it.category == "food" for it in self)
+        return any(it.category == "food" and "corpse" not in it.name.lower() for it in self)
 
     @property
     def has_healing(self) -> bool:
@@ -181,7 +181,7 @@ class InventoryView(list):
 
     def get_food_slot(self) -> str | None:
         for it in self:
-            if it.category == "food":
+            if it.category == "food" and "corpse" not in it.name.lower():
                 return it.slot
         return None
 
@@ -199,11 +199,18 @@ class InventoryView(list):
 
     @property
     def has_daggers(self) -> bool:
-        return any(it.category == "weapon" and "dagger" in it.name.lower() for it in self)
+        return any(
+            (it.category == "weapon" and any(k in it.name.lower() for k in ("dagger", "dart", "arrow", "shuriken", "spear", "javelin")))
+            or ("rock" in it.name.lower() and it.category in ("gem", "weapon", "unknown"))
+            for it in self
+        )
 
     def get_dagger_slot(self) -> str | None:
         for it in self:
             if it.category == "weapon" and "dagger" in it.name.lower():
+                return it.slot
+        for it in self:
+            if any(k in it.name.lower() for k in ("dart", "arrow", "shuriken", "rock", "spear", "javelin")):
                 return it.slot
         return None
 
@@ -225,11 +232,15 @@ class InventoryView(list):
 
     @property
     def dagger_count(self) -> int:
-        return sum(it.quantity for it in self if it.category == "weapon" and "dagger" in it.name.lower())
+        return sum(
+            it.quantity for it in self
+            if (it.category == "weapon" and any(k in it.name.lower() for k in ("dagger", "dart", "arrow", "shuriken", "spear", "javelin")))
+            or ("rock" in it.name.lower() and it.category in ("gem", "weapon", "unknown"))
+        )
 
     @property
     def food_count(self) -> int:
-        return sum(it.quantity for it in self if it.category == "food")
+        return sum(it.quantity for it in self if it.category == "food" and "corpse" not in it.name.lower())
 
     @property
     def potion_count(self) -> int:

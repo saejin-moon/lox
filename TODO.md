@@ -67,8 +67,11 @@ All tactical, spatial, and execution rules are systematically documented and mai
 | **C18** | 10 x 20 | **DL 10** | 3.50 | 14m / $0.022 | Gen 7 reached **Depth 10**! Gen 8 reached 3.50 avg depth; 99.0% combat deaths. Diagnosed author system prompt template reverting `has_safe_melee_target`; updated `prompts.py`. |
 | **C19** | 10 x 20 | **DL 11** | **4.05** | 15m / $0.022 | Gen 8 reached **4.05 avg depth** (508 score); Gen 10 reached **DL 11**! Diagnosed in-combat hunger starvation lock & floating eye stalemate; added in-combat food/prayer & solo eye resolution. |
 | **C20** | 10 x 20 | **DL 10** | 3.85 | 16m / $0.026 | Gen 3 reached **DL 10**; Gen 6 achieved **650.0 avg score**; 3,666 avg turns across 200 episodes. Diagnosed Vault Guard accidental missile provocation & distant passive hazard combat locks; added Invariants 39 & 40. |
+| **C21** | 10 x 20 | DL 8 | 3.75 | 15m / $0.024 | 0 Vault Guard deaths (100% peaceful protection verified). Diagnosed lethal food poisoning from rotten carried corpses & ammunition starvation stalemates; added Invariants 41 & 42. |
 
 ### Recent Breakthroughs & Engine Hardening
+- **Rotten Corpse Food Poisoning Shield & Nutrition Discrimination (Invariant 41)**: In NetHack, corpses rot within 50 turns in the hero's backpack. When hungry, `get_food_slot()` previously picked rotten carried corpses (`a lichen corpse`, `a newt corpse`), resulting in lethal food poisoning. `has_food`, `get_food_slot()`, and `food_count` strictly exclude corpses (`"corpse" not in it.name.lower()`), reserving consumption strictly for non-perishable packaged food (rations, wafers, fruit). When packaged food is exhausted, `has_food == False` triggers major trouble prayer (`pray()`) at `hunger_state >= 3`, providing safe divine feeding without tainted meat poisoning.
+- **Universal Ranged Missile Ammunition (Invariant 42)**: Goblins and orcs drop dozens of darts, arrows, and rocks across early dungeon floors. `has_daggers`, `get_dagger_slot()`, and `dagger_count` recognize all throwable missiles (daggers, darts, arrows, rocks, shuriken, spears, javelins). This ensures the hero never runs out of ranged ammo, allowing continuous ranged elimination of passive hazards (floating eyes, gas spores) and fast speedsters from distance $\ge 2$ without getting stuck in idle wait stalemates.
 - **Vault Guard, Priest & Peaceful Non-Aggression (Invariant 39)**: Level 12 Vault Guards (`guard`) and temple priests (`priest`, `priestess`) are neutral until attacked. When a vault guard asks the hero to follow him out, policies previously threw daggers or zapped wands, provoking instant 1-hit deaths. Expanded `is_peaceful_species` to include `"guard"`, `"priest"`, `"priestess"`, shielded missiles (`throw_dagger`) and wands (`zap_offensive_wand`) against firing at peaceful targets, and enforced retreat.
 - **Active Hostile Gating & Passive Hazard Bypass (Invariant 40)**: Immobile passive hazards (`floating eye`, `gas spore`) at distance $\ge 2$ do not attack or hunt the hero. Added `has_active_hostile` and `active_hostile_count` to `CombatView` and `ALLOWED_PREDICATES`. When no ranged weapons are in inventory and all hostiles in FOV are passive, policies bypass `handle_combat` and proceed with exploration, as `SpatialEngine` (`walkable_nav`) already steers around them safely without melee paralysis or starvation stalemates.
 - **In-Combat Hunger & Solo Floating Eye Stalemate Resolution**: Added in-combat food eating (`obs.hero.hunger_state >= 2`) and major trouble prayer (`hunger_state >= 3`) inside `handle_combat` so heroes never starve while blocked by harmless monsters.
@@ -81,7 +84,7 @@ All tactical, spatial, and execution rules are systematically documented and mai
 - **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter ensures uninterrupted overnight synthesis.
 
 ### Current Campaign Status
-- **Campaign 21 (Upcoming / Active)**:
+- **Campaign 22 (Upcoming / Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
   - **Target**: Average Depth $\ge 20.0$.
 
