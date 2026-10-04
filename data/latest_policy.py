@@ -100,7 +100,6 @@ class Agent:
                 continue
 
             # 3. Gaze/Touch Hazard Avoidance (Floating Eyes, Gas Spores)
-            # STRICT: Never melee. If adjacent, move away immediately.
             if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore or \
                obs.combat.closest_hostile_name in ("floating eye", "gas spore"):
                 if obs.combat.closest_hostile_dist >= 2:
@@ -110,7 +109,6 @@ class Agent:
                     if obs.inventory.has_daggers:
                         obs = yield throw_dagger()
                         continue
-                # If adjacent or ranged failed, we MUST move.
                 obs = yield step_away_from_hostile()
                 continue
 
