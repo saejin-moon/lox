@@ -34,8 +34,9 @@ def test_nethack_interlocks():
     # Test prayer cooldown
     assert adapter.can_safely_pray(turn=500) is True
     adapter.last_prayer_turn = 450
-    assert adapter.can_safely_pray(turn=500) is False  # 50 turns < 350
-    assert adapter.can_safely_pray(turn=850) is True  # 400 turns >= 350
+    assert adapter.can_safely_pray(turn=500) is False  # 50 turns < 850
+    assert adapter.can_safely_pray(turn=850) is False  # 400 turns < 850
+    assert adapter.can_safely_pray(turn=1350) is True  # 900 turns >= 850
 
     adapter.close()
 

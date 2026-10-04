@@ -7,6 +7,7 @@ logs token usage directly into DuckDB, and validates proposed policies against A
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import random
@@ -63,6 +64,88 @@ class AuthorAgent:
         self.db_path = db_path
         self.max_tool_turns = max_tool_turns
         self.tools = DuckDBToolRegistry(db_path=db_path)
+
+    @staticmethod
+    def splice_policy_methods(base_code: str, patch_code: str) -> str:
+        """
+        Surgically splices replacement and new methods from patch_code into base_code via AST.
+        Supports both standalone `def foo(self, ...):` and `class Agent:` wrapped method definitions.
+        If patch_code is a complete standalone policy or base_code is empty, returns patch_code.
+        """
+        if not base_code or not base_code.strip():
+            return patch_code
+        if not patch_code or not patch_code.strip():
+            return base_code
+
+        try:
+            patch_ast = ast.parse(patch_code)
+        except SyntaxError:
+            return patch_code
+
+        # Extract replacement methods from patch_ast
+        replacements: dict[str, ast.FunctionDef] = {}
+        patch_has_class = False
+        for node in patch_ast.body:
+            if isinstance(node, ast.FunctionDef):
+                replacements[node.name] = node
+            elif isinstance(node, ast.ClassDef):
+                patch_has_class = True
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        replacements[item.name] = item
+
+        if not replacements:
+            return patch_code
+
+        try:
+            base_ast = ast.parse(base_code)
+        except SyntaxError:
+            return patch_code
+
+        # Locate class Agent in base_ast
+        agent_node = None
+        for node in base_ast.body:
+            if isinstance(node, ast.ClassDef) and node.name == "Agent":
+                agent_node = node
+                break
+
+        if agent_node is None:
+            return patch_code
+
+        # If patch defines a class with all core methods (run and __init__), it's a complete replacement
+        base_method_names = {
+            item.name for item in agent_node.body if isinstance(item, ast.FunctionDef)
+        }
+        if (
+            patch_has_class
+            and "run" in replacements
+            and len(replacements) >= len(base_method_names)
+        ):
+            return patch_code
+
+        new_body = []
+        for item in agent_node.body:
+            if isinstance(item, ast.FunctionDef) and item.name in replacements:
+                new_method = replacements.pop(item.name)
+                # Ensure 'self' is the first parameter if missing
+                if not new_method.args.args or new_method.args.args[0].arg != "self":
+                    new_method.args.args.insert(0, ast.arg(arg="self"))
+                new_body.append(new_method)
+            else:
+                new_body.append(item)
+
+        # Append any brand-new helper methods defined in patch
+        for new_method in replacements.values():
+            if not new_method.args.args or new_method.args.args[0].arg != "self":
+                new_method.args.args.insert(0, ast.arg(arg="self"))
+            new_body.append(new_method)
+
+        agent_node.body = new_body
+
+        try:
+            return ast.unparse(base_ast)
+        except Exception:
+            return patch_code
 
     def _execute_tool(self, tool_name: str, args: dict[str, Any]) -> str:
         """Dispatches tool execution against the DuckDBToolRegistry with robust error shielding."""
@@ -435,7 +518,7 @@ class Agent:
             f"{compile_err}\n\n"
             f"Candidate Code:\n```python\n{candidate_code.strip()}\n```\n\n"
             "Please fix all syntax and vocabulary violations to adhere strictly to the Approved Vocabulary and grammar rules. "
-            "Output ONLY the complete corrected policy code in a single ```python ... ``` block."
+            "Output ONLY the corrected method or complete corrected policy code in a single ```python ... ``` block."
         )
 
         if self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):
@@ -547,7 +630,12 @@ class Agent:
             )
 
         # Compilation and Self-Repair Loop
-        candidate_code = self.extract_code(raw_response)
+        extracted = self.extract_code(raw_response)
+        candidate_code = (
+            self.splice_policy_methods(current_policy, extracted)
+            if (current_policy and extracted)
+            else extracted
+        )
         last_error = None
 
         for attempt in range(max_repairs + 1):
@@ -750,6 +838,11 @@ class Agent:
                     session_id=session_id,
                     trigger_reason=trigger_reason,
                 )
-                candidate_code = self.extract_code(repaired_response)
+                repaired_extracted = self.extract_code(repaired_response)
+                candidate_code = (
+                    self.splice_policy_methods(current_policy, repaired_extracted)
+                    if (current_policy and repaired_extracted)
+                    else repaired_extracted
+                )
 
         return candidate_code, None, last_error

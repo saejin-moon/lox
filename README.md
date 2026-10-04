@@ -2,7 +2,7 @@
 
 **LOX** is an autonomous, empirical neuro-symbolic policy synthesis engine for NetHack. It enables open, efficient large language models (such as `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on execution telemetry, DuckDB incident autopsies, and an offline NetHack encyclopedia.
 
-LOX achieves **826+ steps/second** (>1,000 game turns/second across 20 parallel workers) by executing sandboxed Python generator policies alongside precomputed vectorized glyph lookup tables and a disk-cached Numba JIT A* spatial navigation engine. Across 32 continuous evolutionary campaigns and over 6,500 real episodes evaluated (21.4M+ game ticks), LOX has systematically eliminated zero-progress stalls, locked-door loops, and starvation blackouts, autonomously forged **the blessed rustproof +1 Excalibur**, repeatedly achieved **Dungeon Depth 12**, and pushed average lifespans beyond **8,000 turns**—all for **~$0.027 per 200-episode campaign**.
+LOX achieves **826+ steps/second** (>1,000 game turns/second across 20 parallel workers) by executing sandboxed Python generator policies alongside precomputed vectorized glyph lookup tables and a disk-cached Numba JIT A* spatial navigation engine. Across 43 continuous evolutionary campaigns and over 8,700 real episodes evaluated (28.5M+ game ticks), LOX has systematically eliminated zero-progress stalls, locked-door loops, premature prayer smiting, and starvation blackouts, autonomously forged **the blessed rustproof +1 Excalibur**, repeatedly achieved **Dungeon Depth 14**, and pushed average lifespans beyond **8,000 turns**—all for **~$0.027 per 200-episode campaign**.
 
 ---
 
@@ -99,7 +99,7 @@ Each evolutionary generation in LOX executes a rigorous, closed-loop 6-stage lif
 
 ## 3. Core Technical Invariants & Defensive Shields
 
-LOX's reliability is anchored on 24 consolidated technical invariants across 6 operational domains (documented in full in [`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)):
+LOX's reliability is anchored on 35 consolidated technical invariants across 6 operational domains (documented in full in [`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)):
 
 1. **Python Generator Protocol & Subroutine Yields**:
    Policies yield actions (`obs = yield action`). Subroutines are invoked via `obs = yield from self.subroutine(obs)`.
@@ -173,7 +173,7 @@ uv sync
 ```bash
 uv run pytest -v
 ```
-All 64 test items pass cleanly in ~2.8 seconds.
+All 81 test items pass cleanly in ~2.9 seconds.
 
 ### Step 3: Run Synthesis
 

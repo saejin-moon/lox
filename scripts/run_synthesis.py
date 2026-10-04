@@ -389,6 +389,11 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
                 " strikes!",
                 " kicks!",
                 " zaps!",
+                " explodes!",
+                " exploded!",
+                " burns!",
+                " freezes!",
+                " poisons!",
                 " bites.",
                 " hits.",
                 " stings.",
@@ -417,7 +422,9 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         if not killer and last_known_hostile:
             killer = last_known_hostile
         if not killer:
-            killer = getattr(obs.combat, "closest_hostile_name", "")
+            cname = getattr(obs.combat, "closest_hostile_name", "")
+            if cname and (cname not in ("floating eye", "gas spore") or getattr(obs.combat, "adjacent_hostile", False)):
+                killer = cname
     ac_at_death = last_valid_ac
     hp_at_death = getattr(obs.hero, "hp", 0)
     max_hp_at_death = last_valid_max_hp

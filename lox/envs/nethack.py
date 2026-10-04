@@ -33,8 +33,11 @@ from lox.core.types import (
     Observation,
     SpatialView,
 )
+from lox.core.digging import DiggingRouter
+from lox.core.sokoban import SokobanSolver
 from lox.envs.base import EnvironmentAdapter
 from lox.envs.solvers.altar_solver import AltarBUCSolver
+from lox.envs.solvers.castle_solver import CastleDrawbridgeSolver
 from lox.envs.solvers.poison_solver import PoisonResHarvestSolver
 
 # Direction character mapping for NetHack
@@ -141,15 +144,16 @@ for _g in range(_MAX_GLYPH):
                 GLYPH_MON_NAME[_g] = _mname
                 _ml = _mname.lower()
                 if (
-                    _ml in ("floating eye", "gas spore")
+                    _ml in ("floating eye", "gas spore", "yellow light", "black light")
                     or "mold" in _ml
                     or "jelly" in _ml
                     or "sphere" in _ml
+                    or "light" in _ml
                 ):
                     GLYPH_IS_PASSIVE_HAZARD_LUT[_g] = True
                 if _ml == "floating eye":
                     GLYPH_IS_FLOATING_EYE[_g] = True
-                elif _ml == "gas spore":
+                elif _ml in ("gas spore", "yellow light", "black light") or "sphere" in _ml:
                     GLYPH_IS_GAS_SPORE[_g] = True
 
                 if _ml in (
@@ -200,8 +204,11 @@ class NetHackAdapter(EnvironmentAdapter):
     def __init__(self, env_id: str = "NetHackChallenge-v0", role: str = "valkyrie"):
         self.env_id = env_id
         self.role = role
+        self.options = ("autopickup", "pickup_thrown", "pickup_types:?!/%=[$*")
         self.env = gym.make(
-            env_id, character=role, options=("autopickup", "pickup_types:?!/%=[$")
+            env_id,
+            character=role,
+            options=self.options,
         )
         self.visited = np.zeros((21, 79), dtype=bool)
         self.turns_on_level = 0
@@ -240,6 +247,10 @@ class NetHackAdapter(EnvironmentAdapter):
         self.agenda = GoalAgenda()
         self.altar_solver = AltarBUCSolver()
         self.poison_solver = PoisonResHarvestSolver()
+        self.castle_solver = CastleDrawbridgeSolver()
+        self.has_magic_res = False
+        self.has_reflection = False
+        self.consecutive_passive_waits = 0
         self.known_altar_pos: tuple[int, int] | None = None
         self.known_fountain_pos: tuple[int, int] | None = None
 
@@ -435,8 +446,8 @@ class NetHackAdapter(EnvironmentAdapter):
         return 0 <= g < _MAX_GLYPH and bool(GLYPH_IS_FLOATING_EYE[g])
 
     def can_safely_pray(self, turn: int) -> bool:
-        """Informational check: returns True if prayer cooldown (350 turns) has elapsed."""
-        return (turn - self.last_prayer_turn) >= 350
+        """Informational check: returns True if safe prayer cooldown (850 turns) has elapsed."""
+        return (turn - self.last_prayer_turn) >= 850
 
     def _decode_message(self, msg_raw: Any) -> str:
         if isinstance(msg_raw, np.ndarray):
@@ -548,6 +559,61 @@ class NetHackAdapter(EnvironmentAdapter):
 
         self.visited[y, x] = True
 
+        inventory_items: list[Item] = []
+        inv_letters = raw_obs.get("inv_letters", [])
+        inv_strs = raw_obs.get("inv_strs", [])
+        inv_oclasses = raw_obs.get("inv_oclasses", [])
+
+        for letter, desc_bytes, oclass in zip(inv_letters, inv_strs, inv_oclasses):
+            if letter > 0:
+                slot = chr(int(letter))
+                desc = self._decode_message(desc_bytes)
+                cat = OCLASS_MAP.get(int(oclass), "unknown")
+                is_equipped = (
+                    "weapon in hand" in desc
+                    or "(being worn)" in desc
+                    or "wielded" in desc
+                )
+                buc = "uncursed"
+                if "cursed" in desc:
+                    buc = "cursed"
+                elif "blessed" in desc:
+                    buc = "blessed"
+                qty = 1
+                words = desc.split()
+                if words and words[0].isdigit():
+                    qty = int(words[0])
+                inventory_items.append(
+                    Item(
+                        slot=slot,
+                        name=desc,
+                        quantity=qty,
+                        category=cat,
+                        is_equipped=is_equipped,
+                        buc=buc,
+                    )
+                )
+
+        self.failed_wear_slots = {
+            s
+            for s in self.failed_wear_slots
+            if any(it.slot == s for it in inventory_items)
+        }
+        inv_view = InventoryView(
+            inventory_items, failed_armor_slots=self.failed_wear_slots
+        )
+
+        has_magic_res = getattr(self, "has_magic_res", False) or any(
+            ("gray dragon scale" in it.name.lower() or "cloak of magic resistance" in it.name.lower())
+            and it.is_equipped
+            for it in inventory_items
+        )
+        has_reflection = getattr(self, "has_reflection", False) or any(
+            ("silver dragon scale" in it.name.lower() or "shield of reflection" in it.name.lower() or "amulet of reflection" in it.name.lower())
+            and it.is_equipped
+            for it in inventory_items
+        )
+
         hero = HeroState(
             y=y,
             x=x,
@@ -572,6 +638,8 @@ class NetHackAdapter(EnvironmentAdapter):
             is_hallucinating=is_hallucinating,
             is_sick=is_sick,
             has_poison_res=getattr(self, "has_poison_res", False),
+            has_magic_res=has_magic_res,
+            has_reflection=has_reflection,
         )
 
         status = HeroStatus(
@@ -583,45 +651,6 @@ class NetHackAdapter(EnvironmentAdapter):
             is_levitating=is_levitating,
             is_encumbered=(encumbrance != EncumbranceState.UNENCUMBERED),
             encumbrance_level=encumbrance,
-        )
-
-        inventory_items: list[Item] = []
-        inv_letters = raw_obs.get("inv_letters", [])
-        inv_strs = raw_obs.get("inv_strs", [])
-        inv_oclasses = raw_obs.get("inv_oclasses", [])
-
-        for letter, desc_bytes, oclass in zip(inv_letters, inv_strs, inv_oclasses):
-            if letter > 0:
-                slot = chr(int(letter))
-                desc = self._decode_message(desc_bytes)
-                cat = OCLASS_MAP.get(int(oclass), "unknown")
-                is_equipped = (
-                    "weapon in hand" in desc
-                    or "(being worn)" in desc
-                    or "wielded" in desc
-                )
-                buc = "uncursed"
-                if "cursed" in desc:
-                    buc = "cursed"
-                elif "blessed" in desc:
-                    buc = "blessed"
-                inventory_items.append(
-                    Item(
-                        slot=slot,
-                        name=desc,
-                        category=cat,
-                        is_equipped=is_equipped,
-                        buc=buc,
-                    )
-                )
-
-        self.failed_wear_slots = {
-            s
-            for s in self.failed_wear_slots
-            if any(it.slot == s for it in inventory_items)
-        }
-        inv_view = InventoryView(
-            inventory_items, failed_armor_slots=self.failed_wear_slots
         )
         message = self._decode_message(raw_obs.get("message", ""))
         chars = raw_obs["chars"]
@@ -943,6 +972,7 @@ class NetHackAdapter(EnvironmentAdapter):
             ord("="),
             ord("$"),
             ord("%"),
+            ord("*"),
         )
         if int(chars[y, x]) in loot_chars:
             self.looted_tiles.add((y, x))
@@ -1135,6 +1165,7 @@ class NetHackAdapter(EnvironmentAdapter):
                     int(altar_coords[0][1]),
                 )
 
+        closest_drawbridge = CastleDrawbridgeSolver.detect_drawbridge(chars, message)
         dungeon = DungeonView(
             tile_type=tile_type,
             in_shop=("shop" in message.lower()),
@@ -1162,6 +1193,10 @@ class NetHackAdapter(EnvironmentAdapter):
             adjacent_trap=adj_trap,
             standing_on_trap=(curr_char == "^"),
             can_forge_excalibur=can_forge,
+            is_sokoban=(branch_name == "sokoban"),
+            has_boulders=bool(chars is not None and np.any(chars == ord("0"))),
+            drawbridge_in_fov=(closest_drawbridge is not None),
+            closest_drawbridge_pos=closest_drawbridge,
         )
 
         # Register inventory items in Epistemic POMDP engine
@@ -1264,14 +1299,18 @@ class NetHackAdapter(EnvironmentAdapter):
             in_more = misc is not None and len(misc) > 2 and misc[2] == 1
             if "--More--" in msg or in_more:
                 raw_obs, _, term, trunc, _ = self.env.step(space_idx)
+            elif "Are you sure you want to pray?" in msg:
+                # NetHack ONLY prompts this when prayer timeout has not elapsed or deity is angry.
+                # Answering 'n' aborts the unsafe prayer and completely avoids divine smiting!
+                raw_obs, _, term, trunc, _ = self.env.step(
+                    self.char_to_act.get("n", space_idx)
+                )
             elif (
-                "Are you sure you want to pray?" in msg
-                or any(
+                any(
                     phrase in msg.lower()
                     for phrase in ("eat it?", "eat that?", "eat one?")
                 )
-                or "dip" in msg.lower()
-                and "fountain" in msg.lower()
+                or ("dip" in msg.lower() and "fountain" in msg.lower())
             ):
                 raw_obs, _, term, trunc, _ = self.env.step(
                     self.char_to_act.get("y", space_idx)
@@ -1548,6 +1587,9 @@ class NetHackAdapter(EnvironmentAdapter):
         self.mines_stairs_positions.clear()
         self._last_descended_stair = None
         self.has_poison_res = False
+        self.has_magic_res = False
+        self.has_reflection = False
+        self.consecutive_passive_waits = 0
         self.turns_on_level = 0
         self.last_depth = 1
         self.last_dnum = 0
@@ -1564,6 +1606,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.epistemic = EpistemicEngine()
         self.agenda = GoalAgenda()
         self.altar_solver.reset()
+        self.castle_solver.reset()
         self.known_altar_pos = None
         self.known_fountain_pos = None
         raw_obs, _ = self.env.reset(seed=seed)
@@ -1627,6 +1670,13 @@ class NetHackAdapter(EnvironmentAdapter):
             and obs_prev is not None
             and self.known_stairs_down
         ):
+            if getattr(obs_prev.hero, "dungeon_branch", "") == "mines":
+                if obs_prev.spatial.standing_on_stairs_up:
+                    return self.step(Action(name="ascend"))
+                elif self.known_stairs_up:
+                    return self.step(Action(name="step_to_stairs_up"))
+                return self.step(Action(name="step_to_frontier"))
+
             hero = obs_prev.hero
             self.last_target_pos = self.known_stairs_down
             walkable, walkable_nav = self._build_walkable_nav(obs_prev)
@@ -1778,10 +1828,28 @@ class NetHackAdapter(EnvironmentAdapter):
 
             # If still no reachable dead end found, find ANY reachable perimeter/wall-adjacent tile
             if not target or target == (-1, -1):
+                # Search immediately if hero is already adjacent to an unexhausted wall
+                if self.searched_count[hero.y, hero.x] < 10:
+                    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        ny, nx = hero.y + dy, hero.x + dx
+                        if 0 <= ny < 21 and 0 <= nx < 79:
+                            ch = (
+                                int(self.known_chars[ny, nx])
+                                if hasattr(self, "known_chars")
+                                and self.known_chars[ny, nx] > 0
+                                else int(chars[ny, nx])
+                            )
+                            if ch in (ord("-"), ord("|"), ord(" "), 0):
+                                return self.step(Action(name="search"))
+
                 wall_adj_mask = np.zeros((21, 79), dtype=bool)
                 for cy in range(21):
                     for cx in range(79):
-                        if walkable[cy, cx] and (cy, cx) != (hero.y, hero.x):
+                        if (
+                            walkable[cy, cx]
+                            and (cy, cx) != (hero.y, hero.x)
+                            and self.searched_count[cy, cx] < 10
+                        ):
                             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                                 ny, nx = cy + dy, cx + dx
                                 if 0 <= ny < 21 and 0 <= nx < 79:
@@ -1878,6 +1946,106 @@ class NetHackAdapter(EnvironmentAdapter):
             elif obs_prev.spatial.has_unvisited_frontier:
                 return self.step(Action(name="step_to_frontier"))
             return self.step(Action(name="step_to_dead_end"))
+
+        elif action.name == "solve_sokoban" and obs_prev is not None:
+            chars = obs_prev.chars
+            hero = obs_prev.hero
+            boulder_mask = (chars == ord("0"))
+            pit_mask = (chars == ord("^"))
+            wall_mask = (chars == ord("-")) | (chars == ord("|"))
+            walkable, walkable_nav = self._build_walkable_nav(obs_prev)
+            clean_floor = walkable | pit_mask
+            push_info = SokobanSolver.find_best_boulder_push(
+                (hero.y, hero.x), wall_mask, boulder_mask, pit_mask, clean_floor
+            )
+            if push_info is not None:
+                if push_info["is_ready_to_push"]:
+                    return self.step(
+                        Action(name="step_direction", direction=push_info["push_dir"])
+                    )
+                else:
+                    all_doors = self._get_all_doors_mask(obs_prev)
+                    path = SpatialEngine.find_path(
+                        (hero.y, hero.x),
+                        push_info["hero_stand_pos"],
+                        walkable_nav,
+                        is_door=all_doors,
+                    )
+                    if path:
+                        dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                        return self._step_or_breach(obs_prev, dy, dx)
+            if obs_prev.spatial.stairs_up_known:
+                return self.step(Action(name="step_to_stairs_up"))
+            elif obs_prev.spatial.has_unvisited_frontier:
+                return self.step(Action(name="step_to_frontier"))
+            return self.step(Action(name="step_to_dead_end"))
+
+        elif action.name == "breach_drawbridge" and obs_prev is not None:
+            sub_act = self.castle_solver.plan_step(
+                obs_prev, obs_prev.dungeon.closest_drawbridge_pos
+            )
+            if sub_act:
+                return self.step(sub_act)
+            if (
+                obs_prev.spatial.standing_on_stairs_down
+                and not obs_prev.status.is_levitating
+            ):
+                return self.step(Action(name="descend"))
+            elif obs_prev.spatial.stairs_down_known:
+                return self.step(Action(name="step_to_stairs_down"))
+            elif obs_prev.spatial.has_unvisited_frontier:
+                return self.step(Action(name="step_to_frontier"))
+            return self.step(Action(name="step_to_dead_end"))
+
+        elif action.name == "dig_tunnel" and obs_prev is not None:
+            hero = obs_prev.hero
+            target_pos = (
+                action.target_pos
+                or action.extra.get("target_pos")
+                or self.known_stairs_down
+                or self.known_stairs_up
+                or self.last_target_pos
+            )
+            if target_pos is None:
+                target_pos = (hero.y, hero.x + 1)
+            dig_dir = DiggingRouter.get_cardinal_tunnel_direction(
+                (hero.y, hero.x), target_pos
+            )
+            wand_slot = next(
+                (
+                    it.slot
+                    for it in obs_prev.inventory
+                    if "wand of digging" in it.name.lower()
+                ),
+                None,
+            )
+            if wand_slot:
+                dir_char = DIR_CHARS.get(dig_dir, ".")
+                return self._step_sequence(
+                    [
+                        self.char_to_act.get("z", 0),
+                        self.char_to_act.get(wand_slot, 0),
+                        self.char_to_act.get(dir_char, 0),
+                    ]
+                )
+            pick_slot = next(
+                (
+                    it.slot
+                    for it in obs_prev.inventory
+                    if "pick-axe" in it.name.lower() or "mattock" in it.name.lower()
+                ),
+                None,
+            )
+            if pick_slot:
+                dir_char = DIR_CHARS.get(dig_dir, ".")
+                return self._step_sequence(
+                    [
+                        self.char_to_act.get("a", 0),
+                        self.char_to_act.get(pick_slot, 0),
+                        self.char_to_act.get(dir_char, 0),
+                    ]
+                )
+            return self.step(Action(name="step_to_frontier"))
 
         elif action.name == "step_to_chokepoint" and obs_prev is not None:
             hero = obs_prev.hero
@@ -2003,15 +2171,15 @@ class NetHackAdapter(EnvironmentAdapter):
                                 best_is_open = is_open
 
             if best_tile:
+                self.consecutive_passive_waits = 0
                 return self._step_or_breach(obs_prev, best_tile[0], best_tile[1])
             elif not obs_prev.combat.closest_hostile_pos:
+                self.consecutive_passive_waits = 0
                 # No hostile in sight: safely fallback to navigation or search instead of engraving/waiting
                 if obs_prev.spatial.stairs_down_known:
                     return self.step(Action(name="step_to_stairs_down"))
                 elif obs_prev.spatial.has_unvisited_frontier:
                     return self.step(Action(name="step_to_frontier"))
-                elif obs_prev.spatial.standing_on_dead_end:
-                    return self.step(Action(name="search"))
                 else:
                     return self.step(Action(name="step_to_dead_end"))
             else:
@@ -2028,6 +2196,66 @@ class NetHackAdapter(EnvironmentAdapter):
                     or getattr(obs_prev.combat, "adjacent_gas_spore", False)
                 )
                 if is_passive:
+                    self.consecutive_passive_waits = (
+                        getattr(self, "consecutive_passive_waits", 0) + 1
+                    )
+                    # If we've already waited once or twice and cannot retreat away:
+                    if self.consecutive_passive_waits >= 2:
+                        self.consecutive_passive_waits = 0
+                        # 1. Try any walkable adjacent tile that is not the monster's tile
+                        if closest_pos:
+                            hy, hx = closest_pos
+                            for dy, dx in (
+                                (-1, 0),
+                                (1, 0),
+                                (0, -1),
+                                (0, 1),
+                                (-1, -1),
+                                (-1, 1),
+                                (1, -1),
+                                (1, 1),
+                            ):
+                                ny, nx = hero.y + dy, hero.x + dx
+                                if (
+                                    0 <= ny < 21
+                                    and 0 <= nx < 79
+                                    and walkable_nav[ny, nx]
+                                    and (ny, nx) != (hy, hx)
+                                ):
+                                    return self._step_or_breach(obs_prev, dy, dx)
+
+                        # 2. Ranged destruction (safe elimination)
+                        if obs_prev.inventory.has_daggers:
+                            return self.step(Action(name="throw_dagger"))
+                        elif obs_prev.inventory.has_offensive_wand:
+                            return self.step(Action(name="zap_offensive_wand"))
+
+                        # 3. Search for secret exit if at dead end
+                        if (
+                            obs_prev.spatial.standing_on_dead_end
+                            and getattr(self, "passive_search_count", 0) < 6
+                        ):
+                            self.passive_search_count = (
+                                getattr(self, "passive_search_count", 0) + 1
+                            )
+                            return self.step(Action(name="search"))
+
+                        # 4. Emergency strike to break deadlock (strictly prohibited against floating eyes to prevent passive paralysis)
+                        if closest_pos:
+                            hy, hx = closest_pos
+                            is_eye = (
+                                self.is_target_floating_eye(obs_prev.glyphs, hy, hx)
+                                or "floating eye" in closest_name
+                                or getattr(obs_prev.combat, "adjacent_floating_eye", False)
+                            )
+                            if not is_eye and abs(hy - hero.y) <= 1 and abs(hx - hero.x) <= 1:
+                                return self.step(
+                                    Action(
+                                        name="melee_attack",
+                                        direction=(hy - hero.y, hx - hero.x),
+                                    )
+                                )
+
                     return self.step(Action(name="wait"))
                 is_on_elbereth = (
                     (hero.y, hero.x) in self.elbereth_positions
@@ -2129,6 +2357,12 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "descend":
             if obs_prev and getattr(obs_prev.status, "is_levitating", False):
                 return self.step(Action(name="wait"))
+            if obs_prev and getattr(obs_prev.hero, "dungeon_branch", "") == "mines":
+                if obs_prev.spatial.standing_on_stairs_up:
+                    return self.step(Action(name="ascend"))
+                elif self.known_stairs_up:
+                    return self.step(Action(name="step_to_stairs_up"))
+                return self.step(Action(name="step_to_frontier"))
             if obs_prev and hasattr(obs_prev, "hero"):
                 self._last_descended_stair = (
                     obs_prev.hero.y,
@@ -2156,7 +2390,14 @@ class NetHackAdapter(EnvironmentAdapter):
             target_char = "."
         elif action.name == "pray":
             obs, r, term, trunc, info = self._step_sequence([self.pray_action_idx])
-            self.last_prayer_turn = obs.hero.turn
+            msg_low = obs.message.lower()
+            if "displeased" in msg_low or "anger" in msg_low:
+                self.last_prayer_turn = obs.hero.turn + 500
+            elif "decide not to pray" in msg_low or "never mind" in msg_low:
+                # Cancelled by shield because timeout was still active
+                self.last_prayer_turn = obs.hero.turn - 500
+            else:
+                self.last_prayer_turn = obs.hero.turn
             return obs, r, term, trunc, info
         elif action.name in ("eat_carried_food", "eat_food"):
             if obs_prev and (
@@ -2355,6 +2596,15 @@ class NetHackAdapter(EnvironmentAdapter):
                     self.failed_wear_slots.add(slot)
                     obs.inventory.failed_armor_slots.add(slot)
                 return obs, reward, term, trunc, info
+            return self.step(Action(name="wait"))
+        elif action.name == "apply_unicorn_horn":
+            slot = action.slot or (
+                obs_prev.inventory.get_unicorn_horn_slot() if obs_prev else None
+            )
+            if slot:
+                return self._step_sequence(
+                    [self.char_to_act.get("a", 0), self.char_to_act.get(slot, 0)]
+                )
             return self.step(Action(name="wait"))
         elif (
             action.name in ("throw_dagger", "throw_item", "fire_missile")

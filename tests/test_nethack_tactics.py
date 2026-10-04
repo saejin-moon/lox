@@ -127,10 +127,12 @@ def test_fountain_fov_and_step_to_fountain():
     adapter = NetHackAdapter()
     obs = adapter.reset(seed=107)
 
-    # Artificially inject a fountain in FOV on chars grid
+    # Artificially inject a fountain in FOV on chars grid (clearing any natural fountains first)
+    obs.chars[obs.chars == ord("{")] = ord(".")
     obs.chars[obs.hero.y, obs.hero.x + 2] = ord("{")
     raw_obs_mock = obs.raw_obs.copy()
     raw_obs_mock["chars"] = obs.chars
+    adapter.known_fountain_pos = None
     obs_fountain = adapter._extract_obs(raw_obs_mock)
 
     assert obs_fountain.dungeon.fountain_in_fov is True
@@ -340,18 +342,25 @@ def test_food_poisoning_shield_and_universal_missiles():
     and that darts, arrows, and rocks are recognized as ranged missile ammunition."""
     from lox.core.types import InventoryView, Item
 
-    corpse_item = Item(slot="d", name="a lichen corpse", category="food")
+    corpse_item = Item(slot="d", name="a kobold corpse", category="food")
     food_ration = Item(slot="e", name="an uncursed food ration", category="food")
+    lichen_corpse = Item(slot="h", name="a lichen corpse", category="food")
     dart_item = Item(slot="f", name="24 darts", category="weapon", quantity=24)
     rock_item = Item(slot="g", name="5 rocks", category="gem", quantity=5)
 
-    # 1. Inventory with only corpse: has_food must be False and get_food_slot None
+    # 1. Inventory with only rotting corpse: has_food must be False and get_food_slot None
     inv_corpse_only = InventoryView([corpse_item])
     assert inv_corpse_only.has_food is False
     assert inv_corpse_only.get_food_slot() is None
     assert inv_corpse_only.food_count == 0
 
-    # 2. Inventory with food ration + corpse: get_food_slot must strictly return ration slot 'e'
+    # 2. Inventory with non-rotting lichen corpse: has_food must be True
+    inv_lichen = InventoryView([lichen_corpse])
+    assert inv_lichen.has_food is True
+    assert inv_lichen.get_food_slot() == "h"
+    assert inv_lichen.food_count == 1
+
+    # 3. Inventory with food ration + rotting corpse: get_food_slot must strictly return ration slot 'e'
     inv_mixed = InventoryView([corpse_item, food_ration])
     assert inv_mixed.has_food is True
     assert inv_mixed.get_food_slot() == "e"
@@ -400,6 +409,49 @@ def test_adjacent_floating_eye_and_proactive_nutrition():
     obs_res, _, _, _, _ = adapter.step(
         Action(name="throw_dagger", target_pos=target_pos)
     )
+    assert obs_res is not None
+
+    adapter.close()
+
+
+def test_floating_eye_melee_prohibition_and_missile_pickup():
+    from lox.envs.nethack import NetHackAdapter
+    from lox.core.types import Action
+    from nle import nethack
+
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=123)
+
+    # 1. Verify missile collection options
+    options = adapter.options
+    assert "pickup_thrown" in options
+    assert "pickup_types:?!/%=[$*" in options
+
+    # 2. Mock cornered adjacent floating eye with consecutive passive waits >= 2
+    raw_obs_mock = obs.raw_obs.copy()
+    raw_obs_mock["glyphs"] = obs.glyphs.copy()
+    for r in range(21):
+        for c in range(79):
+            if nethack.glyph_is_monster(int(raw_obs_mock["glyphs"][r, c])):
+                raw_obs_mock["glyphs"][r, c] = 2359
+
+    target_pos = (obs.hero.y, obs.hero.x + 1)
+    eye_mon_id = 89
+    for mid in range(380):
+        try:
+            if nethack.permonst(mid).mname.lower() == "floating eye":
+                eye_mon_id = mid
+                break
+        except Exception:
+            continue
+    raw_obs_mock["glyphs"][target_pos[0], target_pos[1]] = (
+        nethack.GLYPH_MON_OFF + eye_mon_id
+    )
+    obs_extracted = adapter._extract_obs(raw_obs_mock)
+
+    adapter.last_obs = obs_extracted
+    # Step away from hostile should NOT attack the floating eye
+    obs_res, _, _, _, _ = adapter.step(Action(name="step_away_from_hostile"))
     assert obs_res is not None
 
     adapter.close()

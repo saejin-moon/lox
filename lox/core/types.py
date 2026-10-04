@@ -72,6 +72,8 @@ class HeroState:
     is_poisoned: bool = False
     is_sick: bool = False
     has_poison_res: bool = False
+    has_magic_res: bool = False
+    has_reflection: bool = False
 
     @property
     def hp_frac(self) -> float:
@@ -130,11 +132,18 @@ class InventoryView(list):
     def items(self) -> list[Item]:
         return list(self)
 
+    @staticmethod
+    def _is_safe_food_item(it: Item) -> bool:
+        if it.category != "food":
+            return False
+        n = it.name.lower()
+        if "lichen corpse" in n or "lizard corpse" in n:
+            return True
+        return "corpse" not in n
+
     @property
     def has_food(self) -> bool:
-        return any(
-            it.category == "food" and "corpse" not in it.name.lower() for it in self
-        )
+        return any(self._is_safe_food_item(it) for it in self)
 
     @property
     def has_healing(self) -> bool:
@@ -233,7 +242,7 @@ class InventoryView(list):
 
     def get_food_slot(self) -> str | None:
         for it in self:
-            if it.category == "food" and "corpse" not in it.name.lower():
+            if self._is_safe_food_item(it):
                 return it.slot
         return None
 
@@ -303,6 +312,87 @@ class InventoryView(list):
         return None
 
     @property
+    def has_bag_of_holding(self) -> bool:
+        return any(
+            it.category in ("tool", "container")
+            and "bag of holding" in it.name.lower()
+            for it in self
+        )
+
+    @property
+    def has_speed_boots(self) -> bool:
+        return any(
+            it.category == "armor" and "speed boots" in it.name.lower()
+            for it in self
+        )
+
+    @property
+    def has_gray_dragon_scale_mail(self) -> bool:
+        return any(
+            it.category == "armor"
+            and "gray dragon scale mail" in it.name.lower()
+            for it in self
+        )
+
+    @property
+    def has_gdsm(self) -> bool:
+        return self.has_gray_dragon_scale_mail
+
+    @property
+    def has_silver_dragon_scale_mail(self) -> bool:
+        return any(
+            it.category == "armor"
+            and "silver dragon scale mail" in it.name.lower()
+            for it in self
+        )
+
+    @property
+    def has_sdsm(self) -> bool:
+        return self.has_silver_dragon_scale_mail
+
+    @property
+    def has_wand_of_striking(self) -> bool:
+        return any(
+            it.category == "wand" and "striking" in it.name.lower()
+            for it in self
+        )
+
+    @property
+    def has_wand_of_wishing(self) -> bool:
+        return any(
+            it.category == "wand" and "wishing" in it.name.lower()
+            for it in self
+        )
+
+    @property
+    def has_magic_marker(self) -> bool:
+        return any(
+            it.category in ("tool", "unknown")
+            and "magic marker" in it.name.lower()
+            for it in self
+        )
+
+    @property
+    def has_unicorn_horn(self) -> bool:
+        return any(
+            it.category in ("tool", "weapon")
+            and "unicorn horn" in it.name.lower()
+            for it in self
+        )
+
+    def get_striking_slot(self) -> str | None:
+        for it in self:
+            if it.category == "wand" and "striking" in it.name.lower():
+                return it.slot
+        return None
+
+    def get_unicorn_horn_slot(self) -> str | None:
+        for it in self:
+            if it.category in ("tool", "weapon") and "unicorn horn" in it.name.lower():
+                return it.slot
+        return None
+
+    @property
     def dagger_count(self) -> int:
         return sum(
             it.quantity
@@ -322,11 +412,7 @@ class InventoryView(list):
 
     @property
     def food_count(self) -> int:
-        return sum(
-            it.quantity
-            for it in self
-            if it.category == "food" and "corpse" not in it.name.lower()
-        )
+        return sum(it.quantity for it in self if self._is_safe_food_item(it))
 
     @property
     def potion_count(self) -> int:
@@ -420,6 +506,10 @@ class DungeonView:
     standing_on_trap: bool = False
     can_forge_excalibur: bool = False
     can_harvest_poison: bool = False
+    is_sokoban: bool = False
+    has_boulders: bool = False
+    drawbridge_in_fov: bool = False
+    closest_drawbridge_pos: tuple[int, int] | None = None
 
 
 @dataclass(slots=True)

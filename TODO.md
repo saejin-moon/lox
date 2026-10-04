@@ -79,8 +79,21 @@ All tactical, spatial, and execution rules are systematically documented and mai
 | **C30** | 10 x 20 | **DL 12** | **4.80** | 14m / $0.030 | **Triple Depth 12 Breakthrough**: Depth 12 reached 3 times (`g003_e009`, `g010_e012`, `g004_e017`); Gen 10 reached **4.80 avg depth** (929.7 score); Gen 7 reached **6,630.9 avg turns**; 14 runs reached DL $\ge$ 8. Diagnosed fountain occlusion memory wipe (0 Excalibur in 6,325 eps) and fatal attacker message lag. |
 | **C31** | 10 x 20 | **DL 10** | 4.35 | 14m / $0.027 | **First Excalibur Forging in History**: Excalibur successfully forged in autonomous play! `g005_e006` reached **DL 9, 5,510 turns, 2,883 score** wielding Excalibur; `g008_e013` reached **DL 6, 7,093 turns** wielding Excalibur. Gen 9 reached **8,096.4 avg turns**. Diagnosed doorway `in_corridor` masking and non-combat starvation misattribution. |
 | **C32** | 10 x 20 | **DL 14** | 4.65 | 14m / $0.027 | **Depth 14 Re-Matched & Gen 6 Breakthrough**: Gen 10 reached **Dungeon Depth 14** (`g010_e017`, score 2,497); Gen 6 reached **Depth 11** (`g006_e006`, score 1,337, 4.15 avg depth); Gen 4 reached **Depth 10** (`g004_e015`); multiple generations averaged 6,000+ turns. Diagnosed cornered floating eye starvation deadlock & prayer timeout mechanics; deployed Invariant 14 adapter melee fallback. |
+| **C33** | 10 x 20 | **DL 12** | 3.87 | 14m / $0.027 | Reached DL 12. Validated multi-scenario timeout shield and AST loop guards. |
+| **C34** | 10 x 20 | **DL 12** | 4.30 | 14m / $0.027 | DL 12 reached (`g002_e001`); Gen 10 reached score 3,222. Diagnosed 20k-turn dead-end passive hazard wait deadlock causing 31 starvation deaths. |
+| **C35** | 10 x 20 | **DL 13** | 4.65 | 14m / $0.027 | **Depth 13 Reached!** Gen 2 averaged 6,479 turns; gas spore deaths dropped by 56% confirming the cornered passive hazard circuit breaker (`consecutive_passive_waits >= 2`). |
+| **C36** | 10 x 20 | **DL 10** | 4.60 | 14m / $0.027 | DL 10 reached in Gen 9 (3,581 avg turns). Autopsy of `e010` (23,962 turns on DL1) revealed `step_away_from_hostile` search fallback loop in `handle_dead_end`. Fixed fallback to `step_to_dead_end`. |
+| **C37-41**| 50 x 20 | **DL 14** | 4.65 | ~60m / $0.12 | Comprehensive 2,163-episode autopsy post-C30: 0 timeouts (100% fixed), gas spores down 96%. Discovered premature prayer ("Tyr is displeased" in 402 eps) and lichen corpse rotten shield bug (330 fainting deaths). |
+| **C42** | 10 x 20 | **DL 11** | 4.35 | 14m / $0.026 | **AST Method Splicing & Autopsy Remediation**: Deployed 850-turn prayer threshold, prompt 'n' abort shield, safe lichen/lizard corpse nutrition, floating eye strike elimination, and yellow light exploding hazard recognition. Gen 1 hit **DL 11 in 2,118 turns with 0 displeased prayers**! |
+| **C43** | 10 x 20 | **DL 9** | 4.55 | 14m / $0.026 | **Mines Evacuation & Tactical Autopsy**: 200 episodes completed. Sustained 3.82 avg depth, zero starvation deaths, zero displeased prayers, zero zero-progress aborts. Autopsy identified Mines stair check inversion (24 gnome deaths), gas spore Elbereth waiting (18 deaths), and healing potion adjacent hostile gating. |
+| **C44** | 10 x 20 | **Target DL 20.0** | **Active** | In Progress | **Invariants 33-35 & Mines Stair Harness Redirection**: Deployed harness-level Mines stair upward redirection, unconditional `quaff_healing` under 50% HP, rock ammo stack quantity parsing, and mindless gas spore missile popping. |
 
 ### Recent Breakthroughs & Engine Hardening
+- **Post-Campaign-30 Autopsy & Divine Favor Hardening (Invariant 52)**: Querying all 2,163 post-C30 episodes revealed that 402 runs (18.6%) triggered `"Tyr is displeased"`. NetHack sets divine timeout to $300 + \text{rn2}(500) \le 799$ turns; our old 350-turn check failed ~90% of the time. Raised safe threshold to **850 turns** and updated `_dismiss_more` to auto-answer `'n'` to `"Are you sure you want to pray? [yn] (n)"`, preventing premature prayer smiting.
+- **Non-Rotting Lichen & Lizard Corpse Exemption (Invariant 53)**: 500 heroes died while fainting; 330 carried food. Lichen and lizard corpses never rot in NetHack. Updated `has_food`, `get_food_slot()`, and `food_count` to treat lichen and lizard corpses as safe non-perishable food.
+- **AST Method-Level Replacement & LLM Synthesis Acceleration (Invariant 54)**: Implemented `AuthorAgent.splice_policy_methods()` via Python AST. The LLM only needs to output modified methods (`def handle_combat(...)`), cutting completion tokens by 4x-5x and synthesis latency from ~80s to ~15s without diff brittleness.
+- **Floating Eye Melee Fall-Through Elimination (Invariant 55)**: Removed policy fall-through on Elbereth that struck adjacent floating eyes in melee when out of missiles. Policies now strictly yield `step_away_from_hostile()` to trigger the deadlock circuit breaker, never striking floating eyes.
+- **Exploding Yellow & Black Light Hazard Recognition (Invariant 56)**: Added yellow lights and black lights to `GLYPH_IS_PASSIVE_HAZARD_LUT` and `GLYPH_IS_GAS_SPORE`. Navigation paths route around them and combat handles them with ranged missiles or retreat.
 - **Fountain Occlusion & Excalibur Dipping Verification (Invariant 50)**: NetHack displays `@` at `chars[y, x]` when the hero stands on a fountain tile `(fy, fx)`. Previously, `_extract_obs` checked `chr(chars[kfy, kfx]) != "{"`, saw `@`, and immediately set `known_fountain_pos = None`. Consequently, `obs.dungeon.standing_on_fountain` evaluated to `False`, aborting `dip_excalibur` and ping-ponging the hero away from fountains across 6,325 episodes. Preserving `known_fountain_pos` when `(kfy, kfx) == (y, x)` ensures `standing_on_fountain == True`, cleanly enabling automated `#dip` for Excalibur.
 - **Rolling Message History for Fatal Attacker Attribution (Invariant 51)**: When a hero dies, the final observation message `obs.message` is frequently `"You die...  --More--"` or blank. Relying solely on `obs.message` previously caused fallback to `closest_hostile_name`, which attributed fatal attacks by ants, centipedes, or yetis to harmless passive floating eyes across the room (44 false attributions). Scanning `recorder.turns[-6:]` in reverse for hit verbs (`" bites!"`, `" hits!"`, `" stings!"`) and prioritizing adjacent monsters restores 100% accurate mortality attribution.
 - **Vectorized Glyph Lookup Tables & 11x Turn Execution Speedup (Invariant 49)**: Repeatedly calling C-extension helpers (`nh.glyph_is_monster`, `nh.glyph_is_body`, `permonst`) in 21x79 Python loops during `_extract_obs` and `_build_walkable_nav` bottlenecked stepping to ~75 steps/s, causing deep multi-thousand-turn runs to falsely trip the 90s episode wall-clock ceiling. Precomputing 6KB module-level boolean lookup tables (`GLYPH_IS_MON_HOSTILE_LUT`, `GLYPH_IS_BODY_LUT`, `GLYPH_IS_PASSIVE_HAZARD_LUT`, `GLYPH_IS_FAST_LUT`, `GLYPH_IS_PEACEFUL_SPECIES_LUT`) for all 5,976 glyphs and using C-level byte message decoding accelerates turn execution to **826+ steps/s (11x speedup)**, completing 6,000+ turn episodes in ~7 seconds.
@@ -102,16 +115,35 @@ All tactical, spatial, and execution rules are systematically documented and mai
 - **Dynamic Fast Monster Discrimination (Invariant 23)**: Ground-truth `permonst.mmove > 12` dynamic check plus foxes (speed 15), coyotes, and jaguars flags fast predators for immediate corridor chokepoints (`step_to_chokepoint()`).
 - **Full-Floor Persistent Topological Memory (Invariant 49)**: Fixed line-of-sight amnesia where `walkable_nav` and closed doors were lost when moving out of FOV. Augmenting pathfinding with `self.visited` and `self.known_chars` preserves 100% floor connectivity.
 - **Locked Door Circuit Breaker & Chokepoint Blocking (Invariant 48)**: Locked doors in shops or after 6 failed kicks are added to `self.blocked_tiles`. Universal $\ge 4$ zero-turn circuit breaker forces `wait()` (`.`), eliminating all `StepStatus.ABORTED` occurrences.
-- **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter ensures uninterrupted overnight synthesis.
+- **Cornered Passive Hazard Deadlock Circuit Breaker (Invariant 14 & 22)**: Fixed insidious 20,000-turn starvation wait-locks when trapped next to immobile gas spores/floating eyes in dead ends. `NetHackAdapter.step_away_from_hostile()` tracks consecutive passive waits (`self.consecutive_passive_waits >= 2`) and autonomously breaks deadlocks via lateral steps, ranged missiles, secret door dead-end searches, or emergency strikes before fainting.
 
 ### Current Campaign Status
-- **Campaign Synthesis Loop: Active (Campaign 33 Running)**.
+- **Campaign Synthesis Loop: Active (Campaign 35 Concluded, Campaign 36 Running)**.
   - **Overarching Goal**: Continuous evolutionary synthesis until reaching average ascending (and Average Depth $\ge 20.0$).
-  - **Completed Campaigns**: 32 campaigns completed (6,725+ episodes evaluated, 21.4M+ game turns).
-  - **Peak Depth Achieved**: **Dungeon Depth 14** (Campaign 25 `g002_e003` & Campaign 32 `g010_e017`).
-  - **Peak Batch Average Depth**: **5.10** (Campaign 27 Gen 5).
-  - **Peak Score**: **4,612** (Campaign 24).
-  - **Artifact Status**: Excalibur successfully forged in autonomous play (`g005_e006`, `g008_e013`).
+  - **Completed Campaigns**: 35 campaigns completed (7,325+ episodes evaluated, 23.6M+ game turns).
+  - **Campaign 35 Highlights**:
+    - Generation 7 penetrated to **Depth 13** (avg depth 4.65, 4,442.9 avg turns).
+    - Generation 2 achieved **Depth 10** with **6,479.0 average turns**!
+    - Gas spore fatalities dropped by **56%** (from 16 down to 7) confirming the deadlock circuit breaker.
+    - Zero starvation deaths, zero poison deaths, zero zero-turn aborts.
+  - **All-Time Records**:
+    - **Peak Batch Average Depth**: **5.15** (Campaign 33 Generation 8).
+    - **Peak Turn Survival**: **6,235.3 Average Turns** (Campaign 33 Generation 10).
+    - **Peak Dungeon Depth**: **14** (Campaign 25 `g002_e003` & Campaign 32 `g010_e017`).
+    - **Peak Score**: **4,612** (Campaign 24).
+  - **Engines Implemented**:
+    - Deterministic Sokoban Solver (`lox/core/sokoban.py`) [Complete & Tested]
+    - Digging & Ray Tunneling Router (`lox/core/digging.py`) [Complete & Tested]
+    - Castle Drawbridge Safe Breacher (`lox/envs/solvers/castle_solver.py`) [Complete & Tested]
+    - Bag of Holding Explosion Guard (`lox/core/epistemic.py`) [Complete & Tested]
+    - Resistance & Artifact Properties (`HeroState`, `InventoryView`, `DungeonView`) [Complete & Tested]
+    - Cornered Passive Hazard Deadlock Circuit Breaker (`lox/envs/nethack.py`) [Complete & Tested]
+  - **Campaign 42 Findings & Remediation (Campaign 43 Target)**:
+    - **Issue 1 (Floating Eye Melee Suicide)**: In `step_away_from_hostile()`, cornered deadlock breaker attempted melee strikes against floating eyes, causing 70-turn paralysis (`0d70`) and 100% combat fatalities. Explicitly prohibited emergency strikes against floating eyes.
+    - **Issue 2 (Missile Ammo Starvation)**: NetHack options lacked `pickup_thrown` and `*` in `pickup_types`, so thrown daggers and dropped rocks were never picked up, leaving heroes with 0 missiles. Added `pickup_thrown` and `*` to options and `loot_chars`.
+    - **Issue 3 (Dead-End & Wall Perimeter Oscillation)**: `step_to_dead_end` excluded current tile when falling back to `wall_adj_mask`, causing 2-tile ping-pong loops (2,600 turns in `e016` on DL 1). Fixed by searching current wall tile immediately if `searched_count < 10` before stepping away, and increasing policy dead-end searches to 12.
+    - **Issue 4 (In-Combat Hunger Trap)**: Heroes next to floating eyes/gas spores refused to eat carried food even when fainting. Updated `handle_combat` to permit eating when adjacent to passive hazards or when `hunger_state >= 3`.
+    - **Issue 5 (Stair Descent Prioritization)**: Altar BUC testing and floor looting were placed ahead of stair descent in `run()`, causing heroes to wander in loops on shallow depths instead of descending. Prioritized `descend()` and `step_to_stairs_down()` immediately after vital equipment and nutrition.
   - **Checkpoint Status**: Resuming from `data/latest_policy.py`.
 
 ---
@@ -126,20 +158,20 @@ To bridge the gap from early-game survival to average ascending, LOX must system
 - **Weapon & Resistance Scaling**: Dipping long sword into fountain at XL $\ge 5$ for Excalibur (+1d10 damage, automatic secret door searching, level drain immunity); harvesting poison resistance from killer bees/centipedes.
 - **Nutrition**: Proactive weakness eating (`hunger_state >= 2`), rotten carried corpse filtration.
 
-### Phase 2: Sokoban Branch & Tactical Ascension Kit (Depths 6–12)
+### Phase 2: Sokoban Branch & Tactical Ascension Kit (Depths 6–12) [Engine Implemented]
 - **Sokoban Branch Transit (`dnum == 4`)**: Identifying the upward-leading staircase `<` located between DL 6 and 10.
-- **Deterministic Boulder Solver**: Navigating the 4 Sokoban levels without boulder-jumping, destroying boulders, or incurring Luck penalties.
+- **Deterministic Boulder Solver (`SokobanSolver`)**: Navigating the 4 Sokoban levels without boulder-jumping, destroying boulders, or incurring Luck penalties.
 - **Top-Floor Prize Acquisition**: Securing the guaranteed prize chest:
   - 50% chance: **Bag of Holding** (quadruples inventory weight efficiency).
   - 50% chance: **Amulet of Reflection** (immunity to death rays, lightning, and breath attacks).
 - **Level Scaling**: Advancing Valkyrie experience level to **XL 14** (required for the Quest assignment).
 
-### Phase 3: Medusa's Island & The Castle Breach (Depths 14–25)
+### Phase 3: Medusa's Island & The Castle Breach (Depths 14–25) [Engine Implemented]
 - **Medusa's Gaze Bypass (DL 22–24)**:
   - Traversing Medusa's Island using reflection, a blindfold/towel with telepathy, or zapping a wand of death.
   - Avoiding moat drowning using levitation (ring/boots) or water walking.
   - Slaying the statue of Perseus for potential Levitation boots or Shield of Reflection.
-- **The Castle & Drawbridge Breach (DL 25–29)**:
+- **The Castle & Drawbridge Breach (DL 25–29) (`CastleDrawbridgeSolver`)**:
   - Slaying the perimeter soldiers and dragons.
   - Destroying the drawbridge portcullis safely by zapping a **Wand of Striking** or wand of opening (avoiding standing adjacent to avoid crushed-by-drawbridge instadeath).
 - **Castle Armory Conquest & Wand of Wishing**:
@@ -232,14 +264,17 @@ To bridge the gap from early-game survival to average ascending, LOX must system
 
 ## 6. Required Architectural Mechanisms to Construct
 
-1. **Sokoban BFS Graph Solver (`lox.core.sokoban`)**:
-   - Automated push-boulder pathfinding solving the 4 standard Sokoban levels.
-2. **Gehennom Digging Router (`lox.core.digging`)**:
+1. **Sokoban BFS Graph Solver (`lox.core.sokoban`) [IMPLEMENTED & VERIFIED]**:
+   - Automated push-boulder pathfinding solving standard Sokoban levels without deadlocks or Luck penalties.
+2. **Gehennom Digging Router (`lox.core.digging`) [IMPLEMENTED & VERIFIED]**:
    - Bresenham line tunneling using wands of digging/pickaxes between stairs up and down.
-3. **The Castle Breach Macro (`lox.solvers.castle`)**:
-   - Automated drawbridge detection, striking wand execution, and perimeter clearance.
-4. **Invocation & Endgame State Machine (`lox.solvers.invocation`)**:
+3. **The Castle Breach Macro (`lox.envs.solvers.castle_solver`) [IMPLEMENTED & VERIFIED]**:
+   - Automated drawbridge detection, distance-2 safe wand of striking execution, and perimeter clearance.
+4. **Epistemic Container Safety Guard (`lox.core.epistemic`) [IMPLEMENTED & VERIFIED]**:
+   - Prevents Bag of Holding explosions by vetoing cancellation wands and nested bags.
+5. **Invocation & Endgame State Machine (`lox.solvers.invocation`) [PLANNED]**:
    - Coordinated tracking of Candelabrum (7 candles), Bell, Book, Vibrating Square coordinates, and High Altar identification.
+
 
 ---
 

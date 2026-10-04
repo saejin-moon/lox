@@ -98,6 +98,8 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "corpse_is_safe": "bool",
     "corpse_is_deadly": "bool",
     "has_poison_res": "bool",
+    "has_magic_res": "bool",
+    "has_reflection": "bool",
     "can_harvest_poison": "bool",
     # Equipment & Item Intrinsics
     "has_wand_of_teleport": "bool",
@@ -108,9 +110,20 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "has_lamp": "bool",
     "has_unworn_armor": "bool",
     "has_daggers": "bool",
+    "has_bag_of_holding": "bool",
+    "has_speed_boots": "bool",
+    "has_gray_dragon_scale_mail": "bool",
+    "has_silver_dragon_scale_mail": "bool",
+    "has_wand_of_striking": "bool",
+    "has_wand_of_wishing": "bool",
+    "has_magic_marker": "bool",
+    "has_unicorn_horn": "bool",
     "weapon_is_cursed": "bool",
     "can_forge_excalibur": "bool",
     "fountain_in_fov": "bool",
+    "is_sokoban": "bool",
+    "has_boulders": "bool",
+    "drawbridge_in_fov": "bool",
     # Epistemic POMDP Belief & Safety Gates
     "untested_buc_count": "int",
     "has_untested_items": "bool",
@@ -137,6 +150,9 @@ ALLOWED_ACTIONS: set[str] = {
     "step_direction",
     "descend",
     "ascend",
+    "solve_sokoban",
+    "dig_tunnel",
+    "breach_drawbridge",
     # Tactical Combat & Defense
     "melee_attack_hostile",
     "melee_attack",
@@ -175,6 +191,7 @@ ALLOWED_ACTIONS: set[str] = {
     "wear_armor",
     "retreat",
     "rest",
+    "apply_unicorn_horn",
 }
 
 # Enum constants exposed to conditions
