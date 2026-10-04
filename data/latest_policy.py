@@ -8,7 +8,7 @@ class Agent:
         while True:
             # 1. Absolute Emergency Survival (Fainting or Critical HP)
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state == 4):
-                if obs.hero.turn - self.last_prayer_turn >= 350:
+                if obs.hero.turn - self.last_prayer_turn >= 800:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
@@ -32,7 +32,7 @@ class Agent:
                 if obs.inventory.has_healing:
                     obs = yield quaff_healing()
                     continue
-                elif obs.hero.hp_frac < 0.30 and (obs.hero.turn - self.last_prayer_turn >= 350):
+                elif obs.hero.hp_frac < 0.30 and (obs.hero.turn - self.last_prayer_turn >= 800):
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
@@ -125,7 +125,7 @@ class Agent:
                     continue
 
             # 0.2 Divine Intervention
-            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 350):
+            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 800):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
