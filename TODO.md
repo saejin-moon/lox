@@ -65,8 +65,10 @@ All tactical, spatial, and execution rules are systematically documented and mai
 | **C16** | 10 x 20 | DL 8 | 3.35 | 14m / $0.023 | 2 episodes survived all 25k turns; 0 zero-progress aborts. Diagnosed passive hazard pathfinding bumps & fast predator speeds. |
 | **C17** | 10 x 20 | **DL 11** | 3.75 | 14m / $0.023 | Gen 9 reached **Depth 11**! Gen 10 avg score 507.6; 99.5% combat deaths. Diagnosed hero idling next to passive hazards during swarms; added `has_safe_melee_target`. |
 | **C18** | 10 x 20 | **DL 10** | 3.50 | 14m / $0.022 | Gen 7 reached **Depth 10**! Gen 8 reached 3.50 avg depth; 99.0% combat deaths. Diagnosed author system prompt template reverting `has_safe_melee_target`; updated `prompts.py`. |
+| **C19** | 10 x 20 | **DL 11** | **4.05** | 15m / $0.022 | Gen 8 reached **4.05 avg depth** (508 score); Gen 10 reached **DL 11**! Diagnosed in-combat hunger starvation lock & floating eye stalemate; added in-combat food/prayer & solo eye resolution. |
 
 ### Recent Breakthroughs & Engine Hardening
+- **In-Combat Hunger & Solo Floating Eye Stalemate Resolution**: Added in-combat food eating (`obs.hero.hunger_state >= 2`) and major trouble prayer (`hunger_state >= 3`) inside `handle_combat` so heroes never starve while blocked by harmless monsters. Added solo floating eye melee resolution when trapped with no ranged weapons.
 - **Author Prompt Alignment for Mixed Combat (`prompts.py`)**: Updated `build_system_prompt()` template and Invariant 1 so LLM authoring explicitly integrates `has_safe_melee_target` across all synthesis sessions.
 - **Safe Melee Engagement in Mixed Hazard Swarms (`has_safe_melee_target`)**: When facing a passive hazard (gas spore or floating eye) alongside active attackers (newt, jackal, orc), `obs.combat.has_safe_melee_target` allows the hero to strike the active attacker in melee while the adapter skips the passive hazard, preventing the hero from idling and dying to minor pests.
 - **Passive Hazard Pathfinding Masking & Safe Cornered Wait (Invariant 22)**: Fixed pathfinding routing through passive/exploding hazards (floating eyes, gas spores, molds, jellies) by masking them out of `walkable_nav`. When cornered or unable to retreat, `step_away_from_hostile()` yields `wait()` rather than bumping into them.
@@ -76,7 +78,7 @@ All tactical, spatial, and execution rules are systematically documented and mai
 - **OpenRouter Exponential Backoff Resilience (Invariant 47)**: 6-attempt exponential backoff retry with jitter ensures uninterrupted overnight synthesis.
 
 ### Current Campaign Status
-- **Campaign 19 (Active)**:
+- **Campaign 20 (Active)**:
   - **Configuration**: 10 generations, 20 episodes/gen, 25,000 max turns, 20 workers, OpenRouter `google/gemma-4-31b-it`.
   - **Target**: Average Depth $\ge 20.0$.
 

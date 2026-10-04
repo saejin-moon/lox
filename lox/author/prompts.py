@@ -103,15 +103,27 @@ class Agent:
                 obs = yield step_to_stairs_down()
 
     def handle_combat(self, obs):
-        while obs.combat.hostile_count_fov > 0:
+        while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
             # 0. Emergency Panic Escape: Teleport away if critically low HP (< 25%) or surrounded
-            if (obs.hero.hp_frac < 0.25 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
+            if (obs.hero.hp_frac < 0.20 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
                     obs = yield read_scroll_teleport()
                     continue
                 elif obs.inventory.has_wand_of_teleport:
                     obs = yield zap_wand_teleport()
                     continue
+
+            # 0.1 In-Combat Hunger Emergency: Eat carried food to avoid fainting
+            if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
+                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.combat.adjacent_floating_eye:
+                    obs = yield eat_carried_food()
+                    continue
+
+            # 0.2 Major Trouble Divine Intervention (Fainting or Critical HP)
+            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 150):
+                self.last_prayer_turn = obs.hero.turn
+                obs = yield pray()
+                continue
 
             # 1. Passive & Exploding Hazards: NEVER attack floating eyes or gas spores in melee!
             # BUT if another active attacker is also adjacent, attack the safe target in melee!
@@ -128,6 +140,11 @@ class Agent:
                     continue
                 elif obs.combat.can_retreat:
                     obs = yield step_away_from_hostile()
+                    continue
+                elif obs.combat.adjacent_floating_eye and obs.combat.hostile_count_fov == 1:
+                    # Trapped alone with a floating eye: attacking in melee destroys it; with 0
+                    # other monsters in FOV, paralysis is safe and breaks the starvation stalemate!
+                    obs = yield melee_attack_hostile()
                     continue
                 else:
                     if not obs.combat.standing_on_elbereth:
