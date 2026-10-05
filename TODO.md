@@ -954,3 +954,66 @@ Out of 2,447 historical episodes that terminated on Dungeon Depth 1:
   - In `NetHackAdapter.step_away_from_hostile()`: verify that the closest hostile is mobile and actively threatening.
   - If the only hostile in FOV is an immobile passive hazard (`gas spore`, `floating eye`, molds) at distance $\ge 2$, do NOT execute retreat; immediately fall back to `step_to_frontier` or `step_to_stairs_down`.
 
+---
+
+## 24. Deep Dive 3 Autopsy: The Armor & Weapon Scaling Deficit (Why Are Heroes Naked at Depth 5?)
+
+### 24.1 The Valkyrie Starting Deficit & Armor Class Reality
+Empirical query of all 13,014 episodes and Campaign 68 telemetry isolates the root cause of early combat mortality:
+
+1. **The Starting Nakedness Trap**:
+   - Valkyries start with **AC 6** granted entirely by a single starting item: an uncursed `+3 small shield`.
+   - Valkyries start with **ZERO body armor**, **ZERO helmet**, **ZERO boots**, **ZERO gloves**, and **ZERO cloak**.
+   - NetHack's base unarmored AC is 10. Against AC 6, DL 3–5 monsters (rothes, soldier ants, uruk-hai) have a 65–75% hit rate and deal unabsorbed burst physical damage (15–25 damage/turn against a hero with only 15–30 max HP).
+
+2. **The 83.0% Pre-XL 5 Mortality Funnel**:
+   - Out of 200 episodes in Campaign 68, the maximum experience level (XL) reached before death was:
+     * **XL 1**: 34 runs (17.0%)
+     * **XL 2**: 19 runs (9.5%)
+     * **XL 3**: 50 runs (25.0%)
+     * **XL 4**: 63 runs (31.5%)
+     * **XL 5+**: Only **34 runs (17.0%)** (XL 5: 26, XL 6+: 8).
+   - **83.0% of heroes die at XL $\le 4$** before ever qualifying for Excalibur dipping (which requires XL $\ge 5$).
+
+3. **The Secondary Armor Slot Starvation**:
+   - Across Campaign 68, equipped armor rates at death reveal extreme slot imbalances:
+     * **Shield**: **93.5%** (starting equipment)
+     * **Helmet**: **41.5%** (frequently dropped by goblins/orcs)
+     * **Body Armor**: **41.0%** (up from 11% in early campaigns)
+     * **Boots**: Only **9.0%** (91% unbooted!)
+     * **Cloak**: Only **7.0%** (93% uncloaked!)
+     * **Gloves**: Only **3.5%** (96.5% bare-handed!)
+   - **Root Cause**: Boots, cloaks, and gloves are dropped primarily by elves, dwarves, and uruk-hai on DL 4–8. However, `step_to_loot` was restricted to a 4-tile radius and was completely omitted from `phase_mid_branches` (DL 6–10). Dropped secondary armor was simply left behind on dungeon floors.
+
+4. **The Excalibur Conversion Truth (42.9% Success When XL 5 is Reached)**:
+   - Detailed event tracing of the 34 episodes that reached XL 5:
+     * Encountered a fountain: 12 episodes.
+     * Reached fountain & executed `dip_excalibur`: 7 episodes.
+     * **Successfully forged Excalibur**: **3 episodes (42.9% conversion rate!)**.
+     * In the remaining 4 episodes, the fountain dried up after 1–2 dips.
+   - **Conclusion**: The low 1.5% global Excalibur rate is NOT caused by broken dipping logic or prompt interference; it is 100% caused by heroes dying before XL 5 due to poor Armor Class.
+
+---
+
+### 24.2 Concrete Action Items & Planned Architecture Changes
+
+- [ ] **Action Item 1: Multi-Slot Armor Prioritization (`get_unworn_armor_slot`)**:
+  - In `InventoryView.get_unworn_armor_slot()`: scan unworn items for all missing armor slots in priority order:
+    1. Body Armor (if unarmored)
+    2. Helmet (if unhelmeted)
+    3. Boots (if unbooted)
+    4. Cloak (if uncloaked)
+    5. Gloves (if ungloved)
+  - Ensure unequipped slots are always filled immediately rather than stalling on duplicate body armors or cloaks.
+
+- [ ] **Action Item 2: Floor Loot Radius Expansion & Mid-Branch Scooping**:
+  - In `NetHackAdapter`: expand `loot_candidates` radius from 4 tiles to **8 tiles** specifically for armor glyphs (`[`).
+  - In `latest_policy.py`: add `step_to_loot()` to `phase_mid_branches` (DL 6–10) so high-tier drops from elves, dwarves, and uruk-hai (mithril coats, dwarvish iron helms, iron shoes, elven cloaks) are actively scooped and equipped.
+
+- [ ] **Action Item 3: Early XP Harvesting for XL 5 Excalibur Readiness**:
+  - In `phase_early_rush` (DL 1–2): when encountering weak, non-poisonous pests (jackals, newts, sewers rats, goblins), engage in melee to harvest easy XP, ensuring the hero enters DL 3 at XL $\ge 3$ and reaches XL 5 by DL 4.
+
+- [ ] **Action Item 4: Aggressive Body Armor Upgrading in `phase_early_scaling`**:
+  - Ensure `replace_body_armor()` proactively replaces starting leather armor with dropped heavy armor (`plate mail`, `splint mail`, `banded mail`, `dwarvish mithril coat`), driving hero AC to $\le 0$ before DL 5 to withstand DL 4–6 pack bursts.
+
+
