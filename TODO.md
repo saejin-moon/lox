@@ -832,10 +832,54 @@ Empirical analysis of 8,000+ episodes across Campaigns 23 to 68 revealed that th
    - Added unit tests in `tests/test_agenda.py`, `tests/test_nethack_tactics.py`, and `tests/test_author_splicing.py`.
    - **115 / 115 tests passing cleanly**. Verified end-to-end with 1-generation mock synthesis.
 
+---
 
+## 22. Deep Dive 1 Autopsy: Depth 11–15 Outlier Analysis & Progression Roadmap
 
+### 22.1 Empirical Findings from 91 Deep Run Outliers (Max Depth $\ge 10$)
+A comprehensive DuckDB telemetry audit across all 13,014 historic episodes (38.0M+ ticks) isolated the **91 outlier runs** that breached Dungeon Depth 10 (reaching Depths 11–15), comparing them against the 12,923 early-mortality baseline runs (Depths 1–5):
 
+1. **The Floor Velocity Law (Descent Speed vs Lingering)**:
+   - **Deep Ascents ($\text{DL} \ge 10$)**: Spent an average of only **385 turns on DL 1** and **285 turns on DL 2**, reaching DL 10–15 within **1,200 to 2,500 total turns**.
+   - **Baseline Mortalities ($\text{DL} \le 5$)**: Spent an average of **1,068 turns on DL 1** and **698 turns on DL 2** (~1,766 turns before even seeing DL 3), exhausting turn budgets and food rations on dead-end perimeter sweeps.
+   - **Conclusion**: Fast vertical transit on early floors preserves resources, keeps hunger clocks healthy, and prevents attrition deaths against infinite monster spawns.
 
+2. **The 96.7% Combat Mortality Shift (Zero Starvation at Depth)**:
+   - At $\text{DL} \ge 10$, **96.7% of deaths (88 / 91)** were in combat. Starvation accounted for only **1.1% (1 run)**.
+   - Starvation is strictly an early-floor wandering artifact. Once past DL 5, monster lethality scaling and burst damage are the sole barrier to reaching DL 20.
 
+3. **The Poison & Corrosion Mortality Ceiling**:
+   - **Over 20% of DL 10+ deaths** were caused by poison (`snake`, `killer bee`, `water moccasin`, `queen bee`, `quasit`) or acid/corrosion (`brown pudding`, `gray ooze`, `rust monster`).
+   - Even heroes who reached negative AC ($-1$ to $-4$, occurring in only 19 runs in history!) suffered rapid death when stung because they lacked the **Poison Resistance** intrinsic.
+   - Melee strikes against acid/corrosive monsters (`brown pudding`, `gray ooze`) melted weapon enchantment, reduced armor AC, and inflicted lethal acid splash damage.
 
+4. **The Unidentified Consumable Graveyard**:
+   - Heroes reaching DL 10–14 consistently died with **4 to 8 unidentified potions, scrolls, and wands** in their packs.
+   - NetHack's early potion pool has high concentrations of *extra healing*, *healing*, and *speed*, while scrolls frequently grant *teleportation* or *remove curse*. Dying at 4 HP with a backpack full of un-quaffed potions represents wasted emergency survival bandwidth.
 
+5. **The Armor & Artifact Disconnect**:
+   - Deep runners were 3.2x more likely to wear body armor (29.7% vs 9.3%) and 25x more likely to forge Excalibur (9.9% vs 0.4%).
+   - However, even among deep runners, heroes frequently carried superior body armor (e.g. `splint mail`, `banded mail`) unequipped in backpacks due to slot evaluation deficits.
+
+---
+
+### 22.2 Concrete Action Items & Planned Architecture Changes
+
+Based on these empirical findings, the following concrete improvements are queued for implementation across the harness, schema, and depth-tiered policy:
+
+- [ ] **Action Item 1: Poison Resistance Corpse Harvesting (`phase_early_scaling`)**:
+  - In NetHack, consuming corpses of `killer bee`, `soldier ant`, `homunculus`, `quasit`, or `centipede` grants permanent poison resistance.
+  - Expose `obs.hero.has_poison_resistance` in `HeroState` (inferred from intrinsics / eating messages).
+  - In `phase_early_scaling` (DL 3–5), prioritize eating fresh poison-granting corpses when HP is high ($\ge 80\%$) and divine favor is positive, securing poison immunity before descending into DL 6+.
+
+- [ ] **Action Item 2: Acid & Corrosive Monster Melee Blacklisting**:
+  - Add `GLYPH_IS_CORROSIVE_LUT` and `obs.combat.is_corrosive_target` for `brown pudding`, `gray ooze`, `rust monster`, `acid blob`.
+  - In `handle_combat` and `phase_mid_branches`: strictly prohibit melee attacks against corrosive/acidic monsters. Eliminate them exclusively from distance $\ge 2$ with throwable missiles / offensive wands, or bypass them using `step_away_from_hostile()`.
+
+- [ ] **Action Item 3: Critical Health Emergency Consumable Usage**:
+  - In `handle_combat`: when `hp_frac < 0.20` and prayer is on timeout with no identified healing potion or escape item:
+    - Quaff an unidentified potion (`quaff_emergency_potion`) or read an unidentified scroll (`read_emergency_scroll`).
+    - At extreme peril, the expected value of an unidentified consumable (chance of healing, extra healing, teleportation) far exceeds certain death from the next incoming melee hit.
+
+- [ ] **Action Item 4: Proactive Heavy Body Armor Equipping in `phase_early_scaling`**:
+  - Ensure Valkyries proactively scoop and equip heavy armor drops (`splint mail`, `banded mail`, `plate mail`, `dwarvish mithril coat`) in DL 3–5, driving AC down to $\le 0$ before descending into mid-dungeon branches.
