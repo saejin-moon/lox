@@ -1202,4 +1202,50 @@ To ensure LLM synthesis sessions (targeting `google/gemma-4-31b-it`) generate po
    - Added unit test `test_pack_threat_adjacent_melee_priority()` in `tests/test_nethack_tactics.py`.
    - All 122 unit tests passing with zero regressions (`uv run pytest`).
 
+---
+
+## 29. Campaign 70 Empirical Autopsy & Emergency Nutrition Unshackling (`INV-NUT-005`)
+
+### 29.1 Campaign 70 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_104013`
+- **Milestones Reached**:
+  - **Jackal Deaths Slashed by 84%**: Down from 63 deaths (31.5%) in C69 to only **8 deaths (4.0%)** in C70!
+  - **Deep Dungeon Penetration**: Multiple runs reached **DL 10, 11, and 12**!
+  - **Generation Progression**:
+    * Gen 1: Avg Depth 3.45 | Max Depth 10 | Avg Turns 2,216.6
+    * Gen 2: Avg Depth **5.40** | Max Depth 11 | Avg Turns 2,141.2
+    * Gen 3: Avg Depth 4.00 | Max Depth **12** | Avg Turns 3,570.9
+    * Gen 4: Avg Depth 3.55 | Max Depth 7  | Avg Turns 2,509.1
+    * Gen 5: Avg Depth 3.60 | Max Depth **12** | Avg Turns 3,246.8
+    * Gen 6: Avg Depth 4.20 | Max Depth 7  | Avg Turns 1,936.8
+    * Gen 7: Avg Depth 3.80 | Max Depth 8  | Avg Turns 3,047.1
+    * Gen 8: Avg Depth 3.75 | Max Depth 9  | Avg Turns 2,361.8
+    * Gen 9: Avg Depth 4.55 | Max Depth 9  | Avg Turns 3,102.0
+    * Gen 10: Avg Depth 4.10 | Max Depth 10 | Avg Turns 3,233.9
+
+### 29.2 Autopsy Discoveries: The In-Combat Adjacent Starvation Gating Trap
+1. **The Starvation Surge**:
+   - 35 episodes died to starvation with backpacks full of non-perishable rations, wafers, and eggs.
+   - Forensic tick analysis revealed heroes repeatedly fainting into 30-turn comas while trapped adjacent to slow monsters (acid blobs, molds):
+     `(2759, 'step_to_chokepoint', 'You faint from lack of food.', FAINTING, 'acid blob')`
+   - In `handle_combat`, eating and prayer were gated by `if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:`. When adjacent to any monster, the policy refused to eat or pray, guaranteeing an unconscious coma.
+2. **Corrosive Hazard Infinite Retreat Loop**:
+   - When adjacent to an acid blob with 0 missiles, `handle_combat` looped `step_to_chokepoint()`. Acid blobs were missing from `is_passive` in `step_away_from_hostile()`, bypassing the deadlock circuit breaker.
+3. **LLM Method Indentation Compilation Failures**:
+   - `google/gemma-4-31b-it` generated methods with 4-space outer indentation, causing `ast.parse()` to raise `IndentationError: unexpected indent` or `unindent does not match any outer indentation level`.
+
+### 29.3 Concrete Fixes Implemented & Verified
+1. **Unconditional Emergency Nutrition & Conscious Fainting Prayer (`INV-NUT-005`)**:
+   - In `handle_combat`: when `hunger_state >= 3` (Weak) or `hunger_state >= 4` (Fainting), eating carried food (`eat_carried_food()`) is **unconditional**, even with adjacent hostiles.
+   - When food is exhausted and `hunger_state >= 4`, divine prayer (`pray()`) is **unconditional** while conscious.
+2. **Corrosive Hazard Passive Registration**:
+   - Added `"blob"` and `"ooze"` to `is_passive` in `step_away_from_hostile()` to activate the deadlock circuit breaker for acid blobs and gray oozes.
+3. **AST Dedent Normalization**:
+   - Added `textwrap.dedent()` fallback in `AuthorAgent.splice_policy_methods()` and `parse_and_validate()` to parse indented LLM code cleanly.
+4. **Verification**:
+   - Registered `INV-NUT-005` in `lox/knowledge/invariants.py`.
+   - Added unit test `test_in_combat_emergency_eating_unconditional()` in `tests/test_nethack_tactics.py`.
+   - Verified all 123 unit tests passing (`uv run pytest`).
+
+
 

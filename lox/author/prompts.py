@@ -264,16 +264,15 @@ class Agent:
 
             # 0.1 In-Combat Hunger Emergency: Eat carried food to avoid fainting
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
-                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
+                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.hero.hunger_state >= 3:
                     obs = (yield eat_carried_food())
                     continue
 
             # 0.2 Major Trouble Divine Intervention (Fainting without food or Critical HP - pray while conscious!)
             if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
-                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
-                    self.last_prayer_turn = obs.hero.turn
-                    obs = (yield pray())
-                    continue
+                self.last_prayer_turn = obs.hero.turn
+                obs = (yield pray())
+                continue
 
             # 0.3 In-Combat Emergency Healing
             if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:

@@ -77,10 +77,15 @@ class AuthorAgent:
         if not patch_code or not patch_code.strip():
             return base_code
 
+        import textwrap
+        dedented_patch = textwrap.dedent(patch_code)
         try:
-            patch_ast = ast.parse(patch_code)
+            patch_ast = ast.parse(dedented_patch)
         except SyntaxError:
-            return patch_code
+            try:
+                patch_ast = ast.parse(patch_code)
+            except SyntaxError:
+                return patch_code
 
         # Extract replacement methods from patch_ast
         replacements: dict[str, ast.FunctionDef] = {}

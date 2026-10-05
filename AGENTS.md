@@ -212,6 +212,12 @@ lox/
 51. **The `is_pack_threat` Pacifist Retreat Trap Elimination (`INV-CBT-016`)**:
    - Marking monsters as pack threats unconditionally (e.g. matching any jackal or coyote) caused `handle_combat` to prioritize `step_to_chokepoint()` over melee attacks in open rooms. The hero attempted to retreat while adjacent to a 4 HP enemy, yielding free attacks turn after turn and dying from full HP without striking back (jackals caused 63 deaths / 31.5% of all mortalities in Campaign 69).
    - Solution: `is_pack_threat` requires `hostile_count >= 3`, OR `hostile_count >= 2` with pack species (rothe, ant, bee, wolf, jackal, coyote, orc). Isolated single monsters are NEVER pack threats. Furthermore, `step_to_chokepoint` is strictly restricted to `closest_hostile_dist >= 2`; when adjacent at `hp_frac > 0.35`, the hero MUST strike in melee (`melee_attack_hostile`).
+52. **Unconditional Emergency In-Combat Eating and Conscious Fainting Prayer (`INV-NUT-005`)**:
+   - In NetHack, transitioning to `hunger_state >= 4` ('Fainting') triggers 30-turn unconscious blackouts where any adjacent monster attacks freely. Eating carried food takes 1 turn; praying for divine food takes 1 turn. Gating in-combat eating or prayer on `not adjacent_hostile` trapped heroes next to slow/immobile monsters (e.g. acid blobs, molds) into repeated fainting comas until starving to death with backpacks full of rations (caused 30 deaths in Campaign 70).
+   - Solution: In `handle_combat`, when `hunger_state >= 3` (Weak) or `hunger_state >= 4` (Fainting), the hero eats carried food unconditionally (`eat_carried_food()`). If food is exhausted and `hunger_state >= 4`, the hero prays unconditionally (`pray()`) while conscious before falling into a coma.
+53. **Slow Corrosive Hazard De-Escalation & AST Splicing Dedent Fallback**:
+   - Acid blobs (`"blob"`) and gray oozes (`"ooze"`) added to `is_passive` in `step_away_from_hostile()` so the deadlock circuit breaker breaks proximity instead of looping `step_to_chokepoint()`.
+   - `AuthorAgent.splice_policy_methods()` and `parse_and_validate()` automatically dedent candidate patches via `textwrap.dedent()`, eliminating LLM indentation mismatch compilation errors.
 
 ---
 

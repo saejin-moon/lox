@@ -824,3 +824,33 @@ def test_pack_threat_adjacent_melee_priority():
     assert action is not None
     # Must attack the adjacent jackal directly; must NEVER yield step_to_chokepoint while adjacent and healthy
     assert action.name == "melee_attack_hostile", f"Expected melee_attack_hostile but got {action.name}"
+
+
+def test_in_combat_emergency_eating_unconditional():
+    """Verify that when hunger_state >= WEAK, the hero consumes carried food even with an adjacent hostile."""
+    from lox.dsl.compiler import compile_policy
+    from lox.core.types import Observation, HeroState, Item, HungerState
+
+    with open("data/latest_policy.py") as f:
+        policy_code = f.read()
+
+    executor = compile_policy(policy_code)
+    obs = Observation(
+        chars=None,
+        glyphs=None,
+        hero=HeroState(hp=16, max_hp=16, depth=2, hunger_state=HungerState.WEAK),
+    )
+    obs.combat.adjacent_hostile = True
+    obs.combat.hostile_count_fov = 1
+    obs.combat.closest_hostile_name = "acid blob"
+    obs.combat.closest_hostile_dist = 1
+    obs.combat.can_retreat = True
+    obs.inventory.append(
+        Item(slot="d", name="an uncursed food ration", category="food")
+    )
+
+    runner = executor.create_runner(obs)
+    action = runner.send(obs)
+    assert action is not None
+    assert action.name == "eat_carried_food", f"Expected eat_carried_food but got {action.name}"
+

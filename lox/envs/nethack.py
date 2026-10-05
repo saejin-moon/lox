@@ -2568,6 +2568,8 @@ class NetHackAdapter(EnvironmentAdapter):
                     or "mold" in closest_name
                     or "jelly" in closest_name
                     or "sphere" in closest_name
+                    or "blob" in closest_name
+                    or "ooze" in closest_name
                     or getattr(obs_prev.combat, "gas_spore_in_fov", False)
                     or getattr(obs_prev.combat, "adjacent_floating_eye", False)
                     or getattr(obs_prev.combat, "adjacent_gas_spore", False)
@@ -2642,6 +2644,8 @@ class NetHackAdapter(EnvironmentAdapter):
                     or "mold" in closest_name
                     or "jelly" in closest_name
                     or "sphere" in closest_name
+                    or "blob" in closest_name
+                    or "ooze" in closest_name
                     or getattr(obs_prev.combat, "gas_spore_in_fov", False)
                     or getattr(obs_prev.combat, "adjacent_floating_eye", False)
                     or getattr(obs_prev.combat, "adjacent_gas_spore", False)

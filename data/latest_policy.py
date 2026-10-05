@@ -235,14 +235,13 @@ class Agent:
                     obs = (yield zap_wand_teleport())
                     continue
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
-                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
+                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.hero.hunger_state >= 3:
                     obs = (yield eat_carried_food())
                     continue
             if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
-                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
-                    self.last_prayer_turn = obs.hero.turn
-                    obs = (yield pray())
-                    continue
+                self.last_prayer_turn = obs.hero.turn
+                obs = (yield pray())
+                continue
             if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue

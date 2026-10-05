@@ -798,10 +798,9 @@ if obs.hero.hunger_state >= 1 and obs.inventory.has_food:
 
 # 2. Major trouble divine feeding (strictly hunger_state >= 4 'Fainting')
 if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
-    if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
-        self.last_prayer_turn = obs.hero.turn
-        obs = (yield pray())
-        continue
+    self.last_prayer_turn = obs.hero.turn
+    obs = (yield pray())
+    continue
 """,
         related_ids=["INV-NUT-001", "INV-NUT-004"],
     ),
@@ -827,7 +826,41 @@ if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.
         obs = (yield pray())
         continue
 """,
-        related_ids=["INV-NUT-003"],
+        related_ids=["INV-NUT-003", "INV-NUT-005"],
+    ),
+    Invariant(
+        id="INV-NUT-005",
+        title="Unconditional Emergency In-Combat Eating and Conscious Fainting Prayer",
+        category="nutrition",
+        tags=["fainting", "starvation", "prayer", "eat", "adjacent", "coma", "in-combat"],
+        rule=(
+            "In NetHack, transitioning to hunger_state >= 4 ('Fainting') triggers 30-turn unconscious blackouts where any "
+            "adjacent hostile deals unretaliated free damage. Eating carried food takes 1 turn; praying for divine food "
+            "takes 1 turn. Gating in-combat eating or prayer on 'not adjacent_hostile' traps heroes next to slow/immobile "
+            "monsters (e.g. acid blobs, molds) into repeated fainting comas until starving to death with backpacks full "
+            "of rations. When hunger_state >= 3 (Weak) or Fainting, the hero MUST consume carried food unconditionally "
+            "(eat_carried_food()). If food is exhausted and hunger_state >= 4, the hero MUST pray unconditionally (pray()) "
+            "while conscious before falling into a coma."
+        ),
+        anti_pattern=(
+            "Refusing to eat or pray during combat because adjacent_hostile is True, falling unconscious into a 30-turn coma "
+            "and dying of starvation with food rations in inventory."
+        ),
+        code_snippet="""
+# In handle_combat():
+# 1. Emergency eating: unconditional at Weak/Fainting
+if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
+    if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.hero.hunger_state >= 3:
+        obs = (yield eat_carried_food())
+        continue
+
+# 2. Emergency prayer: unconditional at Fainting when food exhausted
+if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
+    self.last_prayer_turn = obs.hero.turn
+    obs = (yield pray())
+    continue
+""",
+        related_ids=["INV-NUT-001", "INV-NUT-003", "INV-NUT-004"],
     ),
     # -----------------------------------------------------------------
     # EQUIPMENT, LOOTING & ARTIFACTS
@@ -1359,7 +1392,7 @@ class InvariantRegistry:
         if "floating eye" in low_query or "paralysis" in low_query:
             priority_ids.append("INV-CBT-004")
         if "starv" in low_query or "faint" in low_query or "hunger" in low_query:
-            priority_ids.extend(["INV-NUT-003", "INV-NUT-001", "INV-NUT-004"])
+            priority_ids.extend(["INV-NUT-003", "INV-NUT-001", "INV-NUT-004", "INV-NUT-005"])
         if "door" in low_query or "locked" in low_query:
             priority_ids.extend(["INV-NAV-003", "INV-NAV-004"])
         if "dead_end" in low_query or "search" in low_query:

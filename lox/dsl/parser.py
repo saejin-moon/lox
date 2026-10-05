@@ -406,7 +406,11 @@ def parse_and_validate(
     try:
         tree = _parse_with_expanded_stack(clean_code)
     except SyntaxError as e:
-        raise DSLValidationError(f"Syntax error in policy program: {e}") from e
+        import textwrap
+        try:
+            tree = _parse_with_expanded_stack(textwrap.dedent(clean_code))
+        except SyntaxError:
+            raise DSLValidationError(f"Syntax error in policy program: {e}") from e
     except MemoryError as e:
         raise DSLValidationError(f"Parser stack overflowed: {e}") from e
 
