@@ -1131,3 +1131,33 @@ All 4 branch telemetry and navigation upgrades have been implemented, verified w
 
 4. **Invalidate Non-Branch Up Stairs Upon Transition** [COMPLETED & VERIFIED]:
    - `self.sokoban_entrance_pos` is cleared upon true level transitions, properly synchronizing Dungeons of Doom coordinates and eliminating stair-transit ping-pongs.
+
+---
+
+## 27. Pre-Flight Synthesis Synchronization (Prompts, Knowledge Base & Invariants)
+
+### 27.1 Implementation & Verification Summary [ALL COMPLETED & VERIFIED]
+To ensure LLM synthesis sessions (targeting `google/gemma-4-31b-it`) generate policies adhering to the depth-tiered HTN architecture and utilize all 20 tactical primitives from the 5 deep dives, the following pre-flight synchronization has been implemented:
+
+1. **System Prompt HTN Architecture Synchronization (`lox/author/prompts.py`)** [COMPLETED & VERIFIED]:
+   - Replaced legacy monolithic example in `build_system_prompt()` with the Depth-Tiered HTN generator structure:
+     * **Universal Reflexes**: Mines Evacuation (Top Reflex), Major Trouble Prayer, Instant Stair Descent, Active Combat Defense, Emergency Healing & Carried Food.
+     * **Strategic HTN Phase Subroutines**: `phase_early_rush` (DL 1–2), `phase_early_scaling` (DL 3–5), `phase_mid_branches` (DL 6–10), `phase_deep_dungeon` (DL 11–19).
+     * **Combat Subroutine**: Corrosive melee prohibition, pack threat turn-1 dust Elbereth warding, heavy weapon ranged gating, yellow light/homunculus instant ranged elimination, and emergency consumables panic consumption.
+   - Synchronized `Observation Interface` documentation with new predicates: `is_corrosive_target`, `is_heavy_weapon_threat`, `has_sokoban_entrance`, `sokoban_entrance_in_fov`, `has_unidentified_potion`, `has_unidentified_scroll`, etc.
+   - Documented Critical Mechanics & Invariants 31–34 (Corrosive Hazards, Heavy Weapon Threats, Emergency Consumables, Sokoban Entrance Navigation).
+
+2. **Canonical Typed Invariant Expansion (`lox/knowledge/invariants.py`)** [COMPLETED & VERIFIED]:
+   - Expanded indexed invariant registry from 37 to **42 canonical invariants**:
+     * `INV-NAV-007`: Sokoban Branch Entrance Detection & Ascend Transit.
+     * `INV-CBT-012`: Corrosive Hazard Melee Prohibition & Ranged Neutralization.
+     * `INV-CBT-013`: Heavy Weapon Threat Gating & Chokepoint Defense.
+     * `INV-CBT-014`: Emergency Unidentified Consumables Panic Consumption.
+     * `INV-EQP-007`: Empty-Slot Priority Armor Equipping.
+   - Added automatic trigger heuristics for `corrosive`, `heavy weapon`, `consumables`, `sokoban`, and `armor` in `get_relevant_invariants_for_trigger()`.
+
+3. **Regression & Knowledge Base Verification** [COMPLETED & VERIFIED]:
+   - Added `test_new_invariants_and_system_prompt` to `tests/test_knowledge.py`.
+   - Verified 121/121 unit tests passing (`uv run pytest`) across all test suites.
+   - Synchronized living documentation (`AGENTS.md`, `TODO.md`).
+

@@ -125,3 +125,51 @@ def test_prompt_injection_with_invariants():
     assert "Mandatory Empirical Tactical Invariants" in prompt
     assert "INV-CBT-002" in prompt
     assert "class Agent: pass" in prompt
+
+
+def test_new_invariants_and_system_prompt():
+    from lox.author.prompts import build_system_prompt
+
+    # Invariants exist and can be retrieved
+    cbt12 = REGISTRY.get_by_id("INV-CBT-012")
+    assert cbt12 is not None and "corrosive" in cbt12.tags
+    assert "is_corrosive_target" in cbt12.code_snippet
+
+    cbt13 = REGISTRY.get_by_id("INV-CBT-013")
+    assert cbt13 is not None and "heavy weapon" in cbt13.tags
+    assert "is_heavy_weapon_threat" in cbt13.code_snippet
+
+    cbt14 = REGISTRY.get_by_id("INV-CBT-014")
+    assert cbt14 is not None and "emergency" in cbt14.tags
+    assert "quaff_emergency_potion" in cbt14.code_snippet
+
+    nav7 = REGISTRY.get_by_id("INV-NAV-007")
+    assert nav7 is not None and "sokoban" in nav7.tags
+    assert "step_to_sokoban_entrance" in nav7.code_snippet
+
+    eqp7 = REGISTRY.get_by_id("INV-EQP-007")
+    assert eqp7 is not None and "armor" in eqp7.tags
+
+    # Trigger heuristics match
+    invs_corrosive = REGISTRY.get_relevant_invariants_for_trigger("cluster: Killed by corrosive acid blob")
+    assert any(inv.id == "INV-CBT-012" for inv in invs_corrosive)
+
+    invs_heavy = REGISTRY.get_relevant_invariants_for_trigger("cluster: Killed by heavy weapon orc captain")
+    assert any(inv.id == "INV-CBT-013" for inv in invs_heavy)
+
+    invs_sokoban = REGISTRY.get_relevant_invariants_for_trigger("milestone: sokoban entrance discovered")
+    assert any(inv.id == "INV-NAV-007" for inv in invs_sokoban)
+
+    # System prompt covers the new predicates and actions
+    sys_prompt = build_system_prompt()
+    assert "is_corrosive_target" in sys_prompt
+    assert "is_heavy_weapon_threat" in sys_prompt
+    assert "has_sokoban_entrance" in sys_prompt
+    assert "step_to_sokoban_entrance" in sys_prompt
+    assert "quaff_emergency_potion" in sys_prompt
+    assert "read_emergency_scroll" in sys_prompt
+    assert "phase_early_rush" in sys_prompt
+    assert "phase_early_scaling" in sys_prompt
+    assert "phase_mid_branches" in sys_prompt
+    assert "phase_deep_dungeon" in sys_prompt
+

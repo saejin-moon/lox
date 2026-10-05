@@ -221,6 +221,31 @@ def handle_dead_end(self, obs):
 """,
         related_ids=["INV-NAV-005"],
     ),
+    Invariant(
+        id="INV-NAV-007",
+        title="Sokoban Branch Entrance Detection & Ascend Transit",
+        category="navigation",
+        tags=["sokoban", "branch", "stairs_up", "ascend", "entrance", "bag of holding", "reflection"],
+        rule=(
+            "On Depths 6–10, the Sokoban entrance appears as an additional staircase up (<) that is not the floor's arrival stairs. "
+            "Sokoban offers guaranteed non-rotting food and either the Amulet of Reflection or Bag of Holding without monster spawns "
+            "in solved puzzle chambers. When obs.dungeon.has_sokoban_entrance is True and HP is safe (hp_frac >= 0.70), policies must "
+            "yield step_to_sokoban_entrance() to navigate to and ascend into Sokoban."
+        ),
+        anti_pattern=(
+            "Confusing the Sokoban up-staircase with the level arrival staircase, or ignoring Sokoban entirely and descending into "
+            "deadly DL 10+ monster clusters unequipped."
+        ),
+        code_snippet="""
+if obs.dungeon.has_sokoban_entrance and obs.hero.hp_frac >= 0.70:
+    if obs.spatial.standing_on_stairs_up and obs.hero.dungeon_branch != "mines":
+        obs = (yield ascend())
+        return obs
+    obs = (yield step_to_sokoban_entrance())
+    return obs
+""",
+        related_ids=["INV-NAV-001", "INV-NAV-002"],
+    ),
     # -----------------------------------------------------------------
     # COMBAT TACTICS & WARDING
     # -----------------------------------------------------------------
@@ -477,6 +502,89 @@ for _ in range(12):
     obs = (yield search())
 """,
         related_ids=["INV-CBT-001", "INV-NAV-005"],
+    ),
+    Invariant(
+        id="INV-CBT-012",
+        title="Corrosive Hazard Melee Prohibition & Ranged Neutralization",
+        category="combat",
+        tags=["corrosive", "acid", "acid blob", "ochre jelly", "weapon erosion", "rust", "ranged"],
+        rule=(
+            "Melee attacks against acidic monsters (acid blobs, ochre jellies) instantly corrode weapons and armor and "
+            "inflict passive acid splash damage on the hero. When obs.combat.is_corrosive_target is True, policies must "
+            "NEVER melee attack. Instead, eliminate them with thrown missiles (throw_dagger()) or offensive wands "
+            "(zap_offensive_wand()), or retreat (step_to_chokepoint() / step_away_from_hostile())."
+        ),
+        anti_pattern=(
+            "Engaging acid blobs or ochre jellies in melee, reducing weapon enchantment to -3 and dissolving iron armor."
+        ),
+        code_snippet="""
+if obs.combat.is_corrosive_target:
+    if obs.combat.closest_hostile_dist >= 2:
+        if obs.inventory.has_offensive_wand:
+            obs = (yield zap_offensive_wand())
+            continue
+        elif obs.inventory.has_daggers:
+            obs = (yield throw_dagger())
+            continue
+    if obs.combat.adjacent_hostile:
+        obs = (yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile())
+        continue
+""",
+        related_ids=["INV-CBT-002", "INV-CBT-004", "INV-CBT-009"],
+    ),
+    Invariant(
+        id="INV-CBT-013",
+        title="Heavy Weapon Threat Gating & Chokepoint Defense",
+        category="combat",
+        tags=["heavy weapon", "two-handed", "battle-axe", "orc captain", "gnome", "crossbow", "ranged"],
+        rule=(
+            "Orc chieftains, captains, and gnomes wielding two-handed swords, battle-axes, or crossbows deal deadly burst "
+            "damage capable of killing early heroes in 1-2 hits. When obs.combat.is_heavy_weapon_threat is True at distance "
+            ">= 2, harass with thrown missiles or offensive wands, or retreat to 1-tile corridor chokepoints rather than rushing "
+            "blindly into open-room melee."
+        ),
+        anti_pattern=(
+            "Charging into open-room melee against an orc captain wielding a two-handed sword, taking 25+ damage in a single round."
+        ),
+        code_snippet="""
+if obs.combat.is_heavy_weapon_threat:
+    if obs.combat.closest_hostile_dist >= 2:
+        if obs.inventory.has_offensive_wand:
+            obs = (yield zap_offensive_wand())
+            continue
+        elif obs.inventory.has_daggers:
+            obs = (yield throw_dagger())
+            continue
+    if obs.combat.adjacent_hostile and obs.hero.hp_frac < 0.50 and obs.combat.can_retreat:
+        obs = (yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile())
+        continue
+""",
+        related_ids=["INV-CBT-001", "INV-CBT-010"],
+    ),
+    Invariant(
+        id="INV-CBT-014",
+        title="Emergency Unidentified Consumables Panic Consumption",
+        category="combat",
+        tags=["emergency", "potion", "scroll", "unidentified", "panic", "survival"],
+        rule=(
+            "When HP is critically low (hp_frac < 0.20), prayer is on cooldown or unavailable, and no identified healing potions "
+            "remain, dying with unidentified potions and scrolls in inventory is a fatal failure mode. Unidentified potions "
+            "(extra/full healing, speed, gain energy) and unidentified scrolls (teleportation, earth, scare monster) have high "
+            "probabilities of saving the hero. Yield quaff_emergency_potion() or read_emergency_scroll()."
+        ),
+        anti_pattern=(
+            "Dying to an adjacent monster while carrying 3 unidentified potions and 2 unidentified scrolls without quaffing or reading."
+        ),
+        code_snippet="""
+if obs.hero.hp_frac < 0.20 and not obs.inventory.has_healing and not obs.combat.has_panic_escape:
+    if obs.inventory.has_unidentified_potion:
+        obs = (yield quaff_emergency_potion())
+        continue
+    elif obs.inventory.has_unidentified_scroll:
+        obs = (yield read_emergency_scroll())
+        continue
+""",
+        related_ids=["INV-CBT-001", "INV-NUT-004"],
     ),
     # -----------------------------------------------------------------
     # NUTRITION & DIVINE FAVOR
@@ -1027,6 +1135,27 @@ if obs.dungeon.can_donate_to_priest:
 """,
         related_ids=["INV-NUT-004", "INV-EQP-002"],
     ),
+    Invariant(
+        id="INV-EQP-007",
+        title="Empty-Slot Priority Armor Equipping",
+        category="equipment",
+        tags=["armor", "equipment", "empty slot", "body", "helmet", "boots", "cloak", "gloves", "shield", "ac"],
+        rule=(
+            "Armor slots provide additive AC reductions. When unworn armor is picked up, prioritizing empty armor slots "
+            "(Body > Helm > Boots > Cloak > Gloves > Shield) before attempting to replace existing worn armor rapidly reduces AC "
+            "from 10 to negative values with zero turn waste."
+        ),
+        anti_pattern=(
+            "Attempting to wear a cloak or helmet while already wearing one, causing failed wear attempts while the shield or "
+            "boots slot sits empty."
+        ),
+        code_snippet="""
+if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
+    obs = (yield wear_armor())
+    continue
+""",
+        related_ids=["INV-EQP-001", "INV-EQP-004", "INV-EQP-005"],
+    ),
 ]
 
 
@@ -1120,6 +1249,16 @@ class InvariantRegistry:
             or "stuck" in low_query
         ):
             priority_ids.append("INV-CBT-009")
+        if "corrosive" in low_query or "acid" in low_query or "ochre" in low_query:
+            priority_ids.append("INV-CBT-012")
+        if "heavy weapon" in low_query or "battle-axe" in low_query or "two-handed" in low_query or "orc captain" in low_query:
+            priority_ids.append("INV-CBT-013")
+        if "consumable" in low_query or "potion" in low_query or "scroll" in low_query or "emergency" in low_query:
+            priority_ids.append("INV-CBT-014")
+        if "sokoban" in low_query:
+            priority_ids.append("INV-NAV-007")
+        if "armor" in low_query or "ac" in low_query or "equip" in low_query:
+            priority_ids.append("INV-EQP-007")
 
         results: list[Invariant] = []
         for pid in priority_ids:

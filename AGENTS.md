@@ -42,7 +42,7 @@ lox/
 ├── eval/
 │   └── runner.py         # Batch evaluation engine, DuckDB episode and tick telemetry logger
 ├── knowledge/
-│   └── invariants.py     # Canonical Empirical Knowledge Base: 37 typed, indexed invariants (REGISTRY)
+│   └── invariants.py     # Canonical Empirical Knowledge Base: 42 typed, indexed invariants (REGISTRY)
 ├── telemetry/
 │   ├── consolidator.py   # DuckDB consolidation from Parquet buffers & schema evolution
 │   ├── diagnostics.py    # Multi-dimensional Empirical Root Cause Diagnostic Engine
@@ -59,7 +59,7 @@ lox/
 ## 3. Consolidated Technical Invariants & Operational Rules
 
 > [!NOTE]
-> All 37 empirical invariants synthesized across 68 continuous campaigns are programmatically indexed and maintained in the typed knowledge base [`lox/knowledge/invariants.py`](file:///home/moose/git/lox/lox/knowledge/invariants.py) via `REGISTRY`. Each invariant specifies its canonical ID, category, tags, ground-truth rule, anti-pattern, and verified code snippet. LLMs can dynamically query this registry during authoring sessions via `query_invariants(query, category)`.
+> All 42 empirical invariants synthesized across 68 continuous campaigns are programmatically indexed and maintained in the typed knowledge base [`lox/knowledge/invariants.py`](file:///home/moose/git/lox/lox/knowledge/invariants.py) via `REGISTRY`. Each invariant specifies its canonical ID, category, tags, ground-truth rule, anti-pattern, and verified code snippet. LLMs can dynamically query this registry during authoring sessions via `query_invariants(query, category)`.
 
 ### 3.1 Policy Architecture & Anti-Loop Defense
 1. **Python Generator Paradigm & Subroutine Protocol (`INV-ARC-001`)**: Policies are Python classes yielding actions (`obs = yield action`). Subroutines MUST be called via `obs = yield from self.subroutine(obs)`.
