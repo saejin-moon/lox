@@ -90,3 +90,70 @@ class Agent:
     runner = executor.create_runner(obs)
     act = runner.send(obs)
     assert act.name == "harvest_poison_res"
+
+
+def test_depth_tiered_dungeon_phases():
+    from lox.core.agenda import DungeonPhase
+
+    # Phase 0: Depths 1-2
+    assert GoalAgenda.get_phase(1) == DungeonPhase.EARLY_RUSH
+    assert GoalAgenda.get_phase(2) == DungeonPhase.EARLY_RUSH
+
+    # Phase 1: Depths 3-5
+    assert GoalAgenda.get_phase(3) == DungeonPhase.EARLY_SCALING
+    assert GoalAgenda.get_phase(5) == DungeonPhase.EARLY_SCALING
+
+    # Phase 2: Depths 6-10 or Sokoban
+    assert GoalAgenda.get_phase(6) == DungeonPhase.MID_BRANCHES
+    assert GoalAgenda.get_phase(10) == DungeonPhase.MID_BRANCHES
+    assert GoalAgenda.get_phase(3, branch="sokoban") == DungeonPhase.MID_BRANCHES
+
+    # Phase 3: Depths 11-19
+    assert GoalAgenda.get_phase(11) == DungeonPhase.DEEP_DUNGEON
+    assert GoalAgenda.get_phase(18) == DungeonPhase.DEEP_DUNGEON
+
+    # Phase 4: Depths 20+
+    assert GoalAgenda.get_phase(20) == DungeonPhase.CASTLE_ASCENSION
+    assert GoalAgenda.get_phase(35) == DungeonPhase.CASTLE_ASCENSION
+
+
+def test_depth_gated_policy_execution():
+    policy_code = """
+class Agent:
+    def run(self, obs):
+        while True:
+            if obs.agenda.dungeon_phase == PHASE_EARLY_RUSH:
+                obs = yield step_to_stairs_down()
+            elif obs.agenda.dungeon_phase == PHASE_EARLY_SCALING:
+                obs = yield dip_excalibur()
+            else:
+                obs = yield wait()
+"""
+    executor = compile_policy(policy_code)
+
+    # Observation at DL 1 (Early rush)
+    agenda1 = GoalAgenda()
+    obs1 = Observation(
+        chars=np.full((21, 79), ord("."), dtype=np.uint8),
+        glyphs=np.zeros((21, 79), dtype=np.int16),
+        hero=HeroState(y=10, x=10, depth=1),
+    )
+    agenda1.evaluate_milestones(obs1)
+    obs1.agenda = agenda1.create_view()
+    runner1 = executor.create_runner(obs1)
+    act1 = runner1.send(obs1)
+    assert act1.name == "step_to_stairs_down"
+
+    # Observation at DL 4 (Early scaling)
+    agenda4 = GoalAgenda()
+    obs4 = Observation(
+        chars=np.full((21, 79), ord("."), dtype=np.uint8),
+        glyphs=np.zeros((21, 79), dtype=np.int16),
+        hero=HeroState(y=10, x=10, depth=4),
+    )
+    agenda4.evaluate_milestones(obs4)
+    obs4.agenda = agenda4.create_view()
+    runner4 = executor.create_runner(obs4)
+    act4 = runner4.send(obs4)
+    assert act4.name == "dip_excalibur"
+

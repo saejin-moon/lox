@@ -117,3 +117,31 @@ def test_splice_syntax_error_resilience():
     broken_patch = "def broken(obs: return 42"
     res = AuthorAgent.splice_policy_methods(BASE_POLICY, broken_patch)
     assert res == broken_patch
+
+
+def test_splice_phase_subroutine_into_latest_policy():
+    with open("data/latest_policy.py") as f:
+        policy_code = f.read()
+
+    patch = """def phase_early_scaling(self, obs):
+    if obs.dungeon.can_forge_excalibur:
+        obs = yield dip_excalibur()
+        return obs
+    obs = yield step_to_stairs_down()
+    return obs
+"""
+    spliced = AuthorAgent.splice_policy_methods(policy_code, patch)
+    assert "def phase_early_scaling(self, obs):" in spliced
+    assert "dip_excalibur()" in spliced
+    assert "phase_early_rush" in spliced
+    assert "phase_mid_branches" in spliced
+    assert "phase_deep_dungeon" in spliced
+    assert "handle_combat" in spliced
+
+    # Check compilation
+    parsed = ast.parse(spliced)
+    agent_cls = [n for n in parsed.body if isinstance(n, ast.ClassDef)][0]
+    method_names = {m.name for m in agent_cls.body if isinstance(m, ast.FunctionDef)}
+    assert "phase_early_scaling" in method_names
+    assert "phase_early_rush" in method_names
+

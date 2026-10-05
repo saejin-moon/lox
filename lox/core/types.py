@@ -297,21 +297,65 @@ class InventoryView(list):
         return [it for it in self if it.category == cat]
 
     @property
+    def has_worn_cloak(self) -> bool:
+        for it in self:
+            if it.category == "armor" and it.is_equipped:
+                n = it.name.lower()
+                if any(k in n for k in ("cloak", "apron", "cape", "robe")):
+                    return True
+        return False
+
+    @property
+    def has_worn_helmet(self) -> bool:
+        for it in self:
+            if it.category == "armor" and it.is_equipped:
+                n = it.name.lower()
+                if any(k in n for k in ("helmet", "helm", "hat", "cap", "coif")):
+                    return True
+        return False
+
+    @property
+    def has_worn_gloves(self) -> bool:
+        for it in self:
+            if it.category == "armor" and it.is_equipped:
+                n = it.name.lower()
+                if any(k in n for k in ("gloves", "gauntlets")):
+                    return True
+        return False
+
+    @property
+    def has_worn_boots(self) -> bool:
+        for it in self:
+            if it.category == "armor" and it.is_equipped:
+                n = it.name.lower()
+                if any(k in n for k in ("boots", "shoes")):
+                    return True
+        return False
+
+    @property
+    def has_worn_shield(self) -> bool:
+        for it in self:
+            if it.category == "armor" and it.is_equipped:
+                if "shield" in it.name.lower():
+                    return True
+        return False
+
+    @property
     def has_unworn_armor(self) -> bool:
-        return any(
-            it.category == "armor"
-            and not it.is_equipped
-            and it.slot not in self.failed_armor_slots
-            for it in self
-        )
+        return self.get_unworn_armor_slot() is not None
 
     def get_unworn_armor_slot(self) -> str | None:
+        has_cloak = self.has_worn_cloak
         for it in self:
             if (
                 it.category == "armor"
                 and not it.is_equipped
                 and it.slot not in self.failed_armor_slots
             ):
+                n = it.name.lower()
+                # Skip duplicate cloaks/aprons if already wearing a cloak/apron
+                if has_cloak and any(k in n for k in ("cloak", "apron", "cape", "robe")):
+                    continue
                 return it.slot
         return None
 
@@ -790,6 +834,7 @@ class AgendaView:
 
     active_goal: str = "explore_floor"
     goal_stack: list[str] = field(default_factory=lambda: ["explore_floor"])
+    dungeon_phase: str = "early_rush"
 
     def is_active(self, goal_name: Any) -> bool:
         target = goal_name.value if hasattr(goal_name, "value") else str(goal_name)

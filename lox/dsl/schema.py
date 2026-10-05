@@ -149,6 +149,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "can_safely_quaff_healing": "bool",
     # Strategic Goal Agenda
     "active_goal": "str",
+    "dungeon_phase": "str",
 }
 
 # Whitelist of allowed action primitives
@@ -247,4 +248,10 @@ ENUM_CONSTANTS: dict[str, int | str] = {
     "GOAL_CLEAR_MINES": "clear_mines",
     "GOAL_SOLVE_SOKOBAN": "solve_sokoban",
     "GOAL_DESCEND_STAIRS": "descend_stairs",
+    # Depth-Tiered Progression Phases
+    "PHASE_EARLY_RUSH": "early_rush",
+    "PHASE_EARLY_SCALING": "early_scaling",
+    "PHASE_MID_BRANCHES": "mid_branches",
+    "PHASE_DEEP_DUNGEON": "deep_dungeon",
+    "PHASE_CASTLE": "castle",
 }

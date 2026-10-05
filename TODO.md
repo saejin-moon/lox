@@ -802,6 +802,36 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
    - When NetHack outputs multi-sentence combat logs (`"The rothe hits! The rothe bites!"`), splitting on the hit verb without sentence isolation caused the killer to be recorded with leading clause text (`"rothe hits! the rothe"`).
    - **Fix Applied**: Added sentence boundary isolation `part = part.split(".")[-1].split("!")[-1].strip()` to clean attacker names before extracting the subject.
 
+---
+
+## 21. Architectural Breakthrough: Depth-Tiered HTN-BT Strategic Policy & Harness Time-Sink Elimination
+
+### 21.1 40-Campaign Plateau Root Cause Discovery
+Empirical analysis of 8,000+ episodes across Campaigns 23 to 68 revealed that the average depth plateau ($3.8 - 4.3$) was driven by two structural bottlenecks:
+1. **The Apron `wear_armor` 23,000-Turn Black Hole**:
+   - In NetHack, an apron occupies the cloak slot. Wearing an apron while wearing a cloak is forbidden (`"You are already wearing a cloak."`).
+   - In `NetHackAdapter.step()`, lines 2991–2994 previously checked `if "cloak" not in msg_low and "take off" not in msg_low: self.failed_wear_slots.add(slot)`.
+   - Because `"cloak"` was in the message, the slot was *never* blacklisted, causing the hero to call `wear_armor()` for **23,381 consecutive turns** until timeout in runs like `synth_openrouter_20261005_060223_g006_e002`.
+2. **Early Floor Search Lingering & The Monolithic Reactive Policy Trap**:
+   - In a monolithic `run()` loop, all behaviors competed on every tick. The hero spent an average of **853 turns on DL 1** and **621 turns on DL 2** (~1,500 turns before reaching DL 3) searching dead ends for secret doors when down stairs were already discovered.
+   - LLM policy authoring (`gemma-4-31b-it`) was trapped in a 2-parameter combat threshold ping-pong (`hp_frac > 0.35` $\leftrightarrow$ `0.40`), producing zero strategic progression across 40 campaigns.
+
+### 21.2 Architectural Solution Implemented & Verified
+1. **Unconditional Wear Failure Blacklisting & Slot-Aware Unworn Armor Filtering**:
+   - Removed the `if "cloak" not in msg_low` condition in `lox/envs/nethack.py`. Any item that fails to equip is immediately added to `self.failed_wear_slots` and `obs.inventory.failed_armor_slots`.
+   - Updated `InventoryView.get_unworn_armor_slot()` in `lox/core/types.py` to check `has_worn_cloak` and immediately skip unworn aprons/cloaks if a cloak is already equipped.
+2. **Depth-Tiered HTN + Behavior Tree Architecture**:
+   - Enhanced `lox/core/agenda.py` with `DungeonPhase` enum (`EARLY_RUSH` DL 1–2, `EARLY_SCALING` DL 3–5, `MID_BRANCHES` DL 6–10, `DEEP_DUNGEON` DL 11–19, `CASTLE_ASCENSION` DL 20+).
+   - Exposed `dungeon_phase` in `AgendaView`, `Observation`, and `ALLOWED_PREDICATES` in `lox/dsl/schema.py`.
+   - Restructured `data/latest_policy.py`:
+     * Universal Reflexes (Major Trouble Prayer, Stairs Descent, Active Combat Defense, Nutrition) execute first on every tick.
+     * The HTN dispatcher routes execution directly to depth-activated phase subroutines: `phase_early_rush` (fast descent, no dead-end searching once stairs down known), `phase_early_scaling` (Excalibur forging, body armor upgrading, poison resistance harvesting), `phase_mid_branches` (Sokoban graph solver, Mines avoidance), and `phase_deep_dungeon`.
+3. **Targeted Phase Authoring Prompt Alignment**:
+   - Updated `lox/author/prompts.py` with the Depth-Tiered Phase Taxonomy, guiding LLM mutations toward specific phase subroutines rather than endlessly tweaking `handle_combat`.
+4. **Zero Regressions & Full Test Verification**:
+   - Added unit tests in `tests/test_agenda.py`, `tests/test_nethack_tactics.py`, and `tests/test_author_splicing.py`.
+   - **115 / 115 tests passing cleanly**. Verified end-to-end with 1-generation mock synthesis.
+
 
 
 

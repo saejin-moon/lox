@@ -1524,6 +1524,7 @@ class NetHackAdapter(EnvironmentAdapter):
             raw_obs=raw_obs,
         )
         self.agenda.evaluate_milestones(obs)
+        obs.agenda = self.agenda.create_view()
         self._last_hp = hero.hp
         return obs
 
@@ -2988,10 +2989,8 @@ class NetHackAdapter(EnvironmentAdapter):
                     )
                 item = next((it for it in obs.inventory if it.slot == slot), None)
                 if item is not None and not item.is_equipped:
-                    msg_low = obs.message.lower()
-                    if "cloak" not in msg_low and "take off" not in msg_low:
-                        self.failed_wear_slots.add(slot)
-                        obs.inventory.failed_armor_slots.add(slot)
+                    self.failed_wear_slots.add(slot)
+                    obs.inventory.failed_armor_slots.add(slot)
                 return obs, reward, term, trunc, info
             return self.step(Action(name="wait"))
         elif action.name == "replace_body_armor":

@@ -2,93 +2,218 @@ class Agent:
 
     def __init__(self):
         self.last_prayer_turn = -1000
-        self.search_count = 0
-        self.retreat_streak = 0
-        self.altar_tested = False
-        self.last_depth = 1
 
     def run(self, obs):
         while True:
-            if obs.hero.depth != self.last_depth:
-                self.last_depth = obs.hero.depth
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
+            if obs.hero.hp_frac < 0.2 and obs.hero.turn - self.last_prayer_turn >= 350:
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
-            if obs.spatial.standing_on_stairs_down and (not obs.status.is_levitating):
+            elif obs.hero.hp_frac < 0.35 and obs.inventory.has_healing:
+                obs = (yield quaff_healing())
+                continue
+            elif obs.hero.hunger_state >= HUNGRY and obs.inventory.has_food:
+                obs = (yield eat_carried_food())
+                continue
+            if obs.combat.adjacent_hostile:
+                if obs.combat.closest_hostile_name == 'floating eye':
+                    obs = (yield step_away_from_hostile())
+                elif obs.hero.hp_frac < 0.35 and obs.combat.can_retreat:
+                    obs = (yield step_to_chokepoint())
+                else:
+                    obs = (yield melee_attack_hostile())
+                continue
+            if obs.spatial.standing_on_stairs_down:
                 obs = (yield descend())
-                continue
-            if obs.combat.adjacent_hostile or obs.combat.has_active_hostile or (obs.combat.hostile_count_fov > 0 and (obs.inventory.has_offensive_wand or obs.inventory.has_daggers)):
-                obs = (yield from self.handle_combat(obs))
-                continue
-            if obs.hero.hunger_state >= 1:
-                if any((c.is_safe for c in obs.corpses)):
-                    obs = (yield from self.handle_corpse_consumption(obs))
-                    continue
-                elif obs.inventory.has_food:
-                    obs = (yield eat_carried_food())
-                    continue
-            if obs.inventory.get_superior_body_armor_slot() is not None:
-                obs = (yield replace_body_armor())
-                continue
-            if obs.inventory.has_unworn_body_armor and (not obs.inventory.has_worn_body_armor) or (obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor):
-                obs = (yield wear_armor())
-                continue
-            if obs.spatial.has_nearby_loot:
-                obs = (yield step_to_loot())
-                continue
-            if obs.hero.can_enhance_skills:
-                obs = (yield enhance_weapon_skill())
-                continue
-            if obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
-                if obs.dungeon.standing_on_fountain:
-                    obs = (yield dip_excalibur())
-                    continue
-                elif obs.dungeon.fountain_in_fov or obs.dungeon.adjacent_fountain:
-                    obs = (yield step_to_fountain())
-                    continue
-            if obs.dungeon.standing_on_altar:
-                if obs.dungeon.can_sacrifice:
-                    obs = (yield sacrifice_on_altar())
-                    continue
-                elif obs.epistemic.has_untested_items and (not self.altar_tested):
-                    obs = (yield test_altar_buc())
-                    self.altar_tested = True
-                    continue
-            elif obs.dungeon.adjacent_altar and obs.epistemic.has_untested_items and (not self.altar_tested):
-                obs = (yield step_to_altar())
-                continue
-            if obs.dungeon.can_harvest_poison and (not obs.hero.has_poison_res) and (obs.hero.hp_frac > 0.9):
-                obs = (yield harvest_poison_res())
-                continue
-            if obs.spatial.stairs_down_known:
-                obs = (yield step_to_stairs_down())
-                continue
-            if obs.dungeon.can_solve_sokoban:
-                obs = (yield step_solve_sokoban())
-                continue
-            if obs.hero.dungeon_branch == 'mines':
-                if obs.spatial.standing_on_stairs_up:
-                    obs = (yield ascend())
-                    continue
-                obs = (yield step_to_stairs_up())
-                continue
-            if obs.dungeon.adjacent_closed_door:
-                if obs.dungeon.door_is_locked and (not obs.dungeon.in_shop):
+            elif obs.dungeon.adjacent_closed_door:
+                if obs.dungeon.door_is_locked:
                     obs = (yield kick_closed_door())
                 else:
                     obs = (yield open_door())
-                continue
+            elif obs.spatial.stairs_down_known and (not obs.spatial.has_unvisited_frontier):
+                obs = (yield step_to_stairs_down())
             elif obs.spatial.has_unvisited_frontier:
-                self.search_count = 0
                 obs = (yield step_to_frontier())
-                continue
-            elif obs.dungeon.has_closed_door:
-                obs = (yield step_to_closed_door())
-                continue
+            elif obs.spatial.has_unsearched_dead_end:
+                obs = (yield search())
             else:
-                obs = (yield from self.handle_dead_end(obs))
-                continue
+                obs = (yield wait())
+
+    def phase_early_rush(self, obs):
+        """
+        Phase 0: Depths 1-2.
+        Priority: Fast exploration & descent. Scoop loose loot and wear initial armor,
+        but prioritize discovered down stairs immediately rather than scouring walls for secret doors.
+        """
+        if obs.inventory.has_unworn_body_armor and (not obs.inventory.has_worn_body_armor):
+            obs = (yield wear_armor())
+            return obs
+        if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
+            obs = (yield wear_armor())
+            return obs
+        if obs.spatial.has_nearby_loot:
+            obs = (yield step_to_loot())
+            return obs
+        if obs.hero.can_enhance_skills:
+            obs = (yield enhance_weapon_skill())
+            return obs
+        if obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
+        if obs.dungeon.adjacent_closed_door:
+            if obs.dungeon.door_is_locked and (not obs.dungeon.in_shop):
+                obs = (yield kick_closed_door())
+            else:
+                obs = (yield open_door())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        if obs.dungeon.has_closed_door:
+            obs = (yield step_to_closed_door())
+            return obs
+        obs = (yield from self.handle_dead_end(obs))
+        return obs
+
+    def phase_early_scaling(self, obs):
+        """
+        Phase 1: Depths 3-5.
+        Priority: Character power-spiking. Forge Excalibur, upgrade starting armor to mithril/iron,
+        harvest safe corpses for poison resistance, and test BUC at altars.
+        """
+        if obs.inventory.get_superior_body_armor_slot() is not None:
+            obs = (yield replace_body_armor())
+            return obs
+        if obs.inventory.has_unworn_body_armor and (not obs.inventory.has_worn_body_armor):
+            obs = (yield wear_armor())
+            return obs
+        if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
+            obs = (yield wear_armor())
+            return obs
+        if obs.spatial.has_nearby_loot:
+            obs = (yield step_to_loot())
+            return obs
+        if obs.hero.can_enhance_skills:
+            obs = (yield enhance_weapon_skill())
+            return obs
+        if obs.dungeon.can_forge_excalibur and obs.hero.hp_frac >= 0.85:
+            if obs.dungeon.standing_on_fountain:
+                obs = (yield dip_excalibur())
+                return obs
+            elif obs.dungeon.fountain_in_fov or obs.dungeon.adjacent_fountain:
+                obs = (yield step_to_fountain())
+                return obs
+        if obs.dungeon.standing_on_altar:
+            if obs.dungeon.can_sacrifice:
+                obs = (yield sacrifice_on_altar())
+                return obs
+            elif obs.epistemic.has_untested_items and (not self.altar_tested):
+                obs = (yield test_altar_buc())
+                self.altar_tested = True
+                return obs
+        elif obs.dungeon.adjacent_altar and obs.epistemic.has_untested_items and (not self.altar_tested):
+            obs = (yield step_to_altar())
+            return obs
+        if obs.dungeon.can_harvest_poison and (not obs.hero.has_poison_res) and (obs.hero.hp_frac > 0.85):
+            obs = (yield harvest_poison_res())
+            return obs
+        if obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
+        if obs.dungeon.adjacent_closed_door:
+            if obs.dungeon.door_is_locked and (not obs.dungeon.in_shop):
+                obs = (yield kick_closed_door())
+            else:
+                obs = (yield open_door())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        if obs.dungeon.has_closed_door:
+            obs = (yield step_to_closed_door())
+            return obs
+        obs = (yield from self.handle_dead_end(obs))
+        return obs
+
+    def phase_mid_branches(self, obs):
+        """
+        Phase 2: Depths 6-10.
+        Priority: Branch discrimination & ascension tools.
+        Avoid dark Mines, detect and solve Sokoban for Reflection/Bag of Holding, donate for temple protection.
+        """
+        if obs.hero.dungeon_branch == 'mines':
+            if obs.spatial.standing_on_stairs_up:
+                obs = (yield ascend())
+                return obs
+            obs = (yield step_to_stairs_up())
+            return obs
+        if obs.dungeon.can_solve_sokoban:
+            obs = (yield step_solve_sokoban())
+            return obs
+        if obs.inventory.get_superior_body_armor_slot() is not None:
+            obs = (yield replace_body_armor())
+            return obs
+        if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
+            obs = (yield wear_armor())
+            return obs
+        if obs.hero.can_enhance_skills:
+            obs = (yield enhance_weapon_skill())
+            return obs
+        if obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
+        if obs.dungeon.adjacent_closed_door:
+            if obs.dungeon.door_is_locked and (not obs.dungeon.in_shop):
+                obs = (yield kick_closed_door())
+            else:
+                obs = (yield open_door())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        if obs.dungeon.has_closed_door:
+            obs = (yield step_to_closed_door())
+            return obs
+        obs = (yield from self.handle_dead_end(obs))
+        return obs
+
+    def phase_deep_dungeon(self, obs):
+        """
+        Phase 3: Depths 11-19.
+        Priority: High caution, corridor chokepoints, Quest readiness, and descent toward the Castle.
+        """
+        if obs.hero.dungeon_branch == 'mines':
+            if obs.spatial.standing_on_stairs_up:
+                obs = (yield ascend())
+                return obs
+            obs = (yield step_to_stairs_up())
+            return obs
+        if obs.inventory.get_superior_body_armor_slot() is not None:
+            obs = (yield replace_body_armor())
+            return obs
+        if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
+            obs = (yield wear_armor())
+            return obs
+        if obs.hero.can_enhance_skills:
+            obs = (yield enhance_weapon_skill())
+            return obs
+        if obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
+        if obs.dungeon.adjacent_closed_door:
+            if obs.dungeon.door_is_locked and (not obs.dungeon.in_shop):
+                obs = (yield kick_closed_door())
+            else:
+                obs = (yield open_door())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        if obs.dungeon.has_closed_door:
+            obs = (yield step_to_closed_door())
+            return obs
+        obs = (yield from self.handle_dead_end(obs))
+        return obs
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
@@ -221,5 +346,5 @@ class Agent:
             else:
                 obs = (yield step_to_dead_end())
             return obs
-        obs = (yield step_to_dead_end())
+        obs = (yield (step_to_frontier() if obs.spatial.has_unvisited_frontier else step_to_dead_end()))
         return obs

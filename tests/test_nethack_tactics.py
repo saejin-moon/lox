@@ -626,3 +626,38 @@ def test_shop_tiles_tracking_and_loot_shield():
     adapter.close()
 
 
+def test_wear_armor_apron_over_cloak_immediate_blacklisting():
+    import numpy as np
+    from lox.envs.nethack import NetHackAdapter
+    from lox.core.types import Action, Item, InventoryView
+
+    adapter = NetHackAdapter()
+    obs = adapter.reset()
+
+    # Artificially inject an equipped cloak and an unworn apron into inventory
+    worn_cloak = Item(slot="c", name="dwarvish cloak", category="armor", is_equipped=True)
+    unworn_apron = Item(slot="o", name="an apron", category="armor", is_equipped=False)
+    obs.inventory = InventoryView([worn_cloak, unworn_apron])
+
+    # Directly step wear_armor targeting slot 'o'
+    # Mock _step_sequence to simulate NetHack message "You are already wearing a cloak." without equipping
+    def mock_step_sequence(seq):
+        mock_raw = obs.raw_obs.copy()
+        mock_raw["message"] = np.frombuffer(b"You are already wearing a cloak.\x00" + b"\x00" * 223, dtype=np.uint8)
+        new_obs = adapter._extract_obs(mock_raw)
+        new_obs.inventory = InventoryView([worn_cloak, unworn_apron], failed_armor_slots=adapter.failed_wear_slots)
+        return new_obs, 0.0, False, False, {}
+
+    adapter._step_sequence = mock_step_sequence
+    obs_next, _, _, _, _ = adapter.step(Action(name="wear_armor", slot="o"))
+
+    # The failed slot 'o' MUST be immediately blacklisted in failed_wear_slots
+    assert "o" in adapter.failed_wear_slots
+    assert "o" in obs_next.inventory.failed_armor_slots
+    # And has_unworn_armor must now be False, preventing 23,000-turn loops
+    assert obs_next.inventory.has_unworn_armor is False
+
+    adapter.close()
+
+
+
