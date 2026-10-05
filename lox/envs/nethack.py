@@ -120,6 +120,8 @@ GLYPH_IS_PASSIVE_HAZARD_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 GLYPH_IS_PEACEFUL_SPECIES_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 GLYPH_IGNORES_ELBERETH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 GLYPH_IS_FAST_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_CORROSIVE_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+GLYPH_IS_HEAVY_WEAPON_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 
 # Metadata arrays/lists for fast lookup
 GLYPH_MON_NAME: list[str] = [""] * _MAX_GLYPH
@@ -159,6 +161,33 @@ for _g in range(_MAX_GLYPH):
                     or "sphere" in _ml
                 ):
                     GLYPH_IS_GAS_SPORE[_g] = True
+
+                if any(
+                    _cor in _ml
+                    for _cor in (
+                        "brown pudding",
+                        "gray ooze",
+                        "rust monster",
+                        "acid blob",
+                        "black pudding",
+                        "gelatinous cube",
+                    )
+                ):
+                    GLYPH_IS_CORROSIVE_LUT[_g] = True
+
+                if any(
+                    _hw in _ml
+                    for _hw in (
+                        "dwarf",
+                        "gnome lord",
+                        "gnome king",
+                        "orc-captain",
+                        "uruk-hai",
+                        "olog-hai",
+                        "captain",
+                    )
+                ):
+                    GLYPH_IS_HEAVY_WEAPON_LUT[_g] = True
 
                 if _ml in (
                     "watchman",
@@ -236,6 +265,8 @@ class NetHackAdapter(EnvironmentAdapter):
         ] = {}  # (y, x) -> (name, drop_turn, is_poisonous)
         self.known_stairs_down: tuple[int, int] | None = None
         self.known_stairs_up: tuple[int, int] | None = None
+        self.arrival_stairs_up: tuple[int, int] | None = None
+        self.sokoban_entrance_pos: tuple[int, int] | None = None
         self.stairs_down_discovery_turn: int = -1
         self.last_target_pos: tuple[int, int] | None = None
         self.searched_count = np.zeros((21, 79), dtype=np.int32)
@@ -621,6 +652,8 @@ class NetHackAdapter(EnvironmentAdapter):
             self.known_priest_pos = None
             self.known_stairs_down = None
             self.known_stairs_up = (y, x) if had_explicit_descent else None
+            self.arrival_stairs_up = (y, x) if had_explicit_descent else None
+            self.sokoban_entrance_pos = None
             self.stairs_down_discovery_turn = -1
             self.last_target_pos = None
             self.known_chars.fill(0)
@@ -984,16 +1017,31 @@ class NetHackAdapter(EnvironmentAdapter):
         if self.known_stairs_down is not None and self.stairs_down_discovery_turn == -1:
             self.stairs_down_discovery_turn = turn
 
+        all_stairs_up: list[tuple[int, int]] = []
         glyph_stairs_up = np.argwhere(glyphs == stair_up_glyph)
         if len(glyph_stairs_up) > 0:
-            self.known_stairs_up = (
-                int(glyph_stairs_up[0][0]),
-                int(glyph_stairs_up[0][1]),
-            )
-        else:
+            for pt in glyph_stairs_up:
+                all_stairs_up.append((int(pt[0]), int(pt[1])))
+        if not all_stairs_up:
             stairs_up = np.argwhere(chars == ord("<"))
-            if len(stairs_up) > 0:
-                self.known_stairs_up = (int(stairs_up[0][0]), int(stairs_up[0][1]))
+            for pt in stairs_up:
+                all_stairs_up.append((int(pt[0]), int(pt[1])))
+
+        if all_stairs_up:
+            if self.arrival_stairs_up is None:
+                if (y, x) in all_stairs_up:
+                    self.arrival_stairs_up = (y, x)
+                else:
+                    self.arrival_stairs_up = all_stairs_up[0]
+
+            self.known_stairs_up = self.arrival_stairs_up
+
+            # Sokoban branch discrimination on DL 6-10 in Dungeons of Doom (dnum == 0)
+            if dnum == 0 and 6 <= depth <= 10:
+                for s_pos in all_stairs_up:
+                    if self.arrival_stairs_up is not None and s_pos != self.arrival_stairs_up:
+                        self.sokoban_entrance_pos = s_pos
+                        break
 
         if any(
             msg in message.lower()
@@ -1013,6 +1061,8 @@ class NetHackAdapter(EnvironmentAdapter):
             walkable_nav[self.known_stairs_down[0], self.known_stairs_down[1]] = True
         if self.known_stairs_up:
             walkable_nav[self.known_stairs_up[0], self.known_stairs_up[1]] = True
+        if self.sokoban_entrance_pos:
+            walkable_nav[self.sokoban_entrance_pos[0], self.sokoban_entrance_pos[1]] = True
 
         doors_mask = self._get_doors_mask(glyphs)
         target_frontier_mask = (walkable & (~self.visited)) | doors_mask
@@ -1048,11 +1098,29 @@ class NetHackAdapter(EnvironmentAdapter):
             "jaguar",
             "leocrotta",
         )
+        is_corrosive_target = any(
+            k in closest_name.lower()
+            for k in ("pudding", "ooze", "rust monster", "acid blob", "gelatinous cube")
+        ) or any(
+            any(k in m.lower() for k in ("pudding", "ooze", "rust monster", "acid blob", "gelatinous cube"))
+            for m in adjacent_monsters
+        )
+        is_heavy_weapon_threat = any(
+            k in closest_name.lower()
+            for k in ("dwarf", "gnome lord", "gnome king", "orc-captain", "uruk-hai", "olog-hai", "captain")
+        ) or any(
+            any(k in m.lower() for k in ("dwarf", "gnome lord", "gnome king", "orc-captain", "uruk-hai", "olog-hai", "captain"))
+            for m in adjacent_monsters
+        )
         if closest_pos and glyphs is not None:
             cg = int(glyphs[closest_pos[0], closest_pos[1]])
             if 0 <= cg < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[cg]:
                 if GLYPH_IS_FAST_LUT[cg]:
                     is_fast_dangerous = True
+                if GLYPH_IS_CORROSIVE_LUT[cg]:
+                    is_corrosive_target = True
+                if GLYPH_IS_HEAVY_WEAPON_LUT[cg]:
+                    is_heavy_weapon_threat = True
         if closest_name and any(
             ign in closest_name.lower() for ign in IGNORES_ELBERETH_SPECIES
         ):
@@ -1079,6 +1147,8 @@ class NetHackAdapter(EnvironmentAdapter):
                     for k in ("rothe", "ant", "bee", "orc", "wolf", "jackal", "coyote")
                 )
             ),
+            is_corrosive_target=is_corrosive_target,
+            is_heavy_weapon_threat=is_heavy_weapon_threat,
             gas_spore_in_fov=gas_spore_fov,
             adjacent_gas_spore=adjacent_gas_spore,
             adjacent_floating_eye=adjacent_floating_eye,
@@ -1160,17 +1230,21 @@ class NetHackAdapter(EnvironmentAdapter):
 
         if not in_shop_curr:
             loot_candidates = []
-            for dy in range(-4, 5):
-                for dx in range(-4, 5):
+            for dy in range(-8, 9):
+                for dx in range(-8, 9):
                     if dy == 0 and dx == 0:
                         continue
                     ly, lx = y + dy, x + dx
                     if 0 <= ly < 21 and 0 <= lx < 79 and walkable_nav[ly, lx]:
+                        c_val = int(chars[ly, lx])
+                        # Armor drops ([) detectable up to radius 8; other loot up to radius 4
+                        if (abs(dy) > 4 or abs(dx) > 4) and c_val != ord("["):
+                            continue
                         if (
                             (ly, lx) not in self.blocked_tiles
                             and (ly, lx) not in self.looted_tiles
                             and (ly, lx) not in self.shop_tiles
-                            and int(chars[ly, lx]) in loot_chars
+                            and c_val in loot_chars
                         ):
                             if glyphs is not None:
                                 lg = int(glyphs[ly, lx])
@@ -1433,6 +1507,13 @@ class NetHackAdapter(EnvironmentAdapter):
             can_donate_to_priest=can_donate_to_priest,
             can_sacrifice=can_sacrifice,
             can_solve_sokoban=can_solve_sokoban,
+            has_sokoban_entrance=(self.sokoban_entrance_pos is not None),
+            sokoban_entrance_in_fov=(
+                self.sokoban_entrance_pos is not None
+                and abs(self.sokoban_entrance_pos[0] - y) <= 8
+                and abs(self.sokoban_entrance_pos[1] - x) <= 8
+            ),
+            sokoban_entrance_pos=self.sokoban_entrance_pos,
             can_breach_drawbridge=can_breach_drawbridge,
             can_tunnel_gehennom=can_tunnel_gehennom,
             standing_on_vibrating_square=standing_on_vibrating_square,
@@ -1989,6 +2070,32 @@ class NetHackAdapter(EnvironmentAdapter):
                     return self.step(Action(name="step_to_frontier"))
                 return self.step(Action(name="step_to_dead_end"))
 
+        elif (
+            action.name == "step_to_sokoban_entrance"
+            and obs_prev is not None
+        ):
+            if not self.sokoban_entrance_pos:
+                if obs_prev.spatial.has_unvisited_frontier:
+                    return self.step(Action(name="step_to_frontier"))
+                return self.step(Action(name="step_to_dead_end"))
+            hero = obs_prev.hero
+            self.last_target_pos = self.sokoban_entrance_pos
+            walkable, walkable_nav = self._build_walkable_nav(obs_prev)
+            all_doors = self._get_all_doors_mask(obs_prev)
+            walkable_nav[self.sokoban_entrance_pos[0], self.sokoban_entrance_pos[1]] = True
+            path = SpatialEngine.find_path(
+                (hero.y, hero.x), self.sokoban_entrance_pos, walkable_nav, is_door=all_doors
+            )
+            if path:
+                dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
+                return self._step_or_breach(obs_prev, dy, dx)
+            elif (hero.y, hero.x) == self.sokoban_entrance_pos:
+                return self.step(Action(name="ascend"))
+            else:
+                if obs_prev.spatial.has_unvisited_frontier:
+                    return self.step(Action(name="step_to_frontier"))
+                return self.step(Action(name="step_to_dead_end"))
+
         elif action.name == "step_to_fountain" and obs_prev is not None:
             hero = obs_prev.hero
             fountain_pos = obs_prev.dungeon.closest_fountain_pos or getattr(
@@ -2074,10 +2181,21 @@ class NetHackAdapter(EnvironmentAdapter):
                     is_door=all_doors,
                 )
 
+            # Check for starting room trap break on DL 1
+            is_dl1_trap = (
+                obs_prev.hero.depth == 1
+                and obs_prev.hero.dungeon_num == 0
+                and np.sum(self.visited) <= 20
+                and obs_prev.hero.turn >= 80
+                and not obs_prev.spatial.stairs_down_known
+            )
+            perim_limit = 20 if is_dl1_trap else 10
+            corridor_limit = 20 if is_dl1_trap else 15
+
             # Priority 2: Room Perimeter Search
             if not target or target == (-1, -1):
                 dead_ends_mask = self._compute_dead_ends_mask(
-                    chars, walkable, max_corridor=15, max_perimeter=10
+                    chars, walkable, max_corridor=corridor_limit, max_perimeter=perim_limit
                 )
                 step_target_mask = dead_ends_mask.copy()
                 step_target_mask[hero.y, hero.x] = False
@@ -2091,13 +2209,22 @@ class NetHackAdapter(EnvironmentAdapter):
 
             # Priority 3: Full-Floor Stagnation Decay
             # Triggers ONLY when all reachable dead ends and perimeter tiles are exhausted (target == (-1, -1))
-            # and at least 500 turns have elapsed since the last floor-wide decay.
+            # and at least 500 turns have elapsed (or 100 turns on DL 1-2 if stairs down unknown).
             if not target or target == (-1, -1):
-                if obs_prev.hero.turn - getattr(self, "_last_search_decay_turn", -1000) >= 500:
+                decay_threshold = 500
+                if (
+                    obs_prev.hero.dungeon_num == 0
+                    and obs_prev.hero.depth <= 2
+                    and obs_prev.hero.turns_on_level >= 500
+                    and not obs_prev.spatial.stairs_down_known
+                ):
+                    decay_threshold = 100
+
+                if obs_prev.hero.turn - getattr(self, "_last_search_decay_turn", -1000) >= decay_threshold:
                     self._last_search_decay_turn = obs_prev.hero.turn
                     self.searched_count = np.maximum(0, self.searched_count - 10)
                     dead_ends_mask = self._compute_dead_ends_mask(
-                        chars, walkable, max_corridor=15, max_perimeter=12
+                        chars, walkable, max_corridor=corridor_limit, max_perimeter=perim_limit
                     )
                     step_target_mask = dead_ends_mask.copy()
                     step_target_mask[hero.y, hero.x] = False
@@ -2363,6 +2490,15 @@ class NetHackAdapter(EnvironmentAdapter):
 
         elif action.name == "step_to_loot" and obs_prev is not None:
             hero = obs_prev.hero
+            # Starting room trap-break: on DL 1 if visited <= 20 and turns >= 80 without stairs, skip loot to force search
+            if (
+                hero.depth == 1
+                and hero.dungeon_num == 0
+                and np.sum(self.visited) <= 20
+                and hero.turn >= 80
+                and not obs_prev.spatial.stairs_down_known
+            ):
+                return self.step(Action(name="step_to_dead_end"))
             target_pos = (
                 action.target_pos
                 or action.extra.get("target_pos")
@@ -2423,6 +2559,27 @@ class NetHackAdapter(EnvironmentAdapter):
             closest_pos = obs_prev.combat.closest_hostile_pos
             if closest_pos:
                 hy, hx = closest_pos
+                closest_name = getattr(obs_prev.combat, "closest_hostile_name", "").lower()
+                is_passive = (
+                    closest_name in ("floating eye", "gas spore")
+                    or "mold" in closest_name
+                    or "jelly" in closest_name
+                    or "sphere" in closest_name
+                    or getattr(obs_prev.combat, "gas_spore_in_fov", False)
+                    or getattr(obs_prev.combat, "adjacent_floating_eye", False)
+                    or getattr(obs_prev.combat, "adjacent_gas_spore", False)
+                )
+                is_adjacent = abs(hy - hero.y) <= 1 and abs(hx - hero.x) <= 1
+                if is_passive and not is_adjacent and not obs_prev.combat.has_active_hostile:
+                    self.consecutive_passive_waits = 0
+                    self.passive_search_count = 0
+                    if obs_prev.spatial.stairs_down_known:
+                        return self.step(Action(name="step_to_stairs_down"))
+                    elif obs_prev.spatial.has_unvisited_frontier:
+                        return self.step(Action(name="step_to_frontier"))
+                    else:
+                        return self.step(Action(name="step_to_dead_end"))
+
                 curr_dist = math.hypot(hero.y - hy, hero.x - hx)
                 dirs = [
                     (-1, 0),
@@ -2765,16 +2922,21 @@ class NetHackAdapter(EnvironmentAdapter):
             if hero and (hero.y, hero.x) in self.floor_corpses:
                 self.floor_corpses.pop((hero.y, hero.x), None)
             return obs, r, term, trunc, info
-        elif action.name in ("quaff_healing", "quaff"):
-            slot = action.slot or (
-                obs_prev.inventory.get_healing_slot() if obs_prev else "a"
-            )
-            return self._step_sequence(
-                [self.char_to_act.get("q", 0), self.char_to_act.get(slot or "a", 0)]
-            )
-        elif action.name in ("read_scroll_teleport", "read_scroll"):
+        elif action.name in ("quaff_healing", "quaff", "quaff_emergency_potion"):
             slot = action.slot
-            if not slot and action.name == "read_scroll_teleport" and obs_prev:
+            if not slot and action.name == "quaff_emergency_potion" and obs_prev:
+                slot = obs_prev.inventory.get_unidentified_potion_slot() or obs_prev.inventory.get_healing_slot()
+            elif not slot and obs_prev:
+                slot = obs_prev.inventory.get_healing_slot()
+            slot = slot or "a"
+            return self._step_sequence(
+                [self.char_to_act.get("q", 0), self.char_to_act.get(slot, 0)]
+            )
+        elif action.name in ("read_scroll_teleport", "read_scroll", "read_emergency_scroll"):
+            slot = action.slot
+            if not slot and action.name == "read_emergency_scroll" and obs_prev:
+                slot = obs_prev.inventory.get_unidentified_scroll_slot() or obs_prev.inventory.get_scroll_of_teleport_slot()
+            elif not slot and action.name == "read_scroll_teleport" and obs_prev:
                 slot = obs_prev.inventory.get_scroll_of_teleport_slot()
             slot = slot or "a"
             return self._step_sequence(

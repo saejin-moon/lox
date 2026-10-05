@@ -52,7 +52,7 @@ def test_tactical_primitives_execution():
 def test_wear_armor_failed_slot_tracking():
     from lox.core.types import InventoryView, Item
 
-    item1 = Item(slot="b", name="scale mail", category="armor", is_equipped=True)
+    item1 = Item(slot="b", name="small shield", category="armor", is_equipped=True)
     item2 = Item(slot="f", name="ring mail", category="armor", is_equipped=False)
     item3 = Item(slot="g", name="helmet", category="armor", is_equipped=False)
 
@@ -658,6 +658,150 @@ def test_wear_armor_apron_over_cloak_immediate_blacklisting():
     assert obs_next.inventory.has_unworn_armor is False
 
     adapter.close()
+
+
+def test_multi_slot_armor_prioritization():
+    from lox.core.types import InventoryView, Item
+
+    # Valkyrie starts with only a shield (base AC 6)
+    shield = Item(slot="b", name="small shield", category="armor", is_equipped=True)
+    boots = Item(slot="d", name="iron shoes", category="armor", is_equipped=False)
+    body = Item(slot="e", name="dwarvish mithril coat", category="armor", is_equipped=False)
+    helm = Item(slot="f", name="dwarvish iron helm", category="armor", is_equipped=False)
+    cloak = Item(slot="g", name="elven cloak", category="armor", is_equipped=False)
+
+    inv = InventoryView([shield, boots, body, helm, cloak])
+    # Body armor has highest priority
+    assert inv.get_unworn_armor_slot() == "e"
+
+    # Once body armor is equipped, helm has next priority
+    body.is_equipped = True
+    assert inv.get_unworn_armor_slot() == "f"
+
+    # Once helm is equipped, boots have next priority
+    helm.is_equipped = True
+    assert inv.get_unworn_armor_slot() == "d"
+
+    # Once boots are equipped, cloak has next priority
+    boots.is_equipped = True
+    assert inv.get_unworn_armor_slot() == "g"
+
+
+def test_corrosive_and_heavy_weapon_threat_detection():
+    import numpy as np
+    from lox.envs.nethack import (
+        NetHackAdapter,
+        GLYPH_IS_CORROSIVE_LUT,
+        GLYPH_IS_HEAVY_WEAPON_LUT,
+    )
+    from lox.core.types import Action
+
+    adapter = NetHackAdapter()
+    obs = adapter.reset()
+
+    # Corrosive monster name check
+    raw_obs = obs.raw_obs.copy()
+    chars = raw_obs["chars"].copy()
+    hy, hx = obs.hero.y, obs.hero.x
+    chars[hy, hx + 1] = ord("P")  # brown pudding char
+
+    obs_extracted = adapter._extract_obs(raw_obs)
+    # Verify LUTs are populated
+    assert np.any(GLYPH_IS_CORROSIVE_LUT)
+    assert np.any(GLYPH_IS_HEAVY_WEAPON_LUT)
+
+    adapter.close()
+
+
+def test_sokoban_entrance_detection_and_step():
+    from lox.envs.nethack import NetHackAdapter
+    from lox.core.types import Action
+
+    adapter = NetHackAdapter()
+    obs = adapter.reset()
+    hy, hx = obs.hero.y, obs.hero.x
+
+    # Set sokoban entrance pos on current level at an adjacent tile
+    adapter.sokoban_entrance_pos = (hy, hx + 1)
+
+    # Step to Sokoban entrance navigates towards (hy, hx + 1)
+    act = Action(name="step_to_sokoban_entrance")
+    obs_next, _, _, _, _ = adapter.step(act)
+    assert adapter.sokoban_entrance_pos == (hy, hx + 1)
+
+    # If standing on sokoban entrance, yields ascend
+    adapter.sokoban_entrance_pos = (obs_next.hero.y, obs_next.hero.x)
+    executed_seq = []
+    adapter._step_sequence = lambda seq: executed_seq.extend(seq) or (obs_next, 0.0, False, False, {})
+    adapter.step(Action(name="step_to_sokoban_entrance"))
+    assert executed_seq == [adapter.char_to_act.get("<")]
+
+    adapter.close()
+
+
+def test_emergency_consumables_actions():
+    from lox.envs.nethack import NetHackAdapter
+    from lox.core.types import Action, Item, InventoryView
+
+    adapter = NetHackAdapter()
+    obs = adapter.reset()
+
+    # Add unidentified potion and scroll
+    unid_pot = Item(slot="u", name="a cloudy potion", category="potion", is_equipped=False)
+    unid_scr = Item(slot="v", name="an unlabelled scroll", category="scroll", is_equipped=False)
+    inv = InventoryView([unid_pot, unid_scr])
+    assert inv.has_unidentified_potion is True
+    assert inv.get_unidentified_potion_slot() == "u"
+    assert inv.has_unidentified_scroll is True
+    assert inv.get_unidentified_scroll_slot() == "v"
+
+    # Mock _step_sequence to inspect keystrokes
+    executed_seq = []
+    def mock_step_sequence(seq):
+        executed_seq.extend(seq)
+        return obs, 0.0, False, False, {}
+
+    adapter._step_sequence = mock_step_sequence
+
+    # Test quaff_emergency_potion
+    adapter.step(Action(name="quaff_emergency_potion", slot="u"))
+    assert executed_seq[0] == adapter.char_to_act.get("q")
+    assert executed_seq[1] == adapter.char_to_act.get("u")
+
+    executed_seq.clear()
+    # Test read_emergency_scroll
+    adapter.step(Action(name="read_emergency_scroll", slot="v"))
+    assert executed_seq[0] == adapter.char_to_act.get("r")
+    assert executed_seq[1] == adapter.char_to_act.get("v")
+
+    adapter.close()
+
+
+def test_latest_policy_dry_run_validation():
+    from lox.dsl.compiler import compile_policy
+    from lox.core.types import Observation, HeroState
+
+    with open("data/latest_policy.py") as f:
+        policy_code = f.read()
+
+    executor = compile_policy(policy_code)
+    assert executor is not None
+
+    obs = Observation(chars=None, glyphs=None, hero=HeroState(hp=50, max_hp=50))
+    runner = executor.create_runner(obs)
+
+    # Step 1: Normal state -> yields action
+    act1 = runner.send(obs)
+    assert act1 is not None
+    assert isinstance(act1.name, str)
+
+    # Step 2: Combat state -> yields combat action
+    obs_combat = Observation(chars=None, glyphs=None, hero=HeroState(hp=50, max_hp=50))
+    obs_combat.combat.adjacent_hostile = True
+    act2 = runner.send(obs_combat)
+    assert act2 is not None
+    assert act2.name in ("melee_attack_hostile", "step_away_from_hostile", "step_to_chokepoint")
+
 
 
 

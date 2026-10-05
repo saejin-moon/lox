@@ -345,7 +345,37 @@ class InventoryView(list):
         return self.get_unworn_armor_slot() is not None
 
     def get_unworn_armor_slot(self) -> str | None:
+        has_body = self.has_worn_body_armor
+        has_helm = self.has_worn_helmet
+        has_boots = self.has_worn_boots
         has_cloak = self.has_worn_cloak
+        has_gloves = self.has_worn_gloves
+        has_shield = self.has_worn_shield
+
+        # Prioritize empty slots in order: Body > Helm > Boots > Cloak > Gloves > Shield
+        slot_priorities = [
+            (not has_body, ("mail", "suit", "coat", "cuirass", "jacket", "plate", "leather armor", "dragon scale")),
+            (not has_helm, ("helmet", "helm", "hat", "cap", "coif")),
+            (not has_boots, ("boots", "shoes")),
+            (not has_cloak, ("cloak", "apron", "cape", "robe")),
+            (not has_gloves, ("gloves", "gauntlets")),
+            (not has_shield, ("shield",)),
+        ]
+
+        for needed, keywords in slot_priorities:
+            if not needed:
+                continue
+            for it in self:
+                if (
+                    it.category == "armor"
+                    and not it.is_equipped
+                    and it.slot not in self.failed_armor_slots
+                ):
+                    n = it.name.lower()
+                    if any(k in n for k in keywords):
+                        return it.slot
+
+        # Fallback to any unworn armor that doesn't duplicate an already equipped slot
         for it in self:
             if (
                 it.category == "armor"
@@ -353,8 +383,17 @@ class InventoryView(list):
                 and it.slot not in self.failed_armor_slots
             ):
                 n = it.name.lower()
-                # Skip duplicate cloaks/aprons if already wearing a cloak/apron
                 if has_cloak and any(k in n for k in ("cloak", "apron", "cape", "robe")):
+                    continue
+                if has_body and any(k in n for k in ("mail", "suit", "coat", "cuirass", "jacket", "plate", "leather armor", "dragon scale")):
+                    continue
+                if has_helm and any(k in n for k in ("helmet", "helm", "hat", "cap", "coif")):
+                    continue
+                if has_boots and any(k in n for k in ("boots", "shoes")):
+                    continue
+                if has_gloves and any(k in n for k in ("gloves", "gauntlets")):
+                    continue
+                if has_shield and "shield" in n:
                     continue
                 return it.slot
         return None
@@ -699,6 +738,30 @@ class InventoryView(list):
         return sum(it.quantity for it in self if it.category == "scroll")
 
     @property
+    def has_unidentified_potion(self) -> bool:
+        return self.get_unidentified_potion_slot() is not None
+
+    def get_unidentified_potion_slot(self) -> str | None:
+        for it in self:
+            if it.category == "potion":
+                n = it.name.lower()
+                if "potion of " not in n:
+                    return it.slot
+        return None
+
+    @property
+    def has_unidentified_scroll(self) -> bool:
+        return self.get_unidentified_scroll_slot() is not None
+
+    def get_unidentified_scroll_slot(self) -> str | None:
+        for it in self:
+            if it.category == "scroll":
+                n = it.name.lower()
+                if "scroll of " not in n:
+                    return it.slot
+        return None
+
+    @property
     def equipped_weapon_name(self) -> str:
         for it in self:
             if it.category == "weapon" and it.is_equipped:
@@ -724,6 +787,8 @@ class CombatView:
     adjacent_peaceful: bool = False
     is_fast_dangerous: bool = False
     is_pack_threat: bool = False
+    is_corrosive_target: bool = False
+    is_heavy_weapon_threat: bool = False
     gas_spore_in_fov: bool = False
     adjacent_gas_spore: bool = False
     adjacent_floating_eye: bool = False
@@ -793,6 +858,9 @@ class DungeonView:
     can_donate_to_priest: bool = False
     can_sacrifice: bool = False
     can_solve_sokoban: bool = False
+    has_sokoban_entrance: bool = False
+    sokoban_entrance_in_fov: bool = False
+    sokoban_entrance_pos: tuple[int, int] | None = None
     can_breach_drawbridge: bool = False
     can_tunnel_gehennom: bool = False
     standing_on_vibrating_square: bool = False
