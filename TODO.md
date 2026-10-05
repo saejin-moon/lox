@@ -634,6 +634,45 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
    - `handle_combat` previously had `hunger_state >= 3` gated behind `not adjacent_hostile or standing_on_elbereth`. When hungry adjacent to a passive hazard, the hero refused to pray until fainting.
    - **Fix Applied**: Synchronized `handle_combat` to check `(obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and obs.hero.can_pray` directly without requiring non-adjacency, preventing fatal fainting blackouts.
 
+---
+
+## 16. Campaign 64 Empirical Autopsy & Disguised Mimic / Invisible Monster Counter-Strike
+
+### 16.1 Campaign 64 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_043122`
+- **Total Episodes**: 200 | **Avg Depth**: **4.24** | **Max Depth**: **11** | **Avg Score**: **666.9** | **Peak Score**: 2,492 | **Avg Turns**: **3,433.0** | **Peak Turns**: 25,000.
+- **Batch Progression**:
+  - Gen 1: Avg Depth 3.05 | Max Depth 6 | Avg Score 588.5 | Avg Turns 5,855.6
+  - Gen 2: Avg Depth **4.25** | Max Depth 9 | Avg Score **704.4**
+  - Gen 3: Avg Depth **4.95** | Max Depth 9 | Avg Score 623.2
+  - Gen 4: Avg Depth **4.55** | Max Depth **10** | Avg Score **718.8**
+  - Gen 5: Avg Depth **5.50** | Max Depth **11** | Avg Score **800.0** | Peak Score 2,094
+  - Gen 6: Avg Depth 3.85 | Max Depth 8 | Avg Score 665.1
+  - Gen 7: Avg Depth **4.00** | Max Depth 9 | Avg Score 505.7
+  - Gen 8: Avg Depth **4.35** | Max Depth 8 | Avg Score **784.1** | Peak Score **2,492**
+  - Gen 9: Avg Depth 3.95 | Max Depth **11** | Avg Score 627.9
+  - Gen 10: Avg Depth 3.90 | Max Depth 7 | Avg Score 651.8 | Avg Turns **4,356.6**
+- **Key Milestones Achieved**:
+  - Overall Avg Depth jumped to **4.24** (up from 4.11 in C63, and 3.88 in C62).
+  - **Generation 5 surged to Avg Depth 5.50 and Avg Score 800.0**, reaching Dungeon Depth 11!
+  - **ZERO Passive Hazard Deaths**: Zero deaths to floating eyes or gas spores across all 200 episodes.
+  - **ZERO Aborts**: Zero episodes aborted or timed out without progress.
+
+### 16.2 Autopsy Discoveries & Autonomous Fixes Deployed
+1. **Disguised Mimic & Invisible Monster Fatalities (27 Deaths, 13.5% of Campaign)**:
+   - Autopsy of DuckDB tick telemetry revealed that mimics (`mimic`, `small mimic`, `giant mimic`) and invisible hostiles (`it`) accounted for 27 deaths.
+   - In episode `g005_e019` (Depth 11, AC -3, HP 67), the hero found a secret door, entered a room, and was attacked by an invisible monster (`"It hits! It hits!"`, `"It bites!"`). The hero blindly executed 12-turn search loops without fighting back, dropping from 67 HP to death while action remained `'search'`.
+   - In episode `g001_e014`, a small mimic disguised as a door attacked during dead-end searching; the hero did not exit the search loop because `hostile_count_fov == 0` (mimic displayed as door glyph).
+   - **Fix Applied**:
+     1. Updated `NetHackAdapter` to register `GLYPH_INVIS_OFF` (762) and warning glyphs (5589–5594) in `GLYPH_IS_MON_HOSTILE_LUT`.
+     2. In `_extract_obs`, attack messages (`"hits!"`, `"bites!"`, `"touches!"`, etc.) or unexpected HP drops automatically flag `adjacent_hostile = True` and set `closest_name = "unseen hostile"` (or mimic).
+     3. In `melee_attack_hostile`, if no normal monster glyph is visible but `adjacent_hostile` is True, the hero targets adjacent candidate objects or closed doors (where mimics hide) or adjacent walkable tiles, forcing the mimic to undisguise.
+     4. In `handle_dead_end`, added `obs.hero.hp < prev_hp` and `obs.combat.adjacent_hostile` to immediately terminate the search loop upon taking any damage.
+2. **False Shop Retreat Bug (`INV-CBT-008`)**:
+   - In episodes `g002_e004` and `g004_e011`, the hero was inside a shop where a small mimic spawned. Because `INV-CBT-008` included `or obs.dungeon.in_shop`, the hero treated the mimic as a peaceful shopkeeper and repeatedly called `retreat()` instead of attacking, ping-ponging on shop items until death.
+   - **Fix Applied**: Removed `or obs.dungeon.in_shop` from `latest_policy.py` and `INV-CBT-008` in `lox/knowledge/invariants.py`. The hero retreats ONLY if `closest_name` is an actual peaceful NPC (`shopkeeper`, `guard`, `watchman`, etc.), actively fighting hostiles inside shops. Added canonical invariant `INV-CBT-011`.
+
+
 
 
 

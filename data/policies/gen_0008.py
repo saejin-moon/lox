@@ -11,12 +11,10 @@ class Agent:
         while True:
             if obs.hero.depth != self.last_depth:
                 self.last_depth = obs.hero.depth
-                self.altar_tested = False
-            if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food)):
-                if obs.hero.turn - self.last_prayer_turn >= 850:
-                    self.last_prayer_turn = obs.hero.turn
-                    obs = (yield pray())
-                    continue
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
+                self.last_prayer_turn = obs.hero.turn
+                obs = (yield pray())
+                continue
             if obs.spatial.standing_on_stairs_down and (not obs.status.is_levitating):
                 obs = (yield descend())
                 continue
@@ -111,12 +109,10 @@ class Agent:
                 if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
                     obs = (yield eat_carried_food())
                     continue
-            if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food)):
-                if obs.hero.turn - self.last_prayer_turn >= 850:
-                    if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
-                        self.last_prayer_turn = obs.hero.turn
-                        obs = (yield pray())
-                        continue
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
+                self.last_prayer_turn = obs.hero.turn
+                obs = (yield pray())
+                continue
             if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue

@@ -181,6 +181,16 @@ for _g in range(_MAX_GLYPH):
             except Exception:
                 GLYPH_MON_NAME[_g] = "monster"
 
+    elif _g == nethack.GLYPH_INVIS_OFF:
+        GLYPH_IS_MONSTER_LUT[_g] = True
+        GLYPH_IS_MON_HOSTILE_LUT[_g] = True
+        GLYPH_MON_NAME[_g] = "invisible monster"
+
+    elif nethack.GLYPH_WARNING_OFF <= _g < nethack.GLYPH_WARNING_OFF + 6:
+        GLYPH_IS_MONSTER_LUT[_g] = True
+        GLYPH_IS_MON_HOSTILE_LUT[_g] = True
+        GLYPH_MON_NAME[_g] = "warning monster"
+
     elif nethack.glyph_is_body(_g):
         GLYPH_IS_BODY_LUT[_g] = True
         _mid = _g - nethack.GLYPH_BODY_OFF
@@ -890,8 +900,49 @@ class NetHackAdapter(EnvironmentAdapter):
                         adjacent_monsters.append(mname)
                         if GLYPH_IGNORES_ELBERETH_LUT[g]:
                             hostile_ignores_elbereth = True
-                        if not GLYPH_IS_PASSIVE_HAZARD_LUT[g]:
-                            has_safe_melee_target = True
+        # Check if the hero was attacked by an unseen monster or disguised mimic
+        msg_l = message.lower()
+        was_attacked = any(
+            v in msg_l
+            for v in (
+                " hits!",
+                " bites!",
+                " stings!",
+                " claws!",
+                " touches!",
+                " crushes!",
+                " strikes!",
+                " zaps!",
+                " kicks!",
+                " swings ",
+                " burns!",
+                " freezes!",
+                " poisons!",
+                " exploded!",
+                " explodes!",
+            )
+        )
+        if was_attacked or (hp < getattr(self, "_last_hp", hp) and not getattr(self, "standing_on_trap", False)):
+            if not adjacent_hostile:
+                adjacent_hostile = True
+                if hostile_count == 0:
+                    hostile_count = 1
+                    active_hostile_count = 1
+                if not closest_name:
+                    for hit_v in (" hits!", " bites!", " stings!", " claws!", " touches!", " crushes!"):
+                        if hit_v in msg_l:
+                            part = msg_l.split(hit_v)[0].strip()
+                            words = part.split()
+                            if words and words[0] in ("the", "a", "an"):
+                                closest_name = " ".join(words[1:])
+                            elif words:
+                                closest_name = words[-1]
+                            break
+                    if not closest_name:
+                        closest_name = "unseen hostile"
+                if not adjacent_monsters:
+                    adjacent_monsters.append(closest_name)
+                has_safe_melee_target = True
 
         adjacent_peaceful = any(
             abs(py - y) <= 1 and abs(px - x) <= 1 for py, px in self.peaceful_positions
@@ -1471,6 +1522,7 @@ class NetHackAdapter(EnvironmentAdapter):
             raw_obs=raw_obs,
         )
         self.agenda.evaluate_milestones(obs)
+        self._last_hp = hero.hp
         return obs
 
     def _dismiss_more(
@@ -2539,7 +2591,29 @@ class NetHackAdapter(EnvironmentAdapter):
                                     continue
                                 action = Action(name="melee_attack", direction=(dy, dx))
                                 break
-            # If no adjacent non-passive monster, do not approach floating eye / gas spore in melee
+            # If no adjacent non-passive monster, counter-attack adjacent disguised mimic / unseen hostile
+            if action.direction is None and getattr(obs_prev.combat, "adjacent_hostile", False):
+                best_dir = None
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dy == 0 and dx == 0:
+                            continue
+                        ty, tx = hero.y + dy, hero.x + dx
+                        if 0 <= ty < 21 and 0 <= tx < 79 and (ty, tx) not in self.peaceful_positions and (ty, tx) not in self.blocked_tiles:
+                            g = int(glyphs[ty, tx]) if glyphs is not None else 0
+                            if nethack.glyph_is_object(g) or g == nethack.GLYPH_CMAP_OFF + 15:
+                                best_dir = (dy, dx)
+                                break
+                            elif best_dir is None:
+                                best_dir = (dy, dx)
+                    if best_dir is not None and glyphs is not None:
+                        g_curr = int(glyphs[hero.y + best_dir[0], hero.x + best_dir[1]])
+                        if nethack.glyph_is_object(g_curr) or g_curr == nethack.GLYPH_CMAP_OFF + 15:
+                            break
+                if best_dir is not None:
+                    action = Action(name="melee_attack", direction=best_dir)
+
+            # If no adjacent target, do not approach floating eye / gas spore in melee
             if action.direction is None:
                 closest_name = getattr(obs_prev.combat, "closest_hostile_name", "")
                 if (

@@ -422,17 +422,55 @@ if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
         rule=(
             "Vault Guards (guard), temple priests, shopkeepers, and watchmen are peaceful until provoked. "
             "Attacking or shooting missiles at a Level 12 Vault Guard causes instant hero death. The adapter "
-            "shields missiles and wands against peaceful positions and policies must retreat rather than attack."
+            "shields missiles and wands against peaceful positions and policies must retreat rather than attack. "
+            "NEVER check obs.dungeon.in_shop here: monsters (such as mimics disguised as items, rats, or orcs) "
+            "frequently spawn inside shops. Retreating on obs.dungeon.in_shop makes the hero refuse to fight "
+            "hostiles inside shops, causing 100% preventable deaths while trapped in shops."
         ),
         anti_pattern=(
-            "Firing daggers at a Vault Guard or priest standing in a corridor or temple entrance."
+            "Firing daggers at a Vault Guard or priest standing in a corridor or temple entrance, or retreating "
+            "from mimics/orcs inside shops because obs.dungeon.in_shop is True."
         ),
         code_snippet="""
-if obs.combat.closest_hostile_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') or obs.dungeon.in_shop:
+closest_name = obs.combat.closest_hostile_name.lower()
+if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'):
     obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
     continue
 """,
         related_ids=["INV-CBT-006"],
+    ),
+    Invariant(
+        id="INV-CBT-011",
+        title="Disguised Mimic & Unseen Hostile Melee Counter-Strike",
+        category="combat",
+        tags=["mimic", "unseen", "invisible", "search", "dead_end", "damage"],
+        rule=(
+            "Mimics disguise themselves as items, doors, or dungeon features, and invisible monsters cannot be "
+            "directly rendered on the map. When attacked by an unseen monster or disguised mimic ('hits!', 'bites!'), "
+            "or when taking unexpected damage during searching (obs.hero.hp < prev_hp), policies must IMMEDIATELY "
+            "break out of search loops. The adapter detects attack messages and flags obs.combat.adjacent_hostile = True. "
+            "Policies must immediately engage in melee counter-strikes (melee_attack_hostile()) to force the mimic to "
+            "undisguise and destroy it rather than passively taking hits."
+        ),
+        anti_pattern=(
+            "Executing a rigid 12-turn search loop without checking obs.hero.hp or obs.combat.adjacent_hostile, "
+            "standing still while a disguised mimic or invisible monster beats the hero from 67 HP to death."
+        ),
+        code_snippet="""
+# In handle_dead_end: abort search immediately if taking damage or attacked
+prev_hp = obs.hero.hp
+for _ in range(12):
+    if (
+        obs.combat.hostile_count_fov > 0
+        or obs.combat.adjacent_hostile
+        or obs.hero.hp < prev_hp
+        or obs.spatial.stairs_down_known
+        or obs.spatial.has_unvisited_frontier
+    ):
+        return obs
+    obs = (yield search())
+""",
+        related_ids=["INV-CBT-001", "INV-NAV-005"],
     ),
     # -----------------------------------------------------------------
     # NUTRITION & DIVINE FAVOR
