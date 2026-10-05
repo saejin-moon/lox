@@ -19,19 +19,23 @@ class Agent:
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
-            if obs.spatial.standing_on_stairs_down and (not obs.status.is_levitating) and (obs.hero.dungeon_branch != 'sokoban') and (not obs.dungeon.is_sokoban):
-                sweeping_sokoban = (6 <= obs.hero.depth <= 10 and obs.hero.dungeon_branch == 'dungeon' and not obs.dungeon.has_sokoban_entrance and not (obs.hero.has_reflection or obs.inventory.has_bag_of_holding) and obs.hero.hp_frac >= 0.50 and obs.hero.hunger_state <= 2)
-                if not sweeping_sokoban:
-                    obs = (yield descend())
-                    continue
+            if obs.spatial.standing_on_stairs_down and (not obs.status.is_levitating):
+                if not (obs.hero.dungeon_branch == 'sokoban' or obs.dungeon.is_sokoban):
+                    sweeping_sokoban = 6 <= obs.hero.depth <= 10 and obs.hero.dungeon_branch == 'dungeon' and (not obs.dungeon.has_sokoban_entrance) and (not (obs.hero.has_reflection or obs.inventory.has_bag_of_holding)) and (obs.hero.hp_frac >= 0.5) and (obs.hero.hunger_state <= 2)
+                    if not sweeping_sokoban:
+                        obs = (yield descend())
+                        continue
             if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
                 obs = (yield from self.handle_combat(obs))
                 continue
-            if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
-                obs = (yield quaff_healing())
+            if any((obs.hero.y, obs.hero.x) == (c.y, c.x) and c.is_safe for c in obs.corpses) and obs.hero.hunger_state >= 1:
+                obs = (yield eat_floor_corpse())
                 continue
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
                 obs = (yield eat_carried_food())
+                continue
+            if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
+                obs = (yield quaff_healing())
                 continue
             if obs.hero.dungeon_branch == 'sokoban' or obs.dungeon.is_sokoban:
                 obs = (yield from self.phase_sokoban(obs))
@@ -444,13 +448,12 @@ class Agent:
                     obs = (yield melee_attack_hostile())
             elif obs.hero.hp_frac > 0.4:
                 obs = (yield melee_attack_hostile())
+            elif not obs.combat.in_corridor and obs.combat.can_retreat:
+                obs = (yield step_to_chokepoint())
+            elif obs.combat.in_corridor:
+                obs = (yield wait())
             else:
-                if not obs.combat.in_corridor and obs.combat.can_retreat:
-                    obs = (yield step_to_chokepoint())
-                elif obs.combat.in_corridor:
-                    obs = (yield wait())
-                else:
-                    obs = (yield melee_attack_hostile())
+                obs = (yield melee_attack_hostile())
             if obs.combat.hostile_count_fov == 0 and (not obs.combat.adjacent_hostile):
                 break
         return obs
