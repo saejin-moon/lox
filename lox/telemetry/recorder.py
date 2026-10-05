@@ -100,36 +100,30 @@ class FlightRecorder:
     def generate_compact_status_report(
         self, trigger_reason: str, cluster_note: str = ""
     ) -> str:
-        """Generates compact status report with recent steps and tactical details."""
+        """Generates compact status report in YAML format with recent steps and tactical details."""
         if not self.buffer:
-            return f"[INCIDENT: {trigger_reason}]\nNo turn telemetry recorded."
+            return f"incident: '{trigger_reason}'\ntelemetry: null"
 
         last = self.buffer[-1]
-        lines = [
-            f"[INCIDENT: {trigger_reason}]",
-            f"State: Depth {last.depth} ({last.dungeon_branch}) | Turn {last.turn} | HP {last.hp}/{last.max_hp} | Hunger {last.hunger}",
-            "",
-            "Recent Steps (Last 5):",
-            "| T | HP | Action | Threat | Message |",
-            "| :--- | :--- | :--- | :--- | :--- |",
-        ]
-
         recent_snaps = list(self.buffer)[-5:]
+        steps = []
         for s in recent_snaps:
-            msg = s.message.replace("|", "/") if s.message else "-"
             threat = (
                 f"{s.closest_hostile_name[:10]} ({s.closest_hostile_dist:.1f})"
                 if s.closest_hostile_name
-                else "-"
+                else "none"
             )
-            lines.append(
-                f"| {s.turn} | {s.hp}/{s.max_hp} | `{s.action_name}` | {threat} | {msg} |"
+            msg = s.message.replace('"', '\\"') if s.message else ""
+            steps.append(
+                f"  - {{turn: {s.turn}, hp: '{s.hp}/{s.max_hp}', action: '{s.action_name}', threat: '{threat}', msg: '{msg}'}}"
             )
 
-        if cluster_note:
-            lines.append(f"\n{cluster_note}")
-
-        return "\n".join(lines)
+        note_line = f"\ncluster_note: '{cluster_note}'" if cluster_note else ""
+        return (
+            f"incident: '{trigger_reason}'\n"
+            f"state: {{depth: {last.depth}, branch: '{last.dungeon_branch}', turn: {last.turn}, hp: '{last.hp}/{last.max_hp}', hunger: '{last.hunger}'}}\n"
+            f"recent_steps:\n" + "\n".join(steps) + note_line
+        )
 
     def generate_autopsy_report(self, death_reason: str) -> str:
         """Legacy alias pointing to compact status report."""

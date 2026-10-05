@@ -17,6 +17,7 @@ from typing import Any
 
 import duckdb
 import numpy as np
+import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -801,19 +802,33 @@ class Agent:
             f"Mitigate this specific failure mode, optimize stair navigation, and break through to Depth 10+."
         )
 
-        status_rep = (
-            f"```yaml\n{batch_summary.format_yaml()}\n```\n\n"
-            f"Raw Ranked Causes of Death: {death_summary_str}"
-        )
+        # Build comprehensive, pure YAML incident report
+        report_data: dict[str, Any] = {
+            "generation": gen,
+            **batch_summary.to_dict(),
+            "ranked_fatalities": [
+                {"cause": r[0], "count": r[1], "pct": float(r[2])} for r in top_deaths
+            ],
+        }
         if recent_fatal_samples:
-            sample_lines = [
-                f'  - Incident: "{s[0]}" at Depth {s[1]}, Turn {s[2]}\n    Inventory at Death: {s[3] or "Empty"}\n    Action Sequence: {s[4] or "N/A"}'
+            report_data["recent_fatal_incidents"] = [
+                {
+                    "cause": s[0],
+                    "depth": s[1],
+                    "turn": s[2],
+                    "inventory": s[3] or "Empty",
+                    "actions": s[4] or "N/A",
+                }
                 for s in recent_fatal_samples
             ]
-            status_rep += "\n\nRecent Fatal Incident Logs:\n" + "\n".join(sample_lines)
-
         if recent_trajectory:
-            status_rep += f"\n\nPre-Death Diagnostic Trace:\n{recent_trajectory}"
+            report_data["pre_death_trajectory"] = recent_trajectory
+
+        full_report_yaml = yaml.dump(report_data, sort_keys=False)
+        with open("data/latest_report.yaml", "w") as f:
+            f.write(full_report_yaml)
+
+        status_rep = f"```yaml\n{full_report_yaml.strip()}\n```"
 
         print(
             "\n[Author Agent] Initiating empirical synthesis session (querying DuckDB & evaluating)..."

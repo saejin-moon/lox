@@ -17,20 +17,26 @@ from lox.author.wiki import WikiEngine
 
 
 def _format_table(cursor) -> str:
-    """Formats DuckDB cursor results into a clean markdown table with zero pandas dependency."""
+    """Formats DuckDB cursor results into clean, token-efficient YAML."""
     if not cursor.description:
-        return "Query executed successfully."
+        return "status: ok"
     headers = [desc[0] for desc in cursor.description]
     rows = cursor.fetchall()
     if not rows:
-        return "Query returned 0 rows."
-    header_line = "| " + " | ".join(str(h) for h in headers) + " |"
-    separator = "| " + " | ".join("---" for _ in headers) + " |"
-    row_lines = [
-        "| " + " | ".join(str(val) if val is not None else "-" for val in r) + " |"
-        for r in rows
-    ]
-    return "\n".join([header_line, separator] + row_lines)
+        return "results: []"
+    items = []
+    for r in rows:
+        fields = []
+        for h, val in zip(headers, r):
+            if val is None:
+                fields.append(f"{h}: null")
+            elif isinstance(val, (int, float, bool)):
+                fields.append(f"{h}: {val}")
+            else:
+                s_val = str(val).replace('"', '\\"')
+                fields.append(f'{h}: "{s_val}"')
+        items.append("  - {" + ", ".join(fields) + "}")
+    return "```yaml\nresults:\n" + "\n".join(items) + "\n```"
 
 
 class DuckDBToolRegistry:
