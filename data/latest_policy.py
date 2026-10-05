@@ -359,7 +359,12 @@ class Agent:
                     obs = (yield zap_offensive_wand())
                     continue
                 if obs.combat.adjacent_hostile:
-                    obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
+                    if obs.combat.can_retreat and (not obs.combat.in_corridor) and obs.hero.hp_frac < 0.5:
+                        obs = (yield step_to_chokepoint())
+                    elif obs.hero.hp_frac > 0.4:
+                        obs = (yield melee_attack_hostile())
+                    else:
+                        obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor and obs.combat.can_retreat else step_away_from_hostile()))
                     continue
             if obs.combat.is_pack_threat and (not obs.combat.in_corridor):
                 if not obs.combat.standing_on_elbereth and (not obs.combat.hostile_ignores_elbereth):
@@ -447,6 +452,7 @@ class Agent:
                     obs = (yield engrave_dust_elbereth())
                 else:
                     obs = (yield melee_attack_hostile())
+                continue
             elif obs.hero.hp_frac > 0.4:
                 obs = (yield melee_attack_hostile())
             elif not obs.combat.in_corridor and obs.combat.can_retreat and (obs.combat.closest_hostile_dist >= 2):
@@ -474,6 +480,9 @@ class Agent:
         return obs
 
     def handle_dead_end(self, obs):
+        if obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
         if obs.spatial.standing_on_dead_end:
             prev_hp = obs.hero.hp
             search_limit = 20 if obs.hero.depth <= 2 else 12

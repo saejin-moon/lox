@@ -896,4 +896,98 @@ def test_peaceful_domestic_animal_protection_and_sokoban_sweep():
     assert action.name != "descend", f"Expected not to descend on DL 7 during Sokoban sweep but got {action.name}"
 
 
+def test_campaign_77_invariants_and_tactical_hardening():
+    """Verify that blobs/oozes are in passive LUT, shops are excluded from dead ends, and walkable_nav does not block empty peaceful positions."""
+    import numpy as np
+    from lox.envs.nethack import (
+        GLYPH_IS_PASSIVE_HAZARD_LUT,
+        GLYPH_MON_NAME,
+        _MAX_GLYPH,
+        NetHackAdapter,
+    )
+    from lox.core.types import Observation, HeroState, CombatView, SpatialView, InventoryView
+
+    # 1. Passive hazard LUT includes blobs, oozes, and puddings
+    passive_names = [GLYPH_MON_NAME[g].lower() for g in range(_MAX_GLYPH) if GLYPH_IS_PASSIVE_HAZARD_LUT[g]]
+    assert any("acid blob" in n for n in passive_names), "Acid blob must be in passive hazard LUT"
+    assert any("gray ooze" in n for n in passive_names), "Gray ooze must be in passive hazard LUT"
+    assert any("brown pudding" in n for n in passive_names), "Brown pudding must be in passive hazard LUT"
+
+    # 2. Shop tiles strictly masked out of dead-end search masks
+    adapter = NetHackAdapter()
+    adapter.shop_tiles = {(5, 5), (5, 6), (5, 7)}
+    chars = np.full((21, 79), ord("."), dtype=np.uint8)
+    walkable = np.ones((21, 79), dtype=bool)
+    dead_ends_mask = adapter._compute_dead_ends_mask(chars, walkable)
+    for sy, sx in adapter.shop_tiles:
+        assert not dead_ends_mask[sy, sx], f"Shop tile ({sy}, {sx}) must not be in dead_ends_mask"
+
+    # 3. Walkable nav does not block peaceful_positions if empty floor
+    import nle.nethack as nh
+    obs_mock = Observation(
+        chars=chars,
+        glyphs=np.full((21, 79), nh.GLYPH_CMAP_OFF, dtype=np.int32),
+        hero=HeroState(y=5, x=4, hp=30, max_hp=30, depth=1),
+    )
+    adapter.peaceful_positions.add((5, 5))
+    _, walkable_nav = adapter._build_walkable_nav(obs_mock)
+    assert bool(walkable_nav[5, 5]) is True, "Empty floor tile in peaceful_positions must remain walkable in walkable_nav"
+
+
+def test_deadlock_circuit_breaker_emergency_strike():
+    """Verify that when trapped adjacent to a passive hazard with 0 escape routes, deadlock circuit breaker strikes."""
+    import unittest.mock
+    import numpy as np
+    from lox.envs.nethack import NetHackAdapter, Action
+    from lox.core.types import Observation, HeroState, CombatView, InventoryView
+
+    adapter = NetHackAdapter()
+    adapter.reset(seed=42)
+
+    # Simulate being trapped in a 1-tile corner with floating eye adjacent at (10, 21)
+    hero = HeroState(y=10, x=20, hp=30, max_hp=30, depth=1)
+    combat = CombatView(
+        adjacent_hostile=True,
+        closest_hostile_name="floating eye",
+        closest_hostile_pos=(10, 21),
+        adjacent_floating_eye=True,
+    )
+    inv = InventoryView(items=[])
+    obs_prev = Observation(
+        chars=np.full((21, 79), ord(" "), dtype=np.uint8),
+        glyphs=np.zeros((21, 79), dtype=np.int32),
+        hero=hero,
+        combat=combat,
+        inventory=inv,
+    )
+    adapter._last_obs = obs_prev
+    adapter.consecutive_passive_waits = 2  # Already waited twice
+    adapter.passive_search_count = 15      # Searches exhausted
+
+    # All neighbors are walls (' ') except the monster's tile (10, 21)
+    obs_prev.chars[10, 20] = ord(".")
+    obs_prev.chars[10, 21] = ord(".")
+
+    # Intercept step: calling step_away_from_hostile should execute emergency strike at (10, 21)
+    # i.e., direction (0, 1)
+    act = Action(name="step_away_from_hostile")
+    resolved_actions = []
+    original_step = adapter.step
+
+    def capture_step(a):
+        resolved_actions.append(a)
+        if a.name == "melee_attack":
+            return obs_prev, 0.0, False, False, {}
+        return original_step(a)
+
+    with unittest.mock.patch.object(adapter, "step", side_effect=capture_step):
+        adapter.step(act)
+
+    assert any(a.name == "melee_attack" and a.direction == (0, 1) for a in resolved_actions), (
+        f"Expected emergency melee attack towards (0, 1) but got {[a.name for a in resolved_actions]}"
+    )
+
+
+
+
 

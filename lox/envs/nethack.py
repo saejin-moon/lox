@@ -152,6 +152,9 @@ for _g in range(_MAX_GLYPH):
                     or "jelly" in _ml
                     or "sphere" in _ml
                     or "light" in _ml
+                    or "blob" in _ml
+                    or "ooze" in _ml
+                    or "pudding" in _ml
                 ):
                     GLYPH_IS_PASSIVE_HAZARD_LUT[_g] = True
                 if _ml == "floating eye":
@@ -368,10 +371,12 @@ class NetHackAdapter(EnvironmentAdapter):
 
     def _build_walkable_nav(self, obs_or_raw: Any) -> tuple[np.ndarray, np.ndarray]:
         """Builds navigation mask with passable closed doors, excluding blocked tiles and shop/iron locked doors."""
-        if hasattr(obs_or_raw, "raw_obs"):
-            raw_obs = obs_or_raw.raw_obs
+        if hasattr(obs_or_raw, "glyphs"):
+            raw_obs = getattr(obs_or_raw, "raw_obs", None)
+            if raw_obs is None:
+                raw_obs = {"chars": getattr(obs_or_raw, "chars", None), "glyphs": obs_or_raw.glyphs}
             glyphs = obs_or_raw.glyphs
-            in_shop = getattr(obs_or_raw.dungeon, "in_shop", False)
+            in_shop = getattr(obs_or_raw.dungeon, "in_shop", False) if hasattr(obs_or_raw, "dungeon") else False
         elif isinstance(obs_or_raw, dict):
             raw_obs = obs_or_raw
             glyphs = obs_or_raw.get("glyphs")
@@ -438,10 +443,15 @@ class NetHackAdapter(EnvironmentAdapter):
                 if 0 <= ly < 21 and 0 <= lx < 79:
                     walkable_nav[ly, lx] = False
 
-        # Exclude peaceful NPCs from navigation so pathfinding routes around them
+        # Exclude peaceful NPCs currently occupying tiles from navigation so pathfinding routes around them
         for py, px in self.peaceful_positions:
             if 0 <= py < 21 and 0 <= px < 79:
                 if hy is None or (py, px) != (hy, hx):
+                    if glyphs is not None:
+                        pg = int(glyphs[py, px])
+                        if 0 <= pg < _MAX_GLYPH:
+                            if not GLYPH_IS_MONSTER_LUT[pg] or GLYPH_IS_PET_LUT[pg]:
+                                continue
                     walkable_nav[py, px] = False
 
         # Exclude passive and exploding hazards from pathfinding navigation
@@ -520,9 +530,13 @@ class NetHackAdapter(EnvironmentAdapter):
             effective_chars[known_mask & blank_mask] = self.known_chars[
                 known_mask & blank_mask
             ]
-        return SpatialEngine.compute_dead_ends_mask(
+        mask = SpatialEngine.compute_dead_ends_mask(
             effective_chars, walkable, self.searched_count, max_corridor, max_perimeter
         )
+        for sy, sx in getattr(self, "shop_tiles", set()):
+            if 0 <= sy < 21 and 0 <= sx < 79:
+                mask[sy, sx] = False
+        return mask
 
     def _compute_true_dead_ends_mask(
         self,
@@ -538,9 +552,13 @@ class NetHackAdapter(EnvironmentAdapter):
             effective_chars[known_mask & blank_mask] = self.known_chars[
                 known_mask & blank_mask
             ]
-        return SpatialEngine.compute_true_dead_ends_mask(
+        mask = SpatialEngine.compute_true_dead_ends_mask(
             effective_chars, walkable, self.searched_count, max_corridor
         )
+        for sy, sx in getattr(self, "shop_tiles", set()):
+            if 0 <= sy < 21 and 0 <= sx < 79:
+                mask[sy, sx] = False
+        return mask
 
     def is_target_floating_eye(self, glyphs: np.ndarray, y: int, x: int) -> bool:
         """Informational check: returns True if monster at (y, x) is a floating eye."""
@@ -2243,17 +2261,9 @@ class NetHackAdapter(EnvironmentAdapter):
 
             # Priority 3: Full-Floor Stagnation Decay
             # Triggers ONLY when all reachable dead ends and perimeter tiles are exhausted (target == (-1, -1))
-            # and at least 500 turns have elapsed (or 100 turns on DL 1-2 if stairs down unknown).
+            # and at least 500 turns have elapsed across all candidate tiles.
             if not target or target == (-1, -1):
                 decay_threshold = 500
-                if (
-                    obs_prev.hero.dungeon_num == 0
-                    and obs_prev.hero.depth <= 2
-                    and obs_prev.hero.turns_on_level >= 500
-                    and not obs_prev.spatial.stairs_down_known
-                ):
-                    decay_threshold = 100
-
                 if obs_prev.hero.turn - getattr(self, "_last_search_decay_turn", -1000) >= decay_threshold:
                     self._last_search_decay_turn = obs_prev.hero.turn
                     self.searched_count = np.maximum(0, self.searched_count - 10)
@@ -2718,9 +2728,12 @@ class NetHackAdapter(EnvironmentAdapter):
                                 if (
                                     0 <= ny < 21
                                     and 0 <= nx < 79
-                                    and walkable_nav[ny, nx]
+                                    and walkable[ny, nx]
                                     and (ny, nx) != (hy, hx)
+                                    and (ny, nx) not in self.blocked_tiles
                                 ):
+                                    if (ny, nx) in self.locked_doors and obs_prev.dungeon.in_shop:
+                                        continue
                                     self.passive_search_count = 0
                                     return self._step_or_breach(obs_prev, dy, dx)
 
@@ -2731,17 +2744,14 @@ class NetHackAdapter(EnvironmentAdapter):
                             return self.step(Action(name="zap_offensive_wand"))
 
                         # 3. Search for secret exit
-                        if getattr(self, "passive_search_count", 0) < 20:
+                        if getattr(self, "passive_search_count", 0) < 15:
                             self.passive_search_count = (
                                 getattr(self, "passive_search_count", 0) + 1
                             )
                             return self.step(Action(name="search"))
 
-                        # 4. Emergency strike ONLY when starving (hunger_state >= 3: Weak/Fainting)
-                        if (
-                            closest_pos
-                            and obs_prev.hero.hunger_state >= 3
-                        ):
+                        # 4. Emergency strike when cornered with no escape routes
+                        if closest_pos:
                             hy, hx = closest_pos
                             if abs(hy - hero.y) <= 1 and abs(hx - hero.x) <= 1:
                                 self.passive_search_count = 0
