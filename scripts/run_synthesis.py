@@ -382,7 +382,20 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             recent_msgs.append(obs.message)
         for cand in reversed(recent_msgs):
             m = cand.lower()
+            if "magic missile bounces" in m and "hits you" in m:
+                killer = "magic missile bounce"
+                break
+            if "you've been warned, knave" in m or "drop that gold" in m or "drop that money" in m:
+                killer = "guard"
+                break
             for hit_verb in (
+                " hits you!",
+                " touches you!",
+                " stings you!",
+                " bites you!",
+                " strikes you!",
+                " crushes you!",
+                " zaps a ",
                 " bites!",
                 " hits!",
                 " stings!",
@@ -426,16 +439,16 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         if not killer:
             adj_mons = [
                 m for m in getattr(obs.combat, "adjacent_monsters", [])
-                if m not in ("floating eye", "gas spore")
+                if m not in ("floating eye", "gas spore", "unseen hostile")
             ]
             if adj_mons:
                 killer = adj_mons[0]
         if not killer and last_known_hostile:
-            if last_known_hostile not in ("floating eye", "gas spore"):
+            if last_known_hostile not in ("floating eye", "gas spore", "unseen hostile"):
                 killer = last_known_hostile
         if not killer:
             cname = getattr(obs.combat, "closest_hostile_name", "")
-            if cname and cname not in ("floating eye", "gas spore"):
+            if cname and cname not in ("floating eye", "gas spore", "unseen hostile"):
                 killer = cname
         if not killer and is_starving:
             death_reason = "Starvation"

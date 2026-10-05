@@ -672,6 +672,41 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
    - In episodes `g002_e004` and `g004_e011`, the hero was inside a shop where a small mimic spawned. Because `INV-CBT-008` included `or obs.dungeon.in_shop`, the hero treated the mimic as a peaceful shopkeeper and repeatedly called `retreat()` instead of attacking, ping-ponging on shop items until death.
    - **Fix Applied**: Removed `or obs.dungeon.in_shop` from `latest_policy.py` and `INV-CBT-008` in `lox/knowledge/invariants.py`. The hero retreats ONLY if `closest_name` is an actual peaceful NPC (`shopkeeper`, `guard`, `watchman`, etc.), actively fighting hostiles inside shops. Added canonical invariant `INV-CBT-011`.
 
+---
+
+## 17. Campaign 65 Empirical Autopsy & Wand Rebound / Prompt Synchronization
+
+### 17.1 Campaign 65 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_045852`
+- **Total Episodes**: 200 | **Avg Depth**: 3.80 | **Max Depth**: **11** | **Avg Score**: 470.0 | **Peak Score**: 2,128 | **Avg Turns**: 2,641.5 | **Peak Turns**: 25,000.
+- **Batch Progression**:
+  - Gen 1: Avg Depth **3.95** | Max Depth 9 | Avg Score 486.3
+  - Gen 2: Avg Depth **4.00** | Max Depth 9 | Avg Score 494.7 | Peak Turns **25,000**
+  - Gen 3: Avg Depth **4.55** | Max Depth **11** | Avg Score **526.5**
+  - Gen 4: Avg Depth **4.20** | Max Depth 9 | Avg Score 493.6
+  - Gen 5: Avg Depth 3.35 | Max Depth 5 | Avg Score 470.8
+  - Gen 6: Avg Depth 3.55 | Max Depth 7 | Avg Score 422.2
+  - Gen 7: Avg Depth 3.70 | Max Depth **10** | Avg Score 441.1
+  - Gen 8: Avg Depth 3.45 | Max Depth 7 | Avg Score 497.3 | Peak Turns **25,000**
+  - Gen 9: Avg Depth 3.85 | Max Depth 9 | Avg Score **500.7** | Peak Score **2,128**
+  - Gen 10: Avg Depth 3.40 | Max Depth 7 | Avg Score 367.2
+- **Key Milestones Achieved**:
+  - **Mimic Mortalities Collapsed**: Mimic deaths collapsed from 17 down to **3** (82% reduction) following the counter-strike targeting deployed in C64.
+  - **Starvation Hit All-Time Low**: Starvation deaths collapsed to **27 episodes** (13.5% of runs, down from 20.5% in C62).
+  - Reached Dungeon Depth **11** in Gen 3.
+
+### 17.2 Autopsy Discoveries & Autonomous Fixes Deployed
+1. **Magic Missile Point-Blank Wall Rebounds (`g003_e009`)**:
+   - Telemetry revealed heroes zapping offensive wands (`zap_offensive_wand()`) directly into adjacent walls at distance 1 (`"The magic missile bounces! The magic missile hits you!"`), blasting themselves from 52 HP down to death.
+   - **Fix Applied**: Added a point-blank wall rebound shield to `zap_offensive_wand` in `NetHackAdapter`. If the adjacent tile in the firing direction is a wall (`-`, `|`, ` `), the adapter diverts to throwing missiles (`throw_dagger()`) or melee rather than zapping into the wall.
+2. **The System Prompt Template Mutation Bug (`lox/author/prompts.py`)**:
+   - Autopsy revealed that the LLM kept reverting `hunger_state >= 4` back to `>= 3` in generational checkpoints because the system prompt example code in `prompts.py` (lines 31 and 141) still contained the obsolete `hunger_state >= 3`.
+   - **Fix Applied**: Updated `run()` and `handle_combat()` example implementations and Rule 22 in `lox/author/prompts.py` to ground-truth NetHack 3.6 (`hunger_state >= 4` and `obs.hero.can_pray`), eliminating the template regression vector.
+3. **Wand & Guard Killer Attribution Telemetry (`scripts/run_synthesis.py`)**:
+   - `scripts/run_synthesis.py` hit verbs previously lacked `" hits you!"`, `" touches you!"`, and Vault Guard dialog (`"drop that gold"`), causing wand strikes and guard deaths to fall back to `"unseen hostile"`.
+   - **Fix Applied**: Added `" hits you!"`, `" touches you!"`, ray bounce detection, and guard confrontation dialog to the telemetry killer parser.
+
+
 
 
 

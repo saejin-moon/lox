@@ -11,7 +11,7 @@ class Agent:
         while True:
             if obs.hero.depth != self.last_depth:
                 self.last_depth = obs.hero.depth
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
@@ -109,7 +109,7 @@ class Agent:
                 if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
                     obs = (yield eat_carried_food())
                     continue
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
@@ -202,7 +202,7 @@ class Agent:
         if obs.spatial.standing_on_dead_end:
             prev_hp = obs.hero.hp
             for _ in range(12):
-                if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier or obs.hero.hp < prev_hp:
+                if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier or (obs.hero.hp < prev_hp):
                     return obs
                 obs = (yield search())
             if obs.spatial.stairs_down_known:

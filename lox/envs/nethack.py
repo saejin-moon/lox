@@ -2799,6 +2799,15 @@ class NetHackAdapter(EnvironmentAdapter):
             if slot and target_pos:
                 dy = int(np.sign(target_pos[0] - hero.y))
                 dx = int(np.sign(target_pos[1] - hero.x))
+                # Shield against point-blank wall rebounds (magic missile / ray bounces)
+                chars = obs_prev.chars if hasattr(obs_prev, "chars") else None
+                ny, nx = hero.y + dy, hero.x + dx
+                if chars is not None and 0 <= ny < 21 and 0 <= nx < 79:
+                    ch = chr(chars[ny, nx])
+                    if ch in ("-", "|", " ") and (ny, nx) != target_pos:
+                        if obs_prev.inventory.has_daggers:
+                            return self.step(Action(name="throw_dagger"))
+                        return self.step(Action(name="melee_attack_hostile"))
                 dir_char = DIR_CHARS.get((dy, dx), ".")
                 return self._step_sequence(
                     [

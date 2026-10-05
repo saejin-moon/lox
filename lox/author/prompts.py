@@ -27,12 +27,11 @@ class Agent:
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble: Weak without food or <15% HP - pray while conscious!)
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)):
-                if obs.hero.turn - self.last_prayer_turn >= 850:
-                    self.last_prayer_turn = obs.hero.turn
-                    obs = yield pray()
-                    continue
+            # 1. Absolute Emergency Survival (Major Trouble: Fainting without food or <15% HP - pray while conscious!)
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
+                self.last_prayer_turn = obs.hero.turn
+                obs = yield pray()
+                continue
 
             # 2. Immediate Staircase Descent (Invariant 10: 1-turn instant escape from danger!)
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
@@ -137,8 +136,8 @@ class Agent:
                     obs = yield eat_carried_food()
                     continue
 
-            # 0.2 Major Trouble Divine Intervention (Weak without food or Critical HP - pray while conscious!)
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)) and (obs.hero.turn - self.last_prayer_turn >= 850):
+            # 0.2 Major Trouble Divine Intervention (Fainting without food or Critical HP - pray while conscious!)
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
@@ -344,7 +343,7 @@ Every turn, `obs` provides rich sub-namespaces:
 19. **Hybrid HTN-BT Goal Agenda**: Structure strategic progression around milestones (`obs.agenda.active_goal` or `GoalDirective`). Reactive reflexes (Combat, Healing, Hunger, Panic Elbereth) ALWAYS execute first. When safe, evaluate your strategic goal: e.g. acquire poison resistance (`GOAL_COLLECT_POISON_RES`), forge Excalibur (`GOAL_FORGE_EXCALIBUR`), test BUC on altars (`GOAL_TEST_BUC_ALTAR`), or clear the floor and descend (`GOAL_DESCEND_STAIRS`).
 20. **Gnomish Mines Avoidance & Main Dungeon Steering**: The Gnomish Mines entrance (`obs.hero.dungeon_branch == "mines"`) appears on Depths 2–4. The Mines are pitch dark and infested with deadly gnome packs with wands and crossbows. If `obs.hero.dungeon_branch == "mines"`, immediately ascend back up to the main dungeon (`yield ascend()` if on stairs up, or `yield step_to_stairs_up()`). NetHackAdapter will dynamically record and prune that Mines staircase from `known_stairs_down` upon returning to the Dungeons of Doom, allowing the hero to locate and descend the true main dungeon staircase down toward Depth 20.
 21. **Adjacent Passive Hazard Ranged Elimination & Dead-End Safety**: Throwing daggers, darts, arrows, or rocks (`throw_dagger()`) at an adjacent floating eye (`obs.combat.adjacent_floating_eye`) is 100% safe at distance 1 and does NOT trigger the passive melee paralysis attack. Never restrict ranged attacks against floating eyes to distance >= 2. NEVER strike a floating eye in melee under any circumstances (doing so inflicts 70 turns of paralysis and causes certain death); if trapped with 0 missiles, call `step_away_from_hostile()` to trigger the deadlock circuit breaker. Gas spores, yellow lights, and black lights explode on melee contact, so retreat away or fight adjacent safe targets.
-22. **Proactive In-Combat Nutrition**: NetHack fainting occurs randomly at `hunger_state >= 3`, leaving the hero unconscious for 30 turns and defenseless against monsters. Consume carried food (`eat_carried_food()`) proactively as soon as `hunger_state >= 1` ("Hungry") outside combat, or at `hunger_state >= 2` ("Weak") when standing on Elbereth, out of melee reach, or adjacent only to passive hazards (floating eyes or gas spores). Never wait until `hunger_state >= 3` to eat while monsters are in FOV.
+22. **Proactive In-Combat Nutrition & Divine Feeding**: In NetHack 3.6, divine feeding by prayer (`pray()`) strictly requires `hunger_state >= 4` ("Fainting"). Praying at `hunger_state == 3` ("Weak") wastes divine favor. Consume carried food (`eat_carried_food()`) proactively as soon as `hunger_state >= 1` ("Hungry") outside combat, or at `hunger_state >= 2` ("Weak") when standing on Elbereth, out of melee reach, or adjacent only to passive hazards. Only pray for divine feeding when packaged food is exhausted and `hunger_state >= 4`. Never wait until fainting to eat carried food while monsters are in FOV.
 23. **Sokoban Branch Solving (`solve_sokoban`)**: When `obs.dungeon.is_sokoban` and `obs.dungeon.has_boulders`, yield `solve_sokoban()`. The underlying deterministic graph solver calculates optimal boulder pushes into pits without Luck penalties or corner deadlocks, securing the Bag of Holding or Amulet of Reflection.
 24. **Castle Drawbridge Breaching (`breach_drawbridge`)**: At the Castle (Depths 25-29), closed drawbridges kill heroes instantly if bumped or closed upon. When `obs.dungeon.drawbridge_in_fov` or `obs.dungeon.closest_drawbridge_pos` is detected, yield `breach_drawbridge()` to align at distance 2 and zap a wand of striking to safely shatter the bridge.
 25. **Gehennom Mazes & Tunneling (`dig_tunnel`)**: Gehennom (Depths 30-45) consists of vast unlit stone mazes. When in Gehennom and equipped with a wand of digging or pickaxe, yield `dig_tunnel()` to blast straight-line rays through the rock directly toward target stairs or the Sanctum, saving thousands of turns.

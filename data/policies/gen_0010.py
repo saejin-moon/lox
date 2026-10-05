@@ -11,12 +11,10 @@ class Agent:
         while True:
             if obs.hero.depth != self.last_depth:
                 self.last_depth = obs.hero.depth
-                self.altar_tested = False
-            if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food)):
-                if obs.hero.turn - self.last_prayer_turn >= 850:
-                    self.last_prayer_turn = obs.hero.turn
-                    obs = (yield pray())
-                    continue
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food))) and obs.hero.turn - self.last_prayer_turn >= 850:
+                self.last_prayer_turn = obs.hero.turn
+                obs = (yield pray())
+                continue
             if obs.spatial.standing_on_stairs_down and (not obs.status.is_levitating):
                 obs = (yield descend())
                 continue
@@ -111,12 +109,10 @@ class Agent:
                 if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
                     obs = (yield eat_carried_food())
                     continue
-            if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food)):
-                if obs.hero.turn - self.last_prayer_turn >= 850:
-                    if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
-                        self.last_prayer_turn = obs.hero.turn
-                        obs = (yield pray())
-                        continue
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food))) and obs.hero.turn - self.last_prayer_turn >= 850:
+                self.last_prayer_turn = obs.hero.turn
+                obs = (yield pray())
+                continue
             if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
@@ -134,7 +130,7 @@ class Agent:
                 obs = (yield step_away_from_hostile())
                 continue
             closest_name = obs.combat.closest_hostile_name.lower()
-            if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') or obs.dungeon.in_shop:
+            if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'):
                 obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
                 continue
             if obs.combat.is_fast_dangerous:
@@ -142,7 +138,7 @@ class Agent:
                     obs = (yield engrave_dust_elbereth())
                     continue
                 if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.4 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:
                         obs = (yield melee_attack_hostile())
                         continue
                     else:
@@ -204,8 +200,9 @@ class Agent:
 
     def handle_dead_end(self, obs):
         if obs.spatial.standing_on_dead_end:
+            prev_hp = obs.hero.hp
             for _ in range(12):
-                if obs.combat.hostile_count_fov > 0 or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
+                if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier or (obs.hero.hp < prev_hp):
                     return obs
                 obs = (yield search())
             if obs.spatial.stairs_down_known:
