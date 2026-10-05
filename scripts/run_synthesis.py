@@ -774,9 +774,8 @@ class Agent:
         )
         top_arch_pct = batch_summary.archetype_percentages.get(top_arch, 0.0)
 
-        # Save compact failure summary to YAML and JSON
+        # Save compact failure summary to YAML
         batch_summary.save("data/latest_diagnostics.yaml")
-        batch_summary.save("data/latest_diagnostics.json")
 
         print(
             f"\n[Gen {gen} Batch Metrics ({eval_episodes} eps)] Avg Depth: {avg_d:.2f} | Max Depth: {max_d} | Avg Turns: {avg_t:.1f}"

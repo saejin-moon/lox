@@ -151,25 +151,21 @@ def test_summarize_batch():
     assert "`STALL_SECRET_DOOR`" in table_md
     assert "`ARMOR_DEFICIT`" in table_md
 
-    # Test YAML and JSON serialization
+    # Test to_dict and YAML serialization
+    d = summary.to_dict()
+    assert d["batch_metrics"]["episodes"] == 10
+    assert d["root_causes"]["ARMOR_DEFICIT"]["count"] == 6
+
     yaml_str = summary.format_yaml()
     assert "batch_metrics:" in yaml_str
     assert "ARMOR_DEFICIT: {count: 6, pct: 60.0}" in yaml_str
     assert "STALL_SECRET_DOOR: {count: 4, pct: 40.0}" in yaml_str
 
-    json_str = summary.format_json()
-    assert '"episodes": 10' in json_str
-    assert '"ARMOR_DEFICIT"' in json_str
-
-    # Test file saving
+    # Test YAML file saving
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpdir:
         y_path = os.path.join(tmpdir, "diag.yaml")
-        j_path = os.path.join(tmpdir, "diag.json")
         summary.save(y_path)
-        summary.save(j_path)
         assert os.path.exists(y_path)
-        assert os.path.exists(j_path)
         assert "batch_metrics:" in open(y_path).read()
-        assert '"batch_metrics"' in open(j_path).read()

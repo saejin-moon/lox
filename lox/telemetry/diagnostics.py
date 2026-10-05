@@ -6,7 +6,6 @@ failure archetypes to eliminate superficial final-hit combat misclassification.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field
 from enum import Enum
@@ -130,19 +129,11 @@ class BatchDiagnosticSummary:
             lines.append(f"  {cause}: {{count: {info['count']}, pct: {info['pct']}}}")
         return "\n".join(lines)
 
-    def format_json(self, indent: int | None = 2) -> str:
-        """Formats JSON representation of batch diagnostics."""
-        return json.dumps(self.to_dict(), indent=indent)
-
     def save(self, filepath: str = "data/latest_diagnostics.yaml") -> None:
-        """Saves batch diagnostic summary to a YAML or JSON file."""
+        """Saves batch diagnostic summary to a YAML file."""
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        if filepath.endswith(".json"):
-            content = self.format_json()
-        else:
-            content = self.format_yaml()
         with open(filepath, "w") as f:
-            f.write(content + "\n")
+            f.write(self.format_yaml() + "\n")
 
 
 class RootCauseClassifier:
