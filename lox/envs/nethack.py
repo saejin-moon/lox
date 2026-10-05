@@ -199,6 +199,15 @@ for _g in range(_MAX_GLYPH):
                     "aligned priest",
                     "high priest",
                     "oracle",
+                    "kitten",
+                    "housecat",
+                    "large cat",
+                    "little dog",
+                    "dog",
+                    "large dog",
+                    "pony",
+                    "horse",
+                    "warhorse",
                 ):
                     GLYPH_IS_PEACEFUL_SPECIES_LUT[_g] = True
 
@@ -437,6 +446,12 @@ class NetHackAdapter(EnvironmentAdapter):
             for ly, lx in self.locked_doors:
                 if 0 <= ly < 21 and 0 <= lx < 79:
                     walkable_nav[ly, lx] = False
+
+        # Exclude peaceful NPCs from navigation so pathfinding routes around them
+        for py, px in self.peaceful_positions:
+            if 0 <= py < 21 and 0 <= px < 79:
+                if hy is None or (py, px) != (hy, hx):
+                    walkable_nav[py, px] = False
 
         # Exclude passive and exploding hazards from pathfinding navigation
         if glyphs is not None:
@@ -853,7 +868,11 @@ class NetHackAdapter(EnvironmentAdapter):
                 for py, px in list(self.peaceful_positions):
                     if y_min <= py < y_max and x_min <= px < x_max:
                         pg = int(glyphs[py, px])
-                        if 0 <= pg < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[pg] and not GLYPH_IS_PEACEFUL_SPECIES_LUT[pg]:
+                        if (
+                            0 <= pg < _MAX_GLYPH
+                            and GLYPH_IS_MON_HOSTILE_LUT[pg]
+                            and not GLYPH_IS_PEACEFUL_SPECIES_LUT[pg]
+                        ):
                             self.peaceful_positions.discard((py, px))
             sub_g = glyphs[y_min:y_max, x_min:x_max]
             valid_sub = np.clip(sub_g, 0, _MAX_GLYPH - 1)
@@ -2780,7 +2799,7 @@ class NetHackAdapter(EnvironmentAdapter):
                             ) in self.blocked_tiles:
                                 continue
                             g = int(glyphs[ty, tx])
-                            if 0 <= g < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[g]:
+                            if 0 <= g < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[g] and not GLYPH_IS_PEACEFUL_SPECIES_LUT[g]:
                                 if GLYPH_IS_FLOATING_EYE[g] or GLYPH_IS_GAS_SPORE[g]:
                                     continue
                                 action = Action(name="melee_attack", direction=(dy, dx))

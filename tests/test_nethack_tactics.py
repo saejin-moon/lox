@@ -854,3 +854,40 @@ def test_in_combat_emergency_eating_unconditional():
     assert action is not None
     assert action.name == "eat_carried_food", f"Expected eat_carried_food but got {action.name}"
 
+
+def test_peaceful_domestic_animal_protection_and_sokoban_sweep():
+    """Verify that domestic animals are recognized as peaceful and Sokoban sweep is shielded on DL 6-10."""
+    from lox.envs.nethack import (
+        GLYPH_IS_PEACEFUL_SPECIES_LUT,
+        GLYPH_MON_NAME,
+        _MAX_GLYPH,
+        NetHackAdapter,
+    )
+    from lox.dsl.compiler import compile_policy
+    from lox.core.types import Observation, HeroState, SpatialView, DungeonView
+
+    # 1. Domestic animals in peaceful LUT
+    peaceful_names = [GLYPH_MON_NAME[g].lower() for g in range(_MAX_GLYPH) if GLYPH_IS_PEACEFUL_SPECIES_LUT[g]]
+    assert any("kitten" in n for n in peaceful_names), "Kitten must be in peaceful species LUT"
+    assert any("little dog" in n for n in peaceful_names), "Little dog must be in peaceful species LUT"
+    assert any("pony" in n for n in peaceful_names), "Pony must be in peaceful species LUT"
+
+    # 2. Sokoban sweep shielding in policy
+    with open("data/latest_policy.py") as f:
+        policy_code = f.read()
+
+    executor = compile_policy(policy_code)
+    obs = Observation(
+        chars=None,
+        glyphs=None,
+        hero=HeroState(hp=30, max_hp=30, depth=7, dungeon_branch="dungeon"),
+        spatial=SpatialView(standing_on_stairs_down=True, stairs_down_known=True, has_unvisited_frontier=True),
+        dungeon=DungeonView(has_sokoban_entrance=False),
+    )
+    runner = executor.create_runner(obs)
+    action = runner.send(obs)
+    assert action is not None
+    # Must NOT descend on DL 7 when standing on stairs down if sweeping for Sokoban
+    assert action.name != "descend", f"Expected not to descend on DL 7 during Sokoban sweep but got {action.name}"
+
+

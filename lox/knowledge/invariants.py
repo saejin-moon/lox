@@ -503,24 +503,25 @@ if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
     ),
     Invariant(
         id="INV-CBT-008",
-        title="Peaceful NPC Non-Aggression Shield",
+        title="Peaceful NPC & Domestic Animal Non-Aggression Shield",
         category="combat",
-        tags=["peaceful", "guard", "priest", "shopkeeper", "oracle"],
+        tags=["peaceful", "guard", "priest", "shopkeeper", "oracle", "kitten", "dog", "horse"],
         rule=(
-            "Vault Guards (guard), temple priests, shopkeepers, and watchmen are peaceful until provoked. "
-            "Attacking or shooting missiles at a Level 12 Vault Guard causes instant hero death. The adapter "
-            "shields missiles and wands against peaceful positions and policies must retreat rather than attack. "
+            "Vault Guards (guard), temple priests, shopkeepers, watchmen, and domestic animals (kitten, housecat, "
+            "little dog, dog, pony, horse) spawn peaceful by default. Attacking them prompts 'Really attack? [yn]'. "
+            "The adapter auto-answers 'n' and maintains persistent peaceful_positions and GLYPH_IS_PEACEFUL_SPECIES_LUT. "
+            "Policies must never attack peaceful entities, and pathfinding routes around them to avoid 25,000-turn attack loops. "
             "NEVER check obs.dungeon.in_shop here: monsters (such as mimics disguised as items, rats, or orcs) "
             "frequently spawn inside shops. Retreating on obs.dungeon.in_shop makes the hero refuse to fight "
             "hostiles inside shops, causing 100% preventable deaths while trapped in shops."
         ),
         anti_pattern=(
-            "Firing daggers at a Vault Guard or priest standing in a corridor or temple entrance, or retreating "
+            "Attacking peaceful domestic animals or guards, or treating them as hostiles in melee loops, or retreating "
             "from mimics/orcs inside shops because obs.dungeon.in_shop is True."
         ),
         code_snippet="""
 closest_name = obs.combat.closest_hostile_name.lower()
-if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'):
+if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle', 'kitten', 'housecat', 'little dog', 'dog', 'pony', 'horse'):
     obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
     continue
 """,
