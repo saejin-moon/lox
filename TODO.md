@@ -246,6 +246,34 @@ All 12 concrete technical mechanisms across all priority tiers have been fully i
 2. **5x–8x Synthesis Latency Reduction Applied**:
    - **Native `can_pray` Attribute**: Added `can_pray: bool = True` directly to `HeroState` in `types.py` and `schema.py`, populated from `self.can_safely_pray(turn)`. Eliminates dry-run validation failures on pass 1.
    - **Enforced Method Splicing**: Prompts strictly mandate outputting only the modified method (e.g. `def handle_combat(...)` or `def run(...)`), which `AuthorAgent.splice_policy_methods()` merges into `class Agent`.
-   - **Bounded Completion Tokens (`max_tokens: 1500`)**: Cuts completion tokens from 3,200 down to ~400–600 tokens per request, accelerating generation from ~35s to ~5–8s.
+   - **Bounded Completion Tokens (`max_tokens: 3000`)**: Prevents truncation while keeping completion concise, eliminating unclosed parenthesis and syntax truncation errors.
+
+---
+
+## 6. Campaign 54 Empirical Autopsy & Combat Melee Recovery
+
+### 6.1 Campaign 54 Empirical Results (200 Episodes, 10 Generations)
+- **Batch Progression**:
+  - Gen 1: Avg Depth **3.35** | Max Depth 6 | Avg Turns 1,641.3
+  - Gen 2: Avg Depth **3.55** | Max Depth **8** | Avg Turns 1,773.1
+  - Gen 3: Avg Depth **4.20** | Max Depth 7 | Avg Turns 1,506.6
+  - Gen 4–10: Avg Depth 1.0–1.25 (Stalled due to LLM policy mutation in Gen 3 that removed combat exit/melee)
+- **Root Cause Breakdown**:
+  - `STALL_SECRET_DOOR`: 95 (47.5%)
+  - `COMBAT_GENERAL`: 74 (37.0%)
+  - `ARMOR_DEFICIT`: 16 (8.0%, avg depth 5.25)
+  - `COMBAT_FAST_PREDATOR`: 9 (4.5%)
+  - `PASSIVE_HAZARD_PARALYSIS`: 6 (3.0%)
+
+### 6.2 Key Flaw Diagnosed & Repaired
+1. **Combat Melee & Loop Termination Truncation in `handle_combat`**:
+   - In Gen 3, the LLM mutated `handle_combat` and accidentally replaced decisive melee engagement, loop termination `break`, and `return obs` with a lone `obs` statement.
+   - Without `break` or melee attacks, whenever a monster approached, the hero looped without acting or could not exit combat.
+   - **Fix Applied**: Fully restored decisive melee engagement (`melee_attack_hostile`), safe retreat/Elbereth fallback, `break` when hostiles cleared, and `return obs` in `data/latest_policy.py`.
+2. **Enhanced Dry-Run Validator**:
+   - Added `combat_distant` and `combat_cleared` test scenarios to `AuthorAgent.validate_policy()`, guaranteeing any future policy mutation that lacks combat resolution or post-combat loop exit is caught and rejected before acceptance.
+3. **Truncation Prevention**:
+   - Increased `max_tokens` from 1500 to 3000 to prevent long multi-method code blocks from being cut off mid-expression.
+
 
 

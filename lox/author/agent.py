@@ -375,7 +375,7 @@ class Agent:
                     "model": model_name,
                     "messages": messages,
                     "temperature": 0.2,
-                    "max_tokens": 1500,
+                    "max_tokens": 3000,
                 }
                 if use_tools:
                     payload["tools"] = OPENAI_TOOL_SPECS
@@ -555,7 +555,7 @@ class Agent:
                         "model": model_name,
                         "messages": messages,
                         "temperature": 0.1,
-                        "max_tokens": 1500,
+                        "max_tokens": 3000,
                     }
                     resp = client.post(url, headers=headers, json=payload)
                     if not resp.is_error:
@@ -746,6 +746,23 @@ class Agent:
                                 ),
                                 combat=CombatView(
                                     hostile_count_fov=1, adjacent_hostile=True
+                                ),
+                            ),
+                        ),
+                        (
+                            "combat_distant",
+                            Observation(
+                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
+                                glyphs=np.zeros((21, 79), dtype=np.int16),
+                                hero=HeroState(
+                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
+                                ),
+                                combat=CombatView(
+                                    hostile_count_fov=1,
+                                    adjacent_hostile=False,
+                                    closest_hostile_dist=3.0,
+                                    closest_hostile_name="jackal",
+                                    has_active_hostile=False,
                                 ),
                             ),
                         ),
