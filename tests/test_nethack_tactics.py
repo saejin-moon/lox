@@ -455,3 +455,37 @@ def test_floating_eye_melee_prohibition_and_missile_pickup():
     assert obs_res is not None
 
     adapter.close()
+
+
+def test_enhance_weapon_skill_and_superior_body_armor():
+    """Verify that enhance_weapon_skill, superior body armor replacement, and pack threats function correctly."""
+    from lox.core.types import InventoryView, Item
+
+    # 1. Superior body armor detection
+    worn_jacket = Item(slot="a", name="a leather jacket (being worn)", category="armor", is_equipped=True)
+    unworn_mithril = Item(slot="b", name="a dwarvish mithril-coat", category="armor", is_equipped=False)
+    unworn_leather = Item(slot="c", name="a leather jacket", category="armor", is_equipped=False)
+
+    inv = InventoryView([worn_jacket, unworn_mithril, unworn_leather])
+    slots = inv.get_superior_body_armor_slot()
+    assert slots == ("a", "b"), f"Expected ('a', 'b'), got {slots}"
+
+    # Superior armor already worn: should not downgrade
+    worn_plate = Item(slot="a", name="a plate mail (being worn)", category="armor", is_equipped=True)
+    inv_plate = InventoryView([worn_plate, unworn_mithril])
+    assert inv_plate.get_superior_body_armor_slot() is None
+
+    # 2. Test enhance_weapon_skill in adapter
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=456)
+    obs_res, _, _, _, _ = adapter.step(Action(name="enhance_weapon_skill"))
+    assert obs_res is not None
+    assert obs_res.hero.turn >= 1
+
+    # 3. Test is_pack_threat
+    obs_extracted = adapter._extract_obs(obs.raw_obs)
+    assert hasattr(obs_extracted.combat, "is_pack_threat")
+    assert hasattr(obs_extracted.hero, "can_enhance_skills")
+
+    adapter.close()
+

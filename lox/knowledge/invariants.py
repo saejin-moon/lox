@@ -638,6 +638,61 @@ if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
 """,
         related_ids=["INV-CBT-006"],
     ),
+    Invariant(
+        id="INV-EQP-005",
+        title="Weapon Skill Enhancement & Superior Body Armor Replacement",
+        category="equipment",
+        tags=["enhance", "skills", "damage", "armor", "mithril", "replace_body_armor"],
+        rule=(
+            "In NetHack, Valkyries start at Basic (+0 to-hit, +0 damage). Striking enemies 80 times qualifies the hero "
+            "for Skilled (+2 to-hit, +1 damage); 180 hits for Expert (+3 to-hit, +2 damage). When obs.hero.can_enhance_skills "
+            "is True, yield enhance_weapon_skill() outside combat to dramatically increase damage. Additionally, NetHack "
+            "forbids wearing body armor while already wearing body armor; when an unworn body armor (e.g. dwarvish mithril coat "
+            "AC 5) is superior to the worn leather jacket (AC 1), yield replace_body_armor() to take off the inferior jacket "
+            "and equip the superior armor, dropping AC from 6 down to 2 or 1."
+        ),
+        anti_pattern=(
+            "Never enhancing weapon skills, remaining permanently at Basic skill with 35% miss rates, and leaving dwarvish "
+            "mithril coats unequipped in inventory while wearing the starting leather jacket."
+        ),
+        code_snippet="""
+# In run():
+if obs.hero.can_enhance_skills:
+    obs = (yield enhance_weapon_skill())
+    continue
+if obs.inventory.get_superior_body_armor_slot() is not None:
+    obs = (yield replace_body_armor())
+    continue
+""",
+        related_ids=["INV-EQP-001", "INV-CBT-001"],
+    ),
+    Invariant(
+        id="INV-CBT-010",
+        title="Multi-Monster Pack Threat & Rothe Herd Corridor Defense",
+        category="combat",
+        tags=["pack", "herd", "rothe", "swarm", "surrounded", "chokepoint", "elbereth"],
+        rule=(
+            "On DL 4-6, monsters begin spawning in herds and squads (e.g. rothes in packs of 3-5, orc squads, ant swarms). "
+            "Each rothe executes 3 attacks per turn (bite, butt, kick) dealing up to 25+ damage per turn against unarmored heroes. "
+            "Rothes fully respect Elbereth! When obs.combat.is_pack_threat is True in open rooms (not in_corridor), policies must "
+            "NEVER stand and trade melee blows. They must immediately engrave dust Elbereth (engrave_dust_elbereth()) or retreat to "
+            "a 1-tile corridor chokepoint (step_to_chokepoint()) to engage enemies 1v1."
+        ),
+        anti_pattern=(
+            "Treating rothe herds like isolated jackals and fighting in the open, allowing 3 rothes to deal 9 unretaliated attacks per turn."
+        ),
+        code_snippet="""
+# In handle_combat():
+if obs.combat.is_pack_threat and not obs.combat.in_corridor and not obs.combat.standing_on_elbereth:
+    if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth):
+        obs = (yield engrave_dust_elbereth())
+        continue
+    elif obs.combat.can_retreat:
+        obs = (yield step_to_chokepoint())
+        continue
+""",
+        related_ids=["INV-CBT-003", "INV-CBT-005"],
+    ),
 
     # -----------------------------------------------------------------
     # HARNESS & DIALOG INTERCEPTION

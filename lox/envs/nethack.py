@@ -241,6 +241,8 @@ class NetHackAdapter(EnvironmentAdapter):
         self.consecutive_zero_turns: int = 0
         self._prev_turn: int = 0
         self.known_chars = np.zeros((21, 79), dtype=np.uint8)
+        self.can_enhance_skills: bool = False
+        self.last_enhanced_level: int = 1
 
         # Epistemic POMDP Engine & Hybrid HTN-BT Goal Agenda
         self.epistemic = EpistemicEngine()
@@ -632,6 +634,13 @@ class NetHackAdapter(EnvironmentAdapter):
             for it in inventory_items
         )
 
+        message = self._decode_message(raw_obs.get("message", ""))
+        msg_low = message.lower()
+        if "confident in your" in msg_low or "could be more dangerous" in msg_low:
+            self.can_enhance_skills = True
+        elif level > getattr(self, "last_enhanced_level", 1) and level >= 2:
+            self.can_enhance_skills = True
+
         hero = HeroState(
             y=y,
             x=x,
@@ -658,6 +667,7 @@ class NetHackAdapter(EnvironmentAdapter):
             has_poison_res=getattr(self, "has_poison_res", False),
             has_magic_res=has_magic_res,
             has_reflection=has_reflection,
+            can_enhance_skills=self.can_enhance_skills,
         )
 
         status = HeroStatus(
@@ -670,7 +680,6 @@ class NetHackAdapter(EnvironmentAdapter):
             is_encumbered=(encumbrance != EncumbranceState.UNENCUMBERED),
             encumbrance_level=encumbrance,
         )
-        message = self._decode_message(raw_obs.get("message", ""))
         chars = raw_obs["chars"]
         glyphs = raw_obs["glyphs"]
 
@@ -950,6 +959,13 @@ class NetHackAdapter(EnvironmentAdapter):
             floating_eye_in_fov=floating_eye_fov,
             adjacent_peaceful=adjacent_peaceful,
             is_fast_dangerous=is_fast_dangerous,
+            is_pack_threat=bool(
+                hostile_count >= 2
+                or any(
+                    k in closest_name.lower()
+                    for k in ("rothe", "ant", "bee", "orc", "wolf", "jackal", "coyote")
+                )
+            ),
             gas_spore_in_fov=gas_spore_fov,
             adjacent_gas_spore=adjacent_gas_spore,
             adjacent_floating_eye=adjacent_floating_eye,
@@ -2607,6 +2623,42 @@ class NetHackAdapter(EnvironmentAdapter):
                     obs.inventory.failed_armor_slots.add(slot)
                 return obs, reward, term, trunc, info
             return self.step(Action(name="wait"))
+        elif action.name == "replace_body_armor":
+            slots = (
+                obs_prev.inventory.get_superior_body_armor_slot()
+                if obs_prev
+                else None
+            )
+            if slots:
+                worn_slot, superior_slot = slots
+                obs, reward, term, trunc, info = self._step_sequence(
+                    [self.char_to_act.get("T", 0), self.char_to_act.get(worn_slot, 0)]
+                )
+                if term or trunc:
+                    return obs, reward, term, trunc, info
+                obs, reward, term, trunc, info = self._step_sequence(
+                    [self.char_to_act.get("W", 0), self.char_to_act.get(superior_slot, 0)]
+                )
+                return obs, reward, term, trunc, info
+            return self.step(Action(name="wait"))
+        elif action.name == "enhance_weapon_skill":
+            self.can_enhance_skills = False
+            self.last_enhanced_level = obs_prev.hero.level if obs_prev else 1
+            seq = [
+                self.char_to_act.get("#", 0),
+                self.char_to_act.get("e", 0),
+                self.char_to_act.get("n", 0),
+                self.char_to_act.get("h", 0),
+                self.char_to_act.get("a", 0),
+                self.char_to_act.get("n", 0),
+                self.char_to_act.get("c", 0),
+                self.char_to_act.get("e", 0),
+                self.char_to_act.get("\r", 0),
+                self.char_to_act.get("a", 0),
+                self.char_to_act.get("b", 0),
+                self.char_to_act.get("\x1b", 0),
+            ]
+            return self._step_sequence([c for c in seq if c > 0])
         elif action.name == "apply_unicorn_horn":
             slot = action.slot or (
                 obs_prev.inventory.get_unicorn_horn_slot() if obs_prev else None

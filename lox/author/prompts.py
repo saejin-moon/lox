@@ -357,6 +357,9 @@ Every turn, `obs` provides rich sub-namespaces:
     - Phase 5 (Gehennom Descent, DL 30-45): tunnel mazes with `dig_tunnel()`, defeat Vlad for Candelabra, Rodney for Book of the Dead.
     - Phase 6 (Sanctum & Invocation, DL 50): perform Bell-Book-Candle ritual, defeat High Priest of Moloch, grab the Amulet of Yendor.
     - Phase 7 (The Run & Astral Plane): ascend to dungeon level 1, traverse Elemental Planes (Earth, Air, Fire, Water), use Conflict to cross the Astral Plane and offer the Amulet at the Lawful Altar to Ascend!
+28. **Weapon Skill Enhancement (`enhance_weapon_skill`, `obs.hero.can_enhance_skills`)**: In NetHack, Valkyries start at Basic (+0 to-hit, +0 damage). Striking enemies trains skills: 80 hits unlocks Skilled (+2 to-hit, +1 damage), 180 hits unlocks Expert (+3 to-hit, +2 damage). When `obs.hero.can_enhance_skills` is True outside combat, yield `enhance_weapon_skill()` to dramatically increase melee accuracy and damage.
+29. **Superior Body Armor Replacement (`replace_body_armor`)**: NetHack forbids wearing body armor while already wearing body armor. Dropped dwarvish mithril coats (AC 5) or iron cuirasses give vastly superior protection over the starting leather jacket (AC 1). When `obs.inventory.get_superior_body_armor_slot()` is not None, yield `replace_body_armor()` to take off the inferior jacket and wear the superior coat, dropping AC towards negative numbers.
+30. **Pack & Herd Tactical Defense (`obs.combat.is_pack_threat`)**: On DL 4–6, monsters like rothes spawn in herds of 3–5 animals. Each rothe executes 3 attacks per turn, dealing up to 25+ damage per turn against unarmored heroes. When `obs.combat.is_pack_threat` is True in open rooms (`not in_corridor`), do NOT stand and trade melee blows; engrave dust Elbereth (`engrave_dust_elbereth()`) or retreat to a 1-tile corridor chokepoint (`step_to_chokepoint()`).
 
 ### Available Actions:
 {actions}

@@ -74,6 +74,7 @@ class HeroState:
     has_poison_res: bool = False
     has_magic_res: bool = False
     has_reflection: bool = False
+    can_enhance_skills: bool = False
 
     @property
     def hp_frac(self) -> float:
@@ -311,6 +312,61 @@ class InventoryView(list):
                 return it.slot
         return None
 
+    def get_superior_body_armor_slot(self) -> tuple[str, str] | None:
+        """
+        Returns (worn_slot, unworn_superior_slot) if there is an unworn body armor
+        in inventory with higher base AC tier than the currently worn body armor.
+        """
+        tiers = {
+            "crystal plate": 8,
+            "dragon scale": 9,
+            "plate mail": 7,
+            "splint mail": 6,
+            "banded mail": 6,
+            "dwarvish mithril": 5,
+            "elven mithril": 5,
+            "mithril": 5,
+            "chain mail": 4,
+            "scale mail": 4,
+            "cuirass": 4,
+            "ring mail": 3,
+            "studded leather": 3,
+            "leather armor": 2,
+            "leather jacket": 1,
+        }
+        worn_body_item = None
+        for it in self:
+            if it.category == "armor" and it.is_equipped:
+                n = it.name.lower()
+                if any(k in n for k in ("mail", "suit", "coat", "cuirass", "jacket", "plate")):
+                    worn_body_item = it
+                    break
+
+        worn_tier = 0
+        worn_slot = None
+        if worn_body_item:
+            worn_slot = worn_body_item.slot
+            n = worn_body_item.name.lower()
+            for k, val in tiers.items():
+                if k in n:
+                    worn_tier = max(worn_tier, val)
+
+        best_unworn_slot = None
+        best_unworn_tier = worn_tier
+
+        for it in self:
+            if it.category == "armor" and not it.is_equipped and it.slot not in self.failed_armor_slots:
+                n = it.name.lower()
+                for k, val in tiers.items():
+                    if k in n and val > best_unworn_tier:
+                        best_unworn_tier = val
+                        best_unworn_slot = it.slot
+
+        if best_unworn_slot and worn_slot and best_unworn_tier > worn_tier:
+            return (worn_slot, best_unworn_slot)
+        return None
+
+
     @property
     def has_bag_of_holding(self) -> bool:
         return any(
@@ -447,6 +503,7 @@ class CombatView:
     adjacent_pet: bool = False
     adjacent_peaceful: bool = False
     is_fast_dangerous: bool = False
+    is_pack_threat: bool = False
     gas_spore_in_fov: bool = False
     adjacent_gas_spore: bool = False
     adjacent_floating_eye: bool = False
