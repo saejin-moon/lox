@@ -111,10 +111,7 @@ class Agent:
                 if obs.combat.has_safe_melee_target:
                     obs = (yield melee_attack_hostile())
                     continue
-                if not obs.combat.standing_on_elbereth:
-                    obs = (yield engrave_dust_elbereth())
-                else:
-                    obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
+                obs = (yield step_away_from_hostile())
                 continue
             if obs.combat.adjacent_floating_eye:
                 if obs.combat.has_safe_melee_target:
@@ -173,7 +170,6 @@ class Agent:
                 elif obs.inventory.has_daggers:
                     obs = (yield throw_dagger())
                     continue
-            # INV-CBT-001: Decisive Melee Engagement
             if obs.combat.adjacent_hostile:
                 if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:
                     obs = (yield melee_attack_hostile())
@@ -185,8 +181,7 @@ class Agent:
                 obs = (yield melee_attack_hostile())
             else:
                 obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
-
-            if obs.combat.hostile_count_fov == 0 and not obs.combat.adjacent_hostile:
+            if obs.combat.hostile_count_fov == 0 and (not obs.combat.adjacent_hostile):
                 break
         return obs
 

@@ -2736,9 +2736,15 @@ class NetHackAdapter(EnvironmentAdapter):
                     self.door_kick_count.pop(target_door, None)
             return obs, reward, term, trunc, info
         elif action.name == "wear_armor":
-            slot = action.slot or (
-                obs_prev.inventory.get_unworn_armor_slot() if obs_prev else None
-            )
+            slot = action.slot
+            if not slot and obs_prev:
+                if (
+                    not obs_prev.inventory.has_worn_body_armor
+                    and obs_prev.inventory.has_unworn_body_armor
+                ):
+                    slot = obs_prev.inventory.get_unworn_body_armor_slot()
+                if not slot:
+                    slot = obs_prev.inventory.get_unworn_armor_slot()
             if slot:
                 obs, reward, term, trunc, info = self._step_sequence(
                     [self.char_to_act.get("W", 0), self.char_to_act.get(slot, 0)]

@@ -275,5 +275,38 @@ All 12 concrete technical mechanisms across all priority tiers have been fully i
 3. **Truncation Prevention**:
    - Increased `max_tokens` from 1500 to 3000 to prevent long multi-method code blocks from being cut off mid-expression.
 
+---
 
+## 7. Campaign 55 Empirical Autopsy & Progression Upgrades
 
+### 7.1 Campaign 55 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_001645`
+- **Execution Latency**: 13.5 minutes total (down from 35+ minutes) via method-only AST splicing and native `can_pray`. Exactly 1 LLM call per generation (0 repair rounds).
+- **Batch Progression**:
+  - Gen 1: Avg Depth **3.30** | Max Depth 7 | Avg Turns 1,691.0
+  - Gen 2: Avg Depth **4.50** | Max Depth 8 | Avg Turns 1,933.2
+  - Gen 3: Avg Depth **4.05** | Max Depth 8 | Avg Turns 1,842.1
+  - Gen 4: Avg Depth **3.15** | Max Depth 7 | Avg Turns 1,701.5
+  - Gen 5: Avg Depth **4.05** | Max Depth 7 | Avg Turns 2,058.4
+  - Gen 6: Avg Depth **3.60** | Max Depth 7 | Avg Turns 1,677.3
+  - Gen 7: Avg Depth **4.05** | Max Depth 9 | Avg Turns 1,811.2
+  - Gen 8: Avg Depth **4.10** | Max Depth **11** | Avg Turns 1,772.0
+  - Gen 9: Avg Depth **3.65** | Max Depth 8 | Avg Turns 1,794.6
+  - Gen 10: Avg Depth **4.50** | Max Depth **10** | Avg Turns 1,921.0 | Avg Score **618.2**
+- **Overall C55 Metrics**: 200 episodes, Avg Depth **3.90**, Max Depth **11**, Avg Turns **1,820.2**, Avg Score **475.7**.
+- **Root Cause Taxonomy (DuckDB)**:
+  1. `COMBAT_GENERAL`: 84 (42.0%, avg depth 4.35)
+  2. `ARMOR_DEFICIT`: 45 (22.5%, avg depth 5.22, avg turns 1,722.6)
+  3. `STALL_SECRET_DOOR`: 42 (21.0%, avg depth 1.33, avg turns 2,165.8)
+  4. `PASSIVE_HAZARD_PARALYSIS`: 16 (8.0%, avg depth 4.31, avg turns 2,314.4)
+  5. `COMBAT_FAST_PREDATOR`: 13 (6.5%, avg depth 4.15, avg turns 1,403.1)
+
+### 7.2 Key Root Causes Diagnosed & Hardened for Campaign 56
+1. **Gas Spore Elbereth Flaw Elimination**:
+   - In C55, 12 heroes were killed by gas spore explosions. In `data/latest_policy.py`, `adjacent_gas_spore` attempted `engrave_dust_elbereth()`.
+   - Gas spores are mindless (`M1_MINDLESS`) and 100% ignore Elbereth. Staying adjacent led to explosions triggered by adjacent orcs/kobolds throwing darts.
+   - **Fix**: Removed Elbereth attempt from `adjacent_gas_spore`; hero unconditionally yields `step_away_from_hostile()` to reach safe distance $\ge 2$.
+2. **Body Armor Equipping Prioritization**:
+   - 45 deaths (22.5%) were categorized under `ARMOR_DEFICIT` with heroes reaching depth 5+ with AC > 5 despite carrying body armor.
+   - `get_unworn_armor_slot()` returned the first item in inventory (e.g. helmet or boots giving +1 AC), rather than body armor (giving +3 to +8 AC).
+   - **Fix**: Added `get_unworn_body_armor_slot()` in `lox/core/types.py` (`InventoryView`) and updated `wear_armor` in `lox/envs/nethack.py` to prioritize body armor when unarmored.
