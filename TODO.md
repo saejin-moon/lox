@@ -883,3 +883,74 @@ Based on these empirical findings, the following concrete improvements are queue
 
 - [ ] **Action Item 4: Proactive Heavy Body Armor Equipping in `phase_early_scaling`**:
   - Ensure Valkyries proactively scoop and equip heavy armor drops (`splint mail`, `banded mail`, `plate mail`, `dwarvish mithril coat`) in DL 3–5, driving AC down to $\le 0$ before descending into mid-dungeon branches.
+
+---
+
+## 23. Deep Dive 2 Autopsy: Turn Budget & Floor Velocity Profiling (Where Are the Hidden Turn-Sinks?)
+
+### 23.1 Global Turn-Budget Distribution Across 38.0M+ Ticks
+A global telemetry audit across all 38,045,648 ticks in `data/lox.duckdb` (13,014 episodes) revealed that non-progression turn-sinks consume **53.64% of ALL TURNS IN HISTORY (20,409,753 turns)**:
+
+| Action Category | Global Ticks | % of All Turns | Tactical Role & Root Cause |
+|---|---|---|---|
+| `step_to_frontier` | 8,538,125 | 22.44% | **Active Exploration**: Uncovering dark rooms and corridors. |
+| `step_to_dead_end` | 6,200,005 | 16.30% | **Turn-Sink #1 (Dead Ends)**: Navigating to walls and corridor terminals. |
+| `search` | 5,328,335 | 14.01% | **Turn-Sink #1 (Searching)**: 12-turn wall/corridor sweeps. Combined with dead ends = **30.31%**. |
+| `step_away_from_hostile` | 4,572,726 | 12.02% | **Turn-Sink #2 (Retreat Ping-Pong)**: Over 70% driven by immobile passive hazards (`gas spore`, `floating eye`, molds). |
+| `step_to_loot` | 3,253,614 | 8.55% | **Turn-Sink #3 (Loot Oscillation)**: 16% of runs took 200–1,500+ steps over un-autopickable drops. |
+| `melee_attack_hostile` | 2,954,859 | 7.77% | **Active Combat**: Melee strikes against hostiles. |
+| `step_to_stairs_down` | 1,609,881 | 4.23% | **Active Descent Transit**: Heading to exit stairs. |
+| `wait` | 1,049,073 | 2.76% | **Turn-Sink #4 (Fallback Waiting)**: 95.4% spent in `Agent.run` fallback loop. |
+| `harvest_poison_res` | 774,835 | 2.04% | Corpse harvesting navigation. |
+| `step_to_chokepoint` | 593,016 | 1.56% | Tactical retreat to 1-tile corridor. |
+
+### 23.2 The "Hopeless Floor Turn Threshold" (Point of No Return)
+Empirical analysis of survival and progression rates as a function of early floor turn expenditure isolates the exact point where an episode becomes doomed:
+
+1. **DL 1 Turn Threshold**:
+   - $\text{DL } 1 < 400\text{ turns}$: **21.33%** reach DL 6+; **1.00%** reach DL 10+.
+   - $\text{DL } 1 \in [400, 999]\text{ turns}$: **18.25%** reach DL 6+; **1.01%** reach DL 10+.
+   - $\text{DL } 1 \in [1000, 1999]\text{ turns}$: **8.27%** reach DL 6+ (a 60% collapse); **0.15%** reach DL 10+ (a 7x drop).
+   - $\text{DL } 1 \ge 2000\text{ turns}$: **3.15%** reach DL 6+; **0.18%** reach DL 10+.
+2. **Combined DL 1 + DL 2 Turn Threshold**:
+   - $(\text{DL } 1 + 2) < 1,000\text{ turns}$: **24.47%** reach DL 6+; **1.10%** reach DL 10+.
+   - $(\text{DL } 1 + 2) \in [1500, 2499]\text{ turns}$: **12.04%** reach DL 6+ (halved).
+   - $(\text{DL } 1 + 2) \ge 2500\text{ turns}$: **4.51%** reach DL 6+ (an 82% collapse); **0.14%** reach DL 10+ (a 10x drop).
+3. **The Nutrition Depletion Mechanism**:
+   - Heroes who clear DL 1 in $< 400$ turns leave for DL 2 with **1.33 food rations** intact.
+   - Heroes who spend $> 1,000$ turns on DL 1 leave for DL 2 with **0.60 rations** (most having 0). By DL 3, they are in starvation emergencies, forced to eat dangerous/toxic corpses or waste divine favor.
+
+### 23.3 The 85.7% Blind Spot on DL 1 (2,096 Episodes Died Without Seeing Stairs)
+Out of 2,447 historical episodes that terminated on Dungeon Depth 1:
+- **85.7% (2,096 episodes) NEVER ONCE SAW STAIRS DOWN**.
+- They survived an average of **3,688.6 turns**, conducted **797.1 searches**, ate **28.1 corpses**, and prayed **3.4 times** before dying of attrition or starvation.
+- **66.4% of them (1,300 episodes)** explored 70+ tiles (the entire accessible dungeon floor) and performed **980.8 searches**, yet failed to breach the secret door to the rest of the floor due to candidate saturation and the 500-turn stagnation decay throttle.
+- **13.4% of them (262 episodes)** were trapped in $\le 20$ tiles (the starting room) for **2,066 turns**, spending 33.3% of turns on `step_to_dead_end`, 21.1% on `step_to_loot`, and 20.1% on `wait` (doing only 3.99% searching).
+
+### 23.4 The Stair-Discovery-to-Descent Paradox
+- In **78.6% of episodes**, stairs down on DL 1 are discovered within **500 turns** (26.1% $\le 100$ turns, 53.6% $\le 250$ turns).
+- When discovered early ($\le 250$ turns), **95.1% of episodes descend within 50 turns** (average 7.7 turns).
+- However, in episodes where stairs down were known but descent was delayed, **12.33% of turns (123,874 ticks)** were diverted to `step_to_loot` and **7.57% (76,029 ticks)** to `harvest_poison_res` on DL 1.
+
+---
+
+### 23.5 Concrete Action Items & Planned Architecture Changes
+
+- [ ] **Action Item 1: Strict Zero-Loot Staircase Priority in `phase_early_rush`**:
+  - In `phase_early_rush` (DL 1–2): when `obs.spatial.stairs_down_known` is True, `step_to_stairs_down()` MUST execute before `step_to_loot()` and `harvest_poison_res()`.
+  - Scooping mundane dropped darts/rocks or hunting corpses on DL 1–2 when an open staircase is known wastes early floor velocity.
+
+- [ ] **Action Item 2: Starting Room Trap-Break Circuit Breaker**:
+  - If `obs.spatial.tiles_visited_count <= 20` and `obs.hero.turn >= 80` on DL 1:
+    - Forbid `step_to_loot` and `wait`.
+    - Force immediate high-density wall search sweeps (20 searches) along all 4 room perimeter walls to breach secret room exits before turn 150.
+
+- [ ] **Action Item 3: Early Floor Emergency Search Escalation & Fast Decay**:
+  - If `obs.hero.turn > 500` on DL 1 or DL 2 without discovering stairs down:
+    - Escalate corridor dead-end searching from 12 to 20 iterations (`_compute_true_dead_ends_mask`).
+    - Cut stagnation search decay cooldown from 500 turns down to **100 turns**, ensuring un-discovered secret doors are re-searched aggressively before the 1,000-turn hopeless threshold.
+
+- [ ] **Action Item 4: Passive Hazard Exclusion from `step_away_from_hostile`**:
+  - In `NetHackAdapter.step_away_from_hostile()`: verify that the closest hostile is mobile and actively threatening.
+  - If the only hostile in FOV is an immobile passive hazard (`gas spore`, `floating eye`, molds) at distance $\ge 2$, do NOT execute retreat; immediately fall back to `step_to_frontier` or `step_to_stairs_down`.
+
