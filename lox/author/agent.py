@@ -375,6 +375,7 @@ class Agent:
                     "model": model_name,
                     "messages": messages,
                     "temperature": 0.2,
+                    "max_tokens": 1500,
                 }
                 if use_tools:
                     payload["tools"] = OPENAI_TOOL_SPECS
@@ -553,6 +554,7 @@ class Agent:
                     "model": model_name,
                     "messages": messages,
                     "temperature": 0.1,
+                    "max_tokens": 1500,
                 }
                 resp = client.post(url, headers=headers, json=payload)
                 if not resp.is_error:

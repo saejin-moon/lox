@@ -683,6 +683,7 @@ class NetHackAdapter(EnvironmentAdapter):
             has_magic_res=has_magic_res,
             has_reflection=has_reflection,
             can_enhance_skills=self.can_enhance_skills,
+            can_pray=self.can_safely_pray(turn),
         )
 
         status = HeroStatus(

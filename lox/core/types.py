@@ -75,6 +75,7 @@ class HeroState:
     has_magic_res: bool = False
     has_reflection: bool = False
     can_enhance_skills: bool = False
+    can_pray: bool = True
 
     @property
     def hp_frac(self) -> float:

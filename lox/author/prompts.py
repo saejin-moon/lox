@@ -391,11 +391,10 @@ Every turn, `obs` provides rich sub-namespaces:
 ### Safety Rules:
 No imports, no filesystem calls, no arbitrary exec/eval. All logic must reside within `class Agent`.
 
-### Output Requirement (AST Method Splicing Supported):
-Provide 1 brief rationale sentence, then your code in a single ```python ... ``` block.
-You have two options for your output:
-1. **Targeted Method Splicing (Recommended & Fast)**: Output ONLY the specific method(s) you wish to modify or add (e.g. `def handle_combat(self, obs): ...` or `def run(self, obs): ...`). The synthesis engine automatically splices your updated methods into the existing `class Agent` via AST, preserving all other existing methods intact. This is 4x-5x faster and eliminates regressions in unchanged subroutines.
-2. **Complete Class Replacement**: Output the full `class Agent:` if you are refactoring multiple core routines simultaneously.
+### Output Requirement (Targeted Method Splicing Required):
+Provide 1 brief rationale sentence, then your modified method(s) in a single ```python ... ``` block.
+Output ONLY the specific method(s) you are updating or adding (e.g. `def handle_combat(self, obs): ...` or `def run(self, obs): ...`).
+Do NOT output unchanged methods or the full `class Agent` wrapper. The engine automatically splices your updated method into `class Agent` via AST, preserving all other verified subroutines intact and eliminating indentation errors.
 """
 
 
@@ -427,5 +426,5 @@ Call `get_death_autopsy_trace()` to inspect the exact final 15 ticks, `query_inv
 {current_policy.strip()}
 ```
 
-Synthesize your revised policy to address the empirical mortality bottlenecks. You may output ONLY the specific modified method(s) (e.g. `def handle_combat(self, obs): ...`) or the full `class Agent`.
+Synthesize your revised method(s) to address the empirical mortality bottlenecks. Output ONLY the specific modified method(s) (e.g. `def handle_combat(self, obs): ...` or `def run(self, obs): ...`) in a single ```python ... ``` block.
 """

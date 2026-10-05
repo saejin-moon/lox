@@ -223,3 +223,29 @@ All 12 concrete technical mechanisms across all priority tiers have been fully i
 3. **In-Combat Hunger Resolution & Emergency Prayer**:
    - Added emergency prayer checks (`obs.hero.can_pray and (hp_frac < 0.15 or hunger_state >= 3)`) and allowed eating carried rations when adjacent to passive hazards inside `handle_combat()`.
 
+---
+
+## 5. Campaign 53 Empirical Autopsy & Synthesis Acceleration (5x-8x)
+
+### 5.1 Campaign 53 Empirical Results (200 Episodes, 10 Generations)
+- **Batch Progression**:
+  - Gen 1–7: Avg Depth 1.0–1.2 | Max Depth 1–3 | Avg Turns 600–1,072 (Stalled on DL 1 exploration due to invalid syntax/attribute rejections)
+  - Gen 8: Avg Depth **4.20** | Max Depth 7 | Avg Turns 1,829.4 (Breakthrough when policy compiled cleanly)
+  - Gen 9: Avg Depth **3.80** | Max Depth **8** | Avg Turns 1,749.9
+  - Gen 10: Avg Depth **3.40** | Max Depth 5 | Avg Turns 2,310.3
+- **Root Cause Breakdown**:
+  - `STALL_SECRET_DOOR`: 98 (49.0%, concentrated in Gen 1–7 before clean policy promotion)
+  - `COMBAT_GENERAL`: 66 (33.0%)
+  - `ARMOR_DEFICIT`: 23 (11.5%, avg depth 5.09)
+  - `COMBAT_FAST_PREDATOR`: 9 (4.5%)
+  - `PASSIVE_HAZARD_PARALYSIS`: 4 (2.0%)
+
+### 5.2 Critical Latency Bottleneck Discovered & Resolved
+1. **The Self-Repair Cascade**:
+   - In C53, every generation triggered 2 self-repair rounds due to `'HeroState' object has no attribute 'can_pray'` and class-level unindent errors, ballooning LLM calls from 10 to 25 and burning ~120s per generation.
+2. **5x–8x Synthesis Latency Reduction Applied**:
+   - **Native `can_pray` Attribute**: Added `can_pray: bool = True` directly to `HeroState` in `types.py` and `schema.py`, populated from `self.can_safely_pray(turn)`. Eliminates dry-run validation failures on pass 1.
+   - **Enforced Method Splicing**: Prompts strictly mandate outputting only the modified method (e.g. `def handle_combat(...)` or `def run(...)`), which `AuthorAgent.splice_policy_methods()` merges into `class Agent`.
+   - **Bounded Completion Tokens (`max_tokens: 1500`)**: Cuts completion tokens from 3,200 down to ~400–600 tokens per request, accelerating generation from ~35s to ~5–8s.
+
+

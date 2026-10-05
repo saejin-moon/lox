@@ -50,6 +50,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "adjacent_pet": "bool",
     "adjacent_peaceful": "bool",
     "can_safely_pray": "bool",
+    "can_pray": "bool",
     "is_fast_dangerous": "bool",
     "is_pack_threat": "bool",
     "can_enhance_skills": "bool",
