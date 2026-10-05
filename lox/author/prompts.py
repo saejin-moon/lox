@@ -27,37 +27,38 @@ class Agent:
 
     def run(self, obs):
         while True:
-            # 1. Absolute Emergency Survival (Major Trouble: Weak/Fainting without food or <15% HP)
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)):
+            # 1. Absolute Emergency Survival (Major Trouble: Weak without food or <15% HP - pray while conscious!)
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.has_food)):
                 if obs.hero.turn - self.last_prayer_turn >= 850:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
                     continue
 
-            # 2. Combat Logic (Highest Priority)
+            # 2. Immediate Staircase Descent (Invariant 10: 1-turn instant escape from danger!)
+            if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
+                obs = yield descend()
+                continue
+
+            # 3. Combat Logic
             if obs.combat.adjacent_hostile or obs.combat.has_active_hostile or (obs.combat.hostile_count_fov > 0 and (obs.inventory.has_offensive_wand or obs.inventory.has_daggers)):
                 obs = yield from self.handle_combat(obs)
                 continue
 
-            # 3. Hunger Prevention (Eat as soon as Hungry when safe outside combat)
-            if obs.hero.hunger_state >= 1:
-                if obs.inventory.has_food:
-                    obs = yield eat_carried_food()
-                    continue
-                elif any(c.is_safe for c in obs.corpses):
-                    obs = yield from self.handle_corpse_consumption(obs)
-                    continue
+            # 4. Proactive Nutrition: Fresh safe floor corpses first (rot in 50t!), carried rations second (never rot!)
+            if any(c.is_safe for c in obs.corpses) and obs.hero.hunger_state >= 1:
+                obs = yield from self.handle_corpse_consumption(obs)
+                continue
+            if obs.hero.hunger_state >= 1 and obs.inventory.has_food:
+                obs = yield eat_carried_food()
+                continue
 
-            # 4. Equipment Optimization (Equip found armor when out of combat)
+            # 5. Equipment Optimization (Equip found armor when out of combat)
             if obs.inventory.has_unworn_armor:
                 obs = yield wear_armor()
                 continue
 
-            # 5. Immediate Stair Descent & Navigation (Goal 1: Reach Depth 20!)
-            if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
-                obs = yield descend()
-                continue
-            elif obs.spatial.stairs_down_known:
+            # 6. Stairs Down Navigation (Goal 1: Reach Depth 20!)
+            if obs.spatial.stairs_down_known:
                 obs = yield step_to_stairs_down()
                 continue
 
@@ -97,6 +98,8 @@ class Agent:
             elif obs.spatial.has_unvisited_frontier:
                 self.search_count = 0
                 obs = yield step_to_frontier()
+            elif obs.dungeon.has_closed_door:
+                obs = yield step_to_closed_door()
             elif obs.spatial.has_unsearched_dead_end:
                 obs = yield from self.handle_dead_end(obs)
             else:
@@ -109,6 +112,11 @@ class Agent:
 
     def handle_combat(self, obs):
         while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
+            # Instant descent escape if standing on stairs down during combat
+            if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
+                obs = yield descend()
+                break
+
             # If the only monsters in FOV are distant passive hazards and we have no ranged weapons, exit combat to explore
             if not obs.combat.adjacent_hostile and not obs.combat.has_active_hostile:
                 if not (obs.inventory.has_offensive_wand or obs.inventory.has_daggers):
@@ -129,8 +137,8 @@ class Agent:
                     obs = yield eat_carried_food()
                     continue
 
-            # 0.2 Major Trouble Divine Intervention (Fainting or Critical HP)
-            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and (obs.hero.turn - self.last_prayer_turn >= 850):
+            # 0.2 Major Trouble Divine Intervention (Weak without food or Critical HP - pray while conscious!)
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.has_food)) and (obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
