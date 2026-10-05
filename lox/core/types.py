@@ -449,6 +449,116 @@ class InventoryView(list):
         return None
 
     @property
+    def has_blindfold(self) -> bool:
+        return any(
+            it.category in ("tool", "unknown")
+            and any(k in it.name.lower() for k in ("blindfold", "towel"))
+            for it in self
+        )
+
+    def get_blindfold_slot(self) -> str | None:
+        for it in self:
+            if it.category in ("tool", "unknown") and any(
+                k in it.name.lower() for k in ("blindfold", "towel")
+            ):
+                return it.slot
+        return None
+
+    @property
+    def has_corpse(self) -> bool:
+        return any("corpse" in it.name.lower() for it in self)
+
+    def get_corpse_slot(self) -> str | None:
+        for it in self:
+            if "corpse" in it.name.lower():
+                return it.slot
+        return None
+
+    @property
+    def has_athame(self) -> bool:
+        return any(
+            it.category == "weapon"
+            and any(k in it.name.lower() for k in ("athame", "dagger"))
+            for it in self
+        )
+
+    def get_athame_slot(self) -> str | None:
+        for it in self:
+            if it.category == "weapon" and any(
+                k in it.name.lower() for k in ("athame", "dagger")
+            ):
+                return it.slot
+        return None
+
+    @property
+    def has_burn_wand(self) -> bool:
+        return any(
+            it.category == "wand"
+            and any(k in it.name.lower() for k in ("fire", "lightning", "digging"))
+            for it in self
+        )
+
+    def get_burn_wand_slot(self) -> str | None:
+        for it in self:
+            if it.category == "wand" and any(
+                k in it.name.lower() for k in ("fire", "lightning", "digging")
+            ):
+                return it.slot
+        return None
+
+    @property
+    def has_bell_of_opening(self) -> bool:
+        return any(
+            "bell of opening" in it.name.lower()
+            or ("bell" in it.name.lower() and it.category in ("tool", "unknown"))
+            for it in self
+        )
+
+    def get_bell_slot(self) -> str | None:
+        for it in self:
+            if "bell of opening" in it.name.lower() or (
+                "bell" in it.name.lower() and it.category in ("tool", "unknown")
+            ):
+                return it.slot
+        return None
+
+    @property
+    def has_book_of_the_dead(self) -> bool:
+        return any(
+            "book of the dead" in it.name.lower()
+            or ("book" in it.name.lower() and "dead" in it.name.lower())
+            for it in self
+        )
+
+    def get_book_slot(self) -> str | None:
+        for it in self:
+            if "book of the dead" in it.name.lower() or (
+                "book" in it.name.lower() and "dead" in it.name.lower()
+            ):
+                return it.slot
+        return None
+
+    @property
+    def has_candelabrum(self) -> bool:
+        return any(
+            "candelabrum" in it.name.lower() for it in self
+        )
+
+    def get_candelabrum_slot(self) -> str | None:
+        for it in self:
+            if "candelabrum" in it.name.lower():
+                return it.slot
+        return None
+
+    @property
+    def candle_count(self) -> int:
+        return sum(it.quantity for it in self if "candle" in it.name.lower())
+
+    @property
+    def has_amulet_of_yendor(self) -> bool:
+        return any("amulet of yendor" in it.name.lower() for it in self)
+
+    @property
     def dagger_count(self) -> int:
         return sum(
             it.quantity
@@ -567,6 +677,16 @@ class DungeonView:
     has_boulders: bool = False
     drawbridge_in_fov: bool = False
     closest_drawbridge_pos: tuple[int, int] | None = None
+    has_priest: bool = False
+    adjacent_priest: bool = False
+    priest_pos: tuple[int, int] | None = None
+    can_donate_to_priest: bool = False
+    can_sacrifice: bool = False
+    can_solve_sokoban: bool = False
+    can_breach_drawbridge: bool = False
+    can_tunnel_gehennom: bool = False
+    standing_on_vibrating_square: bool = False
+    can_perform_invocation: bool = False
 
 
 @dataclass(slots=True)

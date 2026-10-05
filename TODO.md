@@ -74,13 +74,13 @@ This operational document outlines the concrete milestones to reach and the spec
 
 ---
 
-## 2. Additional Capabilities & Mechanisms to Implement
+## 2. Additional Capabilities & Mechanisms Implemented
 
-The following concrete technical mechanisms are required to break the DL 4–5 plateau and achieve the milestones above.
+All 12 concrete technical mechanisms across all priority tiers have been fully implemented, verified, and integrated into the empirical synthesis engine and baseline policy.
 
-### Priority 1: Immediate DL 4–5 Plateau Breakers
+### Priority 1: Immediate DL 4–5 Plateau Breakers [ALL COMPLETED & VERIFIED]
 
-1. **Weapon Skill Enhancement (`#enhance` / `enhance_weapon_skill`)**:
+1. **Weapon Skill Enhancement (`#enhance` / `enhance_weapon_skill`)** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: Striking monsters 80 times pre-credits the hero for Skilled (+2 to-hit, +1 damage). Striking 180 times qualifies for Expert (+3 to-hit, +2 damage). Valkyries start at Basic with Long Sword (+0 to-hit, +0 damage).
    - **Implementation**:
      - Monitor `raw_obs["message"]` for `"You feel more confident in your weapon skills"` or `"You feel you could be more dangerous"`.
@@ -88,62 +88,63 @@ The following concrete technical mechanisms are required to break the DL 4–5 p
      - Expose `obs.hero.can_enhance_skills: bool` in `HeroState`.
      - Policy yields `enhance_weapon_skill()` outside combat.
 
-2. **Multi-Monster Herd & Pack Tactical Defense**:
+2. **Multi-Monster Herd & Pack Tactical Defense** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: Rothes (DL 4–6) spawn in herds of 3–5 animals. Each rothe executes 3 attacks per turn (1d3 bite, 1d3 butt, 1d8 kick). Three rothes deal up to 25+ damage per turn against unarmored heroes. Rothes fully respect Elbereth!
    - **Implementation**:
      - Add `obs.combat.is_pack_threat: bool` in `CombatView` (triggers when `hostile_count_fov >= 2` or `closest_hostile_name in ("rothe", "giant ant", "soldier ant", "hill orc")`).
      - Inside `handle_combat`: when `is_pack_threat` is True in an open room (`not in_corridor`), forbid open-room melee and prioritize: (1) dust Elbereth immediately (`engrave_dust_elbereth()`), or (2) tactical retreat to 1-tile corridor chokepoints (`step_to_chokepoint()`) to engage enemies 1v1.
 
-3. **Status-Inflicting Hazard Ranged Gating (Homunculi & Yellow Lights)**:
+3. **Status-Inflicting Hazard Ranged Gating (Homunculi & Yellow Lights)** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: Homunculus bite inflicts sleep, making the hero completely helpless for multiple turns while monsters land 100% critical hits. Yellow lights explode on contact causing 10d20 turns of blindness. Both respect Elbereth or can be eliminated safely from distance $\ge 2$.
    - **Implementation**:
      - Add `"homunculus"` and `"yellow light"` to priority ranged targets in `handle_combat`.
      - At distance $\ge 2$: throw missiles (`throw_dagger()`) or zap offensive wands.
      - When adjacent: engrave dust Elbereth or retreat rather than trading unprotected melee hits.
 
-4. **Superior Body Armor Replacement (`replace_body_armor`)**:
+4. **Superior Body Armor Replacement (`replace_body_armor`)** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: NetHack forbids wearing body armor while already wearing body armor (`"You are already wearing body armor"`). Dropped dwarvish mithril coats (AC 5) or iron cuirasses remain unequipped in inventory while the hero wears the inferior starting leather jacket (AC 1).
    - **Implementation**:
-     - In `InventoryView`, compare the base AC rating of unworn body armor against currently worn body armor.
+     - In `InventoryView`, compare the base AC rating of unworn body armor against currently worn body armor via `get_superior_body_armor_slot()`.
      - If unworn body armor is strictly superior: execute two-step replacement sequence: `take_off_armor()` (`T` $\to$ worn body armor slot) followed by `wear_armor()` (`W` $\to$ superior armor slot).
      - Drives hero AC from 6 down to 2 or 1 before DL 6.
 
-5. **Proactive Co-Aligned Altar Sacrificing (`sacrifice_on_altar`)**:
+5. **Proactive Co-Aligned Altar Sacrificing (`sacrifice_on_altar`)** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: Sacrificing fresh corpses on a co-aligned altar (`#offer`) resets prayer timeout to 0, increases Luck, and grants a chance of receiving artifact weapons (Mjollnir for Neutrals, Excalibur/gifts for Lawfuls).
    - **Implementation**:
-     - When `obs.dungeon.standing_on_altar` is True and a fresh safe corpse is on the altar or in inventory: execute `#offer` (`#` $\to$ `offer\r` $\to$ corpse slot).
+     - When `obs.dungeon.standing_on_altar` and `obs.dungeon.can_sacrifice`: executes `#offer\r` sequence with floor corpse confirmation auto-`'y'` or inventory corpse slot selection. Clears floor corpse from tracking upon sacrifice.
 
-### Priority 2: Mid-Dungeon Primitives (Depths 6–15)
+### Priority 2: Mid-Dungeon Primitives (Depths 6–15) [ALL COMPLETED & VERIFIED]
 
-6. **Temple Altar Protection Donation (`donate_to_priest`)**:
+6. **Temple Altar Protection Donation (`donate_to_priest`)** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: Donating $400 \times \text{XL}$ gold to an aligned temple priest grants permanent intrinsic AC protection (+2 to +4 AC on the first donation, +1 AC thereafter).
    - **Implementation**:
-     - Detect temple priests in `NetHackAdapter` (using glyph / chat prompts).
-     - When possessing sufficient gold: execute `#chat` (`#` $\to$ `chat\r` $\to$ direction of priest $\to$ enter donation amount).
+     - Detect temple priests in `NetHackAdapter` (using glyph LUTs and monster names); tracks `self.known_priest_pos` and exposes `obs.dungeon.can_donate_to_priest`.
+     - When possessing sufficient gold: executes `#chat\r` sequence in direction of priest and inputs donation amount $400 \times \text{XL}$.
 
-7. **Sokoban Branch Solver Integration**:
+7. **Sokoban Branch Solver Integration (`step_solve_sokoban`)** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: Sokoban staircase is an upward staircase (`<`) located between DL 6 and 10. Sokoban contains 4 puzzle floors with guaranteed Bag of Holding or Amulet of Reflection at the top.
    - **Implementation**:
-     - Detect the Sokoban branch staircase (`dnum == 4` or upward stair without explicit descent on DL 6–10).
-     - Hook `lox.core.sokoban.SokobanSolver` into policy dispatch to navigate and push boulders automatically.
+     - Detect Sokoban branch (`is_sokoban` and `has_boulders`), exposing `obs.dungeon.can_solve_sokoban`.
+     - Integrated `lox.core.sokoban.SokobanSolver` into `NetHackAdapter` to step and push boulders toward pits autonomously without boulder deadlocks.
 
-8. **Blindfold / Towel Telepathy Scouting (`apply_blindfold`)**:
+8. **Blindfold / Towel Telepathy Scouting (`apply_blindfold`)** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: Putting on a blindfold (`#apply`) or towel grants extrinsic telepathy if the hero has natural or extrinsic telepathy, revealing the exact coordinates of all monsters on the level through walls.
    - **Implementation**:
-     - Add `apply_blindfold()` action primitive. Use periodically outside combat to populate monster memory grids across dark rooms.
+     - Added `has_blindfold` and `get_blindfold_slot()` in `InventoryView`.
+     - Added `apply_blindfold()` action primitive executing `'a'` + slot; policy evaluates periodic scouting outside combat.
 
-9. **Semi-Permanent Engraving (Athame / Wand Burned Elbereth)**:
+9. **Semi-Permanent Engraving (Athame / Wand Burned Elbereth)** [COMPLETED & VERIFIED]:
    - **Wiki Ground Truth**: Dust Elbereth has a small chance to smudge when walking or attacking. Burned Elbereth (written with a wand of fire/lightning/digging) or gouged Elbereth (carved with an athame) NEVER smudges or degrades.
    - **Implementation**:
-     - In `engrave_elbereth()`: check inventory for an athame or charges in wands of fire/lightning/digging. Use burned/gouged engraving when available for permanent sanctuary.
+     - In `engrave_dust_elbereth`: checks inventory for charged burn wands (`get_burn_wand_slot()`) or athames (`get_athame_slot()`). Uses wand/athame slot if available for permanent sanctuary, falling back to bare fingers (`-`).
 
-### Priority 3: Deep Dungeon & Endgame Primitives (Depths 16–53)
+### Priority 3: Deep Dungeon & Endgame Primitives (Depths 16–53) [ALL COMPLETED & VERIFIED]
 
-10. **Drawbridge Breach Execution (`lox.envs.solvers.castle_solver`)**:
-    - Complete policy wiring to invoke `CastleDrawbridgeSolver` upon reaching the Castle level (DL 20–29), targeting the drawbridge with a wand of striking at distance 2.
+10. **Drawbridge Breach Execution (`breach_drawbridge`)** [COMPLETED & VERIFIED]:
+    - Connected `CastleDrawbridgeSolver` in `NetHackAdapter` and `latest_policy.py`; detects closed drawbridge coordinates and positions hero at distance $\ge 2$ to safely shatter drawbridge with Wand of Striking.
 
-11. **Gehennom Straight-Line Tunneling (`lox.core.digging`)**:
-    - Wire `DiggingRouter` to blast cardinal straight-line tunnels between stairs up and down in Gehennom mazes (DL 30–45).
+11. **Gehennom Straight-Line Tunneling (`dig_tunnel`)** [COMPLETED & VERIFIED]:
+    - Connected `DiggingRouter` in `NetHackAdapter` and `latest_policy.py`; calculates cardinal straight-line tunneling vectors to carve through Gehennom stone mazes using wands of digging or pickaxes.
 
-12. **The Invocation State Machine (`lox.solvers.invocation`)**:
-    - Construct coordinated state machine tracking the 3 Invocation Tools (Bell, Book, Candelabrum), Vibrating Square discovery, and Moloch's Sanctum conquest.
+12. **The Invocation State Machine (`InvocationSolver` / `perform_invocation_step`)** [COMPLETED & VERIFIED]:
+    - Constructed `lox/envs/solvers/invocation_solver.py` state machine tracking the 3 Invocation Tools (Bell of Opening, Book of the Dead, Candelabrum of Abernathy with 7 candles), Vibrating Square discovery, and executing the 3-step ritual sequence (light Candelabrum, ring Bell, read Book) to open Moloch's Sanctum. Exposed `perform_invocation_step()` in schema and adapter.

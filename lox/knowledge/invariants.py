@@ -929,6 +929,51 @@ GROUP BY 1 ORDER BY 2 DESC;
 """,
         related_ids=["INV-ARC-003", "INV-HAR-005"],
     ),
+    Invariant(
+        id="INV-EQP-006",
+        title="Semi-Permanent Athame & Burned Wand Engraving",
+        category="equipment",
+        tags=["engrave", "elbereth", "athame", "wand", "fire", "lightning", "digging"],
+        rule=(
+            "Writing Elbereth in dust with fingers has a small chance to smudge or wipe upon movement. Writing with "
+            "an athame (gouges) or a wand of fire/lightning/digging (burns) creates a permanent or semi-permanent ward "
+            "that NEVER smudges or degrades from movement, guaranteeing 100% persistent sanctuary against non-humanoids."
+        ),
+        anti_pattern=(
+            "Engraving in dust when possessing an athame or charged wand of fire/lightning/digging in inventory."
+        ),
+        code_snippet="""
+# Use burn wand or athame slot if available for permanent ward
+burn_slot = obs.inventory.get_burn_wand_slot()
+athame_slot = obs.inventory.get_athame_slot()
+tool = burn_slot or athame_slot or "-"
+obs = (yield engrave_dust_elbereth())
+""",
+        related_ids=["INV-CBT-001", "INV-EQP-003"],
+    ),
+    Invariant(
+        id="INV-RIT-001",
+        title="Co-Aligned Altar Sacrificing & Temple Protection Donation",
+        category="equipment",
+        tags=["altar", "sacrifice", "priest", "protection", "gold", "luck"],
+        rule=(
+            "Co-aligned altar sacrifices (#offer) reset prayer timeout to 0, increase Luck, and grant powerful divine artifact "
+            "gifts. Donating 400 * XL gold to an aligned temple priest via #chat grants permanent intrinsic AC protection (+2 to +4 AC "
+            "initially, +1 AC thereafter), driving hero AC toward negative values for deep-game survivability."
+        ),
+        anti_pattern=(
+            "Leaving 2000+ gold unspent in inventory while AC is positive, or ignoring co-aligned altars while carrying safe fresh corpses."
+        ),
+        code_snippet="""
+if obs.dungeon.standing_on_altar and obs.dungeon.can_sacrifice:
+    obs = (yield sacrifice_on_altar())
+    continue
+if obs.dungeon.can_donate_to_priest:
+    obs = (yield donate_to_priest())
+    continue
+""",
+        related_ids=["INV-NUT-004", "INV-EQP-002"],
+    ),
 ]
 
 

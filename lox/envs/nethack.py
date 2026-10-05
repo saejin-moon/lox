@@ -38,6 +38,7 @@ from lox.core.sokoban import SokobanSolver
 from lox.envs.base import EnvironmentAdapter
 from lox.envs.solvers.altar_solver import AltarBUCSolver
 from lox.envs.solvers.castle_solver import CastleDrawbridgeSolver
+from lox.envs.solvers.invocation_solver import InvocationSolver
 from lox.envs.solvers.poison_solver import PoisonResHarvestSolver
 
 # Direction character mapping for NetHack
@@ -250,11 +251,14 @@ class NetHackAdapter(EnvironmentAdapter):
         self.altar_solver = AltarBUCSolver()
         self.poison_solver = PoisonResHarvestSolver()
         self.castle_solver = CastleDrawbridgeSolver()
+        self.sokoban_solver = SokobanSolver()
+        self.invocation_solver = InvocationSolver()
         self.has_magic_res = False
         self.has_reflection = False
         self.consecutive_passive_waits = 0
         self.known_altar_pos: tuple[int, int] | None = None
         self.known_fountain_pos: tuple[int, int] | None = None
+        self.known_priest_pos: tuple[int, int] | None = None
 
         # Build ASCII char -> action index map
         unwrapped = getattr(self.env, "unwrapped", self.env)
@@ -567,6 +571,7 @@ class NetHackAdapter(EnvironmentAdapter):
             self.looted_tiles.clear()
             self.known_fountain_pos = None
             self.known_altar_pos = None
+            self.known_priest_pos = None
             self.known_stairs_down = None
             self.known_stairs_up = (y, x) if had_explicit_descent else None
             self.stairs_down_discovery_turn = -1
@@ -769,6 +774,8 @@ class NetHackAdapter(EnvironmentAdapter):
                         self, "hostile_npc_positions", set()
                     ):
                         self.peaceful_positions.add((gy, gx))
+                        if any(k in GLYPH_MON_NAME[g].lower() for k in ("priest", "priestess", "cleric")):
+                            self.known_priest_pos = (gy, gx)
                         continue
 
                     mname = GLYPH_MON_NAME[g]
@@ -825,6 +832,8 @@ class NetHackAdapter(EnvironmentAdapter):
                             self, "hostile_npc_positions", set()
                         ):
                             self.peaceful_positions.add((ny, nx))
+                            if any(k in GLYPH_MON_NAME[g].lower() for k in ("priest", "priestess", "cleric")):
+                                self.known_priest_pos = (ny, nx)
                             continue
                         mname = GLYPH_MON_NAME[g]
                         adjacent_monsters.append(mname)
@@ -1209,6 +1218,48 @@ class NetHackAdapter(EnvironmentAdapter):
                 )
 
         closest_drawbridge = CastleDrawbridgeSolver.detect_drawbridge(chars, message)
+
+        # Temple Priest detection
+        if getattr(self, "known_priest_pos", None) is not None:
+            py, px = self.known_priest_pos
+            if abs(py - y) <= 1 and abs(px - x) <= 1 and glyphs is not None:
+                g = int(glyphs[py, px])
+                if g >= _MAX_GLYPH or not GLYPH_IS_PEACEFUL_SPECIES_LUT[g]:
+                    self.known_priest_pos = None
+
+        has_priest = getattr(self, "known_priest_pos", None) is not None
+        priest_pos = self.known_priest_pos
+        adjacent_priest = bool(
+            has_priest
+            and priest_pos
+            and abs(priest_pos[0] - y) <= 1
+            and abs(priest_pos[1] - x) <= 1
+        )
+        can_donate_to_priest = bool(adjacent_priest and gold >= 400 * max(1, level))
+
+        standing_on_altar = bool(self.known_altar_pos == (y, x) or curr_char == "_")
+        can_sacrifice = bool(
+            standing_on_altar
+            and ((y, x) in self.floor_corpses or inv_view.has_corpse)
+        )
+        has_boulders = bool(chars is not None and np.any(chars == ord("0")))
+        is_sokoban = bool(branch_name == "sokoban" or dnum == 4)
+        can_solve_sokoban = bool(is_sokoban and has_boulders)
+        can_breach_drawbridge = bool(
+            closest_drawbridge is not None
+            and (inv_view.has_wand_of_striking or inv_view.has_offensive_wand)
+        )
+        can_tunnel_gehennom = bool(
+            (branch_name == "gehennom" or dnum == 1)
+            and (inv_view.has_wand_of_digging or inv_view.has_pick_axe)
+        )
+        standing_on_vibrating_square = bool(curr_char == "~" or "strange vibration" in message.lower())
+        can_perform_invocation = bool(
+            inv_view.has_bell_of_opening
+            and inv_view.has_book_of_the_dead
+            and inv_view.has_candelabrum
+        )
+
         dungeon = DungeonView(
             tile_type=tile_type,
             in_shop=("shop" in message.lower()),
@@ -1232,14 +1283,24 @@ class NetHackAdapter(EnvironmentAdapter):
                 )
             ),
             adjacent_altar=adj_altar,
-            standing_on_altar=(self.known_altar_pos == (y, x) or curr_char == "_"),
+            standing_on_altar=standing_on_altar,
             adjacent_trap=adj_trap,
             standing_on_trap=(curr_char == "^"),
             can_forge_excalibur=can_forge,
-            is_sokoban=(branch_name == "sokoban"),
-            has_boulders=bool(chars is not None and np.any(chars == ord("0"))),
+            is_sokoban=is_sokoban,
+            has_boulders=has_boulders,
             drawbridge_in_fov=(closest_drawbridge is not None),
             closest_drawbridge_pos=closest_drawbridge,
+            has_priest=has_priest,
+            adjacent_priest=adjacent_priest,
+            priest_pos=priest_pos,
+            can_donate_to_priest=can_donate_to_priest,
+            can_sacrifice=can_sacrifice,
+            can_solve_sokoban=can_solve_sokoban,
+            can_breach_drawbridge=can_breach_drawbridge,
+            can_tunnel_gehennom=can_tunnel_gehennom,
+            standing_on_vibrating_square=standing_on_vibrating_square,
+            can_perform_invocation=can_perform_invocation,
         )
 
         # Register inventory items in Epistemic POMDP engine
@@ -1351,7 +1412,14 @@ class NetHackAdapter(EnvironmentAdapter):
             elif (
                 any(
                     phrase in msg.lower()
-                    for phrase in ("eat it?", "eat that?", "eat one?")
+                    for phrase in (
+                        "eat it?",
+                        "eat that?",
+                        "eat one?",
+                        "sacrifice it?",
+                        "sacrifice that?",
+                        "sacrifice one?",
+                    )
                 )
                 or ("dip" in msg.lower() and "fountain" in msg.lower())
             ):
@@ -1379,6 +1447,10 @@ class NetHackAdapter(EnvironmentAdapter):
                     "what do you want to take off",
                     "what do you want to put on",
                     "in what direction",
+                    "sacrifice what",
+                    "what do you want to sacrifice",
+                    "what do you want to write with",
+                    "how much will you donate",
                 )
             ):
                 if (
@@ -1650,8 +1722,10 @@ class NetHackAdapter(EnvironmentAdapter):
         self.agenda = GoalAgenda()
         self.altar_solver.reset()
         self.castle_solver.reset()
+        self.invocation_solver.reset()
         self.known_altar_pos = None
         self.known_fountain_pos = None
+        self.known_priest_pos = None
         raw_obs, _ = self.env.reset(seed=seed)
         raw_obs, _, _ = self._dismiss_more(raw_obs, False, False)
         self._last_raw_obs = raw_obs
@@ -2363,7 +2437,11 @@ class NetHackAdapter(EnvironmentAdapter):
                 return self.step(Action(name="open_door", direction=(dy, dx)))
 
         # Translate direction or atomic action
-        if action.direction is not None and action.direction in DIR_CHARS:
+        if (
+            action.name in ("step_direction", "melee_attack", "step")
+            and action.direction is not None
+            and action.direction in DIR_CHARS
+        ):
             self._last_attempted_dir = action.direction
             target_char = DIR_CHARS[action.direction]
         elif action.char is not None:
@@ -2485,6 +2563,15 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "zap_offensive_wand" and obs_prev is not None:
             hero = obs_prev.hero
             slot = action.slot or obs_prev.inventory.get_offensive_wand_slot()
+            if action.direction and slot:
+                dir_char = DIR_CHARS.get(action.direction, ".")
+                return self._step_sequence(
+                    [
+                        self.char_to_act.get("z", 0),
+                        self.char_to_act.get(slot, 0),
+                        self.char_to_act.get(dir_char, 0),
+                    ]
+                )
             target_pos = (
                 action.target_pos
                 or action.extra.get("target_pos")
@@ -2698,15 +2785,124 @@ class NetHackAdapter(EnvironmentAdapter):
             if obs_prev:
                 self.elbereth_positions.add((obs_prev.hero.y, obs_prev.hero.x))
             enter_idx = self.char_to_act.get("\r", 19)
+            # Semi-permanent / permanent engraving upgrade:
+            # Check if hero has a wand of fire/lightning/digging (permanent burn) or an athame (permanent gouge)
+            engrave_tool = "-"
+            if obs_prev:
+                burn_slot = obs_prev.inventory.get_burn_wand_slot()
+                athame_slot = obs_prev.inventory.get_athame_slot()
+                if burn_slot:
+                    engrave_tool = burn_slot
+                elif athame_slot:
+                    engrave_tool = athame_slot
             seq = [
                 self.char_to_act.get("E", 0),
-                self.char_to_act.get("-", 0),
+                self.char_to_act.get(engrave_tool, 0),
             ]
             for ch in "Elbereth":
                 seq.append(self.char_to_act.get(ch, 0))
             seq.append(enter_idx)
             obs, reward, term, trunc, info = self._step_sequence(seq)
             return obs, reward, term, trunc, info
+
+        elif action.name == "sacrifice_on_altar" and obs_prev is not None:
+            if not obs_prev.dungeon.standing_on_altar:
+                if obs_prev.dungeon.adjacent_altar or getattr(self, "known_altar_pos", None):
+                    return self.step(Action(name="step_to_altar"))
+                return self.step(Action(name="wait"))
+            hero = obs_prev.hero
+            seq = [
+                self.char_to_act.get("#", 0),
+                self.char_to_act.get("o", 0),
+                self.char_to_act.get("f", 0),
+                self.char_to_act.get("f", 0),
+                self.char_to_act.get("e", 0),
+                self.char_to_act.get("r", 0),
+                self.char_to_act.get("\r", 0),
+            ]
+            if (hero.y, hero.x) not in self.floor_corpses:
+                corpse_slot = obs_prev.inventory.get_corpse_slot()
+                if corpse_slot:
+                    seq.append(self.char_to_act.get(corpse_slot, 0))
+            seq.append(self.char_to_act.get("\r", 0))
+            seq.append(self.char_to_act.get("\x1b", 0))
+            obs, r, term, trunc, info = self._step_sequence([c for c in seq if c > 0])
+            if (hero.y, hero.x) in self.floor_corpses:
+                self.floor_corpses.pop((hero.y, hero.x), None)
+            return obs, r, term, trunc, info
+
+        elif action.name == "donate_to_priest" and obs_prev is not None:
+            priest_pos = getattr(self, "known_priest_pos", None)
+            if not priest_pos:
+                return self.step(Action(name="wait"))
+            hero = obs_prev.hero
+            dy, dx = priest_pos[0] - hero.y, priest_pos[1] - hero.x
+            if abs(dy) > 1 or abs(dx) > 1:
+                return self.step(Action(name="step_to", target_pos=priest_pos))
+            dir_char = DIR_CHARS.get((dy, dx))
+            if not dir_char:
+                return self.step(Action(name="wait"))
+            amount = 400 * max(1, hero.level)
+            seq = [
+                self.char_to_act.get("#", 0),
+                self.char_to_act.get("c", 0),
+                self.char_to_act.get("h", 0),
+                self.char_to_act.get("a", 0),
+                self.char_to_act.get("t", 0),
+                self.char_to_act.get("\r", 0),
+                self.char_to_act.get(dir_char, 0),
+            ]
+            for ch in str(amount):
+                seq.append(self.char_to_act.get(ch, 0))
+            seq.append(self.char_to_act.get("\r", 0))
+            seq.append(self.char_to_act.get("\x1b", 0))
+            return self._step_sequence([c for c in seq if c > 0])
+
+        elif action.name == "apply_blindfold" and obs_prev is not None:
+            slot = action.slot or obs_prev.inventory.get_blindfold_slot()
+            if slot:
+                return self._step_sequence([
+                    self.char_to_act.get("a", 0),
+                    self.char_to_act.get(slot, 0),
+                ])
+            return self.step(Action(name="wait"))
+
+        elif action.name in ("step_solve_sokoban", "solve_sokoban") and obs_prev is not None:
+            chars = obs_prev.chars
+            if chars is None:
+                return self.step(Action(name="wait"))
+            walls = (chars == ord("-")) | (chars == ord("|"))
+            boulders = (chars == ord("0"))
+            pits = (chars == ord("^"))
+            clean_floor = (chars == ord("."))
+            hero_pos = (obs_prev.hero.y, obs_prev.hero.x)
+
+            push_plan = SokobanSolver.find_best_boulder_push(
+                hero_pos, walls, boulders, pits, clean_floor
+            )
+            if push_plan:
+                if push_plan.get("is_ready_to_push", False):
+                    by, bx = push_plan["boulder_pos"]
+                    dy, dx = by - hero_pos[0], bx - hero_pos[1]
+                    dir_char = DIR_CHARS.get((dy, dx))
+                    if dir_char:
+                        self._last_attempted_dir = (dy, dx)
+                        return self._step_sequence([self.char_to_act.get(dir_char, 0)])
+                else:
+                    stand_pos = push_plan["hero_stand_pos"]
+                    return self.step(Action(name="step_to", target_pos=stand_pos))
+            if obs_prev.spatial.stairs_up_known:
+                return self.step(Action(name="step_to_stairs_up"))
+            elif obs_prev.spatial.stairs_down_known:
+                return self.step(Action(name="step_to_stairs_down"))
+            return self.step(Action(name="step_to_frontier"))
+
+
+        elif action.name == "perform_invocation_step" and obs_prev is not None:
+            act = self.invocation_solver.plan_step(obs_prev)
+            if act:
+                return self.step(act)
+            return self.step(Action(name="descend"))
 
         elif (
             action.name in ("dip_excalibur", "dip_in_fountain") and obs_prev is not None

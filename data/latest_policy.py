@@ -76,20 +76,54 @@ class Agent:
                 obs = (yield step_to_loot())
                 continue
 
-            # 11. Altar BUC Testing
-            if obs.dungeon.standing_on_altar and obs.epistemic.has_untested_items:
-                obs = (yield test_altar_buc())
-                continue
+            # 11. Altar BUC Testing & Divine Sacrificing
+            if obs.dungeon.standing_on_altar:
+                if obs.dungeon.can_sacrifice:
+                    obs = (yield sacrifice_on_altar())
+                    continue
+                elif obs.epistemic.has_untested_items:
+                    obs = (yield test_altar_buc())
+                    continue
             elif obs.dungeon.adjacent_altar and obs.epistemic.has_untested_items:
                 obs = (yield step_to_altar())
                 continue
 
-            # 12. Poison Resistance Harvesting
+            # 12. Temple Priest Intrinsic AC Protection Donation
+            if obs.dungeon.can_donate_to_priest:
+                obs = (yield donate_to_priest())
+                continue
+
+            # 13. Telepathy Blindfold Periodic Scouting
+            if obs.inventory.has_blindfold and not obs.hero.is_blind and not obs.combat.adjacent_hostile and obs.hero.turn % 150 == 0:
+                obs = (yield apply_blindfold())
+                continue
+
+            # 14. Poison Resistance Harvesting
             if obs.dungeon.can_harvest_poison and not obs.hero.has_poison_res and obs.hero.hp_frac > 0.9:
                 obs = (yield harvest_poison_res())
                 continue
 
-            # 13. Gnomish Mines Evacuation
+            # 15. Sokoban Branch Boulder Solver
+            if obs.dungeon.can_solve_sokoban:
+                obs = (yield step_solve_sokoban())
+                continue
+
+            # 16. Castle Drawbridge Breaching
+            if obs.dungeon.can_breach_drawbridge:
+                obs = (yield breach_drawbridge())
+                continue
+
+            # 17. Gehennom Straight-Line Tunneling
+            if obs.dungeon.can_tunnel_gehennom and not obs.spatial.stairs_down_known:
+                obs = (yield dig_tunnel())
+                continue
+
+            # 18. Endgame Invocation Ritual
+            if obs.dungeon.can_perform_invocation:
+                obs = (yield perform_invocation_step())
+                continue
+
+            # 19. Gnomish Mines Evacuation
             if obs.hero.dungeon_branch == "mines":
                 if obs.spatial.standing_on_stairs_up:
                     obs = (yield ascend())

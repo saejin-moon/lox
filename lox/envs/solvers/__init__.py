@@ -7,6 +7,13 @@ Deterministic, stateful macro solvers for complex NetHack interactions
 from __future__ import annotations
 
 from lox.envs.solvers.altar_solver import AltarBUCSolver
+from lox.envs.solvers.castle_solver import CastleDrawbridgeSolver
+from lox.envs.solvers.invocation_solver import InvocationSolver
 from lox.envs.solvers.poison_solver import PoisonResHarvestSolver
 
-__all__ = ["AltarBUCSolver", "PoisonResHarvestSolver"]
+__all__ = [
+    "AltarBUCSolver",
+    "CastleDrawbridgeSolver",
+    "InvocationSolver",
+    "PoisonResHarvestSolver",
+]

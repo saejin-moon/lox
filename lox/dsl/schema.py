@@ -126,6 +126,19 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "is_sokoban": "bool",
     "has_boulders": "bool",
     "drawbridge_in_fov": "bool",
+    "has_blindfold": "bool",
+    "has_corpse": "bool",
+    "has_athame": "bool",
+    "has_burn_wand": "bool",
+    "has_priest": "bool",
+    "adjacent_priest": "bool",
+    "can_donate_to_priest": "bool",
+    "can_sacrifice": "bool",
+    "can_solve_sokoban": "bool",
+    "can_breach_drawbridge": "bool",
+    "can_tunnel_gehennom": "bool",
+    "standing_on_vibrating_square": "bool",
+    "can_perform_invocation": "bool",
     # Epistemic POMDP Belief & Safety Gates
     "untested_buc_count": "int",
     "has_untested_items": "bool",
@@ -153,6 +166,7 @@ ALLOWED_ACTIONS: set[str] = {
     "descend",
     "ascend",
     "solve_sokoban",
+    "step_solve_sokoban",
     "dig_tunnel",
     "breach_drawbridge",
     # Tactical Combat & Defense
@@ -182,6 +196,9 @@ ALLOWED_ACTIONS: set[str] = {
     "dip_excalibur",
     "dip_in_fountain",
     "test_altar_buc",
+    "sacrifice_on_altar",
+    "donate_to_priest",
+    "perform_invocation_step",
     # Equipment & Consumables
     "quaff_healing",
     "quaff",
@@ -196,6 +213,7 @@ ALLOWED_ACTIONS: set[str] = {
     "retreat",
     "rest",
     "apply_unicorn_horn",
+    "apply_blindfold",
 }
 
 # Enum constants exposed to conditions
