@@ -943,7 +943,7 @@ class NetHackAdapter(EnvironmentAdapter):
         walkable_adj = sum(
             1
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
-            if 0 <= y + dy < 21 and 0 <= x + dx < 79 and walkable[y + dy, x + dx]
+            if 0 <= y + dy < 21 and 0 <= x + dx < 79 and walkable_nav[y + dy, x + dx]
         )
         in_corridor = (walkable_adj <= 2 and chr(chars[y, x]) == "#") or bool(
             all_doors[y, x]
@@ -2361,18 +2361,18 @@ class NetHackAdapter(EnvironmentAdapter):
                         elif obs_prev.inventory.has_offensive_wand:
                             return self.step(Action(name="zap_offensive_wand"))
 
-                        # 3. Search for secret exit if at dead end
-                        if (
-                            obs_prev.spatial.standing_on_dead_end
-                            and getattr(self, "passive_search_count", 0) < 6
-                        ):
+                        # 3. Search for secret exit
+                        if getattr(self, "passive_search_count", 0) < 20:
                             self.passive_search_count = (
                                 getattr(self, "passive_search_count", 0) + 1
                             )
                             return self.step(Action(name="search"))
 
-                        # 4. Emergency strike to break deadlock (better to risk explosion/paralysis than 100% certain starvation)
-                        if closest_pos:
+                        # 4. Emergency strike ONLY when starving (hunger_state >= 3: Weak/Fainting)
+                        if (
+                            closest_pos
+                            and obs_prev.hero.hunger_state >= 3
+                        ):
                             hy, hx = closest_pos
                             if abs(hy - hero.y) <= 1 and abs(hx - hero.x) <= 1:
                                 self.passive_search_count = 0
@@ -2382,6 +2382,7 @@ class NetHackAdapter(EnvironmentAdapter):
                                         direction=(hy - hero.y, hx - hero.x),
                                     )
                                 )
+                        return self.step(Action(name="wait"))
 
                     return self.step(Action(name="wait"))
                 is_on_elbereth = (
@@ -2421,24 +2422,6 @@ class NetHackAdapter(EnvironmentAdapter):
                                 break
             # If no adjacent non-passive monster, do not approach floating eye / gas spore in melee
             if action.direction is None:
-                # Cornered last resort: Trapped with adjacent floating eye and cannot retreat (Invariant 14)
-                if (
-                    getattr(obs_prev.combat, "adjacent_floating_eye", False)
-                    and not getattr(obs_prev.combat, "can_retreat", True)
-                    and glyphs is not None
-                ):
-                    for dy in (-1, 0, 1):
-                        for dx in (-1, 0, 1):
-                            if dy == 0 and dx == 0:
-                                continue
-                            ty, tx = hero.y + dy, hero.x + dx
-                            if 0 <= ty < 21 and 0 <= tx < 79:
-                                g = int(glyphs[ty, tx])
-                                if 0 <= g < _MAX_GLYPH and GLYPH_IS_FLOATING_EYE[g]:
-                                    return self.step(
-                                        Action(name="melee_attack", direction=(dy, dx))
-                                    )
-
                 closest_name = getattr(obs_prev.combat, "closest_hostile_name", "")
                 if (
                     closest_name in ("floating eye", "gas spore")
@@ -2746,13 +2729,59 @@ class NetHackAdapter(EnvironmentAdapter):
                 if not slot:
                     slot = obs_prev.inventory.get_unworn_armor_slot()
             if slot:
-                obs, reward, term, trunc, info = self._step_sequence(
-                    [self.char_to_act.get("W", 0), self.char_to_act.get(slot, 0)]
+                target_item = (
+                    next((it for it in obs_prev.inventory if it.slot == slot), None)
+                    if obs_prev
+                    else None
                 )
+                is_body = False
+                if target_item:
+                    n = target_item.name.lower()
+                    is_body = any(
+                        k in n
+                        for k in (
+                            "mail",
+                            "suit",
+                            "coat",
+                            "cuirass",
+                            "jacket",
+                            "plate",
+                            "leather armor",
+                            "dragon scale",
+                        )
+                    )
+                worn_cloak = (
+                    next(
+                        (
+                            it
+                            for it in obs_prev.inventory
+                            if it.is_equipped and "cloak" in it.name.lower()
+                        ),
+                        None,
+                    )
+                    if obs_prev
+                    else None
+                )
+                if is_body and worn_cloak and getattr(worn_cloak, "buc", "") != "cursed":
+                    seq = [
+                        self.char_to_act.get("T", 0),
+                        self.char_to_act.get(worn_cloak.slot, 0),
+                        self.char_to_act.get("W", 0),
+                        self.char_to_act.get(slot, 0),
+                        self.char_to_act.get("W", 0),
+                        self.char_to_act.get(worn_cloak.slot, 0),
+                    ]
+                    obs, reward, term, trunc, info = self._step_sequence(seq)
+                else:
+                    obs, reward, term, trunc, info = self._step_sequence(
+                        [self.char_to_act.get("W", 0), self.char_to_act.get(slot, 0)]
+                    )
                 item = next((it for it in obs.inventory if it.slot == slot), None)
                 if item is not None and not item.is_equipped:
-                    self.failed_wear_slots.add(slot)
-                    obs.inventory.failed_armor_slots.add(slot)
+                    msg_low = obs.message.lower()
+                    if "cloak" not in msg_low and "take off" not in msg_low:
+                        self.failed_wear_slots.add(slot)
+                        obs.inventory.failed_armor_slots.add(slot)
                 return obs, reward, term, trunc, info
             return self.step(Action(name="wait"))
         elif action.name == "replace_body_armor":
@@ -2761,18 +2790,43 @@ class NetHackAdapter(EnvironmentAdapter):
             )
             if slots:
                 worn_slot, superior_slot = slots
-                obs, reward, term, trunc, info = self._step_sequence(
-                    [self.char_to_act.get("T", 0), self.char_to_act.get(worn_slot, 0)]
+                worn_cloak = (
+                    next(
+                        (
+                            it
+                            for it in obs_prev.inventory
+                            if it.is_equipped and "cloak" in it.name.lower()
+                        ),
+                        None,
+                    )
+                    if obs_prev
+                    else None
                 )
-                if term or trunc:
-                    return obs, reward, term, trunc, info
-                obs, reward, term, trunc, info = self._step_sequence(
-                    [
+                if worn_cloak and getattr(worn_cloak, "buc", "") != "cursed":
+                    seq = [
+                        self.char_to_act.get("T", 0),
+                        self.char_to_act.get(worn_cloak.slot, 0),
+                        self.char_to_act.get("T", 0),
+                        self.char_to_act.get(worn_slot, 0),
                         self.char_to_act.get("W", 0),
                         self.char_to_act.get(superior_slot, 0),
+                        self.char_to_act.get("W", 0),
+                        self.char_to_act.get(worn_cloak.slot, 0),
                     ]
-                )
-                return obs, reward, term, trunc, info
+                    return self._step_sequence(seq)
+                else:
+                    obs, reward, term, trunc, info = self._step_sequence(
+                        [self.char_to_act.get("T", 0), self.char_to_act.get(worn_slot, 0)]
+                    )
+                    if term or trunc:
+                        return obs, reward, term, trunc, info
+                    obs, reward, term, trunc, info = self._step_sequence(
+                        [
+                            self.char_to_act.get("W", 0),
+                            self.char_to_act.get(superior_slot, 0),
+                        ]
+                    )
+                    return obs, reward, term, trunc, info
             return self.step(Action(name="wait"))
         elif action.name == "enhance_weapon_skill":
             self.can_enhance_skills = False
@@ -2825,7 +2879,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         self.char_to_act.get(dir_char, 0),
                     ]
                 )
-            return self.step(Action(name="melee_attack_hostile"))
+            return self.step(Action(name="step_away_from_hostile"))
 
         elif action.name in ("engrave_dust_elbereth", "engrave_elbereth", "engrave"):
             if obs_prev:

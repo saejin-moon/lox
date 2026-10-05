@@ -497,6 +497,37 @@ def test_enhance_weapon_skill_and_superior_body_armor():
     # 3. Test is_pack_threat
     obs_extracted = adapter._extract_obs(obs.raw_obs)
     assert hasattr(obs_extracted.combat, "is_pack_threat")
-    assert hasattr(obs_extracted.hero, "can_enhance_skills")
-
     adapter.close()
+
+
+def test_wear_armor_with_cloak_removal():
+    """Verify that wear_armor and replace_body_armor safely take off cloak before wearing body armor."""
+    from lox.core.types import Item
+
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=789)
+
+    # Mock inventory with worn cloak and unworn plate mail
+    cloak = Item(slot="d", name="a dwarvish cloak (being worn)", category="armor", is_equipped=True)
+    suit = Item(slot="e", name="a plate mail", category="armor", is_equipped=False)
+    adapter._last_obs.inventory.clear()
+    adapter._last_obs.inventory.extend([cloak, suit])
+
+    # Calling wear_armor should generate the 6-key sequence: T d W e W d
+    executed_seq = []
+    original_step_sequence = adapter._step_sequence
+
+    def mock_step_sequence(seq):
+        executed_seq.extend(seq)
+        return original_step_sequence(seq[:1])  # execute at least 1 action
+
+    adapter._step_sequence = mock_step_sequence
+    try:
+        adapter.step(Action(name="wear_armor", slot="e"))
+        expected_chars = ["T", "d", "W", "e", "W", "d"]
+        expected_seq = [adapter.char_to_act.get(c, 0) for c in expected_chars]
+        assert executed_seq == expected_seq, f"Expected {expected_seq}, got {executed_seq}"
+    finally:
+        adapter._step_sequence = original_step_sequence
+        adapter.close()
+

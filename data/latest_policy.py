@@ -107,25 +107,19 @@ class Agent:
             if obs.hero.hp_frac < 0.45 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
-            if obs.combat.adjacent_gas_spore:
+            if obs.combat.adjacent_gas_spore or obs.combat.adjacent_floating_eye:
                 if obs.combat.has_safe_melee_target:
                     obs = (yield melee_attack_hostile())
                     continue
+                if obs.combat.adjacent_floating_eye:
+                    if obs.inventory.has_daggers:
+                        obs = (yield throw_dagger())
+                        continue
+                    elif obs.inventory.has_offensive_wand:
+                        obs = (yield zap_offensive_wand())
+                        continue
                 obs = (yield step_away_from_hostile())
                 continue
-            if obs.combat.adjacent_floating_eye:
-                if obs.combat.has_safe_melee_target:
-                    obs = (yield melee_attack_hostile())
-                    continue
-                if obs.inventory.has_daggers:
-                    obs = (yield throw_dagger())
-                    continue
-                elif obs.inventory.has_offensive_wand:
-                    obs = (yield zap_offensive_wand())
-                    continue
-                else:
-                    obs = (yield step_away_from_hostile())
-                    continue
             closest_name = obs.combat.closest_hostile_name.lower()
             if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') or obs.dungeon.in_shop:
                 obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))

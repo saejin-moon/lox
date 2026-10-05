@@ -310,3 +310,56 @@ All 12 concrete technical mechanisms across all priority tiers have been fully i
    - 45 deaths (22.5%) were categorized under `ARMOR_DEFICIT` with heroes reaching depth 5+ with AC > 5 despite carrying body armor.
    - `get_unworn_armor_slot()` returned the first item in inventory (e.g. helmet or boots giving +1 AC), rather than body armor (giving +3 to +8 AC).
    - **Fix**: Added `get_unworn_body_armor_slot()` in `lox/core/types.py` (`InventoryView`) and updated `wear_armor` in `lox/envs/nethack.py` to prioritize body armor when unarmored.
+
+---
+
+## 8. Campaign 56 Empirical Autopsy & Progression Upgrades
+
+### 8.1 Campaign 56 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_003431`
+- **Milestone Reached**: **Average Dungeon Depth crossed 4.0 for the first time**: **4.01**!
+- **Batch Progression**:
+  - Gen 1: Avg Depth **3.45** | Max Depth 7 | Avg Turns 2,366.6 | Avg Score 516.0 | Peak Score **2,190**
+  - Gen 2: Avg Depth **3.85** | Max Depth 8 | Avg Turns 1,684.7 | Avg Score 460.8
+  - Gen 3: Avg Depth **3.85** | Max Depth **11** | Avg Turns 1,719.7 | Avg Score 428.0
+  - Gen 4: Avg Depth **4.05** | Max Depth 8 | Avg Turns 1,910.9 | Avg Score 498.9
+  - Gen 5: Avg Depth **3.60** | Max Depth 7 | Avg Turns 1,981.8 | Avg Score 454.8
+  - Gen 6: Avg Depth **3.90** | Max Depth 9 | Avg Turns 1,715.1 | Avg Score 525.8
+  - Gen 7: Avg Depth **4.95** | Max Depth 9 | Avg Turns 1,978.1 | Avg Score 531.8
+  - Gen 8: Avg Depth **4.90** | Max Depth 9 | Avg Turns 1,685.0 | Avg Score **614.8**
+  - Gen 9: Avg Depth **3.65** | Max Depth **10** | Avg Turns 1,867.3 | Avg Score 475.3
+  - Gen 10: Avg Depth **3.95** | Max Depth 8 | Avg Turns 1,531.0 | Avg Score 440.5
+- **Overall C56 Metrics**: 200 episodes, Avg Depth **4.01**, Max Depth **11**, Avg Turns **1,844.0**, Avg Score **494.6**, Peak Score **2,190**.
+- **Root Cause Taxonomy (DuckDB)**:
+  1. `COMBAT_GENERAL`: 75 (37.5%, avg depth 4.17)
+  2. `ARMOR_DEFICIT`: 53 (26.5%, avg depth 5.40, avg turns 1,763.0)
+  3. `STALL_SECRET_DOOR`: 38 (19.0%, avg depth 1.37, avg turns 2,233.4)
+  4. `PASSIVE_HAZARD_PARALYSIS`: 18 (9.0%, avg depth 4.56, avg turns 2,313.6)
+  5. `COMBAT_FAST_PREDATOR`: 16 (8.0%, avg depth 4.38, avg turns 1,824.9)
+- **Top Killers in Campaign 56**:
+  - `jackal`: 16 deaths (avg depth 2.19)
+  - `floating eye`: 13 deaths (avg depth 4.54)
+  - `grid bug`: 8 deaths (avg depth 3.13)
+  - `gecko`: 8 deaths (avg depth 3.63)
+  - `sewer rat`: 7 deaths (avg depth 1.86)
+  - `newt`: 7 deaths (avg depth 1.57)
+  - `fox`: 6 deaths (avg depth 3.00)
+  - `lichen`: 6 deaths (avg depth 2.00)
+  - `small mimic`: 6 deaths (avg depth 4.17)
+  - *Gas Spore Plunge*: Gas spore deaths dropped by 60% (from 12 in C55 to 5 in C56) confirming the gas spore Elbereth fix.
+
+### 8.2 Key Root Causes Diagnosed & Hardened for Campaign 57
+1. **Cloak-Body Armor Interlock Elimination (`ARMOR_DEFICIT`)**:
+   - In NetHack, characters cannot put on or remove body armor while wearing a cloak.
+   - When heroes equipped a cloak early, subsequent attempts to wear found plate mail or splint mail (`W <slot>`) failed with `"You can't wear that over your cloak."`. The adapter previously marked the suit as a failed slot, permanently blacklisting high-tier armor and leaving heroes unarmored through depths 5–11.
+   - **Fix Applied**: Updated `wear_armor` and `replace_body_armor` in `lox/envs/nethack.py` to check for worn cloaks and automatically execute the 6-key sequence (`T <cloak> W <suit> W <cloak>`) or replacement sequence, and shielded `failed_wear_slots` from transient cloak messages. Regression tested with `test_wear_armor_with_cloak_removal`.
+2. **Premature Floating Eye Melee Attack Shielding (`PASSIVE_HAZARD_PARALYSIS`)**:
+   - In `melee_attack_hostile`, if `not can_retreat`, the adapter previously attempted an immediate melee strike on adjacent floating eyes. Because corridors with closed doors counted as `can_retreat=False`, heroes routinely attacked floating eyes in melee, triggering 50-turn paralysis and death.
+   - Additionally, `step_away_from_hostile` previously triggered an emergency strike after just 2 passive waits regardless of hunger or search status.
+   - **Fix Applied**:
+     - Removed the direct floating eye melee strike from `melee_attack_hostile` completely; all non-active passive hazards route to `step_away_from_hostile`.
+     - In `step_away_from_hostile`, expanded secret door search ceiling to 20 attempts across all dead ends.
+     - Strictly gated emergency strikes to genuine hunger emergencies (`hunger_state >= 3`: Weak / Fainting), preventing premature suicide attacks when well-fed.
+     - Changed `throw_dagger` missing ammo fallback from `melee_attack_hostile` to `step_away_from_hostile`.
+3. **Passable Closed Doors in Corridor Adjacency**:
+   - Updated `walkable_adj` calculation to use `walkable_nav`, properly accounting for passable doors as escape paths.
