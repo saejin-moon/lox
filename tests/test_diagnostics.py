@@ -5,6 +5,8 @@ Validates multi-dimensional failure classification and batch reporting against s
 
 from __future__ import annotations
 
+import os
+
 from lox.telemetry.diagnostics import (
     EpisodeDiagnostic,
     FailureArchetype,
@@ -148,3 +150,26 @@ def test_summarize_batch():
     assert "Empirical Failure Archetype Breakdown" in table_md
     assert "`STALL_SECRET_DOOR`" in table_md
     assert "`ARMOR_DEFICIT`" in table_md
+
+    # Test YAML and JSON serialization
+    yaml_str = summary.format_yaml()
+    assert "batch_metrics:" in yaml_str
+    assert "ARMOR_DEFICIT: {count: 6, pct: 60.0}" in yaml_str
+    assert "STALL_SECRET_DOOR: {count: 4, pct: 40.0}" in yaml_str
+
+    json_str = summary.format_json()
+    assert '"episodes": 10' in json_str
+    assert '"ARMOR_DEFICIT"' in json_str
+
+    # Test file saving
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        y_path = os.path.join(tmpdir, "diag.yaml")
+        j_path = os.path.join(tmpdir, "diag.json")
+        summary.save(y_path)
+        summary.save(j_path)
+        assert os.path.exists(y_path)
+        assert os.path.exists(j_path)
+        assert "batch_metrics:" in open(y_path).read()
+        assert '"batch_metrics"' in open(j_path).read()

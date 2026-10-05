@@ -6,6 +6,8 @@ failure archetypes to eliminate superficial final-hit combat misclassification.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -92,6 +94,55 @@ class BatchDiagnosticSummary:
             desc = descriptions.get(arch, "Combat or environmental mortality")
             lines.append(f"| `{arch}` | {count} | {pct:.1f}% | {desc} |")
         return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Returns compact dictionary representation of batch metrics and root cause breakdown."""
+        causes = {}
+        for arch, count in sorted(
+            self.archetype_counts.items(), key=lambda x: x[1], reverse=True
+        ):
+            causes[arch] = {
+                "count": count,
+                "pct": round(self.archetype_percentages.get(arch, 0.0), 1),
+            }
+        return {
+            "batch_metrics": {
+                "episodes": self.total_episodes,
+                "avg_depth": round(self.avg_depth, 2),
+                "max_depth": self.max_depth,
+                "avg_turns": round(self.avg_turns, 1),
+            },
+            "root_causes": causes,
+        }
+
+    def format_yaml(self) -> str:
+        """Formats a clean, ultra-compact YAML representation of batch diagnostics."""
+        d = self.to_dict()
+        lines = [
+            "batch_metrics:",
+            f"  episodes: {d['batch_metrics']['episodes']}",
+            f"  avg_depth: {d['batch_metrics']['avg_depth']}",
+            f"  max_depth: {d['batch_metrics']['max_depth']}",
+            f"  avg_turns: {d['batch_metrics']['avg_turns']}",
+            "root_causes:",
+        ]
+        for cause, info in d["root_causes"].items():
+            lines.append(f"  {cause}: {{count: {info['count']}, pct: {info['pct']}}}")
+        return "\n".join(lines)
+
+    def format_json(self, indent: int | None = 2) -> str:
+        """Formats JSON representation of batch diagnostics."""
+        return json.dumps(self.to_dict(), indent=indent)
+
+    def save(self, filepath: str = "data/latest_diagnostics.yaml") -> None:
+        """Saves batch diagnostic summary to a YAML or JSON file."""
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        if filepath.endswith(".json"):
+            content = self.format_json()
+        else:
+            content = self.format_yaml()
+        with open(filepath, "w") as f:
+            f.write(content + "\n")
 
 
 class RootCauseClassifier:

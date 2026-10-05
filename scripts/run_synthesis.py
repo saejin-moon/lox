@@ -774,11 +774,17 @@ class Agent:
         )
         top_arch_pct = batch_summary.archetype_percentages.get(top_arch, 0.0)
 
+        # Save compact failure summary to YAML and JSON
+        batch_summary.save("data/latest_diagnostics.yaml")
+        batch_summary.save("data/latest_diagnostics.json")
+
         print(
             f"\n[Gen {gen} Batch Metrics ({eval_episodes} eps)] Avg Depth: {avg_d:.2f} | Max Depth: {max_d} | Avg Turns: {avg_t:.1f}"
         )
         print(f"[Gen {gen} Ranked Fatalities] {death_summary_str}")
-        print(f"\n{batch_summary.format_markdown_table()}\n")
+        print(
+            f"\n[Gen {gen} Failure Diagnostics (saved to data/latest_diagnostics.yaml)]:\n{batch_summary.format_yaml()}\n"
+        )
 
         if target_depth is not None and avg_d >= target_depth:
             print("\n" + "=" * 65)
@@ -793,21 +799,12 @@ class Agent:
             f"Generation {gen} Empirical Diagnostic Autopsy ({eval_episodes} episodes): "
             f"Avg Depth {avg_d:.2f}, Max Depth {max_d}, Avg Turns {avg_t:.1f}. "
             f"#1 Empirical Root Cause: '{top_arch}' ({top_arch_pct:.1f}% of runs). "
-            f"Mitigate this specific failure mode (see Diagnostic Breakdown Table), optimize stair navigation, and break through to Depth 10+."
+            f"Mitigate this specific failure mode, optimize stair navigation, and break through to Depth 10+."
         )
 
-        mortality_lines = [
-            f"  {idx}. {r[0]}: {r[1]}/{eval_episodes} runs ({r[2]}%)"
-            for idx, r in enumerate(top_deaths, 1)
-        ]
         status_rep = (
-            f"Batch Size: {eval_episodes} real episodes\n"
-            f"Average Depth: {avg_d:.2f}\n"
-            f"Max Depth: {max_d}\n"
-            f"Average Turns Survived: {avg_t:.1f}\n\n"
-            f"{batch_summary.format_markdown_table()}\n\n"
-            f"Raw Ranked Causes of Death:\n"
-            + ("\n".join(mortality_lines) if mortality_lines else "  - None recorded")
+            f"```yaml\n{batch_summary.format_yaml()}\n```\n\n"
+            f"Raw Ranked Causes of Death: {death_summary_str}"
         )
         if recent_fatal_samples:
             sample_lines = [
