@@ -1,5 +1,4 @@
 class Agent:
-
     def __init__(self):
         self.last_prayer_turn = -1000
         self.search_count = 0
@@ -32,7 +31,7 @@ class Agent:
                 obs = (yield eat_carried_food())
                 continue
 
-            # 5. Armor Optimization (Mitigate ARMOR_DEFICIT)
+            # 5. Armor Optimization
             if obs.inventory.get_superior_body_armor_slot() is not None:
                 obs = (yield replace_body_armor())
                 continue
@@ -128,8 +127,7 @@ class Agent:
                 if not (obs.inventory.has_offensive_wand or obs.inventory.has_daggers):
                     break
 
-            # Panic Escape
-            if (obs.hero.hp_frac < 0.2 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
+            if (obs.hero.hp_frac < 0.20 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
                 if obs.inventory.has_scroll_of_teleport:
                     obs = (yield read_scroll_teleport())
                     continue
@@ -137,8 +135,7 @@ class Agent:
                     obs = (yield zap_wand_teleport())
                     continue
 
-            # Healing & Hunger
-            if obs.hero.hp_frac < 0.5 and obs.inventory.has_healing:
+            if obs.hero.hp_frac < 0.45 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
@@ -146,7 +143,6 @@ class Agent:
                     obs = (yield eat_carried_food())
                     continue
 
-            # Passive Hazards
             if obs.combat.adjacent_gas_spore:
                 if obs.combat.has_safe_melee_target:
                     obs = (yield melee_attack_hostile())
@@ -167,16 +163,14 @@ class Agent:
                     obs = (yield step_away_from_hostile())
                     continue
 
-            # Peaceful NPCs
             closest_name_low = obs.combat.closest_hostile_name.lower()
             if closest_name_low in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') or obs.dungeon.in_shop:
                 obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
                 continue
 
-            # Fast Predators (INV-CBT-005)
             if obs.combat.is_fast_dangerous:
                 if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.4 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.40 or not obs.combat.can_retreat:
                         obs = (yield melee_attack_hostile())
                         continue
                     else:
@@ -186,9 +180,8 @@ class Agent:
                     obs = (yield engrave_dust_elbereth())
                     continue
 
-            # Elbereth Sanctuary
             if not obs.combat.standing_on_elbereth:
-                if obs.hero.hp_frac < 0.35 or (obs.hero.hp_frac < 0.6 and obs.combat.hostile_count_fov >= 2):
+                if obs.hero.hp_frac < 0.35 or (obs.hero.hp_frac < 0.60 and obs.combat.hostile_count_fov >= 2):
                     if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth):
                         obs = (yield engrave_dust_elbereth())
                         continue
@@ -217,7 +210,6 @@ class Agent:
                     obs = (yield melee_attack_hostile())
                     continue
 
-            # Ranged Harassment
             if obs.combat.closest_hostile_dist >= 2:
                 if obs.inventory.has_offensive_wand:
                     obs = (yield zap_offensive_wand())
@@ -226,7 +218,6 @@ class Agent:
                     obs = (yield throw_dagger())
                     continue
 
-            # Decisive Melee Engagement (INV-CBT-001)
             if obs.combat.adjacent_hostile:
                 if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:
                     obs = (yield melee_attack_hostile())
@@ -267,7 +258,6 @@ class Agent:
                     return obs
                 obs = (yield search())
             
-            # After 12 searches, if still no stairs/frontier, force a move to break the loop
             if obs.spatial.stairs_down_known:
                 obs = (yield step_to_stairs_down())
             elif obs.spatial.has_unvisited_frontier:
@@ -275,8 +265,7 @@ class Agent:
             elif obs.dungeon.has_closed_door:
                 obs = (yield step_to_closed_door())
             else:
-                # Fallback: move to any frontier or just step away to reset state
-                obs = (yield (step_to_frontier() if obs.spatial.has_unvisited_frontier else step_to_dead_end()))
+                obs = (yield step_to_frontier() if obs.spatial.has_unvisited_frontier else step_to_dead_end())
             return obs
         else:
             obs = (yield step_to_dead_end())
