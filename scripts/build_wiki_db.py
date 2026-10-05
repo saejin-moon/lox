@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
-import urllib.request
 
 DATA_DIR = "data"
 WIKI_DB_PATH = os.path.join(DATA_DIR, "wiki_index.db")
@@ -19,23 +19,16 @@ DROPBOX_URL = "https://www.dropbox.com/s/6qbfmsr3l89sip0/nethackwikidata.json?dl
 
 
 def download_wiki_json() -> str:
-    """Downloads nethackwikidata.json if not present."""
+    """Downloads nethackwikidata.json via curl if not present."""
     os.makedirs(DATA_DIR, exist_ok=True)
     if os.path.exists(WIKI_JSON_PATH) and os.path.getsize(WIKI_JSON_PATH) > 1000000:
         print(f"[WIKI BUILD] Found existing {WIKI_JSON_PATH} ({os.path.getsize(WIKI_JSON_PATH):,} bytes)")
         return WIKI_JSON_PATH
 
-    print(f"[WIKI BUILD] Downloading NetHack wiki dataset from {DROPBOX_URL}...")
-    headers = {"User-Agent": "Mozilla/5.0"}
-    req = urllib.request.Request(DROPBOX_URL, headers=headers)
-    with urllib.request.urlopen(req) as resp, open(WIKI_JSON_PATH, "wb") as f:
-        total = 0
-        while chunk := resp.read(65536):
-            f.write(chunk)
-            total += len(chunk)
-            if total % (5 * 1024 * 1024) == 0:
-                print(f"  Downloaded {total / (1024*1024):.1f} MB...")
-    print(f"[WIKI BUILD] Successfully downloaded {WIKI_JSON_PATH} ({os.path.getsize(WIKI_JSON_PATH):,} bytes)")
+    print(f"[WIKI BUILD] Curling NetHack wiki dataset from {DROPBOX_URL}...")
+    cmd = ["curl", "-L", "-s", "-S", "--max-time", "120", "-o", WIKI_JSON_PATH, DROPBOX_URL]
+    subprocess.run(cmd, check=True)
+    print(f"[WIKI BUILD] Successfully curled {WIKI_JSON_PATH} ({os.path.getsize(WIKI_JSON_PATH):,} bytes)")
     return WIKI_JSON_PATH
 
 
