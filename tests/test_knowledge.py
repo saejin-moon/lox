@@ -150,6 +150,15 @@ def test_new_invariants_and_system_prompt():
     eqp7 = REGISTRY.get_by_id("INV-EQP-007")
     assert eqp7 is not None and "armor" in eqp7.tags
 
+    nav8 = REGISTRY.get_by_id("INV-NAV-008")
+    assert nav8 is not None and "zero-loot" in nav8.tags
+
+    nav9 = REGISTRY.get_by_id("INV-NAV-009")
+    assert nav9 is not None and "secret_door" in nav9.tags
+
+    cbt15 = REGISTRY.get_by_id("INV-CBT-015")
+    assert cbt15 is not None and "yellow light" in cbt15.tags
+
     # Trigger heuristics match
     invs_corrosive = REGISTRY.get_relevant_invariants_for_trigger("cluster: Killed by corrosive acid blob")
     assert any(inv.id == "INV-CBT-012" for inv in invs_corrosive)
@@ -159,6 +168,12 @@ def test_new_invariants_and_system_prompt():
 
     invs_sokoban = REGISTRY.get_relevant_invariants_for_trigger("milestone: sokoban entrance discovered")
     assert any(inv.id == "INV-NAV-007" for inv in invs_sokoban)
+
+    invs_status = REGISTRY.get_relevant_invariants_for_trigger("cluster: Killed while sleep by homunculus")
+    assert any(inv.id == "INV-CBT-015" for inv in invs_status)
+
+    invs_rush = REGISTRY.get_relevant_invariants_for_trigger("pacing stall on dl1 early rush")
+    assert any(inv.id == "INV-NAV-008" for inv in invs_rush)
 
     # System prompt covers the new predicates and actions
     sys_prompt = build_system_prompt()
@@ -172,4 +187,5 @@ def test_new_invariants_and_system_prompt():
     assert "phase_early_scaling" in sys_prompt
     assert "phase_mid_branches" in sys_prompt
     assert "phase_deep_dungeon" in sys_prompt
+
 

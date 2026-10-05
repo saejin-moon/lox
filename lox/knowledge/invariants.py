@@ -246,6 +246,62 @@ if obs.dungeon.has_sokoban_entrance and obs.hero.hp_frac >= 0.70:
 """,
         related_ids=["INV-NAV-001", "INV-NAV-002"],
     ),
+    Invariant(
+        id="INV-NAV-008",
+        title="Early-Game Fast Descent & Zero-Loot Staircase Priority",
+        category="navigation",
+        tags=["early rush", "stairs_down", "descend", "dl1", "dl2", "zero-loot", "pacing"],
+        rule=(
+            "On shallow levels (DL 1–2), monster threat is minimal and dropped monster equipment consists mostly of junk weapons. "
+            "Lingering on DL 1–2 to scoop loot burns food nutrition and wastes hundreds of turns. In phase_early_rush(), discovering "
+            "stairs down (obs.spatial.stairs_down_known) MUST take absolute precedence over step_to_loot(). Descend immediately to DL 3+ "
+            "where mithril armor and fountains generate."
+        ),
+        anti_pattern=(
+            "Prioritizing step_to_loot() over step_to_stairs_down() on DL 1–2, burning 3,000+ turns wandering back and forth over "
+            "dropped darts and daggers while starving."
+        ),
+        code_snippet="""
+# In phase_early_rush() [DL 1-2]:
+if obs.spatial.stairs_down_known:
+    obs = (yield step_to_stairs_down())
+    return obs
+if obs.spatial.has_nearby_loot:
+    obs = (yield step_to_loot())
+    return obs
+""",
+        related_ids=["INV-NAV-001", "INV-EQP-001"],
+    ),
+    Invariant(
+        id="INV-NAV-009",
+        title="Starting Room Secret Door Escalation & 100-Turn Stagnation Decay",
+        category="navigation",
+        tags=["dead_end", "search", "secret_door", "stagnation", "decay", "dl1", "starting_room"],
+        rule=(
+            "On DL 1–2, procedural generation can seal the starting room behind secret doors with no external corridors or visible frontiers. "
+            "In NetHackAdapter, when frontiers are empty and stairs down are unknown, search decay triggers after 100 turns (instead of 500), "
+            "and starting room perimeter search escalates to 20 sweeps. In policies, handle_dead_end() must abort searching immediately "
+            "upon taking unexpected damage or detecting adjacent hostiles."
+        ),
+        anti_pattern=(
+            "Lingering in a 500-turn stagnation lockout on DL 1, waiting in place until starving to death because secret door search "
+            "counts were frozen."
+        ),
+        code_snippet="""
+prev_hp = obs.hero.hp
+for _ in range(20 if obs.hero.depth <= 2 else 12):
+    if (
+        obs.combat.hostile_count_fov > 0
+        or obs.combat.adjacent_hostile
+        or obs.hero.hp < prev_hp
+        or obs.spatial.stairs_down_known
+        or obs.spatial.has_unvisited_frontier
+    ):
+        return obs
+    obs = (yield search())
+""",
+        related_ids=["INV-NAV-005", "INV-CBT-011"],
+    ),
     # -----------------------------------------------------------------
     # COMBAT TACTICS & WARDING
     # -----------------------------------------------------------------
@@ -585,6 +641,40 @@ if obs.hero.hp_frac < 0.20 and not obs.inventory.has_healing and not obs.combat.
         continue
 """,
         related_ids=["INV-CBT-001", "INV-NUT-004"],
+    ),
+    Invariant(
+        id="INV-CBT-015",
+        title="Status Hazard Neutralization (Yellow Light & Homunculus)",
+        category="combat",
+        tags=["status", "yellow light", "homunculus", "sleep", "blind", "stun", "ranged", "elbereth"],
+        rule=(
+            "Yellow lights explode on contact causing 30+ turns of blindness and stunning; homunculi possess a sleep bite "
+            "that puts heroes to sleep for 10-30 turns, allowing adjacent monsters to kill them while helpless. When facing "
+            "yellow lights or homunculi at distance >= 2, eliminate them with offensive wands or thrown missiles. If adjacent, "
+            "engrave dust Elbereth immediately or eliminate before taking status effects."
+        ),
+        anti_pattern=(
+            "Trading blows in melee with yellow lights or homunculi, resulting in lethal 30-turn sleep or blindness locks."
+        ),
+        code_snippet="""
+# Priority status hazards: yellow light and homunculus
+if "yellow light" in closest_name or "homunculus" in closest_name:
+    if obs.combat.closest_hostile_dist >= 2:
+        if obs.inventory.has_offensive_wand:
+            obs = (yield zap_offensive_wand())
+            continue
+        elif obs.inventory.has_daggers:
+            obs = (yield throw_dagger())
+            continue
+    if obs.combat.adjacent_hostile:
+        if not obs.combat.standing_on_elbereth:
+            obs = (yield engrave_dust_elbereth())
+            continue
+        else:
+            obs = (yield melee_attack_hostile())
+            continue
+""",
+        related_ids=["INV-CBT-001", "INV-CBT-002", "INV-CBT-004"],
     ),
     # -----------------------------------------------------------------
     # NUTRITION & DIVINE FAVOR
@@ -1259,6 +1349,12 @@ class InvariantRegistry:
             priority_ids.append("INV-NAV-007")
         if "armor" in low_query or "ac" in low_query or "equip" in low_query:
             priority_ids.append("INV-EQP-007")
+        if "yellow light" in low_query or "homunculus" in low_query or "sleep" in low_query:
+            priority_ids.append("INV-CBT-015")
+        if "zero-loot" in low_query or "early rush" in low_query or "pacing" in low_query:
+            priority_ids.append("INV-NAV-008")
+        if "starting room" in low_query or "stagnation decay" in low_query:
+            priority_ids.append("INV-NAV-009")
 
         results: list[Invariant] = []
         for pid in priority_ids:
