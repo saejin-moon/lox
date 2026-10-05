@@ -1073,3 +1073,56 @@ DuckDB analysis of all 13,014 historic episodes reveals that **8,053 episodes (6
 
 - [ ] **Action Item 4: Fast Predator Open-Room Non-Fleeing Refinement**:
   - Re-verify that against adjacent fast predators (`is_fast_dangerous`: cats, dogs, giant bats), the policy never yields `step_away_from_hostile()` in open rooms, engaging in immediate Elbereth warding or melee strikes.
+
+---
+
+## 26. Deep Dive 5 Autopsy: Branch Telemetry (Sokoban Discovery & Gnomish Mines Evacuation)
+
+### 26.1 The Gnomish Mines Evacuation Audit
+Auditing all 13,014 historic episodes in `data/lox.duckdb` reveals the operational state of the Mines avoidance system:
+- **Entered Mines Count**: **2,571 episodes (19.76% of runs)** entered the Gnomish Mines (`dnum == 2`).
+- **Median Turns in Mines**: **1.0 turn**.
+- **Exit Velocity Breakdown**:
+  * **1 turn (instant evacuation)**: **1,792 episodes (69.7%)**.
+  * **2–5 turns (quick exit)**: **189 episodes (7.4%)**.
+  * **6–20 turns (short struggle)**: **243 episodes (9.5%)**.
+  * **21–100 turns (lost/fighting)**: **187 episodes (7.3%)**.
+  * **100+ turns (trapped in Mines)**: **160 episodes (6.2%)** (up to 7,414 turns!).
+- **Root Cause of the 6.2% Mines Trap**:
+  * In NetHack, the Mines entrance staircase (`>`) spawns on **DL 2, 3, or 4**.
+  * In `latest_policy.py`, `if obs.hero.dungeon_branch == 'mines':` was placed **exclusively in `phase_mid_branches` (DL 6–10)** and `phase_deep_dungeon` (DL 11–19).
+  * Neither `phase_early_rush` (DL 1–2) nor `phase_early_scaling` (DL 3–5) had the Mines check!
+  * When a hero entered the Mines from DL 2, 3, or 4, the policy did NOT evacuate—it treated the Mines as an ordinary floor, explored dark rooms, and fought gnomes and dwarves until death.
+
+### 26.2 The Sokoban Total Absence (0 Episodes in 38.0M Ticks)
+Querying the 38,045,648 ticks across all 13,014 episodes reveals that **ZERO EPISODES IN HISTORY EVER ENTERED SOKOBAN**:
+- `dungeon`: 37,101,832 ticks (12,839 episodes)
+- `mines`: 99,436 ticks (2,571 episodes)
+- `quest`: 480,091 ticks (573 episodes)
+- `sokoban`: **0 ticks (0 episodes)**.
+- **Why Has LOX Never Entered Sokoban?**:
+  1. **Branch Entry Mechanics**: NetHack spawns the entrance to Sokoban as an **upward staircase (`<`)** on one floor between DL 6 and DL 10. That level has **two up staircases**: the arrival staircase (leading back to the previous floor) and the branch staircase (leading to Sokoban Level 1).
+  2. **Adapter Blindness**: `NetHackAdapter` only tracked a single `known_stairs_up` variable. When a second `<` was discovered on DL 6–10, it simply overwrote `known_stairs_up` without identifying it as the Sokoban branch entrance.
+  3. **Policy Downward Bias**: Policies in `phase_mid_branches` unconditionally prioritize `step_to_stairs_down()` whenever stairs down (`>`) are discovered. The policy NEVER commanded the hero to step onto the second `<` or execute `ascend()`.
+  4. **The Missing Relic Opportunity**: Because Sokoban was never entered, heroes never collected the guaranteed **Amulet of Reflection** (or Bag of Holding) or the food/ring caches on Sokoban 4, depriving heroes of the 100% ray-reflection protection required to cross DL 11–20.
+
+---
+
+### 26.3 Concrete Action Items & Planned Architecture Changes
+
+- [ ] **Action Item 1: Promote Gnomish Mines Evacuation to Universal Reflexes**:
+  - Move `if obs.hero.dungeon_branch == 'mines':` out of `phase_mid_branches` and into **Universal Reflexes** in `Agent.run()` (alongside Major Trouble Prayer and Emergency Descent).
+  - Guarantees 100% immediate 1-turn evacuation on `<` regardless of whether the Mines entrance was encountered on DL 2, DL 3, or DL 4.
+
+- [ ] **Action Item 2: Sokoban Branch Staircase Discrimination in `NetHackAdapter`**:
+  - In `NetHackAdapter`: track the initial level arrival tile on DL 6–10 (`self.arrival_stairs_up`).
+  - When exploring DL 6–10, if an upward staircase (`<`) is discovered at coordinates different from `arrival_stairs_up`, flag it as `self.sokoban_entrance_pos` and expose `obs.dungeon.has_sokoban_entrance: bool` and `sokoban_entrance_in_fov: bool`.
+  - Add `step_to_sokoban_entrance()` action primitive in `NetHackAdapter`.
+
+- [ ] **Action Item 3: Sokoban Branch Prioritization in `phase_mid_branches`**:
+  - In `phase_mid_branches` (DL 6–10): if `obs.dungeon.has_sokoban_entrance` and `obs.hero.hp_frac >= 0.70`:
+    - Prioritize `step_to_sokoban_entrance()` and `ascend()` over `step_to_stairs_down()`.
+    - Once inside Sokoban (`dnum == 4`), activate `step_solve_sokoban()` and `SokobanSolver` to clear all 4 levels and secure the Amulet of Reflection.
+
+- [ ] **Action Item 4: Invalidate Non-Branch Up Stairs Upon Transition**:
+  - Ensure that `self.sokoban_entrance_pos` is cleared upon true level changes and that returning from Sokoban properly synchronizes Dungeons of Doom coordinates without infinite stair-transit loops.
