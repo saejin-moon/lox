@@ -802,6 +802,25 @@ def test_latest_policy_dry_run_validation():
     assert act2 is not None
     assert act2.name in ("melee_attack_hostile", "step_away_from_hostile", "step_to_chokepoint")
 
+def test_pack_threat_adjacent_melee_priority():
+    """Verify that adjacent enemies (like jackals or coyotes) are attacked in melee rather than retreated from."""
+    from lox.dsl.compiler import compile_policy
+    from lox.core.types import Observation, HeroState
 
+    with open("data/latest_policy.py") as f:
+        policy_code = f.read()
 
+    executor = compile_policy(policy_code)
+    obs = Observation(chars=None, glyphs=None, hero=HeroState(hp=16, max_hp=16, depth=2))
+    obs.combat.adjacent_hostile = True
+    obs.combat.hostile_count_fov = 1
+    obs.combat.closest_hostile_name = "jackal"
+    obs.combat.closest_hostile_dist = 1
+    obs.combat.can_retreat = True
+    obs.combat.in_corridor = False
 
+    runner = executor.create_runner(obs)
+    action = runner.send(obs)
+    assert action is not None
+    # Must attack the adjacent jackal directly; must NEVER yield step_to_chokepoint while adjacent and healthy
+    assert action.name == "melee_attack_hostile", f"Expected melee_attack_hostile but got {action.name}"

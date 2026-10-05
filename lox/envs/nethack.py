@@ -1141,10 +1141,13 @@ class NetHackAdapter(EnvironmentAdapter):
             adjacent_peaceful=adjacent_peaceful,
             is_fast_dangerous=is_fast_dangerous,
             is_pack_threat=bool(
-                hostile_count >= 2
-                or any(
-                    k in closest_name.lower()
-                    for k in ("rothe", "ant", "bee", "orc", "wolf", "jackal", "coyote")
+                hostile_count >= 3
+                or (
+                    hostile_count >= 2
+                    and any(
+                        k in closest_name.lower()
+                        for k in ("rothe", "ant", "bee", "orc", "wolf", "jackal", "coyote")
+                    )
                 )
             ),
             is_corrosive_target=is_corrosive_target,

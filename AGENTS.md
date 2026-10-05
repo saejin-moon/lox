@@ -209,6 +209,9 @@ lox/
    - This breaks the LLM Author out of the 2-parameter combat threshold micro-tuning cycle by directing mutations to specific depth-phase subroutines.
 50. **Unconditional Wear Armor Failure Blacklisting & Redundant Cloak Shield (`INV-INV-004`)**:
    - NetHack forbids wearing an apron or second cloak while already wearing a cloak (`"You are already wearing a cloak."`). Any item that fails to equip must be unconditionally added to `self.failed_wear_slots` and `failed_armor_slots` on the very first attempt (removing the previous `if "cloak" not in msg_low` check). `InventoryView.get_unworn_armor_slot()` actively skips cloaks/aprons if `has_worn_cloak` is True, completely eliminating 23,000-turn wear loops.
+51. **The `is_pack_threat` Pacifist Retreat Trap Elimination (`INV-CBT-016`)**:
+   - Marking monsters as pack threats unconditionally (e.g. matching any jackal or coyote) caused `handle_combat` to prioritize `step_to_chokepoint()` over melee attacks in open rooms. The hero attempted to retreat while adjacent to a 4 HP enemy, yielding free attacks turn after turn and dying from full HP without striking back (jackals caused 63 deaths / 31.5% of all mortalities in Campaign 69).
+   - Solution: `is_pack_threat` requires `hostile_count >= 3`, OR `hostile_count >= 2` with pack species (rothe, ant, bee, wolf, jackal, coyote, orc). Isolated single monsters are NEVER pack threats. Furthermore, `step_to_chokepoint` is strictly restricted to `closest_hostile_dist >= 2`; when adjacent at `hp_frac > 0.35`, the hero MUST strike in melee (`melee_attack_hostile`).
 
 ---
 

@@ -676,6 +676,43 @@ if "yellow light" in closest_name or "homunculus" in closest_name:
 """,
         related_ids=["INV-CBT-001", "INV-CBT-002", "INV-CBT-004"],
     ),
+    Invariant(
+        id="INV-CBT-016",
+        title="Decisive Melee Engagement Over Chokepoint Retreat for Adjacent Threats",
+        category="combat",
+        tags=["melee", "jackal", "coyote", "pack", "chokepoint", "retreat", "free attacks", "valkyrie"],
+        rule=(
+            "In NetHack, attempting to retreat (via step_to_chokepoint or step_away_from_hostile) while adjacent to "
+            "monsters in open rooms grants them free pursuit attacks every turn while the hero deals 0 damage, resulting "
+            "in deaths from full HP against trivial pests (jackals, coyotes, giant rats, foxes). When adjacent to any "
+            "non-corrosive, non-passive hostile at hp_frac > 0.35, the hero MUST strike in melee (melee_attack_hostile). "
+            "Valkyrie starting weapons (+1 long sword) kill early pests in 1-2 hits. Chokepoint retreats (step_to_chokepoint) "
+            "are strictly restricted to when hostiles are at closest_hostile_dist >= 2 or when HP is critically low."
+        ),
+        anti_pattern=(
+            "Yielding step_to_chokepoint() while adjacent to lone jackals or coyotes, allowing them to bite the hero to "
+            "death across an open room without ever swinging the long sword."
+        ),
+        code_snippet="""
+# Pack threat defense: retreat to chokepoints ONLY from distance >= 2
+if obs.combat.is_pack_threat and not obs.combat.in_corridor:
+    if not obs.combat.standing_on_elbereth and not obs.combat.hostile_ignores_elbereth:
+        obs = (yield engrave_dust_elbereth())
+        continue
+    elif obs.combat.closest_hostile_dist >= 2 and obs.combat.can_retreat:
+        obs = (yield step_to_chokepoint())
+        continue
+    elif obs.combat.adjacent_hostile:
+        obs = (yield melee_attack_hostile())
+        continue
+
+# Decisive melee strike for adjacent hostiles when healthy
+if obs.combat.adjacent_hostile and obs.hero.hp_frac > 0.35:
+    obs = (yield melee_attack_hostile())
+    continue
+""",
+        related_ids=["INV-CBT-001", "INV-CBT-005", "INV-CBT-013"],
+    ),
     # -----------------------------------------------------------------
     # NUTRITION & DIVINE FAVOR
     # -----------------------------------------------------------------
@@ -1327,8 +1364,8 @@ class InvariantRegistry:
             priority_ids.extend(["INV-NAV-003", "INV-NAV-004"])
         if "dead_end" in low_query or "search" in low_query:
             priority_ids.append("INV-NAV-005")
-        if "rat" in low_query or "newt" in low_query or "retreat" in low_query:
-            priority_ids.append("INV-CBT-001")
+        if "rat" in low_query or "newt" in low_query or "jackal" in low_query or "coyote" in low_query or "retreat" in low_query:
+            priority_ids.extend(["INV-CBT-001", "INV-CBT-016"])
         if "ant" in low_query or "bee" in low_query or "bat" in low_query:
             priority_ids.append("INV-CBT-005")
         if (

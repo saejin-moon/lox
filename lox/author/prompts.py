@@ -344,8 +344,11 @@ class Agent:
                 if not obs.combat.standing_on_elbereth and not obs.combat.hostile_ignores_elbereth:
                     obs = (yield engrave_dust_elbereth())
                     continue
-                elif obs.combat.can_retreat:
+                elif obs.combat.closest_hostile_dist >= 2 and obs.combat.can_retreat:
                     obs = (yield step_to_chokepoint())
+                    continue
+                elif obs.combat.adjacent_hostile:
+                    obs = (yield melee_attack_hostile())
                     continue
 
             # 1.4 Heavy weapon threats (mattocks, battle-axes, two-handed swords, crossbows)

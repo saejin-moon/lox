@@ -1161,3 +1161,45 @@ To ensure LLM synthesis sessions (targeting `google/gemma-4-31b-it`) generate po
    - Verified 121/121 unit tests passing (`uv run pytest`) across all test suites.
    - Synchronized living documentation (`AGENTS.md`, `TODO.md`).
 
+---
+
+## 28. Campaign 69 Empirical Autopsy & Metric Verification (Root Cause: The `is_pack_threat` Pacifist Retreat Trap)
+
+### 28.1 Campaign 69 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_101956`
+- **Episodes Evaluated**: 200 episodes across 10 generations (20 workers, 25,000 max turns).
+- **Target Goal**: Average Depth $\ge 6.5$ (Target missed: Average Depth achieved was **3.10 – 3.70**, max depth 8).
+- **Metric Reporting Audit**:
+  - Investigated DuckDB telemetry to verify whether the metric reporting was accurate or distorted.
+  - Confirmed: `obs.hero.depth` is pulled directly from NetHack C-level `blstats[12]` (`NLE_BL_DLEVEL`), and `max_depth_reached` accurately tracks the peak dungeon floor achieved in each run. Both `depth` and `max_depth` match identically in DuckDB (`avg(depth) == avg(max_depth) == 3.23`).
+  - **Verdict**: The metric is 100% truthfully reported. The heroes genuinely died on Dungeon Levels 2, 3, and 4.
+
+### 28.2 Root Cause Diagnosis: The `is_pack_threat` Pacifist Retreat Trap
+1. **Fatal Killer Distribution Across Campaign 69**:
+   - `jackal`: **63 deaths (31.5% of all runs)** (Avg DL 2.33, Avg Turn 756).
+   - `starvation`: 21 deaths (10.5%) (Avg DL 3.05, Avg Turn 4,454).
+   - `giant rat`: 17 deaths (8.5%) (Avg DL 3.47, Avg Turn 1,447).
+   - `coyote`: 11 deaths (5.5%) (Avg DL 3.64, Avg Turn 708).
+   - `giant bat`: 8 deaths (4.0%) (Avg DL 3.88, Avg Turn 1,738).
+   - `newt`: 7 deaths (3.5%) (Avg DL 2.00, Avg Turn 4,564).
+   - **Over 40% of all heroes were killed by basic early-game pests (jackals, rats, coyotes, newts) that a Valkyrie +1 Long Sword one-shots in 1–2 hits!**
+2. **Action Sequence Forensic Analysis**:
+   - Querying DuckDB for `last_5_actions` on jackal deaths showed:
+     `step_to_chokepoint -> step_to_chokepoint -> step_to_chokepoint -> step_to_chokepoint -> step_to_chokepoint`.
+   - The hero was endlessly trying to retreat to a corridor chokepoint without ever swinging its weapon.
+3. **The Two Flaws**:
+   - **Flaw A (Adapter)**: `is_pack_threat` in `lox/envs/nethack.py` matched `"jackal"`, `"coyote"`, `"wolf"`, `"orc"` unconditionally, treating even a single isolated jackal as a pack threat.
+   - **Flaw B (Policy `handle_combat`)**: If `is_pack_threat` was True in an open room and `can_retreat` was True, it yielded `step_to_chokepoint()` with `continue`, placed *above* `melee_attack_hostile()`. Attempting to walk away from an adjacent fast predator in an open room gives them free bites every turn, dealing 0 retaliatory damage. The hero died from 100% HP.
+
+### 28.3 Autonomous Fixes Deployed & Verified
+1. **`is_pack_threat` Refinement (`lox/envs/nethack.py`)**:
+   - Requires `hostile_count >= 3`, OR (`hostile_count >= 2` and species is rothe, ant, bee, wolf, jackal, coyote, orc). Isolated single monsters are never flagged as pack threats.
+2. **Decisive Adjacent Melee Priority (`data/latest_policy.py` & `lox/author/prompts.py`)**:
+   - In `handle_combat`: `step_to_chokepoint` is strictly restricted to `closest_hostile_dist >= 2`.
+   - When adjacent to any non-corrosive, non-passive hostile at `hp_frac > 0.35`, the hero strikes decisively with `melee_attack_hostile()`.
+3. **Canonical Knowledge Base Invariant `INV-CBT-016`**:
+   - Registered `INV-CBT-016` in `lox/knowledge/invariants.py` ("Decisive Melee Engagement Over Chokepoint Retreat for Adjacent Threats").
+   - Added unit test `test_pack_threat_adjacent_melee_priority()` in `tests/test_nethack_tactics.py`.
+   - All 122 unit tests passing with zero regressions (`uv run pytest`).
+
+

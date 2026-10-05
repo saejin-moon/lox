@@ -5,7 +5,6 @@ class Agent:
 
     def run(self, obs):
         while True:
-            # Universal Reflex 1: Mines Immediate Evacuation (DL 2-4 branch trap elimination)
             if obs.hero.dungeon_branch == 'mines':
                 if obs.spatial.standing_on_stairs_up:
                     obs = (yield ascend())
@@ -16,38 +15,28 @@ class Agent:
                 else:
                     obs = (yield step_to_frontier())
                     continue
-
-            # Universal Reflex 2: Major Trouble Prayer (Fainting starvation or lethal HP emergency)
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
-
-            # Universal Reflex 3: Immediate Stair Descent (even in combat)
-            if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
+            if obs.spatial.standing_on_stairs_down and (not obs.status.is_levitating):
                 obs = (yield descend())
                 continue
-
-            # Universal Reflex 4: Active Combat Defense
             if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
                 obs = (yield from self.handle_combat(obs))
                 continue
-
-            # Universal Reflex 5: Healing & Nutrition Recovery
             if obs.hero.hp_frac < 0.35 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
                 obs = (yield eat_carried_food())
                 continue
-
-            # HTN Strategic Phase Dispatch
-            phase = getattr(obs, "dungeon_phase", "early_rush")
-            if phase == "early_rush" or obs.hero.depth <= 2:
+            phase = getattr(obs, 'dungeon_phase', 'early_rush')
+            if phase == 'early_rush' or obs.hero.depth <= 2:
                 obs = (yield from self.phase_early_rush(obs))
-            elif phase == "early_scaling" or obs.hero.depth <= 5:
+            elif phase == 'early_scaling' or obs.hero.depth <= 5:
                 obs = (yield from self.phase_early_scaling(obs))
-            elif phase == "mid_branches" or obs.hero.depth <= 10:
+            elif phase == 'mid_branches' or obs.hero.depth <= 10:
                 obs = (yield from self.phase_mid_branches(obs))
             else:
                 obs = (yield from self.phase_deep_dungeon(obs))
@@ -66,7 +55,6 @@ class Agent:
         if obs.hero.can_enhance_skills:
             obs = (yield enhance_weapon_skill())
             return obs
-        # Strict Zero-Loot Staircase Priority: descend immediately when stairs down known
         if obs.spatial.stairs_down_known:
             obs = (yield step_to_stairs_down())
             return obs
@@ -154,7 +142,7 @@ class Agent:
         Priority: Branch discrimination & ascension tools.
         Avoid dark Mines, detect and solve Sokoban for Reflection/Bag of Holding, donate for temple protection.
         """
-        if obs.dungeon.has_sokoban_entrance and obs.hero.hp_frac >= 0.70:
+        if obs.dungeon.has_sokoban_entrance and obs.hero.hp_frac >= 0.7:
             if obs.spatial.standing_on_stairs_up and obs.hero.dungeon_branch != 'mines':
                 obs = (yield ascend())
                 return obs
@@ -258,7 +246,7 @@ class Agent:
             if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
-            if obs.hero.hp_frac < 0.20 and (not obs.inventory.has_healing) and (not obs.combat.has_panic_escape):
+            if obs.hero.hp_frac < 0.2 and (not obs.inventory.has_healing) and (not obs.combat.has_panic_escape):
                 if obs.inventory.has_unidentified_potion:
                     obs = (yield quaff_emergency_potion())
                     continue
@@ -279,10 +267,9 @@ class Agent:
                 obs = (yield step_away_from_hostile())
                 continue
             closest_name = obs.combat.closest_hostile_name.lower()
-            if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'):
+            if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') or obs.dungeon.in_shop:
                 obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
                 continue
-            # Priority status hazards: yellow light and homunculus
             if 'yellow light' in closest_name or 'homunculus' in closest_name:
                 if obs.combat.closest_hostile_dist >= 2:
                     if obs.inventory.has_offensive_wand:
@@ -298,7 +285,6 @@ class Agent:
                     else:
                         obs = (yield melee_attack_hostile())
                         continue
-            # Corrosive / acid hazards: strictly forbid melee attacks
             if obs.combat.is_corrosive_target:
                 if obs.combat.closest_hostile_dist >= 2:
                     if obs.inventory.has_offensive_wand:
@@ -310,15 +296,16 @@ class Agent:
                 if obs.combat.adjacent_hostile:
                     obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
                     continue
-            # Pack threat defense: immediate dust Elbereth or chokepoint retreat on turn 1
             if obs.combat.is_pack_threat and (not obs.combat.in_corridor):
                 if not obs.combat.standing_on_elbereth and (not obs.combat.hostile_ignores_elbereth):
                     obs = (yield engrave_dust_elbereth())
                     continue
-                elif obs.combat.can_retreat:
+                elif obs.combat.closest_hostile_dist >= 2 and obs.combat.can_retreat:
                     obs = (yield step_to_chokepoint())
                     continue
-            # Heavy weapon threats (mattocks, aklyses, captains)
+                elif obs.combat.adjacent_hostile:
+                    obs = (yield melee_attack_hostile())
+                    continue
             if obs.combat.is_heavy_weapon_threat:
                 if obs.combat.closest_hostile_dist >= 2:
                     if obs.inventory.has_offensive_wand:
@@ -327,9 +314,50 @@ class Agent:
                     elif obs.inventory.has_daggers:
                         obs = (yield throw_dagger())
                         continue
-                if obs.combat.adjacent_hostile and obs.hero.hp_frac < 0.50 and obs.combat.can_retreat:
-                    obs = (yield step_to_chokepoint())
+                if obs.combat.adjacent_hostile and obs.hero.hp_frac < 0.5 and obs.combat.can_retreat:
+                    obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
                     continue
+            if (obs.hero.hp_frac < 0.35 or (obs.hero.hp_frac < 0.6 and (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2))) and (not obs.combat.standing_on_elbereth):
+                obs = (yield engrave_dust_elbereth())
+                continue
+            if obs.combat.standing_on_elbereth:
+                if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
+                    if obs.hero.hp_frac > 0.4 or not obs.combat.can_retreat:
+                        obs = (yield melee_attack_hostile())
+                        continue
+                    else:
+                        obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
+                        continue
+                if obs.hero.hp_frac < 0.3 and obs.hero.turn - self.last_prayer_turn >= 850:
+                    self.last_prayer_turn = obs.hero.turn
+                    obs = (yield pray())
+                    continue
+                elif obs.hero.hp_frac < 0.6 and obs.inventory.has_healing:
+                    obs = (yield quaff_healing())
+                    continue
+                elif obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
+                    obs = (yield zap_offensive_wand())
+                    continue
+                elif obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
+                    obs = (yield throw_dagger())
+                    continue
+                elif not obs.combat.adjacent_hostile:
+                    if obs.spatial.stairs_down_known:
+                        obs = (yield step_to_stairs_down())
+                    elif obs.spatial.has_unvisited_frontier:
+                        obs = (yield step_to_frontier())
+                    else:
+                        obs = (yield step_away_from_hostile())
+                    continue
+                else:
+                    obs = (yield melee_attack_hostile())
+                    continue
+            if obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
+                obs = (yield zap_offensive_wand())
+                continue
+            if obs.combat.closest_hostile_dist >= 2 and obs.inventory.has_daggers:
+                obs = (yield throw_dagger())
+                continue
             if obs.combat.is_fast_dangerous:
                 if (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2) and (not obs.combat.standing_on_elbereth):
                     obs = (yield engrave_dust_elbereth())
@@ -344,33 +372,8 @@ class Agent:
                         else:
                             obs = (yield melee_attack_hostile())
                         continue
-            if obs.combat.standing_on_elbereth:
-                if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:
-                        obs = (yield melee_attack_hostile())
-                        continue
-                    obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
-                    continue
-                if not obs.combat.adjacent_hostile:
-                    if obs.inventory.has_offensive_wand and obs.combat.closest_hostile_dist >= 2:
-                        obs = (yield zap_offensive_wand())
-                        continue
-                    if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
-                        obs = (yield throw_dagger())
-                        continue
-                    if obs.spatial.stairs_down_known:
-                        obs = (yield step_to_stairs_down())
-                        continue
-                    obs = (yield step_away_from_hostile())
-                    continue
-                obs = (yield melee_attack_hostile())
-                continue
-            if obs.combat.closest_hostile_dist >= 2:
-                if obs.inventory.has_offensive_wand:
-                    obs = (yield zap_offensive_wand())
-                    continue
-                elif obs.inventory.has_daggers:
-                    obs = (yield throw_dagger())
+                elif not obs.combat.in_corridor and obs.combat.can_retreat:
+                    obs = (yield step_to_chokepoint())
                     continue
             if obs.combat.adjacent_hostile:
                 if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:
@@ -378,8 +381,8 @@ class Agent:
                 elif not obs.combat.standing_on_elbereth and (not obs.combat.hostile_ignores_elbereth):
                     obs = (yield engrave_dust_elbereth())
                 else:
-                    obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
-            elif obs.hero.hp_frac > 0.35:
+                    obs = (yield melee_attack_hostile())
+            elif obs.hero.hp_frac > 0.4:
                 obs = (yield melee_attack_hostile())
             else:
                 obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
@@ -404,7 +407,8 @@ class Agent:
     def handle_dead_end(self, obs):
         if obs.spatial.standing_on_dead_end:
             prev_hp = obs.hero.hp
-            for _ in range(12):
+            search_limit = 20 if obs.hero.depth <= 2 else 12
+            for _ in range(search_limit):
                 if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier or (obs.hero.hp < prev_hp):
                     return obs
                 obs = (yield search())
