@@ -256,6 +256,7 @@ def _compute_dead_ends_mask_kernel(
 
     ord_plus = 43  # '+'
     ord_hash = 35  # '#'
+    ord_dot = 46  # '.'
     ord_dash = 45  # '-'
     ord_bar = 124  # '|'
     ord_space = 32  # ' '
@@ -280,6 +281,18 @@ def _compute_dead_ends_mask_kernel(
                     dead_ends_mask[cy, cx] = True
                 continue
 
+            # Lit corridor / cul-de-sac dead ends (walkable . with <= 1 cardinal walkable neighbor)
+            if ch == ord_dot:
+                adj_walkable = 0
+                for i in range(4):
+                    ny = cy + card_dy[i]
+                    nx = cx + card_dx[i]
+                    if 0 <= ny < h and 0 <= nx < w and walkable[ny, nx]:
+                        adj_walkable += 1
+                if adj_walkable <= 1 and searched_count[cy, cx] < max_corridor:
+                    dead_ends_mask[cy, cx] = True
+                    continue
+
             # Room perimeter candidates (adjacent to wall, door frame, or solid stone)
             if searched_count[cy, cx] < max_perimeter:
                 adj_wall = 0
@@ -299,6 +312,43 @@ def _compute_dead_ends_mask_kernel(
                     dead_ends_mask[cy, cx] = True
 
     return dead_ends_mask
+
+
+@njit(fastmath=True, nogil=True, cache=True)
+def _compute_true_dead_ends_mask_kernel(
+    chars: np.ndarray,
+    walkable: np.ndarray,
+    searched_count: np.ndarray,
+    max_corridor: int = 15,
+) -> np.ndarray:
+    """Discovers true corridor dead ends: walkable tiles with <= 1 cardinal walkable neighbors."""
+    h, w = chars.shape
+    dead_ends = np.zeros((h, w), dtype=np.bool_)
+    card_dy = np.array([-1, 1, 0, 0], dtype=np.int32)
+    card_dx = np.array([0, 0, -1, 1], dtype=np.int32)
+
+    ord_plus = 43  # '+'
+
+    for cy in range(h):
+        for cx in range(w):
+            if not walkable[cy, cx]:
+                continue
+            if chars[cy, cx] == ord_plus:
+                continue
+            if searched_count[cy, cx] >= max_corridor:
+                continue
+
+            adj_walkable = 0
+            for i in range(4):
+                ny = cy + card_dy[i]
+                nx = cx + card_dx[i]
+                if 0 <= ny < h and 0 <= nx < w and walkable[ny, nx]:
+                    adj_walkable += 1
+
+            if adj_walkable <= 1:
+                dead_ends[cy, cx] = True
+
+    return dead_ends
 
 
 class SpatialEngine:
@@ -399,6 +449,21 @@ class SpatialEngine:
             max_perimeter,
         )
 
+    @staticmethod
+    def compute_true_dead_ends_mask(
+        chars: np.ndarray,
+        walkable: np.ndarray,
+        searched_count: np.ndarray,
+        max_corridor: int = 15,
+    ) -> np.ndarray:
+        """Fast Numba-compiled discovery of true corridor dead ends (<= 1 walkable neighbor)."""
+        return _compute_true_dead_ends_mask_kernel(
+            chars.astype(np.int32),
+            walkable.astype(np.bool_),
+            searched_count.astype(np.int32),
+            max_corridor,
+        )
+
     @classmethod
     def warmup(cls) -> None:
         """Pre-warms all Numba JIT kernels to populate disk cache before worker forks."""
@@ -410,6 +475,7 @@ class SpatialEngine:
         cls.find_path((10, 40), (10, 42), dummy_walk, is_door=dummy_door)
         cls.find_nearest_target((10, 40), dummy_walk, dummy_walk, is_door=dummy_door)
         cls.compute_dead_ends_mask(dummy_chars, dummy_walk, dummy_searched)
+        cls.compute_true_dead_ends_mask(dummy_chars, dummy_walk, dummy_searched)
 
 
 def build_walkable_mask(obs_or_chars: Any) -> np.ndarray:

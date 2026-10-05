@@ -438,6 +438,24 @@ class NetHackAdapter(EnvironmentAdapter):
             effective_chars, walkable, self.searched_count, max_corridor, max_perimeter
         )
 
+    def _compute_true_dead_ends_mask(
+        self,
+        chars: np.ndarray,
+        walkable: np.ndarray,
+        max_corridor: int = 15,
+    ) -> np.ndarray:
+        """True corridor dead ends mask (<= 1 cardinal walkable neighbor)."""
+        effective_chars = chars.copy()
+        if hasattr(self, "known_chars"):
+            known_mask = self.known_chars > 0
+            blank_mask = (chars == 0) | (chars == ord(" ")) | (chars == ord("@"))
+            effective_chars[known_mask & blank_mask] = self.known_chars[
+                known_mask & blank_mask
+            ]
+        return SpatialEngine.compute_true_dead_ends_mask(
+            effective_chars, walkable, self.searched_count, max_corridor
+        )
+
     def is_target_floating_eye(self, glyphs: np.ndarray, y: int, x: int) -> bool:
         """Informational check: returns True if monster at (y, x) is a floating eye."""
         if not (0 <= y < 21 and 0 <= x < 79):
@@ -946,9 +964,11 @@ class NetHackAdapter(EnvironmentAdapter):
         )
 
         # Check for unsearched corridor dead ends or room perimeter tiles reachable from hero
+        true_dead_ends = self._compute_true_dead_ends_mask(chars, walkable, max_corridor=15)
         dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
+        all_dead_ends = true_dead_ends | dead_ends_mask
         dead_end_target = SpatialEngine.find_nearest_target(
-            (y, x), walkable_nav, target_mask=dead_ends_mask, is_door=all_doors
+            (y, x), walkable_nav, target_mask=all_dead_ends, is_door=all_doors
         )
         has_dead_ends = dead_end_target is not None and dead_end_target != (-1, -1)
 
@@ -1038,7 +1058,15 @@ class NetHackAdapter(EnvironmentAdapter):
         curr_char = chr(chars[y, x])
         curr_glyph = int(glyphs[y, x])
         tile_type = "room"
-        if curr_char == "#":
+        if (y, x) == getattr(self, "known_fountain_pos", None) or curr_char == "{":
+            tile_type = "fountain"
+        elif (y, x) == getattr(self, "known_altar_pos", None) or curr_char == "_":
+            tile_type = "altar"
+        elif (y, x) == getattr(self, "known_stairs_down", None) or curr_char == ">":
+            tile_type = "stairs_down"
+        elif (y, x) == getattr(self, "known_stairs_up", None) or curr_char == "<":
+            tile_type = "stairs_up"
+        elif curr_char == "#":
             tile_type = "corridor"
         elif nethack.glyph_is_cmap(curr_glyph) and nethack.glyph_to_cmap(
             curr_glyph
@@ -1792,25 +1820,30 @@ class NetHackAdapter(EnvironmentAdapter):
             chars = obs_prev.chars
             walkable, walkable_nav = self._build_walkable_nav(obs_prev)
             all_doors = self._get_all_doors_mask(obs_prev)
-            dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
 
-            # Exclude current tile so step_to_dead_end navigates rather than standing still
-            step_target_mask = dead_ends_mask.copy()
-            step_target_mask[hero.y, hero.x] = False
-
-            # Find nearest reachable target in dead_ends_mask
             target = None
-            if np.any(step_target_mask):
-                candidates = np.argwhere(step_target_mask)
-                min_searches = min(self.searched_count[cy, cx] for cy, cx in candidates)
-                min_mask = step_target_mask & (self.searched_count <= min_searches + 2)
+
+            # Priority 1: Reachable true corridor dead ends (<= 1 cardinal walkable neighbors)
+            # These connect directly to unexplored rooms and must always be searched first.
+            true_dead_ends = self._compute_true_dead_ends_mask(chars, walkable, max_corridor=15)
+            step_true_mask = true_dead_ends.copy()
+            step_true_mask[hero.y, hero.x] = False
+            if np.any(step_true_mask):
                 target = SpatialEngine.find_nearest_target(
                     (hero.y, hero.x),
                     walkable_nav,
-                    target_mask=min_mask,
+                    target_mask=step_true_mask,
                     is_door=all_doors,
                 )
-                if not target or target == (-1, -1):
+
+            # Priority 2: Room Perimeter Search
+            if not target or target == (-1, -1):
+                dead_ends_mask = self._compute_dead_ends_mask(
+                    chars, walkable, max_corridor=15, max_perimeter=10
+                )
+                step_target_mask = dead_ends_mask.copy()
+                step_target_mask[hero.y, hero.x] = False
+                if np.any(step_target_mask):
                     target = SpatialEngine.find_nearest_target(
                         (hero.y, hero.x),
                         walkable_nav,
@@ -1818,7 +1851,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         is_door=all_doors,
                     )
 
-            # If no corridor dead end found, search for any unexhausted wall-adjacent perimeter tile
+            # Priority 3: Fallback Wall Perimeter Search (if any wall candidate has < 10 searches)
             if not target or target == (-1, -1):
                 wall_adj_mask = np.zeros((21, 79), dtype=bool)
                 for cy in range(21):
@@ -1848,7 +1881,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         is_door=all_doors,
                     )
 
-            # If still no reachable target found, decay search counts if stagnant (rate limited to 50 turns)
+            # Priority 4: Stagnation Decay (Only if ALL reachable tiles have been searched >= 10 times)
             if not target or target == (-1, -1):
                 if (
                     not hasattr(self, "_last_search_decay_turn")

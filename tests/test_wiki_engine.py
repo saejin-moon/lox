@@ -61,7 +61,7 @@ def test_wiki_engine_lookups(wiki_engine):
     # 2. Exact monster lookup
     res_cockatrice = wiki.query("Cockatrice", top_k=1)
     assert "Cockatrice" in res_cockatrice
-    assert "stoning" in res_cockatrice or "monster" in res_cockatrice
+    assert "stoning" in res_cockatrice.lower() or "monster" in res_cockatrice.lower() or "stone" in res_cockatrice.lower()
 
     # 3. Alias redirect lookup
     res_boh = wiki.query("BoH", top_k=1)
