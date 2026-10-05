@@ -964,11 +964,9 @@ class NetHackAdapter(EnvironmentAdapter):
         )
 
         # Check for unsearched corridor dead ends or room perimeter tiles reachable from hero
-        true_dead_ends = self._compute_true_dead_ends_mask(chars, walkable, max_corridor=15)
         dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
-        all_dead_ends = true_dead_ends | dead_ends_mask
         dead_end_target = SpatialEngine.find_nearest_target(
-            (y, x), walkable_nav, target_mask=all_dead_ends, is_door=all_doors
+            (y, x), walkable_nav, target_mask=dead_ends_mask, is_door=all_doors
         )
         has_dead_ends = dead_end_target is not None and dead_end_target != (-1, -1)
 
@@ -1084,10 +1082,6 @@ class NetHackAdapter(EnvironmentAdapter):
             tile_type = "altar"
         elif nethack.glyph_is_trap(curr_glyph):
             tile_type = "trap"
-        elif curr_char == ">":
-            tile_type = "stairs_down"
-        elif curr_char == "<":
-            tile_type = "stairs_up"
 
         # Check adjacent features (doors can only be interacted with cardinally)
         adj_door = False
@@ -1851,37 +1845,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         is_door=all_doors,
                     )
 
-            # Priority 3: Fallback Wall Perimeter Search (if any wall candidate has < 10 searches)
-            if not target or target == (-1, -1):
-                wall_adj_mask = np.zeros((21, 79), dtype=bool)
-                for cy in range(21):
-                    for cx in range(79):
-                        if (
-                            walkable[cy, cx]
-                            and (cy, cx) != (hero.y, hero.x)
-                            and self.searched_count[cy, cx] < 10
-                        ):
-                            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                                ny, nx = cy + dy, cx + dx
-                                if 0 <= ny < 21 and 0 <= nx < 79:
-                                    ch = (
-                                        int(self.known_chars[ny, nx])
-                                        if hasattr(self, "known_chars")
-                                        and self.known_chars[ny, nx] > 0
-                                        else int(chars[ny, nx])
-                                    )
-                                    if ch in (ord("-"), ord("|"), ord(" "), 0):
-                                        wall_adj_mask[cy, cx] = True
-                                        break
-                if np.any(wall_adj_mask):
-                    target = SpatialEngine.find_nearest_target(
-                        (hero.y, hero.x),
-                        walkable_nav,
-                        target_mask=wall_adj_mask,
-                        is_door=all_doors,
-                    )
-
-            # Priority 4: Stagnation Decay (Only if ALL reachable tiles have been searched >= 10 times)
+            # Priority 3: Stagnation Decay (Only if ALL reachable tiles have been searched >= 10 times)
             if not target or target == (-1, -1):
                 if (
                     not hasattr(self, "_last_search_decay_turn")
