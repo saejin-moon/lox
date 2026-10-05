@@ -572,6 +572,9 @@ class NetHackAdapter(EnvironmentAdapter):
             self.floor_corpses.clear()
             self.elbereth_positions.clear()
             self.looted_tiles.clear()
+            if hasattr(self, "loot_attempts"):
+                self.loot_attempts.clear()
+            self.altar_tested_on_floor = False
             self.known_fountain_pos = None
             self.known_altar_pos = None
             self.known_priest_pos = None
@@ -1980,7 +1983,7 @@ class NetHackAdapter(EnvironmentAdapter):
                     return self._step_or_breach(obs_prev, dy, dx)
 
             # If no dead end target or wall target is reachable, do not oscillate back and forth.
-            # Perform search() if adjacent to walls/doors, or navigate to unvisited/farthest tiles
+            # Perform search() if adjacent to walls/doors and tile not exhausted, else step to least-searched neighbor
             adj_walls = sum(
                 1
                 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
@@ -1988,13 +1991,20 @@ class NetHackAdapter(EnvironmentAdapter):
                 and 0 <= hero.x + dx < 79
                 and chars[hero.y + dy, hero.x + dx] in (ord("|"), ord("-"), ord("#"))
             )
-            if adj_walls >= 1:
+            if adj_walls >= 1 and self.searched_count[hero.y, hero.x] < 12:
                 return self.step(Action(name="search"))
 
+            best_dir = None
+            min_searched = 999999
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 ny, nx = hero.y + dy, hero.x + dx
                 if 0 <= ny < 21 and 0 <= nx < 79 and walkable_nav[ny, nx]:
-                    return self._step_or_breach(obs_prev, dy, dx)
+                    score = self.searched_count[ny, nx]
+                    if score < min_searched:
+                        min_searched = score
+                        best_dir = (dy, dx)
+            if best_dir:
+                return self._step_or_breach(obs_prev, best_dir[0], best_dir[1])
             return self.step(Action(name="search"))
 
         elif action.name == "step_to" and obs_prev is not None:
@@ -2020,6 +2030,10 @@ class NetHackAdapter(EnvironmentAdapter):
                     return self.step(Action(name="search"))
 
         elif action.name == "step_to_altar" and obs_prev is not None:
+            if getattr(self, "altar_tested_on_floor", False):
+                if obs_prev.spatial.has_unvisited_frontier:
+                    return self.step(Action(name="step_to_frontier"))
+                return self.step(Action(name="step_to_dead_end"))
             if self.known_altar_pos:
                 return self.step(
                     Action(name="step_to", target_pos=self.known_altar_pos)
@@ -2027,11 +2041,23 @@ class NetHackAdapter(EnvironmentAdapter):
             return self.step(Action(name="search"))
 
         elif action.name == "test_altar_buc" and obs_prev is not None:
+            if getattr(self, "altar_tested_on_floor", False):
+                if (
+                    obs_prev.spatial.standing_on_stairs_down
+                    and not obs_prev.status.is_levitating
+                ):
+                    return self.step(Action(name="descend"))
+                elif obs_prev.spatial.stairs_down_known:
+                    return self.step(Action(name="step_to_stairs_down"))
+                elif obs_prev.spatial.has_unvisited_frontier:
+                    return self.step(Action(name="step_to_frontier"))
+                return self.step(Action(name="step_to_dead_end"))
             sub_act = self.altar_solver.plan_step(
                 obs_prev, self.epistemic, self.known_altar_pos
             )
             if sub_act:
                 return self.step(sub_act)
+            self.altar_tested_on_floor = True
             if (
                 obs_prev.spatial.standing_on_stairs_down
                 and not obs_prev.status.is_levitating
@@ -2211,6 +2237,15 @@ class NetHackAdapter(EnvironmentAdapter):
                     if obs_prev.spatial.has_unvisited_frontier:
                         return self.step(Action(name="step_to_frontier"))
                     return self.step(Action(name="step_to_dead_end"))
+                if not hasattr(self, "loot_attempts"):
+                    self.loot_attempts = {}
+                attempts = self.loot_attempts.get(target_pos, 0) + 1
+                self.loot_attempts[target_pos] = attempts
+                if attempts >= 3:
+                    self.looted_tiles.add(target_pos)
+                    if obs_prev.spatial.has_unvisited_frontier:
+                        return self.step(Action(name="step_to_frontier"))
+                    return self.step(Action(name="step_to_dead_end"))
                 walkable, walkable_nav = self._build_walkable_nav(obs_prev)
                 all_doors = self._get_all_doors_mask(obs_prev)
                 walkable_nav[target_pos[0], target_pos[1]] = True
@@ -2222,6 +2257,8 @@ class NetHackAdapter(EnvironmentAdapter):
                     if (hero.y + dy, hero.x + dx) == target_pos:
                         self.looted_tiles.add(target_pos)
                     return self._step_or_breach(obs_prev, dy, dx)
+                else:
+                    self.looted_tiles.add(target_pos)
             if obs_prev.spatial.has_unvisited_frontier:
                 return self.step(Action(name="step_to_frontier"))
             return self.step(Action(name="step_to_dead_end"))
@@ -2661,13 +2698,17 @@ class NetHackAdapter(EnvironmentAdapter):
                             break
             if not found:
                 return self.step(Action(name="wait"))
-            # If the door is already known to be locked, automatically kick it to breach
+            # If the door is already known to be locked, automatically kick it or blacklist if in shop
             if (
                 target_door
                 and target_door in self.locked_doors
                 and obs_prev
-                and not obs_prev.dungeon.in_shop
             ):
+                if obs_prev.dungeon.in_shop:
+                    self.blocked_tiles.add(target_door)
+                    if obs_prev.spatial.has_unvisited_frontier:
+                        return self.step(Action(name="step_to_frontier"))
+                    return self.step(Action(name="step_to_dead_end"))
                 return self.step(
                     Action(name="kick_closed_door", direction=self._last_attempted_dir)
                 )

@@ -363,3 +363,49 @@ All 12 concrete technical mechanisms across all priority tiers have been fully i
      - Changed `throw_dagger` missing ammo fallback from `melee_attack_hostile` to `step_away_from_hostile`.
 3. **Passable Closed Doors in Corridor Adjacency**:
    - Updated `walkable_adj` calculation to use `walkable_nav`, properly accounting for passable doors as escape paths.
+
+---
+
+## 9. Campaign 57 Empirical Autopsy & 4 Stall Eliminators
+
+### 9.1 Campaign 57 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_010211`
+- **Floating Eye & Fast Predator Validation**:
+  - `floating eye` fatalities plunged by **62%** (from 13 in C56 down to 5 in C57).
+  - `PASSIVE_HAZARD_PARALYSIS` dropped by 50% (from 18 down to 9).
+  - `COMBAT_FAST_PREDATOR` dropped by 69% (from 16 down to 5).
+  - Peak score reached **2,298**; max depth reached **11**.
+- **Batch Progression**:
+  - Gen 1: Avg Depth **3.30** | Max Depth 7 | Avg Turns 1,564.7 | Avg Score 301.2
+  - Gen 2: Avg Depth **3.45** | Max Depth 5 | Avg Turns 2,041.2 | Avg Score 374.7
+  - Gen 3: Avg Depth **4.25** | Max Depth 8 | Avg Turns 1,290.7 | Avg Score 506.4 | Peak Score **2,298**
+  - Gen 4: Avg Depth **3.75** | Max Depth **11** | Avg Turns 1,866.5 | Avg Score 383.4
+  - Gen 5: Avg Depth **3.80** | Max Depth 8 | Avg Turns 2,027.6 | Avg Score 501.4
+  - Gen 6: Avg Depth **3.85** | Max Depth 7 | Avg Turns 1,860.8 | Avg Score 483.8
+  - Gen 7: Avg Depth **3.30** | Max Depth 8 | Avg Turns 1,474.1 | Avg Score 364.7
+  - Gen 8: Avg Depth **3.05** | Max Depth 7 | Avg Turns 1,624.7 | Avg Score 328.8
+  - Gen 9: Avg Depth **4.40** | Max Depth 9 | Avg Turns 1,665.8 | Avg Score **565.8**
+  - Gen 10: Avg Depth **3.20** | Max Depth 6 | Avg Turns 1,734.2 | Avg Score 368.0
+- **Overall C57 Metrics**: 200 episodes, Avg Depth **3.64**, Max Depth **11**, Avg Turns **1,715.0**, Avg Score **417.8**, Peak Score **2,298**.
+- **Root Cause Taxonomy (DuckDB)**:
+  1. `COMBAT_GENERAL`: 80 (40.0%, avg depth 3.74)
+  2. `ARMOR_DEFICIT`: 57 (28.5%, avg depth 5.25, avg turns 1,591.2)
+  3. `STALL_SECRET_DOOR`: 49 (24.5%, avg depth 1.43, avg turns 2,139.2)
+  4. `PASSIVE_HAZARD_PARALYSIS`: 9 (4.5%, avg depth 4.11, avg turns 2,538.6)
+  5. `COMBAT_FAST_PREDATOR`: 5 (2.5%, avg depth 4.40, avg turns 1,199.6)
+
+### 9.2 Key Stall Root Causes Diagnosed & Hardened for Campaign 58
+Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop traps causing 2,000+ turn starvation deadlocks on DL 1–2:
+1. **Locked Shop Door Loop**:
+   - Inside shops, kicking locked doors was forbidden, but `target_door` was never added to `blocked_tiles`. The hero stood before the door yielding `open_door()` every single turn for 2,000 turns until starving to death.
+   - **Fix Applied**: When `target_door in self.locked_doors` and `obs_prev.dungeon.in_shop`, the adapter adds `target_door` to `self.blocked_tiles` and steps away to frontiers/dead ends. Policy also skips locked doors inside shops.
+2. **`step_to_loot` Ping-Pong & Unreachable Item Trap**:
+   - When dropped loot was unreachable (across moat/pit/boulder) or unpickable, `nearby_loot_pos` kept targeting it every other turn, creating a 2,000-turn `step_to_frontier -> step_to_loot` oscillation.
+   - **Fix Applied**: Added `self.loot_attempts` tracking per tile (blacklisting after 3 attempts or immediately if `find_path` returns None).
+3. **`test_altar_buc` Single-Floor Cycle Guard**:
+   - Once BUC testing completed, `altar_solver` returned `None`, stepping off the altar. On the adjacent tile, `has_untested_items` triggered `step_to_altar()`, stepping back on, resulting in a 2,000-turn `test_altar_buc -> step_to_altar` ping-pong.
+   - **Fix Applied**: Added `self.altar_tested_on_floor` flag in `NetHackAdapter` and policy; testing is executed at most once per floor.
+4. **`step_to_dead_end` In-Place Wall Search Stagnation**:
+   - When no dead ends were reachable, `step_to_dead_end` checked `adj_walls >= 1` and searched in place. Because the hero never moved, `adj_walls >= 1` remained true forever, causing up to 2,000 consecutive in-place searches.
+   - **Fix Applied**: Capped in-place searches at `< 12` (`self.searched_count[y, x] < 12`). If $\ge 12$, the adapter forcibly steps to the adjacent walkable tile with the lowest search count, sweeping along walls and discovering genuine corridors.
+
