@@ -1016,4 +1016,60 @@ Empirical query of all 13,014 episodes and Campaign 68 telemetry isolates the ro
 - [ ] **Action Item 4: Aggressive Body Armor Upgrading in `phase_early_scaling`**:
   - Ensure `replace_body_armor()` proactively replaces starting leather armor with dropped heavy armor (`plate mail`, `splint mail`, `banded mail`, `dwarvish mithril coat`), driving hero AC to $\le 0$ before DL 5 to withstand DL 4–6 pack bursts.
 
+---
 
+## 25. Deep Dive 4 Autopsy: The Monster Threat Matrix at the "DL 4–7 Wall"
+
+### 25.1 The 61.9% Mortality Wall (Depths 3 to 7)
+DuckDB analysis of all 13,014 historic episodes reveals that **8,053 episodes (61.9%) terminate on Depths 3 through 7**:
+
+| Depth | Deaths | % of DL 3–7 Deaths | Primary Monster Archetypes Encountered |
+|---|---|---|---|
+| **DL 3** | 2,531 | 31.4% | Early vermin (`jackal`, `rat`, `newt`, `gecko`) + early passive hazards (`floating eye`, `gas spore`). |
+| **DL 4** | 2,095 | 26.0% | High-speed flyers (`giant bat` 7.4%), early orcs, and food depletion starvations. |
+| **DL 5** | 1,836 | 22.8% | **Swarms & Herds Arrive**: `giant ant` (4.5%), `rothe` (4.0%), `hill orc` (3.3%), `rock mole` (3.0%). |
+| **DL 6** | 981 | 12.2% | Poison packs & lethal elites: `giant ant` (5.7%), `rothe` (4.5%), `yellow light` (3.3%), `killer bee` (3.3%). |
+| **DL 7** | 610 | 7.6% | Exploding hazards & heavy hitters: `yellow light` (5.8%), `giant ant` (4.9%), `giant spider` (4.7%), `rothe` (4.1%). |
+
+### 25.2 The 4 Fatal Combat Vulnerabilities Uncovered
+
+1. **The Pack/Herd Burst Vulnerability (`is_pack_threat` Omission)**:
+   - Rothes spawn in herds of 3–5. Each rothe executes 3 attacks per turn (1d3 bite, 1d3 butt, 1d8 kick), dealing 15–35 damage in a single round.
+   - While `NetHackAdapter` computed `obs.combat.is_pack_threat`, **it was completely omitted from `handle_combat` in `latest_policy.py`**.
+   - As a result, heroes stood in open rooms trading melee blows against multiple beasts until HP dropped $< 35\%$, then attempted to engrave Elbereth at 4 HP and died while engraving.
+   - **Crucial Rule**: Rothes and giant ants fully respect Elbereth! In an open room against a pack, the policy must engrave Elbereth *immediately on turn 1* (at 100% HP) or retreat to a 1-tile corridor chokepoint before taking damage.
+
+2. **Wielded Weapon Humanoids (Mattock Dwarves & Aklys Gnomes)**:
+   - Dwarves with dwarvish mattocks (2d12 damage, up to 24 burst damage per swing) and gnome lords with aklyses (1d6+2 bludgeoning) deal lethal burst strikes to AC 4–6 heroes.
+   - Dwarves and gnomes are humanoids that **ignore Elbereth** (`hostile_ignores_elbereth == True`).
+   - Standing in open melee with them caused instant mortalities. They must be softened from distance $\ge 2$ with missiles/wands or fought strictly in 1v1 corridor chokepoints.
+
+3. **Speed 15+ Exploding Hazards (`yellow light`)**:
+   - Yellow lights move at speed 15 and explode on contact, causing **10d20 turns of blindness** (average 105 turns).
+   - Once blinded, heroes cannot see hostiles, suffer $-3$ to hit, grant monsters $+3$ to hit, and cannot navigate or target ranged weapons, leading to guaranteed deaths from 1-HP pests.
+   - Yellow lights have only 1 HP and must be prioritized for instant ranged disposal with thrown daggers/darts at distance $\ge 2$.
+
+4. **Status-Inflicting Sleep Pests (`homunculus`)**:
+   - Homunculus bites inflict 10–30 turns of sleep, rendering the hero completely defenseless while adjacent monsters land 100% critical hits.
+   - Must be dispatched exclusively via thrown missiles at range or on Elbereth.
+
+---
+
+### 25.3 Concrete Action Items & Planned Architecture Changes
+
+- [ ] **Action Item 1: Immediate Pack Threat Defense (`is_pack_threat`) in `handle_combat`**:
+  - In `handle_combat`: when `obs.combat.is_pack_threat` is True in an open room (`not obs.combat.in_corridor`):
+    - Strictly forbid open-room melee.
+    - If facing non-humanoid beasts/insects (rothes, ants, bees, wolves, coyotes) and not on Elbereth: immediately yield `engrave_dust_elbereth()` on **turn 1** before taking damage.
+    - If facing humanoids (orcs, elves) or already on Elbereth: immediately retreat to a 1-tile corridor chokepoint (`step_to_chokepoint()`) to fight 1v1.
+
+- [ ] **Action Item 2: Weapon-Wielding Humanoid Elite Defense**:
+  - Add `obs.combat.is_heavy_weapon_threat` for dwarves with mattocks, gnomes with aklyses, and orc captains.
+  - Prioritize ranged elimination at distance $\ge 2$ via `throw_dagger()` and `zap_offensive_wand()`. When adjacent, retreat to chokepoints or quaff healing before HP drops below 50%.
+
+- [ ] **Action Item 3: Priority Ranged Neutralization for Yellow Lights & Homunculi**:
+  - Add `"yellow light"` and `"homunculus"` to the highest-priority missile targeting list in `handle_combat`.
+  - When visible at distance $\ge 2$: throw daggers/darts or zap offensive wands immediately to eliminate them before they can close distance.
+
+- [ ] **Action Item 4: Fast Predator Open-Room Non-Fleeing Refinement**:
+  - Re-verify that against adjacent fast predators (`is_fast_dangerous`: cats, dogs, giant bats), the policy never yields `step_away_from_hostile()` in open rooms, engaging in immediate Elbereth warding or melee strikes.
