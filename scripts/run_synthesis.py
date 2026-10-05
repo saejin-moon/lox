@@ -319,8 +319,18 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
                     "poison" in m.lower() for m in recent_msgs
                 ):
                     death_reason = "Poison"
-                elif "petrif" in msg_l or any(
-                    "petrif" in m.lower() for m in recent_msgs
+                elif (
+                    "petrif" in msg_l
+                    or "turn to stone" in msg_l
+                    or "turning to stone" in msg_l
+                    or "slowing sensation" in msg_l
+                    or any(
+                        "petrif" in m.lower()
+                        or "turn to stone" in m.lower()
+                        or "turning to stone" in m.lower()
+                        or "slowing sensation" in m.lower()
+                        for m in recent_msgs
+                    )
                 ):
                     death_reason = "Petrification"
                 elif any(

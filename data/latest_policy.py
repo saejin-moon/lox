@@ -47,9 +47,6 @@ class Agent:
                 elif obs.dungeon.fountain_in_fov or obs.dungeon.adjacent_fountain:
                     obs = (yield step_to_fountain())
                     continue
-            if obs.spatial.stairs_down_known:
-                obs = (yield step_to_stairs_down())
-                continue
             if obs.dungeon.standing_on_altar:
                 if obs.dungeon.can_sacrifice:
                     obs = (yield sacrifice_on_altar())
@@ -63,6 +60,9 @@ class Agent:
                 continue
             if obs.dungeon.can_harvest_poison and (not obs.hero.has_poison_res) and (obs.hero.hp_frac > 0.9):
                 obs = (yield harvest_poison_res())
+                continue
+            if obs.spatial.stairs_down_known:
+                obs = (yield step_to_stairs_down())
                 continue
             if obs.dungeon.can_solve_sokoban:
                 obs = (yield step_solve_sokoban())
@@ -110,9 +110,10 @@ class Agent:
                     obs = (yield eat_carried_food())
                     continue
             if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
-                self.last_prayer_turn = obs.hero.turn
-                obs = (yield pray())
-                continue
+                if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
+                    self.last_prayer_turn = obs.hero.turn
+                    obs = (yield pray())
+                    continue
             if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
@@ -142,7 +143,10 @@ class Agent:
                         obs = (yield melee_attack_hostile())
                         continue
                     else:
-                        obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
+                        if not obs.combat.standing_on_elbereth:
+                            obs = (yield engrave_dust_elbereth())
+                        else:
+                            obs = (yield melee_attack_hostile())
                         continue
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:

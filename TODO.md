@@ -706,6 +706,40 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
    - `scripts/run_synthesis.py` hit verbs previously lacked `" hits you!"`, `" touches you!"`, and Vault Guard dialog (`"drop that gold"`), causing wand strikes and guard deaths to fall back to `"unseen hostile"`.
    - **Fix Applied**: Added `" hits you!"`, `" touches you!"`, ray bounce detection, and guard confrontation dialog to the telemetry killer parser.
 
+---
+
+## 18. Campaign 66 Empirical Autopsy & Cockatrice Egg Petrification Shield
+
+### 18.1 Campaign 66 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_052547`
+- **Total Episodes**: 200 | **Avg Depth**: **4.28** | **Max Depth**: **11** | **Avg Score**: **558.6** | **Peak Score**: 2,059 | **Avg Turns**: **2,922.5** | **Peak Turns**: 25,000.
+- **Batch Progression**:
+  - Gen 1: Avg Depth **4.00** | Max Depth 7 | Avg Score 485.2
+  - Gen 2: Avg Depth **3.95** | Max Depth 9 | Avg Score 480.1
+  - Gen 3: Avg Depth **4.35** | Max Depth **10** | Avg Score **639.6** | Peak Turns **25,000**
+  - Gen 4: Avg Depth **5.00** | Max Depth 9 | Avg Score **644.9**
+  - Gen 5: Avg Depth 3.75 | Max Depth 7 | Avg Score 475.7
+  - Gen 6: Avg Depth 3.55 | Max Depth 8 | Avg Score 562.1 | Peak Turns **24,808**
+  - Gen 7: Avg Depth **4.45** | Max Depth 8 | Avg Score 477.5
+  - Gen 8: Avg Depth **4.30** | Max Depth **11** | Avg Score 537.9 | Peak Score 2,059
+  - Gen 9: Avg Depth **4.45** | Max Depth 8 | Avg Score 554.4
+  - Gen 10: Avg Depth **5.00** | Max Depth **10** | Avg Score **729.2**
+- **Key Milestones Achieved**:
+  - Overall Avg Depth rose to **4.28** across 200 episodes.
+  - **Generations 4 and 10 both hit Avg Depth 5.00**!
+  - **ZERO Wand Rebound Self-Kills**: Point-blank wall rebound shield completely eliminated wand bounce fatalities.
+  - Reached Dungeon Depth **11** in Gen 8, Depth **10** in Gen 3 & 10.
+
+### 18.2 Autopsy Discoveries & Autonomous Fixes Deployed
+1. **Lethal Cockatrice Egg Petrification (`g006_e004`)**:
+   - In episode `g006_e004` (Depth 5, max HP 63, turns 5344), the hero was at full health, scooped an egg from the floor via autopickup `%`, and called `eat_carried_food()` (`"This egg is delicious!"` $\to$ instant petrification death).
+   - In `lox.core.types.InventoryView._is_safe_food_item`, any item of category `"food"` was considered safe unless `"corpse"` was in its name. Eggs were categorized as `"food"` without the word `"corpse"`, allowing cockatrice eggs to be consumed as normal food rations.
+   - **Fix Applied**: Updated `_is_safe_food_item` in `lox/core/types.py` to strictly exclude `"egg"` and `"tripe"` alongside `"corpse"`, preventing lethal petrification and nausea vomiting.
+2. **Petrification Telemetry Truthfulness (`scripts/run_synthesis.py`)**:
+   - NetHack's petrification messages (`"You turn to stone."`, `"You feel a slowing sensation."`) do not contain the substring `"petrif"`. Petrification deaths were previously misattributed to combat hit verbs from turns earlier.
+   - **Fix Applied**: Added `"turn to stone"`, `"turning to stone"`, and `"slowing sensation"` to the petrification detector in `scripts/run_synthesis.py`.
+
+
 
 
 

@@ -141,7 +141,9 @@ class InventoryView(list):
         n = it.name.lower()
         if "lichen corpse" in n or "lizard corpse" in n:
             return True
-        return "corpse" not in n
+        if "corpse" in n or "egg" in n or "tripe" in n:
+            return False
+        return True
 
     @property
     def has_food(self) -> bool:
