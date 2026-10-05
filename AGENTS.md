@@ -165,6 +165,10 @@ lox/
    - In NetHack, `HungerState` transitions from `HUNGRY` (2) to `WEAK` (3) before `FAINTING` (4). At `FAINTING`, the hero randomly falls unconscious for 30 turns and cannot act or pray. Emergency prayer for food must trigger at `hunger_state >= 3` when packaged food is exhausted, ensuring divine feeding before the hero falls unconscious.
 38. **Floor Corpse Aging Pruning & Safe Corpse Consumption Gating**:
    - In NetHack, non-lichen/non-lizard corpses rot within 50 turns. The adapter strictly prunes floor corpses with `age >= 50` from `self.floor_corpses`. Policies gate floor corpse consumption on `any(c.is_safe for c in obs.corpses)` rather than truthiness of `obs.corpses`, and `handle_corpse_consumption` falls back to `step_to_frontier()` or `step_to_dead_end()` rather than `wait()`. This completely eliminates the 1,000-turn stationary `wait` stall that previously affected 19% of episodes when inedible rotten corpses lingered on the floor.
+39. **Offline Wiki Knowledge Retrieval (`data/wiki_index.db`)**:
+   - Sub-5ms BM25 SQLite FTS5 index over 3,113 NetHack encyclopedia articles and redirects. Unblocks the LLM AuthorAgent's `query_wiki` tool during generational policy synthesis, supplying accurate domain knowledge (resistances, monster statistics, artifact dipping, Sokoban solutions, prayer mechanics).
+40. **Hierarchical True Dead End Prioritization & Hero Occlusion Attribution**:
+   - `_compute_true_dead_ends_mask` recognizes any walkable tile with $\le 1$ walkable cardinal neighbors (for both `#` and lit `.`) as a true dead end. In `step_to_dead_end`, reachable true dead ends take absolute Priority 1 over generic room perimeter wall candidates, forcing the hero to traverse corridors and search dead ends across the entire floor. Eliminates the local room search trap that previously killed 17.5% of episodes on DL 1. In `_extract_obs`, `tile_type` checks static level fixtures (`known_fountain_pos`, `known_altar_pos`, `known_stairs_down`, `known_stairs_up`), preventing `@` hero occlusion from wiping feature identities.
 
 ---
 
