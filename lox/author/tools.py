@@ -201,6 +201,26 @@ class DuckDBToolRegistry:
             top_k_int = 2
         return self.wiki.query(query, top_k=top_k_int)
 
+    def query_invariants(self, query: str, category: str = "", top_k: int = 3) -> str:
+        """
+        Queries the canonical LOX Empirical Invariant Knowledge Base.
+        Returns high-density rules, anti-patterns, and verified code patterns for tactical topics
+        (e.g., 'hunger prayer', 'floating eye', 'gas spore', 'closed door', 'dead end', 'elbereth', 'mines').
+        """
+        from lox.knowledge import REGISTRY
+
+        cat_arg = category.strip() if category else None
+        try:
+            top_k_int = int(top_k)
+        except Exception:
+            top_k_int = 3
+
+        invs = REGISTRY.search(query, category=cat_arg, top_k=top_k_int)
+        if not invs:
+            return f"No invariants found matching '{query}' (category: {category or 'all'})."
+        return REGISTRY.format_llm_reference(invs)
+
+
     def request_macro(
         self,
         macro_name: str,
@@ -464,6 +484,40 @@ OPENAI_TOOL_SPECS = [
                     "top_k": {
                         "type": "integer",
                         "description": "Number of articles to return (default 2).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_invariants",
+            "description": "Query the LOX Empirical Invariant Knowledge Base for ground-truth rules, anti-patterns, and verified code snippets (topics: 'prayer', 'hunger', 'floating eye', 'gas spore', 'door', 'dead end', 'elbereth', 'mines').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Topic or symptom to search, e.g. 'fainting hunger', 'gas spore explosion', 'passive hazard', 'closed door navigation'",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "combat",
+                            "navigation",
+                            "nutrition",
+                            "equipment",
+                            "dialog_harness",
+                            "architecture",
+                            "",
+                        ],
+                        "description": "Optional category filter.",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of invariants to retrieve (default 3).",
                     },
                 },
                 "required": ["query"],

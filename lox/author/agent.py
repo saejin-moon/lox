@@ -164,6 +164,12 @@ class AuthorAgent:
                 return self.tools.query_wiki(
                     args.get("query", ""), top_k=args.get("top_k", 2)
                 )
+            elif tool_name == "query_invariants":
+                return self.tools.query_invariants(
+                    query=args.get("query", ""),
+                    category=args.get("category", ""),
+                    top_k=args.get("top_k", 3),
+                )
             elif tool_name == "request_macro":
                 run_id = getattr(self, "_current_run_id", "synth_session")
                 return self.tools.request_macro(
@@ -282,6 +288,7 @@ class Agent:
             self.tools.get_floor_pacing_stats,
             self.tools.get_action_distribution,
             self.tools.query_wiki,
+            self.tools.query_invariants,
             self.tools.get_dungeon_topology,
             self.tools.get_hazard_map,
             self.tools.get_floor_stash_report,

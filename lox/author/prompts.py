@@ -374,6 +374,7 @@ Every turn, `obs` provides rich sub-namespaces:
 - `get_floor_stash_report()`: Altars, fountains, and features discovered across all explored dungeon levels.
 - `get_death_taxonomy(window)`: Top death causes, frequencies, and avg depth.
 - `query_wiki(query)`: Search offline NetHack 3.6.6 encyclopedia (monsters, intrinsics, corpses, rituals).
+- `query_invariants(query, category)`: Query the canonical LOX Empirical Invariant Knowledge Base for ground-truth tactical rules, anti-patterns, and verified code patterns (topics: 'prayer', 'hunger', 'floating eye', 'gas spore', 'door', 'dead end', 'elbereth', 'mines').
 - `request_macro(macro_name, rationale, proposed_interface, priority)`:
   * **When to request a macro**: Call `request_macro` when you identify a complex, multi-turn algorithmic procedure that cannot be cleanly implemented in simple reactive `Agent` code (for example: Sokoban boulder-push pathfinding, shop price-identification sequences, complex container stash packing, or water-crossing solvers).
   * **Contract**:
@@ -397,7 +398,14 @@ You have two options for your output:
 def build_user_prompt(
     current_policy: str, trigger_reason: str, status_report: str
 ) -> str:
-    """User prompt presenting the empirical autopsy, ranked mortality causes, and current policy."""
+    """User prompt presenting the empirical autopsy, ranked mortality causes, relevant invariants, and current policy."""
+    from lox.knowledge import REGISTRY
+
+    relevant_invs = REGISTRY.get_relevant_invariants_for_trigger(trigger_reason, top_k=3)
+    invariants_block = REGISTRY.format_llm_reference(relevant_invs)
+    if invariants_block:
+        invariants_block = f"\n{invariants_block}\n"
+
     return f"""### Empirical Incident Report:
 {status_report}
 
@@ -406,8 +414,8 @@ def build_user_prompt(
 
 ### Diagnostic Notice:
 The telemetry database `data/lox.duckdb` holds complete per-tick flight recordings and death traces.
-Call `get_death_autopsy_trace()` to inspect the exact final 15 ticks, `get_hazard_map(depth)` to view known traps/monsters, or `query_wiki(monster_name)` to look up mechanics before writing code.
-
+Call `get_death_autopsy_trace()` to inspect the exact final 15 ticks, `query_invariants(topic)` to check verified tactical rules, or `query_wiki(monster_name)` to look up mechanics before writing code.
+{invariants_block}
 ### Current Policy:
 ```python
 {current_policy.strip()}

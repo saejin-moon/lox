@@ -41,6 +41,8 @@ lox/
 │   └── nethack.py        # NetHackAdapter: NLE gym wrapper, menu dismissal, navigation & tactical primitives
 ├── eval/
 │   └── runner.py         # Batch evaluation engine, DuckDB episode and tick telemetry logger
+├── knowledge/
+│   └── invariants.py     # Canonical Empirical Knowledge Base: 32 typed, indexed invariants (REGISTRY)
 ├── telemetry/
 │   └── database.py       # DuckDB schema: episodes, ticks, token_usage, evolved_policies tables
 └── wiki/
@@ -51,8 +53,11 @@ lox/
 
 ## 3. Consolidated Technical Invariants & Operational Rules
 
+> [!NOTE]
+> All 32 empirical invariants synthesized across 48+ campaigns are programmatically indexed and maintained in the typed knowledge base [`lox/knowledge/invariants.py`](file:///home/moose/git/lox/lox/knowledge/invariants.py) via `REGISTRY`. Each invariant specifies its canonical ID, category, tags, ground-truth rule, anti-pattern, and verified code snippet. LLMs can dynamically query this registry during authoring sessions via `query_invariants(query, category)`.
+
 ### 3.1 Policy Architecture & Anti-Loop Defense
-1. **Python Generator Paradigm & Subroutine Protocol**: Policies are Python classes yielding actions (`obs = yield action`). Subroutines MUST be called via `obs = yield from self.subroutine(obs)`.
+1. **Python Generator Paradigm & Subroutine Protocol (`INV-ARC-001`)**: Policies are Python classes yielding actions (`obs = yield action`). Subroutines MUST be called via `obs = yield from self.subroutine(obs)`.
 2. **The Zero-Yield Busy Loop Trap**: Every subroutine called via `yield from` MUST yield an action on every code branch before returning, OR the caller must avoid `continue` without yielding. Returning without yielding (e.g. `return obs`) followed by caller `continue` spins CPU at 100% without advancing the environment clock.
 3. **Four-Layer Anti-Loop Defense Architecture**:
    - **Layer 1 (AST `LoopGuardTransformer`)**: Instruments every `while` and `for` loop with `_guard.tick()`. If any loop exceeds 2,000 iterations without yielding, raises `RuntimeError("Infinite loop detected")` in $< 1\text{ms}$.
