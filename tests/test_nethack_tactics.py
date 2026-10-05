@@ -856,7 +856,7 @@ def test_in_combat_emergency_eating_unconditional():
 
 
 def test_peaceful_domestic_animal_protection_and_sokoban_sweep():
-    """Verify that domestic animals are recognized as peaceful and Sokoban sweep is shielded on DL 6-10."""
+    """Verify that genuine peaceful NPCs are recognized, attack retaliation triggers, and Sokoban sweep is shielded."""
     from lox.envs.nethack import (
         GLYPH_IS_PEACEFUL_SPECIES_LUT,
         GLYPH_MON_NAME,
@@ -866,13 +866,18 @@ def test_peaceful_domestic_animal_protection_and_sokoban_sweep():
     from lox.dsl.compiler import compile_policy
     from lox.core.types import Observation, HeroState, SpatialView, DungeonView
 
-    # 1. Domestic animals in peaceful LUT
+    # 1. Genuine peaceful humanoid NPCs in peaceful LUT
     peaceful_names = [GLYPH_MON_NAME[g].lower() for g in range(_MAX_GLYPH) if GLYPH_IS_PEACEFUL_SPECIES_LUT[g]]
-    assert any("kitten" in n for n in peaceful_names), "Kitten must be in peaceful species LUT"
-    assert any("little dog" in n for n in peaceful_names), "Little dog must be in peaceful species LUT"
-    assert any("pony" in n for n in peaceful_names), "Pony must be in peaceful species LUT"
+    assert any("guard" in n for n in peaceful_names), "Guard must be in peaceful species LUT"
+    assert any("priest" in n for n in peaceful_names), "Priest must be in peaceful species LUT"
+    assert any("shopkeeper" in n for n in peaceful_names), "Shopkeeper must be in peaceful species LUT"
+    assert any("oracle" in n for n in peaceful_names), "Oracle must be in peaceful species LUT"
 
-    # 2. Sokoban sweep shielding in policy
+    # 2. Domestic animals must NOT be blanket peaceful so hero defends against wild/feral attacks
+    assert not any("kitten" in n for n in peaceful_names), "Kitten must not be blanket peaceful in LUT"
+    assert not any("little dog" in n for n in peaceful_names), "Little dog must not be blanket peaceful in LUT"
+
+    # 3. Sokoban sweep shielding in policy
     with open("data/latest_policy.py") as f:
         policy_code = f.read()
 
@@ -889,5 +894,6 @@ def test_peaceful_domestic_animal_protection_and_sokoban_sweep():
     assert action is not None
     # Must NOT descend on DL 7 when standing on stairs down if sweeping for Sokoban
     assert action.name != "descend", f"Expected not to descend on DL 7 during Sokoban sweep but got {action.name}"
+
 
 

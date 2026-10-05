@@ -503,29 +503,29 @@ if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
     ),
     Invariant(
         id="INV-CBT-008",
-        title="Peaceful NPC & Domestic Animal Non-Aggression Shield",
+        title="Peaceful NPC Shield & Universal Attack Retaliation",
         category="combat",
-        tags=["peaceful", "guard", "priest", "shopkeeper", "oracle", "kitten", "dog", "horse"],
+        tags=["peaceful", "guard", "priest", "shopkeeper", "oracle", "retaliation"],
         rule=(
-            "Vault Guards (guard), temple priests, shopkeepers, watchmen, and domestic animals (kitten, housecat, "
-            "little dog, dog, pony, horse) spawn peaceful by default. Attacking them prompts 'Really attack? [yn]'. "
-            "The adapter auto-answers 'n' and maintains persistent peaceful_positions and GLYPH_IS_PEACEFUL_SPECIES_LUT. "
-            "Policies must never attack peaceful entities, and pathfinding routes around them to avoid 25,000-turn attack loops. "
-            "NEVER check obs.dungeon.in_shop here: monsters (such as mimics disguised as items, rats, or orcs) "
-            "frequently spawn inside shops. Retreating on obs.dungeon.in_shop makes the hero refuse to fight "
-            "hostiles inside shops, causing 100% preventable deaths while trapped in shops."
+            "Vault Guards (guard), temple priests, shopkeepers, watchmen, and oracles are peaceful until provoked. "
+            "Attacking them prompts 'Really attack? [yn]'. The adapter auto-answers 'n' and maintains persistent "
+            "peaceful_positions and GLYPH_IS_PEACEFUL_SPECIES_LUT. Pathfinding routes around peaceful NPCs to avoid attack prompts. "
+            "CRITICAL: When ANY monster attacks the hero ('hits!', 'bites!', 'scratches!'), universal attack retaliation "
+            "immediately strips peaceful status from all adjacent tiles and marks them hostile. Policies must defend themselves "
+            "and eliminate attackers in melee. Wild/feral animals are NOT blanket peaceful in the LUT, ensuring the hero defends "
+            "against biting dogs and kittens. NEVER check obs.dungeon.in_shop to refuse fighting hostiles."
         ),
         anti_pattern=(
-            "Attacking peaceful domestic animals or guards, or treating them as hostiles in melee loops, or retreating "
-            "from mimics/orcs inside shops because obs.dungeon.in_shop is True."
+            "Treating wild/feral biting animals as unattackable peaceful NPCs, or firing ranged weapons at Vault Guards "
+            "or temple priests, or retreating from mimics/orcs inside shops because obs.dungeon.in_shop is True."
         ),
         code_snippet="""
 closest_name = obs.combat.closest_hostile_name.lower()
-if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle', 'kitten', 'housecat', 'little dog', 'dog', 'pony', 'horse'):
+if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') and not obs.combat.adjacent_hostile:
     obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
     continue
 """,
-        related_ids=["INV-CBT-006"],
+        related_ids=["INV-CBT-006", "INV-CBT-011"],
     ),
     Invariant(
         id="INV-CBT-011",

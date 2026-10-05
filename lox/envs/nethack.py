@@ -199,15 +199,6 @@ for _g in range(_MAX_GLYPH):
                     "aligned priest",
                     "high priest",
                     "oracle",
-                    "kitten",
-                    "housecat",
-                    "large cat",
-                    "little dog",
-                    "dog",
-                    "large dog",
-                    "pony",
-                    "horse",
-                    "warhorse",
                 ):
                     GLYPH_IS_PEACEFUL_SPECIES_LUT[_g] = True
 
@@ -864,16 +855,7 @@ class NetHackAdapter(EnvironmentAdapter):
             x_min, x_max = max(0, x - 8), min(79, x + 9)
             if (y, x) in self.peaceful_positions:
                 self.peaceful_positions.discard((y, x))
-            if self.peaceful_positions:
-                for py, px in list(self.peaceful_positions):
-                    if y_min <= py < y_max and x_min <= px < x_max:
-                        pg = int(glyphs[py, px])
-                        if (
-                            0 <= pg < _MAX_GLYPH
-                            and GLYPH_IS_MON_HOSTILE_LUT[pg]
-                            and not GLYPH_IS_PEACEFUL_SPECIES_LUT[pg]
-                        ):
-                            self.peaceful_positions.discard((py, px))
+
             sub_g = glyphs[y_min:y_max, x_min:x_max]
             valid_sub = np.clip(sub_g, 0, _MAX_GLYPH - 1)
             hostile_mask = GLYPH_IS_MON_HOSTILE_LUT[valid_sub]
@@ -1795,25 +1777,28 @@ class NetHackAdapter(EnvironmentAdapter):
 
         msg = obs.message.lower()
         all_doors = self._get_all_doors_mask(obs)
-        if (
-            any(
-                f"{npc} hits" in msg
-                for npc in (
-                    "watchman",
-                    "shopkeeper",
-                    "watch captain",
-                    "priest",
-                    "priestess",
-                    "guard",
-                )
+        if any(
+            verb in msg
+            for verb in (
+                " hits",
+                " bites",
+                " scratches",
+                " stings",
+                " butts",
+                " kicks",
+                " touches",
+                " crushes",
             )
-            and getattr(self, "_last_attempted_dir", None) is not None
         ):
-            py, px = getattr(self, "_prev_hero_pos", (0, 0))
-            dy, dx = self._last_attempted_dir
-            target_tile = (py + dy, px + dx)
-            self.hostile_npc_positions.add(target_tile)
-            self.peaceful_positions.discard(target_tile)
+            hy, hx = obs.hero.y, obs.hero.x
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ay, ax = hy + dy, hx + dx
+                    if 0 <= ay < 21 and 0 <= ax < 79:
+                        self.peaceful_positions.discard((ay, ax))
+                        self.hostile_npc_positions.add((ay, ax))
         if (
             "really attack" in msg
             or "who are you" in msg

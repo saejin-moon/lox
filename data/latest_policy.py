@@ -28,12 +28,13 @@ class Agent:
             if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
                 obs = (yield from self.handle_combat(obs))
                 continue
-            if any((obs.hero.y, obs.hero.x) == (c.y, c.x) and c.is_safe for c in obs.corpses) and obs.hero.hunger_state >= 1:
-                obs = (yield eat_floor_corpse())
-                continue
-            if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
-                obs = (yield eat_carried_food())
-                continue
+            if obs.hero.hunger_state >= 2:
+                if any((c.is_safe for c in obs.corpses)):
+                    obs = (yield from self.handle_corpse_consumption(obs))
+                    continue
+                elif obs.inventory.has_food:
+                    obs = (yield eat_carried_food())
+                    continue
             if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
@@ -448,7 +449,7 @@ class Agent:
                     obs = (yield melee_attack_hostile())
             elif obs.hero.hp_frac > 0.4:
                 obs = (yield melee_attack_hostile())
-            elif not obs.combat.in_corridor and obs.combat.can_retreat:
+            elif not obs.combat.in_corridor and obs.combat.can_retreat and (obs.combat.closest_hostile_dist >= 2):
                 obs = (yield step_to_chokepoint())
             elif obs.combat.in_corridor:
                 obs = (yield wait())
