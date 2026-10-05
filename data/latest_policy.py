@@ -12,7 +12,7 @@ class Agent:
             if obs.hero.depth != self.last_depth:
                 self.last_depth = obs.hero.depth
                 self.altar_tested = False
-            if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food)):
+            if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food)):
                 if obs.hero.turn - self.last_prayer_turn >= 850:
                     self.last_prayer_turn = obs.hero.turn
                     obs = (yield pray())
@@ -75,11 +75,8 @@ class Agent:
                 obs = (yield step_to_stairs_up())
                 continue
             if obs.dungeon.adjacent_closed_door:
-                if obs.dungeon.door_is_locked:
-                    if not obs.dungeon.in_shop:
-                        obs = (yield kick_closed_door())
-                    else:
-                        obs = (yield (step_to_frontier() if obs.spatial.has_unvisited_frontier else step_to_dead_end()))
+                if obs.dungeon.door_is_locked and (not obs.dungeon.in_shop):
+                    obs = (yield kick_closed_door())
                 else:
                     obs = (yield open_door())
                 continue
@@ -109,14 +106,14 @@ class Agent:
                 elif obs.inventory.has_wand_of_teleport:
                     obs = (yield zap_wand_teleport())
                     continue
-            if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and obs.hero.turn - self.last_prayer_turn >= 850:
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and obs.hero.turn - self.last_prayer_turn >= 850:
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
             if obs.hero.hp_frac < 0.45 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
-            if obs.combat.adjacent_gas_spore or obs.combat.adjacent_floating_eye:
+            if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
                 if obs.combat.has_safe_melee_target:
                     obs = (yield melee_attack_hostile())
                     continue
@@ -143,12 +140,6 @@ class Agent:
                 if (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2) and (not obs.combat.standing_on_elbereth):
                     obs = (yield engrave_dust_elbereth())
                     continue
-            if not obs.combat.standing_on_elbereth:
-                if obs.hero.hp_frac < 0.35 or (obs.hero.hp_frac < 0.6 and obs.combat.hostile_count_fov >= 2):
-                    if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth):
-                        if not (obs.combat.adjacent_hostile and obs.hero.hp_frac > 0.35):
-                            obs = (yield engrave_dust_elbereth())
-                            continue
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
                     if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:

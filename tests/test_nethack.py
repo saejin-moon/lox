@@ -41,6 +41,24 @@ def test_nethack_interlocks():
     adapter.close()
 
 
+def test_prayer_execution_and_guard():
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=42)
+    assert adapter.can_safely_pray(obs.hero.turn) is True
+
+    # 1. Safe prayer executes (answers 'y' to confirmation prompt)
+    obs, r, term, trunc, info = adapter.step(Action(name="pray"))
+    assert obs.hero.turn > 1
+    assert adapter.can_safely_pray(obs.hero.turn) is False
+
+    # 2. Premature prayer is guarded: falls back to wait instead of angering deity
+    t_before = obs.hero.turn
+    obs, r, term, trunc, info = adapter.step(Action(name="pray"))
+    assert obs.hero.turn > t_before
+
+    adapter.close()
+
+
 def test_door_glyph_discrimination_and_open_fallback():
     import nle.nethack as nh
 

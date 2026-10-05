@@ -182,13 +182,17 @@ class RootCauseClassifier:
         inv_str = str(ep_summary.get("inventory_at_death") or "").lower()
         death_reason = str(ep_summary.get("death_reason") or "").lower()
 
-        # Check ticks for rich state telemetry
-        turns_fainting = sum(1 for t in ticks if t.get("hunger") == "FAINTING")
-        turns_weak = sum(1 for t in ticks if t.get("hunger") == "WEAK")
+        # Check ticks or ep_summary for rich state telemetry
+        turns_fainting = int(ep_summary.get("turns_fainting", 0)) or sum(
+            1 for t in ticks if t.get("hunger") == "FAINTING"
+        )
+        turns_weak = int(ep_summary.get("turns_weak", 0)) or sum(
+            1 for t in ticks if t.get("hunger") == "WEAK"
+        )
         searches_count = int(ep_summary.get("searches") or 0)
 
-        # Detect position oscillation in last 60 ticks
-        is_oscillating = False
+        # Detect position oscillation in last 60 ticks or summary flag
+        is_oscillating = bool(ep_summary.get("is_oscillating", False))
         if len(ticks) >= 30:
             recent_positions = [(t.get("y", -1), t.get("x", -1)) for t in ticks[-40:]]
             unique_pos = set(recent_positions)

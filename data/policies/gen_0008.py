@@ -4,9 +4,14 @@ class Agent:
         self.last_prayer_turn = -1000
         self.search_count = 0
         self.retreat_streak = 0
+        self.altar_tested = False
+        self.last_depth = 1
 
     def run(self, obs):
         while True:
+            if obs.hero.depth != self.last_depth:
+                self.last_depth = obs.hero.depth
+                self.altar_tested = False
             if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and (not obs.inventory.has_food)):
                 if obs.hero.turn - self.last_prayer_turn >= 850:
                     self.last_prayer_turn = obs.hero.turn
@@ -50,10 +55,11 @@ class Agent:
                 if obs.dungeon.can_sacrifice:
                     obs = (yield sacrifice_on_altar())
                     continue
-                elif obs.epistemic.has_untested_items:
+                elif obs.epistemic.has_untested_items and (not self.altar_tested):
                     obs = (yield test_altar_buc())
+                    self.altar_tested = True
                     continue
-            elif obs.dungeon.adjacent_altar and obs.epistemic.has_untested_items:
+            elif obs.dungeon.adjacent_altar and obs.epistemic.has_untested_items and (not self.altar_tested):
                 obs = (yield step_to_altar())
                 continue
             if obs.dungeon.can_harvest_poison and (not obs.hero.has_poison_res) and (obs.hero.hp_frac > 0.9):
@@ -107,28 +113,19 @@ class Agent:
             if obs.hero.hp_frac < 0.45 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
-            if obs.combat.adjacent_gas_spore:
+            if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
                 if obs.combat.has_safe_melee_target:
                     obs = (yield melee_attack_hostile())
                     continue
-                if not obs.combat.standing_on_elbereth:
-                    obs = (yield engrave_dust_elbereth())
-                else:
-                    obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
+                if obs.combat.adjacent_floating_eye:
+                    if obs.inventory.has_daggers:
+                        obs = (yield throw_dagger())
+                        continue
+                    elif obs.inventory.has_offensive_wand:
+                        obs = (yield zap_offensive_wand())
+                        continue
+                obs = (yield step_away_from_hostile())
                 continue
-            if obs.combat.adjacent_floating_eye:
-                if obs.combat.has_safe_melee_target:
-                    obs = (yield melee_attack_hostile())
-                    continue
-                if obs.inventory.has_daggers:
-                    obs = (yield throw_dagger())
-                    continue
-                elif obs.inventory.has_offensive_wand:
-                    obs = (yield zap_offensive_wand())
-                    continue
-                else:
-                    obs = (yield step_away_from_hostile())
-                    continue
             closest_name = obs.combat.closest_hostile_name.lower()
             if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') or obs.dungeon.in_shop:
                 obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
@@ -146,8 +143,9 @@ class Agent:
             if not obs.combat.standing_on_elbereth:
                 if obs.hero.hp_frac < 0.35 or (obs.hero.hp_frac < 0.6 and obs.combat.hostile_count_fov >= 2):
                     if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth):
-                        obs = (yield engrave_dust_elbereth())
-                        continue
+                        if not (obs.combat.adjacent_hostile and obs.hero.hp_frac > 0.35):
+                            obs = (yield engrave_dust_elbereth())
+                            continue
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
                     if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:

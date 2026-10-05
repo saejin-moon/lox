@@ -298,7 +298,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             )
 
             recent_msgs = [
-                t.get("message", "") for t in getattr(recorder, "turns", [])[-6:]
+                s.message for s in list(getattr(recorder, "buffer", []))[-6:]
             ]
             if getattr(obs.hero, "hp", 0) <= 0:
                 msg = getattr(obs, "message", "").strip()
@@ -376,7 +376,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         or "fatality" in death_reason.lower()
     ):
         recent_msgs = [
-            t.get("message", "") for t in getattr(recorder, "turns", [])[-6:]
+            s.message for s in list(getattr(recorder, "buffer", []))[-6:]
         ]
         if getattr(obs, "message", ""):
             recent_msgs.append(obs.message)
@@ -396,6 +396,12 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
                 " burns!",
                 " freezes!",
                 " poisons!",
+                " thrusts ",
+                " thrusts his ",
+                " thrusts her ",
+                " touches!",
+                " crushes!",
+                " swings ",
                 " bites.",
                 " hits.",
                 " stings.",

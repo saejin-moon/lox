@@ -1428,11 +1428,20 @@ class NetHackAdapter(EnvironmentAdapter):
             if "--More--" in msg or in_more:
                 raw_obs, _, term, trunc, _ = self.env.step(space_idx)
             elif "Are you sure you want to pray?" in msg:
-                # NetHack ONLY prompts this when prayer timeout has not elapsed or deity is angry.
-                # Answering 'n' aborts the unsafe prayer and completely avoids divine smiting!
-                raw_obs, _, term, trunc, _ = self.env.step(
-                    self.char_to_act.get("n", space_idx)
+                bl = raw_obs.get("blstats")
+                cur_turn = (
+                    int(bl[20])
+                    if bl is not None and len(bl) > 20
+                    else getattr(self, "_prev_turn", 0)
                 )
+                if self.can_safely_pray(cur_turn):
+                    raw_obs, _, term, trunc, _ = self.env.step(
+                        self.char_to_act.get("y", space_idx)
+                    )
+                else:
+                    raw_obs, _, term, trunc, _ = self.env.step(
+                        self.char_to_act.get("n", space_idx)
+                    )
             elif any(
                 phrase in msg.lower()
                 for phrase in (
@@ -2540,13 +2549,15 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name in ("wait", "rest"):
             target_char = "."
         elif action.name == "pray":
+            turn_before = getattr(self, "_prev_turn", 0)
+            if not self.can_safely_pray(turn_before):
+                return self.step(Action(name="wait"))
             obs, r, term, trunc, info = self._step_sequence([self.pray_action_idx])
             msg_low = obs.message.lower()
             if "displeased" in msg_low or "anger" in msg_low:
                 self.last_prayer_turn = obs.hero.turn + 500
             elif "decide not to pray" in msg_low or "never mind" in msg_low:
-                # Cancelled by shield because timeout was still active
-                self.last_prayer_turn = obs.hero.turn - 500
+                pass
             else:
                 self.last_prayer_turn = obs.hero.turn
             return obs, r, term, trunc, info

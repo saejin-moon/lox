@@ -453,4 +453,37 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
 2. **Next Frontier for Depth 20**:
    - Securing Excalibur early (XL $\ge 5$, fountain dipping) and navigating through the Minetown branch to donate gold ($400 \times \text{XL}$) to the aligned temple priest for permanent +2 to +4 AC protection.
 
+---
+
+## 11. Campaign 59 Empirical Autopsy & Prayer Confirmation Restoration
+
+### 11.1 Campaign 59 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_014629`
+- **Key Metrics**:
+  - **Overall Average Depth**: **3.90** (Max Depth **10**, Avg Turns **1,994.5**, Avg Score **510.5**, Peak Score **1,881**).
+  - **Body Armor Impact**: 84 episodes (42%) acquired and equipped body armor, reaching **Avg Depth 4.80** (vs 3.25 without body armor, a **+1.55 depth surge**).
+  - **Deep Runs**: Gen 2 achieved **Avg Depth 4.40**, Gen 6 achieved **Avg Depth 4.40** (Max Depth 9, Avg Score 644.3), Gen 7 reached **Max Depth 10**.
+- **Batch Progression**:
+  - Gen 1: Avg Depth **4.20** | Max Depth 8 | Avg Turns 1,861.2 | Avg Score 531.8
+  - Gen 2: Avg Depth **4.40** | Max Depth 8 | Avg Turns 2,255.5 | Avg Score **667.1**
+  - Gen 3: Avg Depth **3.95** | Max Depth 7 | Avg Turns 2,410.5 | Avg Score 535.7
+  - Gen 4: Avg Depth **3.55** | Max Depth 8 | Avg Turns 2,105.0 | Avg Score 503.2
+  - Gen 5: Avg Depth **3.60** | Max Depth 8 | Avg Turns 1,935.9 | Avg Score 423.2
+  - Gen 6: Avg Depth **4.40** | Max Depth 9 | Avg Turns 1,935.8 | Avg Score **644.3** | Peak Score **1,881**
+  - Gen 7: Avg Depth **3.85** | Max Depth **10** | Avg Turns 2,032.7 | Avg Score 448.7
+  - Gen 8: Avg Depth **3.70** | Max Depth 7 | Avg Turns 1,840.0 | Avg Score 438.4
+  - Gen 9: Avg Depth **3.80** | Max Depth 9 | Avg Turns 1,700.3 | Avg Score 458.5
+  - Gen 10: Avg Depth **3.55** | Max Depth 7 | Avg Turns 1,868.2 | Avg Score 454.7
+
+### 11.2 Root Cause Taxonomy & Autopsy Discoveries
+1. **Prayer Confirmation Abortion Bug (`INV-DIV-001`)**:
+   - In vanilla NetHack 3.6, `#pray` ALWAYS prompts `"Are you sure you want to pray? [yn] (n)"`.
+   - `_dismiss_more` had been auto-answering `'n'`, silently aborting 100% of all prayers in the game. Heroes with 0 food were unable to receive divine feeding, fainting from lack of food and succumbing to pests.
+   - Furthermore, divine feeding is ONLY granted at `hunger_state >= 4` (`FAINTING`), not `WEAK`.
+   - **Fix Applied**: Updated `_dismiss_more` to check `can_safely_pray(turn)`: if $\ge 850$ turns have elapsed, auto-answers `'y'` to execute safe prayer; if premature ($< 850$ turns), auto-answers `'n'` (and `step()` guards with `Action(name="wait")`) to eliminate divine wrath. Updated policy to trigger prayer at `hunger_state >= 4` or `hp_frac < 0.15`.
+2. **FlightRecorder Message History Fix**:
+   - `getattr(recorder, "turns", [])` accessed a non-existent attribute; replaced with `list(recorder.buffer)[-6:]` so killer hit verbs and `is_starving` are properly resolved.
+3. **Diagnostics Telemetry Fallback**:
+   - `turns_fainting`, `turns_weak`, and `is_oscillating` now fall back to `ep_summary` data when raw `ticks` are streamed to disk.
+
 
