@@ -19,7 +19,7 @@ class Agent:
                 if obs.inventory.has_food:
                     obs = (yield eat_carried_food())
                     continue
-                elif obs.corpses:
+                elif any((c.is_safe for c in obs.corpses)):
                     obs = (yield from self.handle_corpse_consumption(obs))
                     continue
             if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
@@ -92,7 +92,7 @@ class Agent:
                 elif obs.inventory.has_wand_of_teleport:
                     obs = (yield zap_wand_teleport())
                     continue
-            if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
+            if obs.hero.hp_frac < 0.5 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
             if (obs.hero.hp_frac < 0.15 or obs.hero.hunger_state >= 3) and obs.hero.turn - self.last_prayer_turn >= 850:
@@ -110,14 +110,19 @@ class Agent:
                     obs = (yield zap_offensive_wand())
                     continue
                 else:
+                    if not obs.combat.standing_on_elbereth:
+                        obs = (yield engrave_dust_elbereth())
+                        continue
                     obs = (yield step_away_from_hostile())
                     continue
             if obs.combat.closest_hostile_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') or obs.dungeon.in_shop:
                 obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
                 continue
-            if (obs.hero.hp_frac < 0.3 or (obs.hero.hp_frac < 0.6 and obs.combat.hostile_count_fov >= 2)) and (not obs.combat.standing_on_elbereth):
-                obs = (yield engrave_dust_elbereth())
-                continue
+            if not obs.combat.standing_on_elbereth:
+                if obs.hero.hp_frac < 0.4 or (obs.hero.hp_frac < 0.6 and obs.combat.hostile_count_fov >= 2):
+                    if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth):
+                        obs = (yield engrave_dust_elbereth())
+                        continue
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
                     if obs.hero.hp_frac > 0.4 or not obs.combat.can_retreat:
@@ -135,8 +140,8 @@ class Agent:
                         continue
                     if obs.spatial.stairs_down_known:
                         obs = (yield step_to_stairs_down())
-                    else:
-                        obs = (yield step_away_from_hostile())
+                        continue
+                    obs = (yield step_away_from_hostile())
                     continue
                 else:
                     obs = (yield melee_attack_hostile())
@@ -153,11 +158,11 @@ class Agent:
                     obs = (yield engrave_dust_elbereth())
                     continue
                 if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.5 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.45 or not obs.combat.can_retreat:
                         obs = (yield melee_attack_hostile())
                         continue
                     else:
-                        obs = (yield (engrave_dust_elbereth() if not obs.combat.standing_on_elbereth else melee_attack_hostile()))
+                        obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
                         continue
                 elif not obs.combat.in_corridor and obs.combat.can_retreat:
                     obs = (yield step_to_chokepoint())
@@ -167,7 +172,7 @@ class Agent:
                     obs = (yield melee_attack_hostile())
                 else:
                     obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
-            elif obs.hero.hp_frac > 0.3:
+            elif obs.hero.hp_frac > 0.4:
                 obs = (yield melee_attack_hostile())
             else:
                 obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
@@ -187,7 +192,10 @@ class Agent:
                 else:
                     obs = (yield step_to(corpse.y, corpse.x))
                     return obs
-        obs = (yield wait())
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+        else:
+            obs = (yield step_to_dead_end())
         return obs
 
     def handle_dead_end(self, obs):
