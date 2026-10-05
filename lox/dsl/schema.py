@@ -111,6 +111,8 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "has_pick_axe": "bool",
     "has_lamp": "bool",
     "has_unworn_armor": "bool",
+    "has_worn_body_armor": "bool",
+    "has_unworn_body_armor": "bool",
     "has_daggers": "bool",
     "has_bag_of_holding": "bool",
     "has_speed_boots": "bool",

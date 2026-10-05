@@ -7,8 +7,8 @@ class Agent:
 
     def run(self, obs):
         while True:
-            # 1. Emergency Prayer
-            if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.has_food):
+            # 1. Emergency Prayer (Major Trouble: Weak without food or Critical HP)
+            if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food):
                 if obs.hero.turn - self.last_prayer_turn >= 850:
                     self.last_prayer_turn = obs.hero.turn
                     obs = (yield pray())
@@ -52,8 +52,8 @@ class Agent:
                 obs = (yield replace_body_armor())
                 continue
 
-            # 7. Unworn Auxiliary Armor (Helmets, Boots, Cloaks, Gloves, Shields)
-            if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
+            # 7. Unworn Armor (Body armor when unarmored, or auxiliary armor)
+            if (obs.inventory.has_unworn_body_armor and not obs.inventory.has_worn_body_armor) or (obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor):
                 obs = (yield wear_armor())
                 continue
 
@@ -183,7 +183,7 @@ class Agent:
                 if obs.combat.standing_on_elbereth or not obs.combat.adjacent_hostile or obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
                     obs = (yield eat_carried_food())
                     continue
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.has_food)) and (obs.hero.turn - self.last_prayer_turn >= 850):
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)) and (obs.hero.turn - self.last_prayer_turn >= 850):
                 if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
                     self.last_prayer_turn = obs.hero.turn
                     obs = (yield pray())
@@ -310,7 +310,7 @@ class Agent:
 
     def handle_dead_end(self, obs):
         if obs.spatial.standing_on_dead_end:
-            for _ in range(5):
+            for _ in range(15):
                 if obs.combat.hostile_count_fov > 0:
                     return obs
                 if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:

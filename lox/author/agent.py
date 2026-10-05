@@ -156,6 +156,11 @@ class AuthorAgent:
                 return self.tools.get_duckdb_schema()
             elif tool_name == "get_death_taxonomy":
                 return self.tools.get_death_taxonomy(window=args.get("window", 20))
+            elif tool_name == "query_root_causes":
+                return self.tools.query_root_causes(
+                    run_id=args.get("run_id", ""),
+                    window=args.get("window", 10),
+                )
             elif tool_name == "get_floor_pacing_stats":
                 return self.tools.get_floor_pacing_stats(depth=args.get("depth", 1))
             elif tool_name == "get_action_distribution":

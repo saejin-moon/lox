@@ -130,6 +130,48 @@ class DuckDBToolRegistry:
             con.close()
             return f"Error querying death taxonomy: {e}"
 
+    def query_root_causes(self, run_id: str = "", window: int = 10) -> str:
+        """
+        Summarizes the distribution of ground-truth root causes from the episodes table.
+        Shows counts, percentage share, average depth reached, and average turns survived per archetype.
+        """
+        if not os.path.exists(self.db_path):
+            return "No database found."
+
+        try:
+            window_int = int(window)
+        except Exception:
+            window_int = 10
+
+        con = duckdb.connect(self.db_path, read_only=True)
+        try:
+            cols = [c[0] for c in con.execute("DESCRIBE episodes").fetchall()]
+            if "root_cause" not in cols:
+                con.close()
+                return "Column 'root_cause' not found in episodes table. Run consolidation with diagnostic schema."
+
+            where = f"WHERE run_id = '{run_id}'" if run_id else ""
+            query = f"""
+                SELECT
+                    COALESCE(root_cause, 'UNCLASSIFIED') as root_cause,
+                    COUNT(*) as occurrences,
+                    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) as pct,
+                    ROUND(AVG(depth), 2) as avg_depth,
+                    ROUND(AVG(turns), 1) as avg_turns
+                FROM episodes
+                {where}
+                GROUP BY root_cause
+                ORDER BY occurrences DESC
+                LIMIT {max(1, window_int)}
+            """
+            cur = con.execute(query)
+            res = _format_table(cur)
+            con.close()
+            return "### Empirical Root Cause Attribution Breakdown:\n" + res
+        except Exception as e:
+            con.close()
+            return f"Error querying root causes: {e}"
+
     def get_floor_pacing_stats(self, depth: int = 1) -> str:
         """
         Returns floor pacing statistics for a given dungeon depth: turn count distribution and survival rates.
@@ -433,6 +475,26 @@ OPENAI_TOOL_SPECS = [
                         "type": "integer",
                         "description": "Maximum number of distinct causes to return (default 20).",
                     }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_root_causes",
+            "description": "Query empirical root cause attribution breakdown across 9 canonical failure archetypes from episodes table.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Optional run_id to filter episodes by. If omitted, aggregates across all recent episodes.",
+                    },
+                    "window": {
+                        "type": "integer",
+                        "description": "Maximum number of archetypes to return (default 10).",
+                    },
                 },
             },
         },

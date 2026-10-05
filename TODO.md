@@ -148,3 +148,41 @@ All 12 concrete technical mechanisms across all priority tiers have been fully i
 
 12. **The Invocation State Machine (`InvocationSolver` / `perform_invocation_step`)** [COMPLETED & VERIFIED]:
     - Constructed `lox/envs/solvers/invocation_solver.py` state machine tracking the 3 Invocation Tools (Bell of Opening, Book of the Dead, Candelabrum of Abernathy with 7 candles), Vibrating Square discovery, and executing the 3-step ritual sequence (light Candelabrum, ring Bell, read Book) to open Moloch's Sanctum. Exposed `perform_invocation_step()` in schema and adapter.
+
+---
+
+## 3. Campaign 50 Empirical Autopsy & Root Cause Diagnostic System
+
+### 3.1 Campaign 50 Empirical Results (200 Episodes, 10 Generations)
+- **Batch Progression**:
+  - Gen 1: Avg Depth 3.60 | Max Depth 9 | Avg Turns 1681.7
+  - Gen 2: Avg Depth 4.45 | Max Depth 8 | Avg Turns 1365.1
+  - Gen 3: Avg Depth 4.65 | Max Depth 10 | Avg Turns 2091.5
+  - Gen 4: Avg Depth 3.85 | Max Depth 9 | Avg Turns 1712.1
+  - Gen 5: Avg Depth 3.70 | Max Depth 7 | Avg Turns 1953.0
+  - Gen 6: Avg Depth 3.50 | Max Depth 7 | Avg Turns 1756.4
+  - Gen 7: Avg Depth 3.70 | Max Depth 8 | Avg Turns 1259.3
+  - Gen 8: Avg Depth 3.85 | Max Depth 8 | Avg Turns 1620.2
+  - Gen 9: Avg Depth 3.50 | Max Depth 10 | Avg Turns 2077.9
+  - Gen 10: Avg Depth 4.10 | Max Depth **12** | Avg Turns 1522.5
+- **Token Expenditure**: 175,092 tokens across 10 synthesis sessions; total cost: **$0.0232 USD**.
+
+### 3.2 The Three Critical Failure Modes Pinpointed
+1. **Secret Door 5-Search Stall & 2-Tile Ping-Pong (34% of runs)**:
+   - 34% of all runs died on DL 1–2 after surviving an average of **1,814 turns**.
+   - `handle_dead_end` looped only 5 times. With NetHack's ~15% search chance, 5 searches failed 44% of the time. Once marked searched, the adapter throttled search decay by 50 turns, falling through to a 2-tile ping-pong oscillation until starvation.
+   - **Fix**: Expanded search loop to 15 iterations (>91% discovery rate) and eliminated the 50-turn decay throttle in `step_to_dead_end`, searching adjacent walls instead of ping-ponging.
+2. **Premature Prayer & Fainting Starvation**:
+   - `run()` and `handle_combat()` prayed at `hunger_state >= 2` ("Hungry"). Tyr only feeds for major trouble (`hunger_state >= 3` "Weak").
+   - Praying while merely "Hungry" wasted divine favor and triggered an 850-turn cooldown. When the hero later entered `FAINTING` (unconscious for 20–30 turns), prayer was on cooldown, causing death to 1-HP pests.
+   - **Fix**: Gated divine feeding prayer strictly to `hunger_state >= 3` ("Weak" or "Fainting").
+3. **Valkyrie Body Armor Deficit**:
+   - Valkyries start with zero body armor (base AC 6 from a +3 shield). Dropped armor remained unworn due to overly strict BUC gates.
+   - Heroes entered DL 6–8 with AC 6, suffering lethal burst damage from ants and Uruk-hai.
+   - **Fix**: Added `has_worn_body_armor` and `has_unworn_body_armor` in `InventoryView` and `schema.py`; allowed immediate equipping of body armor when unarmored.
+
+### 3.3 The Root Cause Diagnostic Engine (`lox/telemetry/diagnostics.py`)
+- Replaces misleading `"Killed in combat (100.0%)"` labels with 9 causal failure archetypes:
+  `STALL_SECRET_DOOR`, `STARVATION_FAINTING`, `PING_PONG_OSCILLATION`, `ARMOR_DEFICIT`, `PREMATURE_PRAYER`, `PASSIVE_HAZARD_PARALYSIS`, `COMBAT_TACTICAL_SWARM`, `COMBAT_FAST_PREDATOR`, `COMBAT_GENERAL`.
+- Integrated directly into DuckDB `episodes` table (`root_cause`, `turns_fainting`, `has_body_armor`, `is_oscillating`), parquet logger, batch reporting, and LLM authoring prompts.
+- All 107 unit tests pass with zero regressions (`uv run pytest`).

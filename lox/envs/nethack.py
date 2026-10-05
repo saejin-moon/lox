@@ -1315,13 +1315,16 @@ class NetHackAdapter(EnvironmentAdapter):
 
         can_wear_armor = True
         if inv_view.has_unworn_armor:
-            arm_slot = inv_view.get_unworn_armor_slot()
-            for it in inv_view:
-                if it.slot == arm_slot:
-                    can_wear_armor = self.epistemic.can_safely_wear(
-                        it.name, max_cursed_prob=0.15
-                    )
-                    break
+            if not inv_view.has_worn_body_armor and inv_view.has_unworn_body_armor:
+                can_wear_armor = True
+            else:
+                arm_slot = inv_view.get_unworn_armor_slot()
+                for it in inv_view:
+                    if it.slot == arm_slot:
+                        can_wear_armor = self.epistemic.can_safely_wear(
+                            it.name, max_cursed_prob=0.15
+                        )
+                        break
 
         can_quaff_heal = True
         heal_slot = inv_view.get_healing_slot()
@@ -1934,24 +1937,20 @@ class NetHackAdapter(EnvironmentAdapter):
                         is_door=all_doors,
                     )
 
-            # Priority 3: Stagnation Decay (Only if ALL reachable tiles have been searched >= 10 times)
+            # Priority 3: Stagnation Decay (Immediate decay when all dead ends are marked searched)
             if not target or target == (-1, -1):
-                if (
-                    not hasattr(self, "_last_search_decay_turn")
-                    or obs_prev.hero.turn - self._last_search_decay_turn >= 50
-                ):
-                    self._last_search_decay_turn = obs_prev.hero.turn
-                    self.searched_count = np.maximum(0, self.searched_count - 10)
-                    dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
-                    step_target_mask = dead_ends_mask.copy()
-                    step_target_mask[hero.y, hero.x] = False
-                    if np.any(step_target_mask):
-                        target = SpatialEngine.find_nearest_target(
-                            (hero.y, hero.x),
-                            walkable_nav,
-                            target_mask=step_target_mask,
-                            is_door=all_doors,
-                        )
+                self._last_search_decay_turn = obs_prev.hero.turn
+                self.searched_count = np.maximum(0, self.searched_count - 10)
+                dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
+                step_target_mask = dead_ends_mask.copy()
+                step_target_mask[hero.y, hero.x] = False
+                if np.any(step_target_mask):
+                    target = SpatialEngine.find_nearest_target(
+                        (hero.y, hero.x),
+                        walkable_nav,
+                        target_mask=step_target_mask,
+                        is_door=all_doors,
+                    )
 
             self.last_target_pos = target if (target and target != (-1, -1)) else None
 
@@ -1963,12 +1962,23 @@ class NetHackAdapter(EnvironmentAdapter):
                     dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                     return self._step_or_breach(obs_prev, dy, dx)
 
-            # If no dead end target or wall target is reachable, step to any walkable tile to prevent standing still
+            # If no dead end target or wall target is reachable, do not oscillate back and forth.
+            # Perform search() if adjacent to walls/doors, or navigate to unvisited/farthest tiles
+            adj_walls = sum(
+                1
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                if 0 <= hero.y + dy < 21
+                and 0 <= hero.x + dx < 79
+                and chars[hero.y + dy, hero.x + dx] in (ord("|"), ord("-"), ord("#"))
+            )
+            if adj_walls >= 1:
+                return self.step(Action(name="search"))
+
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 ny, nx = hero.y + dy, hero.x + dx
                 if 0 <= ny < 21 and 0 <= nx < 79 and walkable_nav[ny, nx]:
                     return self._step_or_breach(obs_prev, dy, dx)
-            return self.step(Action(name="wait"))
+            return self.step(Action(name="search"))
 
         elif action.name == "step_to" and obs_prev is not None:
             hero = obs_prev.hero

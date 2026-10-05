@@ -28,7 +28,7 @@ class Agent:
     def run(self, obs):
         while True:
             # 1. Absolute Emergency Survival (Major Trouble: Weak without food or <15% HP - pray while conscious!)
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.has_food)):
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)):
                 if obs.hero.turn - self.last_prayer_turn >= 850:
                     self.last_prayer_turn = obs.hero.turn
                     obs = yield pray()
@@ -138,7 +138,7 @@ class Agent:
                     continue
 
             # 0.2 Major Trouble Divine Intervention (Weak without food or Critical HP - pray while conscious!)
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.has_food)) and (obs.hero.turn - self.last_prayer_turn >= 850):
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)) and (obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
@@ -376,6 +376,7 @@ Every turn, `obs` provides rich sub-namespaces:
 - `get_hazard_map(depth)`: Discovered traps, floating eyes, and dangerous monster locations.
 - `get_floor_stash_report()`: Altars, fountains, and features discovered across all explored dungeon levels.
 - `get_death_taxonomy(window)`: Top death causes, frequencies, and avg depth.
+- `query_root_causes(run_id, window)`: Empirical root cause attribution breakdown table across 9 canonical failure archetypes (secret door stalls, starvation fainting, ping-pong oscillation, armor deficit, premature prayer, passive hazards, swarms, fast predators, general combat).
 - `query_wiki(query)`: Search offline NetHack 3.6.6 encyclopedia (monsters, intrinsics, corpses, rituals).
 - `query_invariants(query, category)`: Query the canonical LOX Empirical Invariant Knowledge Base for ground-truth tactical rules, anti-patterns, and verified code patterns (topics: 'prayer', 'hunger', 'floating eye', 'gas spore', 'door', 'dead end', 'elbereth', 'mines').
 - `request_macro(macro_name, rationale, proposed_interface, priority)`:

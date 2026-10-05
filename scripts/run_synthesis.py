@@ -59,6 +59,7 @@ from lox.dsl.compiler import compile_policy
 from lox.envs.minihack import MiniHackAdapter
 from lox.envs.nethack import NetHackAdapter
 from lox.telemetry.consolidator import consolidate_run
+from lox.telemetry.diagnostics import FailureArchetype, RootCauseClassifier
 from lox.telemetry.parquet import ParquetLogger
 from lox.telemetry.recorder import FlightRecorder
 from lox.telemetry.tokens import get_token_usage_summary
@@ -470,6 +471,9 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         "hp_at_death": hp_at_death,
         "max_hp_at_death": max_hp_at_death,
         "excalibur_forged": excalibur_forged,
+        "turns_fainting": sum(1 for s in recorder.buffer if s.hunger == "FAINTING"),
+        "turns_weak": sum(1 for s in recorder.buffer if s.hunger == "WEAK"),
+        "is_oscillating": (len(set(s.pos for s in list(recorder.buffer)[-40:])) <= 2) if len(recorder.buffer) >= 30 else False,
         "trajectory": recorder.get_last_10_turns_trajectory(),
     }
 
@@ -606,6 +610,7 @@ class Agent:
         trigger_reason = ""
         gen_depths = []
         gen_turns = []
+        gen_scores = []
         gen_dir_id = f"{run_id}_g{gen:03d}"
         logger = ParquetLogger(
             run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=100
@@ -672,12 +677,14 @@ class Agent:
             ep_results = [_run_single_episode_worker(p) for p in payloads]
 
         recent_trajectory = ""
-        for r in ep_results:
+        batch_diagnostics = [RootCauseClassifier.classify(r) for r in ep_results]
+        batch_summary = RootCauseClassifier.summarize_batch(batch_diagnostics)
+
+        for r, diag in zip(ep_results, batch_diagnostics):
             gen_depths.append(r["final_depth"])
+            gen_scores.append(r["final_score"])
             gen_turns.append(r["ep_turns"])
-            if r["death_reason"] not in ("active", "MaxTurnsReached") and r.get(
-                "trajectory"
-            ):
+            if r["death_reason"] != "active":
                 recent_trajectory = r["trajectory"]
 
             logger.log_episode(
@@ -708,6 +715,10 @@ class Agent:
                 hp_at_death=r.get("hp_at_death", 0),
                 max_hp_at_death=r.get("max_hp_at_death", 0),
                 excalibur_forged=r.get("excalibur_forged", False),
+                root_cause=diag.primary_archetype.value,
+                turns_fainting=diag.turns_fainting,
+                has_body_armor=diag.has_body_armor,
+                is_oscillating=diag.is_oscillating,
             )
 
         # Consolidate raw telemetry into DuckDB so LLM tools query live empirical state
@@ -750,13 +761,15 @@ class Agent:
         death_summary_str = (
             ", ".join(f"{r[0]} ({r[2]}%)" for r in top_deaths) if top_deaths else "None"
         )
-        primary_cause = top_deaths[0][0] if top_deaths else "Floor Stagnation"
-        primary_pct = top_deaths[0][2] if top_deaths else 0.0
+        # Determine dominant root cause archetype from empirical diagnostic engine
+        top_arch = max(batch_summary.archetype_counts.items(), key=lambda x: x[1])[0] if batch_summary.archetype_counts else "COMBAT_GENERAL"
+        top_arch_pct = batch_summary.archetype_percentages.get(top_arch, 0.0)
 
         print(
             f"\n[Gen {gen} Batch Metrics ({eval_episodes} eps)] Avg Depth: {avg_d:.2f} | Max Depth: {max_d} | Avg Turns: {avg_t:.1f}"
         )
         print(f"[Gen {gen} Ranked Fatalities] {death_summary_str}")
+        print(f"\n{batch_summary.format_markdown_table()}\n")
 
         if target_depth is not None and avg_d >= target_depth:
             print("\n" + "=" * 65)
@@ -768,10 +781,10 @@ class Agent:
             break
 
         trigger_reason = (
-            f"Generation {gen} Empirical Incident Autopsy ({eval_episodes} episodes): "
+            f"Generation {gen} Empirical Diagnostic Autopsy ({eval_episodes} episodes): "
             f"Avg Depth {avg_d:.2f}, Max Depth {max_d}, Avg Turns {avg_t:.1f}. "
-            f"#1 Mortality Bottleneck: '{primary_cause}' ({primary_pct}% of runs). "
-            f"Synthesize an evolved policy program that directly mitigates this #1 cause of death, optimizes stair navigation, and breaks through deeper dungeon levels."
+            f"#1 Empirical Root Cause: '{top_arch}' ({top_arch_pct:.1f}% of runs). "
+            f"Mitigate this specific failure mode (see Diagnostic Breakdown Table), optimize stair navigation, and break through to Depth 10+."
         )
 
         mortality_lines = [
@@ -783,7 +796,8 @@ class Agent:
             f"Average Depth: {avg_d:.2f}\n"
             f"Max Depth: {max_d}\n"
             f"Average Turns Survived: {avg_t:.1f}\n\n"
-            f"Ranked Causes of Death (Ranked by Popularity/Frequency):\n"
+            f"{batch_summary.format_markdown_table()}\n\n"
+            f"Raw Ranked Causes of Death:\n"
             + ("\n".join(mortality_lines) if mortality_lines else "  - None recorded")
         )
         if recent_fatal_samples:

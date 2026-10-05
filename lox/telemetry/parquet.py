@@ -81,6 +81,10 @@ EPISODE_SCHEMA = pa.schema(
         ("hp_at_death", pa.int32()),
         ("max_hp_at_death", pa.int32()),
         ("excalibur_forged", pa.bool_()),
+        ("root_cause", pa.string()),
+        ("turns_fainting", pa.int32()),
+        ("has_body_armor", pa.bool_()),
+        ("is_oscillating", pa.bool_()),
     ]
 )
 
@@ -225,6 +229,10 @@ class ParquetLogger:
         hp_at_death: int = 0,
         max_hp_at_death: int = 0,
         excalibur_forged: bool = False,
+        root_cause: str = "unknown",
+        turns_fainting: int = 0,
+        has_body_armor: bool = False,
+        is_oscillating: bool = False,
     ) -> None:
         self.episode_buffer.append(
             {
@@ -256,6 +264,10 @@ class ParquetLogger:
                 "hp_at_death": int(hp_at_death),
                 "max_hp_at_death": int(max_hp_at_death),
                 "excalibur_forged": bool(excalibur_forged),
+                "root_cause": str(root_cause),
+                "turns_fainting": int(turns_fainting),
+                "has_body_armor": bool(has_body_armor),
+                "is_oscillating": bool(is_oscillating),
             }
         )
 

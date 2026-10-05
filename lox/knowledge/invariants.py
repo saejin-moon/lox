@@ -169,16 +169,17 @@ if obs.dungeon.adjacent_closed_door:
         rule=(
             "Corridor dead ends (walkable # or lit . with <= 1 cardinal neighbor) connect directly "
             "to unexplored rooms and must take absolute Priority 1 over room perimeter wall searching in "
-            "step_to_dead_end. In handle_dead_end(), cap searches at 5 per tile (67% discovery chance) "
-            "and rate-limit search decay to prevent 2,000-turn in-place search loops."
+            "step_to_dead_end. In handle_dead_end(), execute up to 15 searches per tile (>91% discovery chance) "
+            "breaking immediately if stairs or frontiers are revealed. When dead ends are exhausted, decay searched "
+            "count immediately to prevent 50-turn 2-tile ping-pong oscillations."
         ),
         anti_pattern=(
-            "Searching room perimeter wall tiles 12 times each, wasting 600+ turns per level on DL 1."
+            "Searching only 5 times (44% failure rate) and then bouncing between 2 tiles in a 50-turn decay stall."
         ),
         code_snippet="""
 def handle_dead_end(self, obs):
     if obs.spatial.standing_on_dead_end:
-        for _ in range(5):
+        for _ in range(15):
             if obs.combat.hostile_count_fov > 0:
                 return obs
             if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
@@ -500,22 +501,24 @@ def handle_corpse_consumption(self, obs):
         category="nutrition",
         tags=["faint", "weak", "prayer", "divine feeding", "hunger_state"],
         rule=(
-            "During combat, heroes transition from Hungry to Weak (hunger_state == 2). At hunger_state >= 3 (Fainting), "
-            "heroes randomly fall unconscious for 30 turns and prayer commands abort. In handle_combat(), allow eating "
-            "carried food if on Elbereth or out of melee reach. When food is exhausted, trigger divine prayer (pray()) "
-            "at hunger_state >= 2 while still fully conscious, guaranteeing 100% safe divine feeding."
+            "In NetHack, HungerState enum values are SATIATED=0, NORMAL=1, HUNGRY=2, WEAK=3, FAINTING=4. "
+            "Carried food should be eaten proactively at hunger_state >= 1 ('Hungry'). However, deities only grant "
+            "divine feeding for major trouble, which requires hunger_state >= 3 ('Weak' or 'Fainting'). Praying at "
+            "hunger_state == 2 ('Hungry') fails major trouble checks, wastes divine favor, and puts prayer on an 850-turn "
+            "cooldown, causing certain death 800 turns later when the hero actually starves/faints."
         ),
         anti_pattern=(
-            "Waiting until hunger_state >= 3 to pray or omitting eating logic from handle_combat, causing 42% of heroes "
-            "to faint unconscious and be beaten to death by minor pests."
+            "Praying for food when merely hunger_state == 2 ('Hungry'), angering deity or exhausting divine favor before genuine starvation."
         ),
         code_snippet="""
-# In handle_combat():
-if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
-    if obs.combat.standing_on_elbereth or not obs.combat.adjacent_hostile or obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
-        obs = (yield eat_carried_food())
-        continue
-if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.has_food)) and obs.hero.turn - self.last_prayer_turn >= 850:
+# In handle_combat() and run():
+# 1. Proactive eating of packaged food
+if obs.hero.hunger_state >= 1 and obs.inventory.has_food:
+    obs = (yield eat_carried_food())
+    continue
+
+# 2. Major trouble divine feeding (strictly hunger_state >= 3 'Weak')
+if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)) and obs.hero.turn - self.last_prayer_turn >= 850:
     if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
         self.last_prayer_turn = obs.hero.turn
         obs = (yield pray())

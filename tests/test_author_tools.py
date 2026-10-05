@@ -11,11 +11,11 @@ def populated_db(tmp_path):
     db_file = str(tmp_path / "test_lox.duckdb")
     con = init_db(db_file)
     con.execute("""
-        INSERT INTO episodes (run_id, episode_id, depth, score, turns, death_reason, solved, wall_sec, max_depth)
+        INSERT INTO episodes (run_id, episode_id, depth, score, turns, death_reason, solved, wall_sec, max_depth, root_cause)
         VALUES
-            ('run_1', 'ep_1', 1, 100, 80, 'starved to death', false, 0.5, 1),
-            ('run_1', 'ep_2', 2, 250, 150, 'killed by newt', false, 0.8, 2),
-            ('run_1', 'ep_3', 1, 120, 85, 'starved to death', false, 0.5, 1);
+            ('run_1', 'ep_1', 1, 100, 80, 'starved to death', false, 0.5, 1, 'STARVATION_FAINTING'),
+            ('run_1', 'ep_2', 2, 250, 150, 'killed by newt', false, 0.8, 2, 'COMBAT_GENERAL'),
+            ('run_1', 'ep_3', 1, 120, 85, 'starved to death', false, 0.5, 1, 'STARVATION_FAINTING');
         INSERT INTO ticks (run_id, episode_id, turn, depth, hp, max_hp, hunger, y, x, action, message, reward)
         VALUES
             ('run_1', 'ep_1', 1, 1, 16, 16, 'NORMAL', 5, 5, 'step', '', 0.0),
@@ -54,11 +54,16 @@ def test_duckdb_tool_registry(populated_db):
     assert "starved to death" in tax
     assert "killed by newt" in tax
 
-    # 5. Test pacing stats
+    # 5. Test root cause querying
+    rc = registry.query_root_causes(window=5)
+    assert "STARVATION_FAINTING" in rc
+    assert "COMBAT_GENERAL" in rc
+
+    # 6. Test pacing stats
     pacing = registry.get_floor_pacing_stats(depth=1)
     assert "total_episodes" in pacing
 
-    # 6. Test action distribution
+    # 7. Test action distribution
     dist = registry.get_action_distribution()
     assert "step" in dist
     assert "search" in dist

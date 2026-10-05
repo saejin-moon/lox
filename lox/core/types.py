@@ -312,6 +312,24 @@ class InventoryView(list):
                 return it.slot
         return None
 
+    @property
+    def has_worn_body_armor(self) -> bool:
+        for it in self:
+            if it.category == "armor" and it.is_equipped:
+                n = it.name.lower()
+                if any(k in n for k in ("mail", "suit", "coat", "cuirass", "jacket", "plate", "leather armor")):
+                    return True
+        return False
+
+    @property
+    def has_unworn_body_armor(self) -> bool:
+        for it in self:
+            if it.category == "armor" and not it.is_equipped and it.slot not in self.failed_armor_slots:
+                n = it.name.lower()
+                if any(k in n for k in ("mail", "suit", "coat", "cuirass", "jacket", "plate", "leather armor")):
+                    return True
+        return False
+
     def get_superior_body_armor_slot(self) -> tuple[str, str] | None:
         """
         Returns (worn_slot, unworn_superior_slot) if there is an unworn body armor

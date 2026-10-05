@@ -44,9 +44,14 @@ lox/
 ├── knowledge/
 │   └── invariants.py     # Canonical Empirical Knowledge Base: 32 typed, indexed invariants (REGISTRY)
 ├── telemetry/
-│   └── database.py       # DuckDB schema: episodes, ticks, token_usage, evolved_policies tables
-└── wiki/
-    └── engine.py         # Offline NetHack wiki retrieval engine for LLM queries
+│   ├── consolidator.py   # DuckDB consolidation from Parquet buffers & schema evolution
+│   ├── diagnostics.py    # Multi-dimensional Empirical Root Cause Diagnostic Engine
+│   ├── parquet.py        # High-throughput pyarrow Parquet telemetry logger
+│   ├── recorder.py       # Circular 100-turn in-memory flight recorder
+│   ├── tokens.py         # LLM token usage tracking & cost accounting
+│   └── triggers.py       # Dynamic incident triggers (stalls, cluster mortalities)
+├── wiki/
+│   └── engine.py         # Offline NetHack wiki retrieval engine for LLM queries
 ```
 
 ---
