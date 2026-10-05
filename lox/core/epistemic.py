@@ -327,9 +327,7 @@ class ShannonSafeGate:
         return True, "SAFE"
 
     @classmethod
-    def can_safely_insert_bag_of_holding(
-        cls, item_name: str
-    ) -> tuple[bool, str]:
+    def can_safely_insert_bag_of_holding(cls, item_name: str) -> tuple[bool, str]:
         """
         Guards against Bag of Holding explosion:
         Inserting a Bag of Holding, Bag of Tricks, Wand of Cancellation, or Wand of Tricks
@@ -337,7 +335,10 @@ class ShannonSafeGate:
         """
         name = item_name.lower()
         if "cancellation" in name:
-            return False, "VETO: Wand of cancellation causes explosion in Bag of Holding"
+            return (
+                False,
+                "VETO: Wand of cancellation causes explosion in Bag of Holding",
+            )
         if "bag of holding" in name:
             return False, "VETO: Bag of Holding inside Bag of Holding causes explosion"
         if "bag of tricks" in name:
@@ -432,4 +433,3 @@ class EpistemicEngine:
     def is_safe_for_bag_of_holding(self, item_name: str) -> bool:
         safe, _ = ShannonSafeGate.can_safely_insert_bag_of_holding(item_name)
         return safe
-

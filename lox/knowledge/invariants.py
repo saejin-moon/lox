@@ -221,7 +221,6 @@ def handle_dead_end(self, obs):
 """,
         related_ids=["INV-NAV-005"],
     ),
-
     # -----------------------------------------------------------------
     # COMBAT TACTICS & WARDING
     # -----------------------------------------------------------------
@@ -435,7 +434,6 @@ if obs.combat.closest_hostile_name in ('shopkeeper', 'watchman', 'watch captain'
 """,
         related_ids=["INV-CBT-006"],
     ),
-
     # -----------------------------------------------------------------
     # NUTRITION & DIVINE FAVOR
     # -----------------------------------------------------------------
@@ -550,7 +548,6 @@ if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.
 """,
         related_ids=["INV-NUT-003"],
     ),
-
     # -----------------------------------------------------------------
     # EQUIPMENT, LOOTING & ARTIFACTS
     # -----------------------------------------------------------------
@@ -696,7 +693,6 @@ if obs.combat.is_pack_threat and not obs.combat.in_corridor and not obs.combat.s
 """,
         related_ids=["INV-CBT-003", "INV-CBT-005"],
     ),
-
     # -----------------------------------------------------------------
     # HARNESS & DIALOG INTERCEPTION
     # -----------------------------------------------------------------
@@ -779,7 +775,6 @@ body_mask = GLYPH_IS_BODY_LUT[valid_glyphs]
 """,
         related_ids=["INV-HAR-003"],
     ),
-
     # -----------------------------------------------------------------
     # ARCHITECTURE & SYNTHESIS
     # -----------------------------------------------------------------
@@ -854,7 +849,16 @@ new_policy_code = author.splice_policy_methods(base_code=current_policy, patch_c
         id="INV-CBT-009",
         title="Passive Hazard Combat Gating & Exploration Break",
         category="combat",
-        tags=["passive", "hazard", "floating eye", "gas spore", "mold", "bypass", "break", "loop"],
+        tags=[
+            "passive",
+            "hazard",
+            "floating eye",
+            "gas spore",
+            "mold",
+            "bypass",
+            "break",
+            "loop",
+        ],
         rule=(
             "Immobile passive hazards (floating eyes, gas spores, brown molds) at distance >= 2 do NOT hunt or pursue "
             "the hero. If the hero is not adjacent to hostiles, has no active hostile chasing them (not obs.combat.has_active_hostile), "
@@ -1000,14 +1004,18 @@ class InvariantRegistry:
         cat_low = category.lower().strip()
         return [inv for inv in self._invariants if inv.category.lower() == cat_low]
 
-    def search(self, query: str, category: str | None = None, top_k: int = 5) -> list[Invariant]:
+    def search(
+        self, query: str, category: str | None = None, top_k: int = 5
+    ) -> list[Invariant]:
         """
         Ranks invariants by relevance to a search query using token match scoring across
         title, tags, rule, and anti-pattern.
         """
         tokens = set(re.findall(r"\w+", query.lower()))
         if not tokens:
-            candidates = self.get_by_category(category) if category else self._invariants
+            candidates = (
+                self.get_by_category(category) if category else self._invariants
+            )
             return candidates[:top_k]
 
         candidates = self.get_by_category(category) if category else self._invariants
@@ -1058,7 +1066,13 @@ class InvariantRegistry:
             priority_ids.append("INV-CBT-001")
         if "ant" in low_query or "bee" in low_query or "bat" in low_query:
             priority_ids.append("INV-CBT-005")
-        if "passive" in low_query or "hazard" in low_query or "eye" in low_query or "spore" in low_query or "stuck" in low_query:
+        if (
+            "passive" in low_query
+            or "hazard" in low_query
+            or "eye" in low_query
+            or "spore" in low_query
+            or "stuck" in low_query
+        ):
             priority_ids.append("INV-CBT-009")
 
         results: list[Invariant] = []

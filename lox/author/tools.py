@@ -262,7 +262,6 @@ class DuckDBToolRegistry:
             return f"No invariants found matching '{query}' (category: {category or 'all'})."
         return REGISTRY.format_llm_reference(invs)
 
-
     def request_macro(
         self,
         macro_name: str,

@@ -5,12 +5,10 @@ Tests for Sokoban, Digging, Castle Drawbridge Solver, and Ascension mechanisms.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from lox.core.digging import DiggingRouter
 from lox.core.sokoban import SokobanSolver
 from lox.core.types import (
-    Action,
     CombatView,
     DungeonView,
     HeroState,
@@ -97,7 +95,6 @@ def test_digging_router_find_dig_target():
     assert target["direction"] == (0, 1)
 
 
-
 def test_castle_drawbridge_detection():
     chars = np.full((21, 79), ord("."), dtype=np.uint8)
     # Moat at (10, 39)
@@ -115,9 +112,22 @@ def test_castle_drawbridge_plan_step():
 
     # Case 1: Hero adjacent to drawbridge at (10, 39) - danger, step back!
     hero_adj = HeroState(
-        y=10, x=39, hp=50, max_hp=50, energy=10, max_energy=10,
-        ac=0, level=10, depth=26, dungeon_num=0, gold=100, score=5000,
-        turn=1000, turns_on_level=10, hunger_state=0, dungeon_branch="dungeon"
+        y=10,
+        x=39,
+        hp=50,
+        max_hp=50,
+        energy=10,
+        max_energy=10,
+        ac=0,
+        level=10,
+        depth=26,
+        dungeon_num=0,
+        gold=100,
+        score=5000,
+        turn=1000,
+        turns_on_level=10,
+        hunger_state=0,
+        dungeon_branch="dungeon",
     )
     obs_adj = Observation(
         chars=np.zeros((21, 79), dtype=np.uint8),
@@ -135,9 +145,22 @@ def test_castle_drawbridge_plan_step():
 
     # Case 2: Hero at distance 2 orthogonal: (10, 38) with wand of striking
     hero_dist2 = HeroState(
-        y=10, x=38, hp=50, max_hp=50, energy=10, max_energy=10,
-        ac=0, level=10, depth=26, dungeon_num=0, gold=100, score=5000,
-        turn=1001, turns_on_level=11, hunger_state=0, dungeon_branch="dungeon"
+        y=10,
+        x=38,
+        hp=50,
+        max_hp=50,
+        energy=10,
+        max_energy=10,
+        ac=0,
+        level=10,
+        depth=26,
+        dungeon_num=0,
+        gold=100,
+        score=5000,
+        turn=1001,
+        turns_on_level=11,
+        hunger_state=0,
+        dungeon_branch="dungeon",
     )
     wand_item = Item(slot="a", name="wand of striking (0:4)", category="wand")
     inv = InventoryView([wand_item])
@@ -158,7 +181,9 @@ def test_castle_drawbridge_plan_step():
 
 def test_ascension_inventory_properties():
     items = [
-        Item(slot="a", name="gray dragon scale mail", category="armor", is_equipped=True),
+        Item(
+            slot="a", name="gray dragon scale mail", category="armor", is_equipped=True
+        ),
         Item(slot="b", name="bag of holding", category="tool"),
         Item(slot="c", name="speed boots", category="armor", is_equipped=True),
         Item(slot="d", name="wand of wishing (0:3)", category="wand"),

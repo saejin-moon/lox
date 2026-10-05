@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import deque
 from typing import Any
+
 import numpy as np
 
 
@@ -21,7 +22,9 @@ class SokobanSolver:
     CARDINALS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
     @staticmethod
-    def is_deadlock_position(by: int, bx: int, walls: np.ndarray, pits: np.ndarray) -> bool:
+    def is_deadlock_position(
+        by: int, bx: int, walls: np.ndarray, pits: np.ndarray
+    ) -> bool:
         """
         Checks if a boulder at (by, bx) is in a corner or immovable deadlock.
         A boulder in a corner (two perpendicular walls) that is not on a pit is deadlocked.
@@ -41,7 +44,9 @@ class SokobanSolver:
         return False
 
     @staticmethod
-    def find_hero_reachable(hero_pos: tuple[int, int], walkable_floor: np.ndarray) -> np.ndarray:
+    def find_hero_reachable(
+        hero_pos: tuple[int, int], walkable_floor: np.ndarray
+    ) -> np.ndarray:
         """
         Computes 2D boolean mask of tiles reachable by the hero without stepping
         on boulders, pits, or walls.
@@ -59,7 +64,12 @@ class SokobanSolver:
             cy, cx = q.popleft()
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 ny, nx = cy + dy, cx + dx
-                if 0 <= ny < 21 and 0 <= nx < 79 and walkable_floor[ny, nx] and not reachable[ny, nx]:
+                if (
+                    0 <= ny < 21
+                    and 0 <= nx < 79
+                    and walkable_floor[ny, nx]
+                    and not reachable[ny, nx]
+                ):
                     reachable[ny, nx] = True
                     q.append((ny, nx))
 
@@ -90,7 +100,9 @@ class SokobanSolver:
             return None
 
         # Find candidate boulders
-        boulder_coords = [(by, bx) for by in range(21) for bx in range(79) if boulders[by, bx]]
+        boulder_coords = [
+            (by, bx) for by in range(21) for bx in range(79) if boulders[by, bx]
+        ]
         if not boulder_coords:
             return None
 
@@ -115,7 +127,11 @@ class SokobanSolver:
 
                 # Is the destination tile valid? Must be a pit or clean open floor without another boulder
                 if not pits[dest_y, dest_x]:
-                    if not clean_floor[dest_y, dest_x] or boulders[dest_y, dest_x] or walls[dest_y, dest_x]:
+                    if (
+                        not clean_floor[dest_y, dest_x]
+                        or boulders[dest_y, dest_x]
+                        or walls[dest_y, dest_x]
+                    ):
                         continue
                     # Destination must not be a permanent corner deadlock
                     if cls.is_deadlock_position(dest_y, dest_x, walls, pits):

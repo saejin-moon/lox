@@ -11,7 +11,6 @@ and executes the ritual sequence:
 
 from __future__ import annotations
 
-from typing import Any
 import numpy as np
 
 from lox.core.types import Action, Observation
@@ -53,7 +52,10 @@ class InvocationSolver:
         'You feel a strange vibration beneath your feet.'
         Or on some displays it is marked with '~' glyph.
         """
-        if "vibration beneath your feet" in message.lower() or "strange vibration" in message.lower():
+        if (
+            "vibration beneath your feet" in message.lower()
+            or "strange vibration" in message.lower()
+        ):
             return None  # Pos determined by hero's current position
 
         if chars is not None:
@@ -66,9 +68,7 @@ class InvocationSolver:
         """Verifies possession of Bell of Opening, Book of the Dead, and Candelabrum."""
         inv = obs.inventory
         return bool(
-            inv.has_bell_of_opening
-            and inv.has_book_of_the_dead
-            and inv.has_candelabrum
+            inv.has_bell_of_opening and inv.has_book_of_the_dead and inv.has_candelabrum
         )
 
     def plan_step(self, obs: Observation) -> Action | None:
@@ -83,11 +83,20 @@ class InvocationSolver:
         # Check message feedback for state transitions
         if "strange vibration" in msg:
             self.vibrating_square_pos = (hy, hx)
-        if "candelabrum glows" in msg or "burns with a pure" in msg or "candles are lit" in msg:
+        if (
+            "candelabrum glows" in msg
+            or "burns with a pure" in msg
+            or "candles are lit" in msg
+        ):
             self.candelabrum_lit = True
         if "bell rings" in msg or "bell issues a" in msg or "resonant chime" in msg:
             self.bell_rung = True
-        if "stairs appear" in msg or "a stairway appears" in msg or "staircase opens" in msg or "sanctum" in msg:
+        if (
+            "stairs appear" in msg
+            or "a stairway appears" in msg
+            or "staircase opens" in msg
+            or "sanctum" in msg
+        ):
             self.book_read = True
             self.state = "SANCTUM_OPENED"
             return Action(name="descend")
@@ -103,7 +112,10 @@ class InvocationSolver:
                 self.vibrating_square_pos = detected
 
         # If not standing on vibrating square, step toward it
-        if self.vibrating_square_pos is not None and (hy, hx) != self.vibrating_square_pos:
+        if (
+            self.vibrating_square_pos is not None
+            and (hy, hx) != self.vibrating_square_pos
+        ):
             self.state = "NAVIGATE_TO_SQUARE"
             return Action(name="step_to", target_pos=self.vibrating_square_pos)
 

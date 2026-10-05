@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
 import numpy as np
 
 
@@ -84,7 +85,9 @@ class BatchDiagnosticSummary:
             FailureArchetype.MAX_TURNS_REACHED.value: "Exceeded 25,000 turn episode ceiling alive",
             FailureArchetype.ABORTED_ZERO_PROGRESS.value: "Aborted due to repeated zero-turn stalls",
         }
-        for arch, count in sorted(self.archetype_counts.items(), key=lambda x: x[1], reverse=True):
+        for arch, count in sorted(
+            self.archetype_counts.items(), key=lambda x: x[1], reverse=True
+        ):
             pct = self.archetype_percentages.get(arch, 0.0)
             desc = descriptions.get(arch, "Combat or environmental mortality")
             lines.append(f"| `{arch}` | {count} | {pct:.1f}% | {desc} |")
@@ -95,13 +98,27 @@ class RootCauseClassifier:
     """Classifies episodes into root cause archetypes from raw telemetry."""
 
     FAST_PREDATORS = {
-        "soldier ant", "giant ant", "killer bee", "queen bee",
-        "fox", "coyote", "dingo", "jaguar", "giant bat", "wolf"
+        "soldier ant",
+        "giant ant",
+        "killer bee",
+        "queen bee",
+        "fox",
+        "coyote",
+        "dingo",
+        "jaguar",
+        "giant bat",
+        "wolf",
     }
 
     PASSIVE_HAZARDS = {
-        "floating eye", "gas spore", "brown mold", "yellow mold",
-        "green slime", "freezing sphere", "flaming sphere", "shocking sphere"
+        "floating eye",
+        "gas spore",
+        "brown mold",
+        "yellow mold",
+        "green slime",
+        "freezing sphere",
+        "flaming sphere",
+        "shocking sphere",
     }
 
     @classmethod
@@ -115,7 +132,11 @@ class RootCauseClassifier:
         max_d = int(ep_summary.get("max_depth") or depth)
         turns = int(ep_summary.get("ep_turns") or ep_summary.get("turns") or 0)
         killer = str(ep_summary.get("killer") or "").lower()
-        ac = int(ep_summary.get("ac_at_death") if ep_summary.get("ac_at_death") is not None else 10)
+        ac = int(
+            ep_summary.get("ac_at_death")
+            if ep_summary.get("ac_at_death") is not None
+            else 10
+        )
         inv_str = str(ep_summary.get("inventory_at_death") or "").lower()
         death_reason = str(ep_summary.get("death_reason") or "").lower()
 
@@ -179,7 +200,11 @@ class RootCauseClassifier:
             )
 
         # 2. Starvation / Fainting Check
-        if turns_fainting > 0 or "starvation" in death_reason or "faint" in death_reason:
+        if (
+            turns_fainting > 0
+            or "starvation" in death_reason
+            or "faint" in death_reason
+        ):
             return EpisodeDiagnostic(
                 episode_id=str(ep_summary.get("episode_id", "")),
                 run_id=str(ep_summary.get("run_id", "")),
@@ -209,7 +234,7 @@ class RootCauseClassifier:
                 ac_at_death=ac,
                 primary_archetype=FailureArchetype.PING_PONG_OSCILLATION,
                 confidence=0.90,
-                explanation=f"Trapped in 2-tile ping-pong oscillation for >= 30 turns prior to death",
+                explanation="Trapped in 2-tile ping-pong oscillation for >= 30 turns prior to death",
                 turns_fainting=turns_fainting,
                 turns_weak=turns_weak,
                 is_oscillating=True,
@@ -219,7 +244,11 @@ class RootCauseClassifier:
         # 4. Level Exploration / Secret Door Stall Check
         turns_dl1 = int(ep_summary.get("turns_dl1") or 0)
         turns_dl2 = int(ep_summary.get("turns_dl2") or 0)
-        if (turns_dl1 >= 500 and max_d == 1) or (turns_dl2 >= 600 and max_d <= 2) or (turns >= 1200 and max_d <= 2 and searches_count >= 15):
+        if (
+            (turns_dl1 >= 500 and max_d == 1)
+            or (turns_dl2 >= 600 and max_d <= 2)
+            or (turns >= 1200 and max_d <= 2 and searches_count >= 15)
+        ):
             return EpisodeDiagnostic(
                 episode_id=str(ep_summary.get("episode_id", "")),
                 run_id=str(ep_summary.get("run_id", "")),
@@ -299,7 +328,11 @@ class RootCauseClassifier:
         if ticks:
             last_tick = ticks[-1]
             hostiles_fov = int(last_tick.get("hostiles_in_fov") or 0)
-            adj_count = len(str(last_tick.get("adjacent_monsters") or "").split(",")) if last_tick.get("adjacent_monsters") else 0
+            adj_count = (
+                len(str(last_tick.get("adjacent_monsters") or "").split(","))
+                if last_tick.get("adjacent_monsters")
+                else 0
+            )
             if hostiles_fov >= 2 or adj_count >= 2:
                 return EpisodeDiagnostic(
                     episode_id=str(ep_summary.get("episode_id", "")),
@@ -337,7 +370,9 @@ class RootCauseClassifier:
         )
 
     @classmethod
-    def summarize_batch(cls, diagnostics: list[EpisodeDiagnostic]) -> BatchDiagnosticSummary:
+    def summarize_batch(
+        cls, diagnostics: list[EpisodeDiagnostic]
+    ) -> BatchDiagnosticSummary:
         total = len(diagnostics)
         if total == 0:
             return BatchDiagnosticSummary(0, 0.0, 0, 0.0)
@@ -353,10 +388,28 @@ class RootCauseClassifier:
 
         percentages = {k: (v / total) * 100.0 for k, v in counts.items()}
 
-        fainting_count = sum(1 for d in diagnostics if d.turns_fainting > 0 or d.primary_archetype == FailureArchetype.STARVATION_FAINTING)
-        stall_count = sum(1 for d in diagnostics if d.primary_archetype == FailureArchetype.STALL_SECRET_DOOR)
-        armor_count = sum(1 for d in diagnostics if d.primary_archetype == FailureArchetype.ARMOR_DEFICIT)
-        osc_count = sum(1 for d in diagnostics if d.is_oscillating or d.primary_archetype == FailureArchetype.PING_PONG_OSCILLATION)
+        fainting_count = sum(
+            1
+            for d in diagnostics
+            if d.turns_fainting > 0
+            or d.primary_archetype == FailureArchetype.STARVATION_FAINTING
+        )
+        stall_count = sum(
+            1
+            for d in diagnostics
+            if d.primary_archetype == FailureArchetype.STALL_SECRET_DOOR
+        )
+        armor_count = sum(
+            1
+            for d in diagnostics
+            if d.primary_archetype == FailureArchetype.ARMOR_DEFICIT
+        )
+        osc_count = sum(
+            1
+            for d in diagnostics
+            if d.is_oscillating
+            or d.primary_archetype == FailureArchetype.PING_PONG_OSCILLATION
+        )
 
         return BatchDiagnosticSummary(
             total_episodes=total,

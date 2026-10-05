@@ -9,7 +9,6 @@ Prevents crushed-by-drawbridge instadeaths and moat drowning by:
 
 from __future__ import annotations
 
-from typing import Any
 import numpy as np
 
 from lox.core.types import Action, Observation
@@ -52,8 +51,13 @@ class CastleDrawbridgeSolver:
         # Ideal firing position: distance == 2 in a straight orthogonal line
         if (abs(dy) == 2 and dx == 0) or (abs(dx) == 2 and dy == 0):
             # Fire wand of striking directly at drawbridge
-            strike_dir = (1 if dy > 0 else (-1 if dy < 0 else 0), 1 if dx > 0 else (-1 if dx < 0 else 0))
-            if obs.inventory.has_offensive_wand or getattr(obs.inventory, "has_wand_of_striking", False):
+            strike_dir = (
+                1 if dy > 0 else (-1 if dy < 0 else 0),
+                1 if dx > 0 else (-1 if dx < 0 else 0),
+            )
+            if obs.inventory.has_offensive_wand or getattr(
+                obs.inventory, "has_wand_of_striking", False
+            ):
                 self.state = "DONE"
                 return Action(name="zap_offensive_wand", direction=strike_dir)
             else:
@@ -65,12 +69,14 @@ class CastleDrawbridgeSolver:
         return Action(name="step_to", target_pos=(target_y, target_x))
 
     @staticmethod
-    def detect_drawbridge(chars: np.ndarray | None, message: str = "") -> tuple[int, int] | None:
+    def detect_drawbridge(
+        chars: np.ndarray | None, message: str = ""
+    ) -> tuple[int, int] | None:
         """Finds coordinates of a closed drawbridge near moat/water."""
         if chars is None:
             return None
         # In Castle, moat is '}' (pool/moat). A bridge/door '#' or '+' adjacent to water '}'
-        water_mask = (chars == ord("}"))
+        water_mask = chars == ord("}")
         if not np.any(water_mask):
             return None
         for wy, wx in np.argwhere(water_mask):

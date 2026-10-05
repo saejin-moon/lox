@@ -12,11 +12,19 @@ Unit tests for LOX Ascension Milestones & Advanced Primitives:
 
 from __future__ import annotations
 
-import numpy as np
-import pytest
+from typing import Any
 
-from lox.core.types import Action, HeroState, InventoryView, Item, Observation, DungeonView, SpatialView, CombatView
-from lox.envs.nethack import NetHackAdapter, DIR_CHARS
+import numpy as np
+
+from lox.core.types import (
+    Action,
+    DungeonView,
+    HeroState,
+    InventoryView,
+    Item,
+    Observation,
+)
+from lox.envs.nethack import NetHackAdapter
 from lox.envs.solvers.invocation_solver import InvocationSolver
 
 
@@ -31,7 +39,35 @@ class DummyEnv:
         self.step_history.append(action)
         self.last_action = action
         raw_obs = {
-            "blstats": np.array([10, 10, 0, 0, 0, 0, 0, 0, 0, 0, 20, 20, 1, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            "blstats": np.array(
+                [
+                    10,
+                    10,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    20,
+                    20,
+                    1,
+                    1000,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]
+            ),
             "chars": np.full((21, 79), ord("."), dtype=np.uint8),
             "glyphs": np.zeros((21, 79), dtype=np.int32),
             "message": np.zeros(256, dtype=np.uint8),
@@ -44,7 +80,35 @@ class DummyEnv:
 
     def reset(self, seed=None):
         raw_obs = {
-            "blstats": np.array([10, 10, 0, 0, 0, 0, 0, 0, 0, 0, 20, 20, 1, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            "blstats": np.array(
+                [
+                    10,
+                    10,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    20,
+                    20,
+                    1,
+                    1000,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]
+            ),
             "chars": np.full((21, 79), ord("."), dtype=np.uint8),
             "glyphs": np.zeros((21, 79), dtype=np.int32),
             "message": np.zeros(256, dtype=np.uint8),
@@ -105,8 +169,15 @@ def test_sacrifice_on_altar_with_floor_corpse():
     act = Action(name="sacrifice_on_altar")
     new_obs, reward, term, trunc, info = adapter.step(act)
 
-    executed_chars = [chr(adapter.actions[idx].value if hasattr(adapter.actions[idx], "value") else adapter.actions[idx])
-                      for idx in adapter.env.step_history if idx in adapter.char_to_act.values()]
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
     seq_str = "".join(executed_chars)
     assert "#offer" in seq_str
     # Floor corpse on altar tile should be removed
@@ -127,8 +198,15 @@ def test_sacrifice_on_altar_with_inventory_corpse():
     act = Action(name="sacrifice_on_altar")
     new_obs, reward, term, trunc, info = adapter.step(act)
 
-    executed_chars = [chr(adapter.actions[idx].value if hasattr(adapter.actions[idx], "value") else adapter.actions[idx])
-                      for idx in adapter.env.step_history if idx in adapter.char_to_act.values()]
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
     seq_str = "".join(executed_chars)
     assert "#offer" in seq_str
     assert "c" in seq_str  # Corpse slot selected
@@ -140,7 +218,9 @@ def test_donate_to_priest():
     adapter.env = DummyEnv()
     hero = HeroState(y=10, x=10, level=3, gold=2000)
     inv = InventoryView([])
-    dungeon = DungeonView(in_temple=True, has_priest=True, adjacent_priest=True, priest_pos=(10, 11))
+    dungeon = DungeonView(
+        in_temple=True, has_priest=True, adjacent_priest=True, priest_pos=(10, 11)
+    )
     obs = make_obs(hero=hero, inventory=inv, dungeon=dungeon)
     adapter._last_obs = obs
     adapter.known_priest_pos = (10, 11)  # East of hero ('l')
@@ -148,8 +228,15 @@ def test_donate_to_priest():
     act = Action(name="donate_to_priest")
     new_obs, reward, term, trunc, info = adapter.step(act)
 
-    executed_chars = [chr(adapter.actions[idx].value if hasattr(adapter.actions[idx], "value") else adapter.actions[idx])
-                      for idx in adapter.env.step_history if idx in adapter.char_to_act.values()]
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
     seq_str = "".join(executed_chars)
     assert "#chat" in seq_str
     assert "l" in seq_str  # Direction toward priest (East)
@@ -168,8 +255,15 @@ def test_apply_blindfold():
     act = Action(name="apply_blindfold")
     new_obs, reward, term, trunc, info = adapter.step(act)
 
-    executed_chars = [chr(adapter.actions[idx].value if hasattr(adapter.actions[idx], "value") else adapter.actions[idx])
-                      for idx in adapter.env.step_history if idx in adapter.char_to_act.values()]
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
     seq_str = "".join(executed_chars)
     assert "ab" in seq_str
 
@@ -187,8 +281,15 @@ def test_semi_permanent_engraving_with_burn_wand():
     act = Action(name="engrave_dust_elbereth")
     new_obs, reward, term, trunc, info = adapter.step(act)
 
-    executed_chars = [chr(adapter.actions[idx].value if hasattr(adapter.actions[idx], "value") else adapter.actions[idx])
-                      for idx in adapter.env.step_history if idx in adapter.char_to_act.values()]
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
     seq_str = "".join(executed_chars)
     # Must use wand slot 'w' instead of fingers '-'
     assert "EwElbereth" in seq_str
@@ -207,8 +308,15 @@ def test_semi_permanent_engraving_with_athame():
     act = Action(name="engrave_dust_elbereth")
     new_obs, reward, term, trunc, info = adapter.step(act)
 
-    executed_chars = [chr(adapter.actions[idx].value if hasattr(adapter.actions[idx], "value") else adapter.actions[idx])
-                      for idx in adapter.env.step_history if idx in adapter.char_to_act.values()]
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
     seq_str = "".join(executed_chars)
     assert "EaElbereth" in seq_str
 
@@ -249,8 +357,15 @@ def test_castle_drawbridge_breach_step():
     act = Action(name="breach_drawbridge")
     new_obs, reward, term, trunc, info = adapter.step(act)
 
-    executed_chars = [chr(adapter.actions[idx].value if hasattr(adapter.actions[idx], "value") else adapter.actions[idx])
-                      for idx in adapter.env.step_history if idx in adapter.char_to_act.values()]
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
     seq_str = "".join(executed_chars)
     # Zaps wand of striking directly at drawbridge (East 'l')
     assert "zzl" in seq_str or "zl" in seq_str
@@ -273,8 +388,15 @@ def test_dig_tunnel():
     act = Action(name="dig_tunnel")
     new_obs, reward, term, trunc, info = adapter.step(act)
 
-    executed_chars = [chr(adapter.actions[idx].value if hasattr(adapter.actions[idx], "value") else adapter.actions[idx])
-                      for idx in adapter.env.step_history if idx in adapter.char_to_act.values()]
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
     seq_str = "".join(executed_chars)
     # Zaps wand of digging south ('j')
     assert "zdj" in seq_str
@@ -283,7 +405,9 @@ def test_dig_tunnel():
 def test_invocation_solver_full_sequence():
     """Verify InvocationSolver executes the 3 mandatory ritual steps at Vibrating Square."""
     solver = InvocationSolver()
-    candelabrum = Item(slot="c", name="the Candelabrum of Abernathy (7 candles)", category="tool")
+    candelabrum = Item(
+        slot="c", name="the Candelabrum of Abernathy (7 candles)", category="tool"
+    )
     bell = Item(slot="b", name="the Bell of Opening", category="tool")
     book = Item(slot="B", name="the Book of the Dead", category="scroll")
     inv = InventoryView([candelabrum, bell, book])
@@ -292,7 +416,12 @@ def test_invocation_solver_full_sequence():
     chars = np.full((21, 79), ord("."), dtype=np.uint8)
     chars[12, 14] = ord("~")  # Standing on Vibrating Square
 
-    obs = make_obs(hero=hero, inventory=inv, chars=chars, message="You feel a strange vibration beneath your feet.")
+    obs = make_obs(
+        hero=hero,
+        inventory=inv,
+        chars=chars,
+        message="You feel a strange vibration beneath your feet.",
+    )
 
     # Step 1: Light Candelabrum
     act1 = solver.plan_step(obs)
@@ -300,21 +429,36 @@ def test_invocation_solver_full_sequence():
     assert act1.slot == "c"
 
     # Simulate message that candelabrum glows
-    obs_glow = make_obs(hero=hero, inventory=inv, chars=chars, message="The candelabrum burns with a pure flame.")
+    obs_glow = make_obs(
+        hero=hero,
+        inventory=inv,
+        chars=chars,
+        message="The candelabrum burns with a pure flame.",
+    )
     # Step 2: Ring Bell of Opening
     act2 = solver.plan_step(obs_glow)
     assert act2 is not None
     assert act2.slot == "b"
 
     # Simulate message that bell rings
-    obs_bell = make_obs(hero=hero, inventory=inv, chars=chars, message="The bell rings with a resonant chime.")
+    obs_bell = make_obs(
+        hero=hero,
+        inventory=inv,
+        chars=chars,
+        message="The bell rings with a resonant chime.",
+    )
     # Step 3: Read Book of the Dead
     act3 = solver.plan_step(obs_bell)
     assert act3 is not None
     assert act3.slot == "B"
 
     # Simulate message that stairway opens
-    obs_open = make_obs(hero=hero, inventory=inv, chars=chars, message="A stairway opens into Moloch's Sanctum!")
+    obs_open = make_obs(
+        hero=hero,
+        inventory=inv,
+        chars=chars,
+        message="A stairway opens into Moloch's Sanctum!",
+    )
     act4 = solver.plan_step(obs_open)
     assert act4 is not None
     assert act4.name == "descend"

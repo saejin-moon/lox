@@ -59,7 +59,7 @@ from lox.dsl.compiler import compile_policy
 from lox.envs.minihack import MiniHackAdapter
 from lox.envs.nethack import NetHackAdapter
 from lox.telemetry.consolidator import consolidate_run
-from lox.telemetry.diagnostics import FailureArchetype, RootCauseClassifier
+from lox.telemetry.diagnostics import RootCauseClassifier
 from lox.telemetry.parquet import ParquetLogger
 from lox.telemetry.recorder import FlightRecorder
 from lox.telemetry.tokens import get_token_usage_summary
@@ -424,7 +424,10 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             killer = last_known_hostile
         if not killer:
             cname = getattr(obs.combat, "closest_hostile_name", "")
-            if cname and (cname not in ("floating eye", "gas spore") or getattr(obs.combat, "adjacent_hostile", False)):
+            if cname and (
+                cname not in ("floating eye", "gas spore")
+                or getattr(obs.combat, "adjacent_hostile", False)
+            ):
                 killer = cname
     ac_at_death = last_valid_ac
     hp_at_death = getattr(obs.hero, "hp", 0)
@@ -473,7 +476,9 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         "excalibur_forged": excalibur_forged,
         "turns_fainting": sum(1 for s in recorder.buffer if s.hunger == "FAINTING"),
         "turns_weak": sum(1 for s in recorder.buffer if s.hunger == "WEAK"),
-        "is_oscillating": (len(set(s.pos for s in list(recorder.buffer)[-40:])) <= 2) if len(recorder.buffer) >= 30 else False,
+        "is_oscillating": (len(set(s.pos for s in list(recorder.buffer)[-40:])) <= 2)
+        if len(recorder.buffer) >= 30
+        else False,
         "trajectory": recorder.get_last_10_turns_trajectory(),
     }
 
@@ -762,7 +767,11 @@ class Agent:
             ", ".join(f"{r[0]} ({r[2]}%)" for r in top_deaths) if top_deaths else "None"
         )
         # Determine dominant root cause archetype from empirical diagnostic engine
-        top_arch = max(batch_summary.archetype_counts.items(), key=lambda x: x[1])[0] if batch_summary.archetype_counts else "COMBAT_GENERAL"
+        top_arch = (
+            max(batch_summary.archetype_counts.items(), key=lambda x: x[1])[0]
+            if batch_summary.archetype_counts
+            else "COMBAT_GENERAL"
+        )
         top_arch_pct = batch_summary.archetype_percentages.get(top_arch, 0.0)
 
         print(

@@ -10,7 +10,6 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 
 DATA_DIR = "data"
 WIKI_DB_PATH = os.path.join(DATA_DIR, "wiki_index.db")
@@ -22,13 +21,27 @@ def download_wiki_json() -> str:
     """Downloads nethackwikidata.json via curl if not present."""
     os.makedirs(DATA_DIR, exist_ok=True)
     if os.path.exists(WIKI_JSON_PATH) and os.path.getsize(WIKI_JSON_PATH) > 1000000:
-        print(f"[WIKI BUILD] Found existing {WIKI_JSON_PATH} ({os.path.getsize(WIKI_JSON_PATH):,} bytes)")
+        print(
+            f"[WIKI BUILD] Found existing {WIKI_JSON_PATH} ({os.path.getsize(WIKI_JSON_PATH):,} bytes)"
+        )
         return WIKI_JSON_PATH
 
     print(f"[WIKI BUILD] Curling NetHack wiki dataset from {DROPBOX_URL}...")
-    cmd = ["curl", "-L", "-s", "-S", "--max-time", "120", "-o", WIKI_JSON_PATH, DROPBOX_URL]
+    cmd = [
+        "curl",
+        "-L",
+        "-s",
+        "-S",
+        "--max-time",
+        "120",
+        "-o",
+        WIKI_JSON_PATH,
+        DROPBOX_URL,
+    ]
     subprocess.run(cmd, check=True)
-    print(f"[WIKI BUILD] Successfully curled {WIKI_JSON_PATH} ({os.path.getsize(WIKI_JSON_PATH):,} bytes)")
+    print(
+        f"[WIKI BUILD] Successfully curled {WIKI_JSON_PATH} ({os.path.getsize(WIKI_JSON_PATH):,} bytes)"
+    )
     return WIKI_JSON_PATH
 
 
@@ -99,7 +112,9 @@ def build_database(json_path: str, db_path: str) -> None:
             except json.JSONDecodeError:
                 continue
 
-            title = item.get("wikipedia_title", "").strip() or item.get("title", "").strip()
+            title = (
+                item.get("wikipedia_title", "").strip() or item.get("title", "").strip()
+            )
             text_data = item.get("text", "")
             if isinstance(text_data, list):
                 content = "".join(text_data)
@@ -134,7 +149,9 @@ def build_database(json_path: str, db_path: str) -> None:
             except sqlite3.Error:
                 pass
 
-    print(f"[WIKI BUILD] Inserted {articles_inserted:,} articles and {redirects_inserted:,} redirects.")
+    print(
+        f"[WIKI BUILD] Inserted {articles_inserted:,} articles and {redirects_inserted:,} redirects."
+    )
     print("[WIKI BUILD] Populating FTS5 full-text index...")
     cur.execute("INSERT INTO wiki_fts(wiki_fts) VALUES('rebuild');")
     con.commit()
@@ -150,7 +167,9 @@ def build_database(json_path: str, db_path: str) -> None:
     vac_con.close()
 
     db_size = os.path.getsize(db_path)
-    print(f"[WIKI BUILD] Complete! {db_path} created successfully ({db_size / (1024*1024):.1f} MB).")
+    print(
+        f"[WIKI BUILD] Complete! {db_path} created successfully ({db_size / (1024 * 1024):.1f} MB)."
+    )
 
 
 def main():

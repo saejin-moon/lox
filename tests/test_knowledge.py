@@ -4,7 +4,7 @@ Tests for LOX Empirical Knowledge Base and Invariant Registry.
 
 from lox.author.prompts import build_user_prompt
 from lox.author.tools import DuckDBToolRegistry
-from lox.knowledge import REGISTRY, Invariant, InvariantRegistry
+from lox.knowledge import REGISTRY
 
 
 def test_registry_basics():
@@ -73,15 +73,21 @@ def test_registry_search():
 
 
 def test_trigger_relevance():
-    spore_invs = REGISTRY.get_relevant_invariants_for_trigger("cluster: Killed in combat: gas spore")
+    spore_invs = REGISTRY.get_relevant_invariants_for_trigger(
+        "cluster: Killed in combat: gas spore"
+    )
     spore_ids = [inv.id for inv in spore_invs]
     assert "INV-CBT-002" in spore_ids
 
-    starve_invs = REGISTRY.get_relevant_invariants_for_trigger("cluster: Starvation / Hunger fainting")
+    starve_invs = REGISTRY.get_relevant_invariants_for_trigger(
+        "cluster: Starvation / Hunger fainting"
+    )
     starve_ids = [inv.id for inv in starve_invs]
     assert "INV-NUT-003" in starve_ids or "INV-NUT-001" in starve_ids
 
-    passive_invs = REGISTRY.get_relevant_invariants_for_trigger("stuck in combat with passive hazard")
+    passive_invs = REGISTRY.get_relevant_invariants_for_trigger(
+        "stuck in combat with passive hazard"
+    )
     passive_ids = [inv.id for inv in passive_invs]
     assert "INV-CBT-009" in passive_ids
 

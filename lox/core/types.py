@@ -317,16 +317,42 @@ class InventoryView(list):
         for it in self:
             if it.category == "armor" and it.is_equipped:
                 n = it.name.lower()
-                if any(k in n for k in ("mail", "suit", "coat", "cuirass", "jacket", "plate", "leather armor")):
+                if any(
+                    k in n
+                    for k in (
+                        "mail",
+                        "suit",
+                        "coat",
+                        "cuirass",
+                        "jacket",
+                        "plate",
+                        "leather armor",
+                    )
+                ):
                     return True
         return False
 
     @property
     def has_unworn_body_armor(self) -> bool:
         for it in self:
-            if it.category == "armor" and not it.is_equipped and it.slot not in self.failed_armor_slots:
+            if (
+                it.category == "armor"
+                and not it.is_equipped
+                and it.slot not in self.failed_armor_slots
+            ):
                 n = it.name.lower()
-                if any(k in n for k in ("mail", "suit", "coat", "cuirass", "jacket", "plate", "leather armor")):
+                if any(
+                    k in n
+                    for k in (
+                        "mail",
+                        "suit",
+                        "coat",
+                        "cuirass",
+                        "jacket",
+                        "plate",
+                        "leather armor",
+                    )
+                ):
                     return True
         return False
 
@@ -356,7 +382,10 @@ class InventoryView(list):
         for it in self:
             if it.category == "armor" and it.is_equipped:
                 n = it.name.lower()
-                if any(k in n for k in ("mail", "suit", "coat", "cuirass", "jacket", "plate")):
+                if any(
+                    k in n
+                    for k in ("mail", "suit", "coat", "cuirass", "jacket", "plate")
+                ):
                     worn_body_item = it
                     break
 
@@ -373,7 +402,11 @@ class InventoryView(list):
         best_unworn_tier = worn_tier
 
         for it in self:
-            if it.category == "armor" and not it.is_equipped and it.slot not in self.failed_armor_slots:
+            if (
+                it.category == "armor"
+                and not it.is_equipped
+                and it.slot not in self.failed_armor_slots
+            ):
                 n = it.name.lower()
                 for k, val in tiers.items():
                     if k in n and val > best_unworn_tier:
@@ -384,27 +417,23 @@ class InventoryView(list):
             return (worn_slot, best_unworn_slot)
         return None
 
-
     @property
     def has_bag_of_holding(self) -> bool:
         return any(
-            it.category in ("tool", "container")
-            and "bag of holding" in it.name.lower()
+            it.category in ("tool", "container") and "bag of holding" in it.name.lower()
             for it in self
         )
 
     @property
     def has_speed_boots(self) -> bool:
         return any(
-            it.category == "armor" and "speed boots" in it.name.lower()
-            for it in self
+            it.category == "armor" and "speed boots" in it.name.lower() for it in self
         )
 
     @property
     def has_gray_dragon_scale_mail(self) -> bool:
         return any(
-            it.category == "armor"
-            and "gray dragon scale mail" in it.name.lower()
+            it.category == "armor" and "gray dragon scale mail" in it.name.lower()
             for it in self
         )
 
@@ -415,8 +444,7 @@ class InventoryView(list):
     @property
     def has_silver_dragon_scale_mail(self) -> bool:
         return any(
-            it.category == "armor"
-            and "silver dragon scale mail" in it.name.lower()
+            it.category == "armor" and "silver dragon scale mail" in it.name.lower()
             for it in self
         )
 
@@ -427,30 +455,26 @@ class InventoryView(list):
     @property
     def has_wand_of_striking(self) -> bool:
         return any(
-            it.category == "wand" and "striking" in it.name.lower()
-            for it in self
+            it.category == "wand" and "striking" in it.name.lower() for it in self
         )
 
     @property
     def has_wand_of_wishing(self) -> bool:
         return any(
-            it.category == "wand" and "wishing" in it.name.lower()
-            for it in self
+            it.category == "wand" and "wishing" in it.name.lower() for it in self
         )
 
     @property
     def has_magic_marker(self) -> bool:
         return any(
-            it.category in ("tool", "unknown")
-            and "magic marker" in it.name.lower()
+            it.category in ("tool", "unknown") and "magic marker" in it.name.lower()
             for it in self
         )
 
     @property
     def has_unicorn_horn(self) -> bool:
         return any(
-            it.category in ("tool", "weapon")
-            and "unicorn horn" in it.name.lower()
+            it.category in ("tool", "weapon") and "unicorn horn" in it.name.lower()
             for it in self
         )
 
@@ -558,9 +582,7 @@ class InventoryView(list):
 
     @property
     def has_candelabrum(self) -> bool:
-        return any(
-            "candelabrum" in it.name.lower() for it in self
-        )
+        return any("candelabrum" in it.name.lower() for it in self)
 
     def get_candelabrum_slot(self) -> str | None:
         for it in self:

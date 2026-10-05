@@ -5,7 +5,6 @@ Validates multi-dimensional failure classification and batch reporting against s
 
 from __future__ import annotations
 
-import pytest
 from lox.telemetry.diagnostics import (
     EpisodeDiagnostic,
     FailureArchetype,
@@ -65,7 +64,9 @@ def test_classify_oscillation():
         "death_reason": "Killed in combat",
     }
     # 40 ticks alternating between (10, 15) and (10, 16)
-    ticks = [{"y": 10, "x": 15 if i % 2 == 0 else 16, "hunger": "NORMAL"} for i in range(40)]
+    ticks = [
+        {"y": 10, "x": 15 if i % 2 == 0 else 16, "hunger": "NORMAL"} for i in range(40)
+    ]
     diag = RootCauseClassifier.classify(ep, ticks=ticks)
     assert diag.primary_archetype == FailureArchetype.PING_PONG_OSCILLATION
     assert diag.is_oscillating is True
@@ -127,7 +128,9 @@ def test_summarize_batch():
             turns=1500,
             killer="test",
             ac_at_death=6,
-            primary_archetype=FailureArchetype.STALL_SECRET_DOOR if i < 4 else FailureArchetype.ARMOR_DEFICIT,
+            primary_archetype=FailureArchetype.STALL_SECRET_DOOR
+            if i < 4
+            else FailureArchetype.ARMOR_DEFICIT,
             confidence=0.9,
             explanation="test",
         )
@@ -137,7 +140,9 @@ def test_summarize_batch():
     assert summary.total_episodes == 10
     assert summary.archetype_counts[FailureArchetype.STALL_SECRET_DOOR.value] == 4
     assert summary.archetype_counts[FailureArchetype.ARMOR_DEFICIT.value] == 6
-    assert summary.archetype_percentages[FailureArchetype.STALL_SECRET_DOOR.value] == 40.0
+    assert (
+        summary.archetype_percentages[FailureArchetype.STALL_SECRET_DOOR.value] == 40.0
+    )
 
     table_md = summary.format_markdown_table()
     assert "Empirical Failure Archetype Breakdown" in table_md

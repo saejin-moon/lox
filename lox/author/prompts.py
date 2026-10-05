@@ -405,7 +405,9 @@ def build_user_prompt(
     """User prompt presenting the empirical autopsy, ranked mortality causes, relevant invariants, and current policy."""
     from lox.knowledge import REGISTRY
 
-    relevant_invs = REGISTRY.get_relevant_invariants_for_trigger(trigger_reason, top_k=3)
+    relevant_invs = REGISTRY.get_relevant_invariants_for_trigger(
+        trigger_reason, top_k=3
+    )
     invariants_block = REGISTRY.format_llm_reference(relevant_invs)
     if invariants_block:
         invariants_block = f"\n{invariants_block}\n"

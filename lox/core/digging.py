@@ -7,8 +7,8 @@ and pickaxes, cutting turn expenditure from 15,000+ turns down to dozens of turn
 
 from __future__ import annotations
 
-import math
 from typing import Any
+
 import numpy as np
 
 

@@ -16,7 +16,9 @@ from nle import nethack
 from nle.nethack import permonst
 
 from lox.core.agenda import GoalAgenda
+from lox.core.digging import DiggingRouter
 from lox.core.epistemic import EpistemicEngine
+from lox.core.sokoban import SokobanSolver
 from lox.core.spatial import SpatialEngine, build_walkable_mask
 from lox.core.types import (
     Action,
@@ -33,8 +35,6 @@ from lox.core.types import (
     Observation,
     SpatialView,
 )
-from lox.core.digging import DiggingRouter
-from lox.core.sokoban import SokobanSolver
 from lox.envs.base import EnvironmentAdapter
 from lox.envs.solvers.altar_solver import AltarBUCSolver
 from lox.envs.solvers.castle_solver import CastleDrawbridgeSolver
@@ -154,7 +154,10 @@ for _g in range(_MAX_GLYPH):
                     GLYPH_IS_PASSIVE_HAZARD_LUT[_g] = True
                 if _ml == "floating eye":
                     GLYPH_IS_FLOATING_EYE[_g] = True
-                elif _ml in ("gas spore", "yellow light", "black light") or "sphere" in _ml:
+                elif (
+                    _ml in ("gas spore", "yellow light", "black light")
+                    or "sphere" in _ml
+                ):
                     GLYPH_IS_GAS_SPORE[_g] = True
 
                 if _ml in (
@@ -629,12 +632,19 @@ class NetHackAdapter(EnvironmentAdapter):
         )
 
         has_magic_res = getattr(self, "has_magic_res", False) or any(
-            ("gray dragon scale" in it.name.lower() or "cloak of magic resistance" in it.name.lower())
+            (
+                "gray dragon scale" in it.name.lower()
+                or "cloak of magic resistance" in it.name.lower()
+            )
             and it.is_equipped
             for it in inventory_items
         )
         has_reflection = getattr(self, "has_reflection", False) or any(
-            ("silver dragon scale" in it.name.lower() or "shield of reflection" in it.name.lower() or "amulet of reflection" in it.name.lower())
+            (
+                "silver dragon scale" in it.name.lower()
+                or "shield of reflection" in it.name.lower()
+                or "amulet of reflection" in it.name.lower()
+            )
             and it.is_equipped
             for it in inventory_items
         )
@@ -774,7 +784,10 @@ class NetHackAdapter(EnvironmentAdapter):
                         self, "hostile_npc_positions", set()
                     ):
                         self.peaceful_positions.add((gy, gx))
-                        if any(k in GLYPH_MON_NAME[g].lower() for k in ("priest", "priestess", "cleric")):
+                        if any(
+                            k in GLYPH_MON_NAME[g].lower()
+                            for k in ("priest", "priestess", "cleric")
+                        ):
                             self.known_priest_pos = (gy, gx)
                         continue
 
@@ -832,7 +845,10 @@ class NetHackAdapter(EnvironmentAdapter):
                             self, "hostile_npc_positions", set()
                         ):
                             self.peaceful_positions.add((ny, nx))
-                            if any(k in GLYPH_MON_NAME[g].lower() for k in ("priest", "priestess", "cleric")):
+                            if any(
+                                k in GLYPH_MON_NAME[g].lower()
+                                for k in ("priest", "priestess", "cleric")
+                            ):
                                 self.known_priest_pos = (ny, nx)
                             continue
                         mname = GLYPH_MON_NAME[g]
@@ -1239,8 +1255,7 @@ class NetHackAdapter(EnvironmentAdapter):
 
         standing_on_altar = bool(self.known_altar_pos == (y, x) or curr_char == "_")
         can_sacrifice = bool(
-            standing_on_altar
-            and ((y, x) in self.floor_corpses or inv_view.has_corpse)
+            standing_on_altar and ((y, x) in self.floor_corpses or inv_view.has_corpse)
         )
         has_boulders = bool(chars is not None and np.any(chars == ord("0")))
         is_sokoban = bool(branch_name == "sokoban" or dnum == 4)
@@ -1253,7 +1268,9 @@ class NetHackAdapter(EnvironmentAdapter):
             (branch_name == "gehennom" or dnum == 1)
             and (inv_view.has_wand_of_digging or inv_view.has_pick_axe)
         )
-        standing_on_vibrating_square = bool(curr_char == "~" or "strange vibration" in message.lower())
+        standing_on_vibrating_square = bool(
+            curr_char == "~" or "strange vibration" in message.lower()
+        )
         can_perform_invocation = bool(
             inv_view.has_bell_of_opening
             and inv_view.has_book_of_the_dead
@@ -1412,20 +1429,17 @@ class NetHackAdapter(EnvironmentAdapter):
                 raw_obs, _, term, trunc, _ = self.env.step(
                     self.char_to_act.get("n", space_idx)
                 )
-            elif (
-                any(
-                    phrase in msg.lower()
-                    for phrase in (
-                        "eat it?",
-                        "eat that?",
-                        "eat one?",
-                        "sacrifice it?",
-                        "sacrifice that?",
-                        "sacrifice one?",
-                    )
+            elif any(
+                phrase in msg.lower()
+                for phrase in (
+                    "eat it?",
+                    "eat that?",
+                    "eat one?",
+                    "sacrifice it?",
+                    "sacrifice that?",
+                    "sacrifice one?",
                 )
-                or ("dip" in msg.lower() and "fountain" in msg.lower())
-            ):
+            ) or ("dip" in msg.lower() and "fountain" in msg.lower()):
                 raw_obs, _, term, trunc, _ = self.env.step(
                     self.char_to_act.get("y", space_idx)
                 )
@@ -1911,7 +1925,9 @@ class NetHackAdapter(EnvironmentAdapter):
 
             # Priority 1: Reachable true corridor dead ends (<= 1 cardinal walkable neighbors)
             # These connect directly to unexplored rooms and must always be searched first.
-            true_dead_ends = self._compute_true_dead_ends_mask(chars, walkable, max_corridor=15)
+            true_dead_ends = self._compute_true_dead_ends_mask(
+                chars, walkable, max_corridor=15
+            )
             step_true_mask = true_dead_ends.copy()
             step_true_mask[hero.y, hero.x] = False
             if np.any(step_true_mask):
@@ -2048,8 +2064,8 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "solve_sokoban" and obs_prev is not None:
             chars = obs_prev.chars
             hero = obs_prev.hero
-            boulder_mask = (chars == ord("0"))
-            pit_mask = (chars == ord("^"))
+            boulder_mask = chars == ord("0")
+            pit_mask = chars == ord("^")
             wall_mask = (chars == ord("-")) | (chars == ord("|"))
             walkable, walkable_nav = self._build_walkable_nav(obs_prev)
             clean_floor = walkable | pit_mask
@@ -2344,9 +2360,15 @@ class NetHackAdapter(EnvironmentAdapter):
                             is_eye = (
                                 self.is_target_floating_eye(obs_prev.glyphs, hy, hx)
                                 or "floating eye" in closest_name
-                                or getattr(obs_prev.combat, "adjacent_floating_eye", False)
+                                or getattr(
+                                    obs_prev.combat, "adjacent_floating_eye", False
+                                )
                             )
-                            if not is_eye and abs(hy - hero.y) <= 1 and abs(hx - hero.x) <= 1:
+                            if (
+                                not is_eye
+                                and abs(hy - hero.y) <= 1
+                                and abs(hx - hero.x) <= 1
+                            ):
                                 return self.step(
                                     Action(
                                         name="melee_attack",
@@ -2722,9 +2744,7 @@ class NetHackAdapter(EnvironmentAdapter):
             return self.step(Action(name="wait"))
         elif action.name == "replace_body_armor":
             slots = (
-                obs_prev.inventory.get_superior_body_armor_slot()
-                if obs_prev
-                else None
+                obs_prev.inventory.get_superior_body_armor_slot() if obs_prev else None
             )
             if slots:
                 worn_slot, superior_slot = slots
@@ -2734,7 +2754,10 @@ class NetHackAdapter(EnvironmentAdapter):
                 if term or trunc:
                     return obs, reward, term, trunc, info
                 obs, reward, term, trunc, info = self._step_sequence(
-                    [self.char_to_act.get("W", 0), self.char_to_act.get(superior_slot, 0)]
+                    [
+                        self.char_to_act.get("W", 0),
+                        self.char_to_act.get(superior_slot, 0),
+                    ]
                 )
                 return obs, reward, term, trunc, info
             return self.step(Action(name="wait"))
@@ -2817,7 +2840,9 @@ class NetHackAdapter(EnvironmentAdapter):
 
         elif action.name == "sacrifice_on_altar" and obs_prev is not None:
             if not obs_prev.dungeon.standing_on_altar:
-                if obs_prev.dungeon.adjacent_altar or getattr(self, "known_altar_pos", None):
+                if obs_prev.dungeon.adjacent_altar or getattr(
+                    self, "known_altar_pos", None
+                ):
                     return self.step(Action(name="step_to_altar"))
                 return self.step(Action(name="wait"))
             hero = obs_prev.hero
@@ -2871,20 +2896,25 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "apply_blindfold" and obs_prev is not None:
             slot = action.slot or obs_prev.inventory.get_blindfold_slot()
             if slot:
-                return self._step_sequence([
-                    self.char_to_act.get("a", 0),
-                    self.char_to_act.get(slot, 0),
-                ])
+                return self._step_sequence(
+                    [
+                        self.char_to_act.get("a", 0),
+                        self.char_to_act.get(slot, 0),
+                    ]
+                )
             return self.step(Action(name="wait"))
 
-        elif action.name in ("step_solve_sokoban", "solve_sokoban") and obs_prev is not None:
+        elif (
+            action.name in ("step_solve_sokoban", "solve_sokoban")
+            and obs_prev is not None
+        ):
             chars = obs_prev.chars
             if chars is None:
                 return self.step(Action(name="wait"))
             walls = (chars == ord("-")) | (chars == ord("|"))
-            boulders = (chars == ord("0"))
-            pits = (chars == ord("^"))
-            clean_floor = (chars == ord("."))
+            boulders = chars == ord("0")
+            pits = chars == ord("^")
+            clean_floor = chars == ord(".")
             hero_pos = (obs_prev.hero.y, obs_prev.hero.x)
 
             push_plan = SokobanSolver.find_best_boulder_push(
@@ -2906,7 +2936,6 @@ class NetHackAdapter(EnvironmentAdapter):
             elif obs_prev.spatial.stairs_down_known:
                 return self.step(Action(name="step_to_stairs_down"))
             return self.step(Action(name="step_to_frontier"))
-
 
         elif action.name == "perform_invocation_step" and obs_prev is not None:
             act = self.invocation_solver.plan_step(obs_prev)
