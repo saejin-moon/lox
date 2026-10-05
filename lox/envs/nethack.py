@@ -238,6 +238,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.door_kick_count: dict[tuple[int, int], int] = {}
         self.hostile_npc_positions: set[tuple[int, int]] = set()
         self.looted_tiles: set[tuple[int, int]] = set()
+        self.shop_tiles: set[tuple[int, int]] = set()
         self.mines_stairs_positions: set[tuple[int, int, int]] = (
             set()
         )  # (y, x, depth) in Dungeons of Doom
@@ -396,7 +397,33 @@ class NetHackAdapter(EnvironmentAdapter):
         # Exclude passive and exploding hazards from pathfinding navigation
         if glyphs is not None:
             valid_glyphs = np.clip(glyphs, 0, _MAX_GLYPH - 1)
-            walkable_nav[GLYPH_IS_PASSIVE_HAZARD_LUT[valid_glyphs]] = False
+            passive_mask = GLYPH_IS_PASSIVE_HAZARD_LUT[valid_glyphs]
+            walkable_nav[passive_mask] = False
+
+            # When hero lacks ranged weapons (daggers or offensive wands), buffer passive hazards
+            # so A* navigation routes around them at distance >= 2, eliminating approach/retreat ping-pongs.
+            has_ranged = False
+            last_obs = getattr(self, "_last_obs", None)
+            if last_obs and hasattr(last_obs, "inventory"):
+                has_ranged = bool(
+                    last_obs.inventory.has_daggers
+                    or last_obs.inventory.has_offensive_wand
+                )
+            elif hasattr(obs_or_raw, "inventory"):
+                has_ranged = bool(
+                    obs_or_raw.inventory.has_daggers
+                    or obs_or_raw.inventory.has_offensive_wand
+                )
+
+            if not has_ranged and np.any(passive_mask):
+                p_ys, p_xs = np.nonzero(passive_mask)
+                for py, px in zip(p_ys, p_xs):
+                    for dy in range(-1, 2):
+                        for dx in range(-1, 2):
+                            ny, nx = py + dy, px + dx
+                            if 0 <= ny < 21 and 0 <= nx < 79:
+                                if hy is None or (ny, nx) != (hy, hx):
+                                    walkable_nav[ny, nx] = False
 
         # Hero's current position is always walkable and can depart
         if hy is not None and 0 <= hy < 21 and 0 <= hx < 79:
@@ -572,6 +599,7 @@ class NetHackAdapter(EnvironmentAdapter):
             self.floor_corpses.clear()
             self.elbereth_positions.clear()
             self.looted_tiles.clear()
+            self.shop_tiles.clear()
             if hasattr(self, "loot_attempts"):
                 self.loot_attempts.clear()
             self.altar_tested_on_floor = False
@@ -1044,7 +1072,52 @@ class NetHackAdapter(EnvironmentAdapter):
         )
         if int(chars[y, x]) in loot_chars:
             self.looted_tiles.add((y, x))
-        if "shop" not in message.lower():
+
+        msg_lower = message.lower()
+        shop_words = (
+            "store",
+            "shop",
+            "emporium",
+            "deli",
+            "bookstore",
+            "jeweler",
+            "outlet",
+            "hardware",
+            "boutique",
+        )
+        if "nethack" not in msg_lower and (
+            "(for sale" in msg_lower
+            or (
+                ("welcome to" in msg_lower or "welcomes you" in msg_lower)
+                and any(w in msg_lower for w in shop_words)
+            )
+            or (
+                any(w in msg_lower for w in shop_words)
+                and not any(
+                    k in msg_lower
+                    for k in ("shopkeeper", "watchman", "priest", "watch captain")
+                )
+            )
+        ):
+            # Flood-fill current room floor to register persistent shop tiles
+            queue = [(y, x)]
+            visited_shop = {(y, x)}
+            while queue:
+                cy, cx = queue.pop(0)
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < 21 and 0 <= nx < 79 and (ny, nx) not in visited_shop:
+                        ch = chr(chars[ny, nx])
+                        if ch == "." or int(chars[ny, nx]) in loot_chars:
+                            visited_shop.add((ny, nx))
+                            queue.append((ny, nx))
+            self.shop_tiles.update(visited_shop)
+
+        in_shop_curr = (y, x) in self.shop_tiles or (
+            "shop" in msg_lower and "nethack" not in msg_lower
+        )
+
+        if not in_shop_curr:
             loot_candidates = []
             for dy in range(-4, 5):
                 for dx in range(-4, 5):
@@ -1055,6 +1128,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         if (
                             (ly, lx) not in self.blocked_tiles
                             and (ly, lx) not in self.looted_tiles
+                            and (ly, lx) not in self.shop_tiles
                             and int(chars[ly, lx]) in loot_chars
                         ):
                             if glyphs is not None:
@@ -1283,7 +1357,7 @@ class NetHackAdapter(EnvironmentAdapter):
 
         dungeon = DungeonView(
             tile_type=tile_type,
-            in_shop=("shop" in message.lower()),
+            in_shop=in_shop_curr,
             in_temple=("temple" in message.lower()),
             is_dark_level=(branch_name == "mines"),
             dungeon_branch=branch_name,
@@ -1729,6 +1803,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.door_kick_count.clear()
         self.hostile_npc_positions.clear()
         self.looted_tiles.clear()
+        self.shop_tiles.clear()
         self.mines_stairs_positions.clear()
         self._last_descended_stair = None
         self.has_poison_res = False

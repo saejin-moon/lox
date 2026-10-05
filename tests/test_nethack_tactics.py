@@ -531,3 +531,80 @@ def test_wear_armor_with_cloak_removal():
         adapter._step_sequence = original_step_sequence
         adapter.close()
 
+
+def test_passive_hazard_nav_buffering():
+    """Verify that passive hazards (floating eyes) buffer adjacent tiles when lacking ranged weapons."""
+    import nle.nethack as nh
+    from lox.core.types import Item
+
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=123)
+    hy, hx = obs.hero.y, obs.hero.x
+
+    eye_mon_id = nh.PM_FLOATING_EYE if hasattr(nh, "PM_FLOATING_EYE") else None
+    if eye_mon_id is None:
+        for i in range(nh.NUMMONS):
+            if nh.permonst(i).mname == "floating eye":
+                eye_mon_id = i
+                break
+    eye_glyph = nh.GLYPH_MON_OFF + eye_mon_id
+
+    # Place eye 3 steps away horizontally in the open room
+    eye_pos = (hy, hx + 3)
+    obs.glyphs[eye_pos[0], eye_pos[1]] = eye_glyph
+    obs.raw_obs["glyphs"][eye_pos[0], eye_pos[1]] = eye_glyph
+
+    # Remove daggers and offensive wands from inventory
+    obs.inventory.clear()
+    adapter._last_obs = obs
+
+    _, nav_no_ranged = adapter._build_walkable_nav(obs)
+    # The tile immediately next to the floating eye (hy, hx + 2) should be buffered (not walkable)
+    assert not nav_no_ranged[hy, hx + 2], "Tile adjacent to passive hazard must be buffered when lacking ranged weapons"
+
+    # Now give hero a dagger
+    obs.inventory.append(Item(slot="a", name="a dagger", category="weapon"))
+    adapter._last_obs = obs
+    _, nav_with_ranged = adapter._build_walkable_nav(obs)
+    # With daggers, adjacent tile is walkable so hero can approach to throw missiles safely
+    assert nav_with_ranged[hy, hx + 2], "Tile adjacent to passive hazard must be walkable when possessing ranged weapons"
+
+    adapter.close()
+
+
+def test_shop_tiles_tracking_and_loot_shield():
+    """Verify that shop welcome messages register persistent shop_tiles and shield shop merchandise from loot_candidates."""
+    import numpy as np
+
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=456)
+    hy, hx = obs.hero.y, obs.hero.x
+
+    # Place an armor '[' on an adjacent floor tile
+    target_pos = (hy, hx + 1)
+    raw_obs_mock = obs.raw_obs.copy()
+    raw_obs_mock["chars"] = obs.chars.copy()
+    raw_obs_mock["chars"][target_pos[0], target_pos[1]] = ord("[")
+    raw_obs_mock["glyphs"] = obs.glyphs.copy()
+    raw_obs_mock["glyphs"][target_pos[0], target_pos[1]] = 2359
+
+    # Without shop message, it should be recognized as loot
+    raw_obs_mock["message"] = np.frombuffer(b"You see an open floor.\x00" + b"\x00" * 233, dtype=np.uint8)
+    obs_loot = adapter._extract_obs(raw_obs_mock)
+    assert obs_loot.spatial.has_nearby_loot is True
+
+    # Now step into a store: shop greeting message
+    raw_obs_mock["message"] = np.frombuffer(b"Welcome to Izchak's general store!\x00" + b"\x00" * 220, dtype=np.uint8)
+    obs_shop = adapter._extract_obs(raw_obs_mock)
+
+    # Shop tiles must be populated
+    assert len(adapter.shop_tiles) > 0
+    assert (hy, hx) in adapter.shop_tiles
+    assert target_pos in adapter.shop_tiles
+    assert obs_shop.dungeon.in_shop is True
+    # Merchandise inside the shop must NOT trigger has_nearby_loot
+    assert obs_shop.spatial.has_nearby_loot is False
+
+    adapter.close()
+
+
