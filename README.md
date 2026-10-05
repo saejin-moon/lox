@@ -75,12 +75,11 @@ Each evolutionary generation in LOX executes a rigorous, closed-loop 6-stage lif
 - Official ground-truth scores are extracted from NetHack C-level `blstats[nh.NLE_BL_SCORE]`.
 - Fatal attacker attribution scans the rolling message buffer and adjacent entities, separating real combat deaths from starvation blackouts and passive hazard encounters.
 
-### Phase 3: Empirical Autopsy & Failure Diagnosis
-- The `AuthorAgent` executes ReAct tool calls querying DuckDB:
-  - Top killer species and fatal depth distributions.
-  - Frequency of starvation or fainting events.
-  - Armor equipping rates and Excalibur forging attempts.
-- Identifies the primary bottleneck limiting the current generation's average depth.
+#### Phase 3: Empirical Autopsy & Root Cause Diagnosis
+- The `AuthorAgent` executes ReAct tool calls querying DuckDB and the **Empirical Root Cause Diagnostic Engine** ([`lox/telemetry/diagnostics.py`](file:///home/moose/git/lox/lox/telemetry/diagnostics.py)):
+  - Classifies every episode into one of 9 canonical failure archetypes (`STALL_SECRET_DOOR`, `STARVATION_FAINTING`, `ARMOR_DEFICIT`, `PING_PONG_OSCILLATION`, `PREMATURE_PRAYER`, `PASSIVE_HAZARD_PARALYSIS`, `COMBAT_TACTICAL_SWARM`, `COMBAT_FAST_PREDATOR`, `COMBAT_GENERAL`).
+  - Formats clean, ultra-compact YAML reports (`data/latest_report.yaml` and `data/latest_diagnostics.yaml`) cutting token consumption by 70%.
+  - Identifies the primary bottleneck limiting the current generation's average depth without "Killed in combat" final-hit misattribution.
 
 ### Phase 4: AST-Constrained Mutation & Domain Guidance
 - The LLM consults the offline NetHack encyclopedia (`lox.wiki.engine`) to look up monster stats, resistances, and game mechanics.
@@ -99,10 +98,10 @@ Each evolutionary generation in LOX executes a rigorous, closed-loop 6-stage lif
 
 ## 3. Core Technical Invariants & Defensive Shields
 
-LOX's reliability is anchored on 38 consolidated technical invariants across 6 operational domains (documented in full in [`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)):
+LOX's reliability is anchored on 32 consolidated technical invariants across 6 operational domains (documented in full in [`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md) and [`lox/knowledge/invariants.py`](file:///home/moose/git/lox/lox/knowledge/invariants.py)):
 
-1. **Python Generator Protocol & Subroutine Yields**:
-   Policies yield actions (`obs = yield action`). Subroutines are invoked via `obs = yield from self.subroutine(obs)`.
+1. **Python Generator Protocol & Subroutine Yields (`INV-ARC-001`)**:
+   Policies yield actions (`obs = yield action`). Subroutines are invoked via `obs = yield from self.subroutine(obs)` and conclude with `return obs`.
 2. **Four-Layer Anti-Loop Defense Architecture**:
    - **Layer 1 (AST LoopGuard)**: Raises `RuntimeError` if any loop exceeds 2,000 iterations without yielding.
    - **Layer 2 (PolicyRunner Fallback)**: Catches runtime errors and yields `wait()` (`.`) to advance the game clock safely.
@@ -116,16 +115,20 @@ LOX's reliability is anchored on 38 consolidated technical invariants across 6 o
    Precomputed 6KB boolean lookup tables classify all 5,976 NetHack glyphs in $< 1\text{µs}$, driving turn throughput to **826+ steps/second**.
 5. **Full-Floor Persistent Topological Memory**:
    Preserves discovered walkable terrain and fixed fixtures (stairs up/down, fountains, altars) across line-of-sight boundaries.
-6. **Dust Elbereth Sanctuary & Species Discrimination**:
+6. **Dust Elbereth Sanctuary & Species Discrimination (`INV-CMB-001`)**:
    Writing `"Elbereth"` in dust provides a 100% ward against non-humanoids (ants, bees, spiders, wolves). Discriminated immune species (orcs, elves, humans, trolls) trigger corridor retreats or melee.
-7. **Passive Hazard Discrimination**:
+7. **Passive Hazard Discrimination (`INV-CMB-002`)**:
    Floating eyes and gas spores are masked out of navigation pathfinding. Distance-1 projectile throwing eliminates floating eyes safely without passive paralysis.
-8. **Proactive Nutrition & Rotten Corpse Shield**:
+8. **Proactive Nutrition & Rotten Corpse Shield (`INV-NUT-001`)**:
    Carried food rations are eaten proactively at `hunger_state >= 2` ("Weak") when away from hostiles or on Elbereth, preventing fainting blackouts. Rotten corpses are strictly filtered out of food slots.
-9. **Excalibur Artifact Scaling**:
+9. **Excalibur Artifact Scaling (`INV-EQP-004`)**:
    Lawful Valkyries navigate to fountains at XL $\ge 5$ to dip long swords, forging Excalibur (+1d10 damage, secret door detection, level drain immunity).
-10. **Safe Divine Favor Threshold**:
-    Enforces `turn - last_prayer_turn >= 350` before emergency prayer, guaranteeing safe full HP recovery or divine feeding without angering the deity.
+10. **Safe Divine Favor Threshold (`INV-NUT-003`)**:
+    Enforces `turn - last_prayer_turn >= 850` turns and gates hunger prayer strictly to `hunger_state >= 3` ("Weak"), guaranteeing safe divine feeding or full HP recovery without angering the deity.
+11. **Dead-End Search Persistence (`INV-NAV-005`)**:
+    Searches 12–15 times at dead ends before moving to the next candidate tile, raising secret door discovery probability to $>91\%$ and eliminating exploration deadlocks.
+12. **Unarmored Body Armor Equipping (`INV-EQP-007`)**:
+    Valkyries start with base AC 6 and no body armor. Equipping dropped armor suits immediately without prior BUC testing drastically cuts deep-level burst damage.
 
 ---
 
@@ -173,7 +176,7 @@ uv sync
 ```bash
 uv run pytest -v
 ```
-All 81 test items pass cleanly in ~2.9 seconds.
+All 107 test items pass cleanly in ~3.1 seconds.
 
 ### Step 3: Run Synthesis
 
@@ -203,9 +206,14 @@ uv run python -u -m scripts.run_synthesis \
 
 ---
 
-## 6. Inspecting Campaign Telemetry with DuckDB
+## 6. Inspecting Campaign Telemetry with DuckDB & YAML
 
-Every tick, episode, and LLM token usage is recorded in `data/lox.duckdb`:
+Every tick, episode, and LLM token usage is recorded in `data/lox.duckdb`, with pure YAML summaries automatically exported to `data/latest_diagnostics.yaml` and `data/latest_report.yaml`:
+
+### View Latest Generation Failure Breakdown (YAML)
+```bash
+cat data/latest_diagnostics.yaml
+```
 
 ### Check Generation Performance Summary
 ```bash
@@ -224,13 +232,13 @@ for r in rows:
 "
 ```
 
-### Inspect Recent Episode Fatalities & Depths
+### Inspect Recent Episode Fatalities & Root Causes
 ```bash
 uv run python -c "
 import duckdb
 conn = duckdb.connect('data/lox.duckdb', read_only=True)
 rows = conn.execute('''
-    SELECT episode_id, depth, max_depth, score, turns, death_reason, killer
+    SELECT episode_id, depth, max_depth, turns, root_cause, death_reason, ac_at_death
     FROM episodes
     ORDER BY episode_id DESC
     LIMIT 10
@@ -257,5 +265,6 @@ print(conn.execute('''
 
 ## 7. Key Operational Documents
 
-- **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Authoritative operational guide, architectural foundation, and 24 consolidated technical invariants across 6 domains.
+- **[`HANDOFF.md`](file:///home/moose/git/lox/HANDOFF.md)**: Master onboarding manual for LLM agents taking over the codebase (mission targets, policy generator rules, diagnostic engine, and ascension roadmap).
+- **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Authoritative operational guide, architectural foundation, and 32 consolidated technical invariants across 6 domains.
 - **[`TODO.md`](file:///home/moose/git/lox/TODO.md)**: Real-time campaign tracking, empirical benchmark progression, autopsy findings, and active roadmap.
