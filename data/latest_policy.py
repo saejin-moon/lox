@@ -19,17 +19,20 @@ class Agent:
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
-            if obs.spatial.standing_on_stairs_down and (not obs.status.is_levitating):
+            if obs.spatial.standing_on_stairs_down and (not obs.status.is_levitating) and obs.hero.dungeon_branch != 'sokoban' and not obs.dungeon.is_sokoban:
                 obs = (yield descend())
                 continue
             if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
                 obs = (yield from self.handle_combat(obs))
                 continue
-            if obs.hero.hp_frac < 0.35 and obs.inventory.has_healing:
+            if obs.hero.hp_frac < 0.40 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
                 obs = (yield eat_carried_food())
+                continue
+            if obs.hero.dungeon_branch == 'sokoban' or obs.dungeon.is_sokoban:
+                obs = (yield from self.phase_sokoban(obs))
                 continue
             phase = getattr(obs, 'dungeon_phase', 'early_rush')
             if phase == 'early_rush' or obs.hero.depth <= 2:
@@ -41,11 +44,58 @@ class Agent:
             else:
                 obs = (yield from self.phase_deep_dungeon(obs))
 
+    def phase_sokoban(self, obs):
+        """
+        Special Branch: Sokoban (dnum == 4).
+        Priority: Solve boulder puzzles, ascend levels 1-4,
+        collect Reflection / Bag of Holding + rations, then descend back to Dungeons of Doom.
+        """
+        if obs.inventory.get_superior_body_armor_slot() is not None:
+            obs = (yield replace_body_armor())
+            return obs
+        if obs.inventory.has_unworn_body_armor and not obs.inventory.has_worn_body_armor:
+            obs = (yield wear_armor())
+            return obs
+        if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
+            obs = (yield wear_armor())
+            return obs
+        if obs.spatial.has_nearby_loot:
+            obs = (yield step_to_loot())
+            return obs
+        if obs.dungeon.can_solve_sokoban:
+            obs = (yield step_solve_sokoban())
+            return obs
+        has_prize = obs.hero.has_reflection or obs.inventory.has_bag_of_holding
+        if not has_prize and obs.hero.depth < 4:
+            if obs.spatial.standing_on_stairs_up:
+                obs = (yield ascend())
+                return obs
+            elif obs.spatial.stairs_up_known:
+                obs = (yield step_to_stairs_up())
+                return obs
+            elif obs.spatial.has_unvisited_frontier:
+                obs = (yield step_to_frontier())
+                return obs
+        if obs.spatial.standing_on_stairs_down:
+            obs = (yield descend())
+            return obs
+        elif obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
+        elif obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        obs = (yield from self.handle_dead_end(obs))
+        return obs
+
     def phase_early_rush(self, obs):
         """
         Phase 0: Depths 1-2.
         Priority: Fast exploration & descent. Strict zero-loot staircase priority.
         """
+        if obs.hero.hunger_state >= 1 and not obs.inventory.has_food and obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
         if obs.inventory.get_superior_body_armor_slot() is not None:
             obs = (yield replace_body_armor())
             return obs
@@ -85,6 +135,10 @@ class Agent:
         Priority: Character power-spiking. Forge Excalibur, upgrade starting armor to mithril/iron,
         harvest safe corpses for poison resistance, and test BUC at altars.
         """
+        # Hunger descent priority: If hungry with no food, descend immediately to avoid starvation death
+        if obs.hero.hunger_state >= 1 and not obs.inventory.has_food and obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
         if obs.inventory.get_superior_body_armor_slot() is not None:
             obs = (yield replace_body_armor())
             return obs
@@ -143,16 +197,13 @@ class Agent:
         """
         Phase 2: Depths 6-10.
         Priority: Branch discrimination & ascension tools.
-        Avoid dark Mines, detect and solve Sokoban for Reflection/Bag of Holding, donate for temple protection.
+        Thoroughly sweep floor to discover Sokoban (<) before descending (>).
         """
-        if obs.dungeon.has_sokoban_entrance and obs.hero.hp_frac >= 0.7:
+        if obs.dungeon.has_sokoban_entrance and obs.hero.hp_frac >= 0.60:
             if obs.spatial.standing_on_stairs_up and obs.hero.dungeon_branch != 'mines':
                 obs = (yield ascend())
                 return obs
             obs = (yield step_to_sokoban_entrance())
-            return obs
-        if obs.dungeon.can_solve_sokoban:
-            obs = (yield step_solve_sokoban())
             return obs
         if obs.inventory.get_superior_body_armor_slot() is not None:
             obs = (yield replace_body_armor())
@@ -166,6 +217,24 @@ class Agent:
         if obs.hero.can_enhance_skills:
             obs = (yield enhance_weapon_skill())
             return obs
+
+        # Floor sweep on DL 6-10: Explore unvisited frontiers and doors to uncover Sokoban (<) before taking stairs down (>)
+        has_prize = obs.hero.has_reflection or obs.inventory.has_bag_of_holding
+        if not obs.dungeon.has_sokoban_entrance and not has_prize and obs.hero.hp_frac >= 0.50:
+            if obs.dungeon.adjacent_closed_door:
+                if obs.dungeon.door_is_locked and (not obs.dungeon.in_shop):
+                    obs = (yield kick_closed_door())
+                else:
+                    obs = (yield open_door())
+                return obs
+            if obs.spatial.has_unvisited_frontier:
+                obs = (yield step_to_frontier())
+                return obs
+            if obs.dungeon.has_closed_door:
+                obs = (yield step_to_closed_door())
+                return obs
+
+        # If Sokoban entrance not present or already completed or floor fully explored: descend to next floor
         if obs.spatial.stairs_down_known:
             obs = (yield step_to_stairs_down())
             return obs
@@ -245,7 +314,7 @@ class Agent:
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
-            if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
+            if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
             if obs.hero.hp_frac < 0.2 and (not obs.inventory.has_healing) and (not obs.combat.has_panic_escape):
@@ -269,7 +338,7 @@ class Agent:
                 obs = (yield step_away_from_hostile())
                 continue
             closest_name = obs.combat.closest_hostile_name.lower()
-            if any(p in closest_name for p in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle')):
+            if any((p in closest_name for p in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'))):
                 if obs.combat.adjacent_hostile and obs.combat.can_retreat:
                     obs = (yield retreat())
                     continue
@@ -278,6 +347,28 @@ class Agent:
                     continue
                 else:
                     break
+            if 'grid bug' in closest_name or 'blob' in closest_name or 'jelly' in closest_name:
+                if obs.combat.closest_hostile_dist >= 1 and obs.inventory.has_daggers:
+                    obs = (yield throw_dagger())
+                    continue
+                elif obs.combat.closest_hostile_dist >= 2 and obs.inventory.has_offensive_wand:
+                    obs = (yield zap_offensive_wand())
+                    continue
+                elif obs.combat.adjacent_hostile and obs.hero.hp_frac < 0.70:
+                    obs = (yield step_away_from_hostile())
+                    continue
+            is_poison_threat = any(p in closest_name for p in ('spider', 'cave spider', 'bee', 'killer bee', 'ant', 'centipede'))
+            if is_poison_threat and not obs.hero.has_poison_res:
+                if obs.combat.closest_hostile_dist >= 2:
+                    if obs.inventory.has_offensive_wand:
+                        obs = (yield zap_offensive_wand())
+                        continue
+                    elif obs.inventory.has_daggers:
+                        obs = (yield throw_dagger())
+                        continue
+                if obs.combat.adjacent_hostile and not obs.combat.standing_on_elbereth:
+                    obs = (yield engrave_dust_elbereth())
+                    continue
             if 'yellow light' in closest_name or 'homunculus' in closest_name:
                 if obs.combat.closest_hostile_dist >= 2:
                     if obs.inventory.has_offensive_wand:

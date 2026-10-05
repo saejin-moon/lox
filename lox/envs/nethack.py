@@ -266,6 +266,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.known_stairs_down: tuple[int, int] | None = None
         self.known_stairs_up: tuple[int, int] | None = None
         self.arrival_stairs_up: tuple[int, int] | None = None
+        self.known_stairs_up_set: set[tuple[int, int]] = set()
         self.sokoban_entrance_pos: tuple[int, int] | None = None
         self.stairs_down_discovery_turn: int = -1
         self.last_target_pos: tuple[int, int] | None = None
@@ -653,6 +654,7 @@ class NetHackAdapter(EnvironmentAdapter):
             self.known_stairs_down = None
             self.known_stairs_up = (y, x) if had_explicit_descent else None
             self.arrival_stairs_up = (y, x) if had_explicit_descent else None
+            self.known_stairs_up_set = {(y, x)} if had_explicit_descent else set()
             self.sokoban_entrance_pos = None
             self.stairs_down_discovery_turn = -1
             self.last_target_pos = None
@@ -1025,28 +1027,27 @@ class NetHackAdapter(EnvironmentAdapter):
         if self.known_stairs_down is not None and self.stairs_down_discovery_turn == -1:
             self.stairs_down_discovery_turn = turn
 
-        all_stairs_up: list[tuple[int, int]] = []
         glyph_stairs_up = np.argwhere(glyphs == stair_up_glyph)
         if len(glyph_stairs_up) > 0:
             for pt in glyph_stairs_up:
-                all_stairs_up.append((int(pt[0]), int(pt[1])))
-        if not all_stairs_up:
-            stairs_up = np.argwhere(chars == ord("<"))
+                self.known_stairs_up_set.add((int(pt[0]), int(pt[1])))
+        stairs_up = np.argwhere(chars == ord("<"))
+        if len(stairs_up) > 0:
             for pt in stairs_up:
-                all_stairs_up.append((int(pt[0]), int(pt[1])))
+                self.known_stairs_up_set.add((int(pt[0]), int(pt[1])))
 
-        if all_stairs_up:
+        if self.known_stairs_up_set:
             if self.arrival_stairs_up is None:
-                if (y, x) in all_stairs_up:
+                if (y, x) in self.known_stairs_up_set:
                     self.arrival_stairs_up = (y, x)
                 else:
-                    self.arrival_stairs_up = all_stairs_up[0]
+                    self.arrival_stairs_up = sorted(list(self.known_stairs_up_set))[0]
 
             self.known_stairs_up = self.arrival_stairs_up
 
             # Sokoban branch discrimination on DL 6-10 in Dungeons of Doom (dnum == 0)
             if dnum == 0 and 6 <= depth <= 10:
-                for s_pos in all_stairs_up:
+                for s_pos in self.known_stairs_up_set:
                     if self.arrival_stairs_up is not None and s_pos != self.arrival_stairs_up:
                         self.sokoban_entrance_pos = s_pos
                         break

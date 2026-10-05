@@ -223,3 +223,40 @@ def test_bag_of_holding_explosion_safety():
     safe, msg = ShannonSafeGate.can_safely_insert_bag_of_holding("wand of cancellation")
     assert safe is False
     assert "cancellation" in msg
+
+
+def test_sokoban_entrance_detection_and_sweep():
+    from lox.envs.nethack import NetHackAdapter
+    adapter = NetHackAdapter()
+    obs = adapter.reset(seed=101)
+
+    # Simulate arrival on DL 6 with explicit descent
+    adapter.last_depth = 6
+    adapter.last_dnum = 0
+    adapter.arrival_stairs_up = (10, 20)
+    adapter.known_stairs_up_set = {(10, 20)}
+    adapter.sokoban_entrance_pos = None
+
+    # Discovered a second staircase up at (15, 30) (Sokoban entrance)
+    adapter.known_stairs_up_set.add((15, 30))
+
+    # Re-extract observation with DL 6 in blstats
+    raw_obs = dict(adapter._last_raw_obs)
+    bl = np.array(raw_obs["blstats"])
+    bl[12] = 6
+    bl[23] = 0
+    raw_obs["blstats"] = bl
+    obs = adapter._extract_obs(raw_obs)
+
+    assert adapter.sokoban_entrance_pos == (15, 30)
+    assert obs.dungeon.has_sokoban_entrance is True
+    assert obs.dungeon.sokoban_entrance_pos == (15, 30)
+    adapter.close()
+
+
+def test_latest_policy_sokoban_execution():
+    from lox.dsl.compiler import compile_policy
+    with open("data/latest_policy.py") as f:
+        compiled = compile_policy(f.read())
+    assert compiled is not None
+
