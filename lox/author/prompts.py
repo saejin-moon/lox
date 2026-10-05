@@ -304,9 +304,13 @@ class Agent:
                 continue
 
             closest_name = obs.combat.closest_hostile_name.lower()
-            if closest_name in ("shopkeeper", "watchman", "watch captain", "guard", "priest", "priestess", "oracle") or obs.dungeon.in_shop:
-                obs = (yield retreat() if obs.combat.can_retreat else step_away_from_hostile())
-                continue
+            if closest_name in ("shopkeeper", "watchman", "watch captain", "guard", "priest", "priestess", "oracle"):
+                if obs.combat.adjacent_hostile and obs.combat.can_retreat:
+                    obs = (yield retreat())
+                    continue
+                elif obs.combat.adjacent_hostile:
+                    obs = (yield step_away_from_hostile())
+                    continue
 
             # 1.1 Priority status hazards (yellow light, homunculus)
             if "yellow light" in closest_name or "homunculus" in closest_name:

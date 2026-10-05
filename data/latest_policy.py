@@ -266,9 +266,13 @@ class Agent:
                 obs = (yield step_away_from_hostile())
                 continue
             closest_name = obs.combat.closest_hostile_name.lower()
-            if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle') or obs.dungeon.in_shop:
-                obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
-                continue
+            if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'):
+                if obs.combat.adjacent_hostile and obs.combat.can_retreat:
+                    obs = (yield retreat())
+                    continue
+                elif obs.combat.adjacent_hostile:
+                    obs = (yield step_away_from_hostile())
+                    continue
             if 'yellow light' in closest_name or 'homunculus' in closest_name:
                 if obs.combat.closest_hostile_dist >= 2:
                     if obs.inventory.has_offensive_wand:
@@ -420,5 +424,11 @@ class Agent:
             else:
                 obs = (yield step_to_dead_end())
             return obs
-        obs = (yield (step_to_frontier() if obs.spatial.has_unvisited_frontier else step_to_dead_end()))
+        if obs.dungeon.has_closed_door:
+            obs = (yield step_to_closed_door())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        obs = (yield step_to_dead_end())
         return obs
