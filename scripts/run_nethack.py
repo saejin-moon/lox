@@ -162,7 +162,12 @@ class Agent:
             if getattr(hero, "dungeon_branch", "") == "mines":
                 turns_mines += 1
 
-            action = policy_runner.send(obs)
+            try:
+                action = policy_runner.send(obs)
+            except StopIteration:
+                break
+            except Exception:
+                action = Action(name="wait")
             if action is None:
                 action = Action(name="search")
 

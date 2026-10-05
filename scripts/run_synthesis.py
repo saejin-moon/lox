@@ -446,8 +446,14 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         else (last_valid_gold + (final_depth * 100))
     )
 
-    logger.flush_ticks()
-    adapter.close()
+    try:
+        logger.flush_ticks()
+    except Exception:
+        pass
+    try:
+        adapter.close()
+    except Exception:
+        pass
 
     return {
         "episode_id": ep_id,
@@ -642,9 +648,14 @@ class Agent:
                 async_res = pool.map_async(_run_single_episode_worker, payloads)
                 try:
                     ep_results = async_res.get(timeout=180.0)
-                except mp.TimeoutError:
+                except (mp.TimeoutError, Exception) as exc:
+                    reason = (
+                        "WorkerPoolTimeout"
+                        if isinstance(exc, mp.TimeoutError)
+                        else f"WorkerPoolException: {exc}"[:40]
+                    )
                     print(
-                        f"\n[Warning] Generation {gen} worker pool timed out after 180s! Terminating hung worker processes..."
+                        f"\n[Warning] Generation {gen} worker pool encountered {reason}! Terminating worker processes..."
                     )
                     pool.terminate()
                     pool.join()
@@ -654,7 +665,7 @@ class Agent:
                             "final_depth": 1,
                             "final_score": 0,
                             "ep_turns": 100,
-                            "death_reason": "WorkerPoolTimeout",
+                            "death_reason": reason,
                             "wall_sec": 180.0,
                             "role": role,
                             "gold": 0,
@@ -670,7 +681,7 @@ class Agent:
                             "turns_dl1": 100,
                             "turns_dl2": 0,
                             "turns_mines": 0,
-                            "killer": "WorkerPoolTimeout",
+                            "killer": reason,
                             "ac_at_death": 10,
                             "hp_at_death": 0,
                             "max_hp_at_death": 15,

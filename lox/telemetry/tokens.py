@@ -13,7 +13,7 @@ from typing import Any
 
 import duckdb
 
-from lox.telemetry.consolidator import init_db
+from lox.telemetry.consolidator import init_db, safe_duckdb_connect
 
 # Estimated cost in USD per 1,000,000 tokens
 MODEL_PRICING: dict[str, tuple[float, float]] = {
@@ -107,7 +107,7 @@ def get_token_usage_summary(
             "total_cost_usd": 0.0,
         }
 
-    con = duckdb.connect(db_path, read_only=True)
+    con = safe_duckdb_connect(db_path, read_only=True)
     if run_id:
         res = con.execute(
             """

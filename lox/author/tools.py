@@ -14,6 +14,7 @@ import duckdb
 
 from lox.author.requests import queue_macro_request
 from lox.author.wiki import WikiEngine
+from lox.telemetry.consolidator import safe_duckdb_connect
 
 
 def _format_table(cursor) -> str:
@@ -55,7 +56,7 @@ class DuckDBToolRegistry:
         if not os.path.exists(self.db_path):
             return "DuckDB database not found. No telemetry has been consolidated yet."
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         tables = con.execute("SHOW TABLES").fetchall()
         if not tables:
             con.close()
@@ -95,7 +96,7 @@ class DuckDBToolRegistry:
             if re.search(rf"\b{word}\b", low):
                 return f"Error: Mutative statement '{word.upper()}' is forbidden. Only SELECT queries are permitted."
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         try:
             if "limit" not in low:
                 clean_sql += " LIMIT 50"
@@ -119,7 +120,7 @@ class DuckDBToolRegistry:
         except Exception:
             window_int = 20
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         query = f"""
             SELECT death_reason, COUNT(*) as fatalities, ROUND(AVG(depth), 2) as avg_depth, ROUND(AVG(turns), 1) as avg_turns
             FROM episodes
@@ -149,7 +150,7 @@ class DuckDBToolRegistry:
         except Exception:
             window_int = 10
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         try:
             cols = [c[0] for c in con.execute("DESCRIBE episodes").fetchall()]
             if "root_cause" not in cols:
@@ -190,7 +191,7 @@ class DuckDBToolRegistry:
         except Exception:
             depth_int = 1
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         query = f"""
             SELECT
                 COUNT(*) as total_episodes,
@@ -217,7 +218,7 @@ class DuckDBToolRegistry:
         if not os.path.exists(self.db_path):
             return "No database found."
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         where = f"WHERE run_id = '{run_id}'" if run_id else ""
         query = f"""
             SELECT
@@ -320,7 +321,7 @@ class DuckDBToolRegistry:
         except Exception:
             depth_int = 1
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         try:
             rows = con.execute(f"""
                 SELECT DISTINCT y, x, tile_type
@@ -369,7 +370,7 @@ class DuckDBToolRegistry:
         except Exception:
             depth_int = 1
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         try:
             cur = con.execute(f"""
                 SELECT y, x, tile_type, closest_hostile_name, COUNT(*) as occurrences
@@ -393,7 +394,7 @@ class DuckDBToolRegistry:
         if not os.path.exists(self.db_path):
             return "No database found."
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         try:
             cur = con.execute("""
                 SELECT depth, tile_type, COUNT(DISTINCT (y || ',' || x)) as distinct_features
@@ -416,7 +417,7 @@ class DuckDBToolRegistry:
         if not os.path.exists(self.db_path):
             return "No database found."
 
-        con = duckdb.connect(self.db_path, read_only=True)
+        con = safe_duckdb_connect(self.db_path, read_only=True)
         try:
             where = (
                 f"WHERE episode_id = '{episode_id}'"

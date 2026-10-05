@@ -9,15 +9,40 @@ from __future__ import annotations
 import glob
 import os
 import shutil
+import time
 from typing import Any
 
 import duckdb
 
 
+def safe_duckdb_connect(
+    db_path: str,
+    read_only: bool = False,
+    max_retries: int = 5,
+    initial_delay: float = 0.2,
+) -> duckdb.DuckDBPyConnection:
+    """Connects to DuckDB with retry and exponential backoff to handle transient locks."""
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
+    delay = initial_delay
+    last_err: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return duckdb.connect(db_path, read_only=read_only)
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2
+            else:
+                break
+    if last_err is not None:
+        raise last_err
+    return duckdb.connect(db_path, read_only=read_only)
+
+
 def init_db(db_path: str = "data/lox.duckdb") -> duckdb.DuckDBPyConnection:
     """Initializes DuckDB tables and runs migrations if needed."""
-    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-    con = duckdb.connect(db_path)
+    con = safe_duckdb_connect(db_path, read_only=False)
 
     con.execute("""
         CREATE TABLE IF NOT EXISTS ticks (

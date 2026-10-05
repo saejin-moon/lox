@@ -14,7 +14,7 @@ from typing import Any
 
 import duckdb
 
-from lox.telemetry.consolidator import init_db
+from lox.telemetry.consolidator import init_db, safe_duckdb_connect
 
 QUEUE_FILE = "data/macro_requests.md"
 
@@ -56,7 +56,7 @@ def queue_macro_request(
     if clean_priority not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
         clean_priority = "MEDIUM"
 
-    con = duckdb.connect(db_path)
+    con = safe_duckdb_connect(db_path, read_only=False)
     con.execute(
         """
         INSERT INTO macro_requests (
@@ -109,7 +109,7 @@ def list_macro_requests(
     if not os.path.exists(db_path):
         return []
 
-    con = duckdb.connect(db_path, read_only=True)
+    con = safe_duckdb_connect(db_path, read_only=True)
     rows = con.execute(
         """
         SELECT request_id, timestamp, macro_name, rationale, proposed_interface, priority, status

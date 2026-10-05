@@ -549,31 +549,34 @@ class Agent:
                 self, "_last_model_name", self.model or "google/gemini-2.5-flash"
             )
 
-            with httpx.Client(timeout=120.0) as client:
-                payload = {
-                    "model": model_name,
-                    "messages": messages,
-                    "temperature": 0.1,
-                    "max_tokens": 1500,
-                }
-                resp = client.post(url, headers=headers, json=payload)
-                if not resp.is_error:
-                    data = resp.json()
-                    usage = data.get("usage", {})
-                    log_token_usage(
-                        run_id=run_id,
-                        session_id=session_id,
-                        provider="openrouter",
-                        model=model_name,
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0),
-                        trigger_reason=f"repair: {trigger_reason}",
-                        db_path=self.db_path,
-                    )
-                    choice = data["choices"][0]
-                    msg = choice["message"]
-                    messages.append(msg)
-                    return str(msg.get("content") or "")
+            try:
+                with httpx.Client(timeout=120.0) as client:
+                    payload = {
+                        "model": model_name,
+                        "messages": messages,
+                        "temperature": 0.1,
+                        "max_tokens": 1500,
+                    }
+                    resp = client.post(url, headers=headers, json=payload)
+                    if not resp.is_error:
+                        data = resp.json()
+                        usage = data.get("usage", {})
+                        log_token_usage(
+                            run_id=run_id,
+                            session_id=session_id,
+                            provider="openrouter",
+                            model=model_name,
+                            prompt_tokens=usage.get("prompt_tokens", 0),
+                            completion_tokens=usage.get("completion_tokens", 0),
+                            trigger_reason=f"repair: {trigger_reason}",
+                            db_path=self.db_path,
+                        )
+                        choice = data["choices"][0]
+                        msg = choice["message"]
+                        messages.append(msg)
+                        return str(msg.get("content") or "")
+            except Exception as exc:
+                print(f"[Warning] Policy repair LLM call failed: {exc}")
         return candidate_code
 
     def extract_code(self, response_text: str) -> str:
