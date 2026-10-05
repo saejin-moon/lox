@@ -106,7 +106,7 @@ class Agent:
                 elif obs.inventory.has_wand_of_teleport:
                     obs = (yield zap_wand_teleport())
                     continue
-            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and obs.hero.turn - self.last_prayer_turn >= 850:
+            if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and (not obs.inventory.has_food))) and obs.hero.turn - self.last_prayer_turn >= 850:
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
@@ -131,14 +131,14 @@ class Agent:
                 obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
                 continue
             if obs.combat.is_fast_dangerous:
+                if (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2) and (not obs.combat.standing_on_elbereth):
+                    obs = (yield engrave_dust_elbereth())
+                    continue
                 if obs.combat.adjacent_hostile:
                     if obs.hero.hp_frac > 0.4 or not obs.combat.can_retreat:
                         obs = (yield melee_attack_hostile())
                         continue
                     obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
-                    continue
-                if (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2) and (not obs.combat.standing_on_elbereth):
-                    obs = (yield engrave_dust_elbereth())
                     continue
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:

@@ -1924,6 +1924,10 @@ class NetHackAdapter(EnvironmentAdapter):
                     if path:
                         dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                         return self._step_or_breach(obs_prev, dy, dx)
+                else:
+                    # Unreachable closed doors: blacklist so we don't stall trying to reach them
+                    for dy, dx in closed_doors:
+                        self.blocked_tiles.add((int(dy), int(dx)))
             if obs_prev.spatial.has_unvisited_frontier:
                 return self.step(Action(name="step_to_frontier"))
             return self.step(Action(name="step_to_dead_end"))
@@ -1966,20 +1970,21 @@ class NetHackAdapter(EnvironmentAdapter):
                         is_door=all_doors,
                     )
 
-            # Priority 3: Stagnation Decay (Immediate decay when all dead ends are marked searched)
+            # Priority 3: Stagnation Decay (decay only once every 50 turns when all dead ends are marked searched)
             if not target or target == (-1, -1):
-                self._last_search_decay_turn = obs_prev.hero.turn
-                self.searched_count = np.maximum(0, self.searched_count - 10)
-                dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
-                step_target_mask = dead_ends_mask.copy()
-                step_target_mask[hero.y, hero.x] = False
-                if np.any(step_target_mask):
-                    target = SpatialEngine.find_nearest_target(
-                        (hero.y, hero.x),
-                        walkable_nav,
-                        target_mask=step_target_mask,
-                        is_door=all_doors,
-                    )
+                if obs_prev.hero.turn - getattr(self, "_last_search_decay_turn", -1000) >= 50:
+                    self._last_search_decay_turn = obs_prev.hero.turn
+                    self.searched_count = np.maximum(0, self.searched_count - 10)
+                    dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
+                    step_target_mask = dead_ends_mask.copy()
+                    step_target_mask[hero.y, hero.x] = False
+                    if np.any(step_target_mask):
+                        target = SpatialEngine.find_nearest_target(
+                            (hero.y, hero.x),
+                            walkable_nav,
+                            target_mask=step_target_mask,
+                            is_door=all_doors,
+                        )
 
             self.last_target_pos = target if (target and target != (-1, -1)) else None
 

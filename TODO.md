@@ -486,4 +486,41 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
 3. **Diagnostics Telemetry Fallback**:
    - `turns_fainting`, `turns_weak`, and `is_oscillating` now fall back to `ep_summary` data when raw `ticks` are streamed to disk.
 
+---
+
+## 12. Campaign 60 Empirical Autopsy & Historic Highs (4.21 Avg Depth, 3,312 Turns)
+
+### 12.1 Campaign 60 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_021505`
+- **Milestones Reached**:
+  - **All-Time Record Campaign Average Depth**: **4.21**!
+  - **All-Time Record Average Turns**: **3,312.0** turns (+66% survival boost over C59's 1,994.5 turns)!
+  - **All-Time Record Average Score**: **670.2** (up from 510.5 in C59)!
+  - **All-Time Record Peak Score**: **3,229**!
+  - **Excalibur Forged in 6 Episodes**: Reached **Avg Depth 6.33** and **Avg Score 1,919.8**.
+  - **Body Armor Impact**: 73 episodes equipped body armor, reaching **Avg Depth 5.19** and **Avg Score 970.5**.
+- **Batch Progression**:
+  - Gen 1: Avg Depth **4.80** | Max Depth **10** | Avg Turns 2,333.8 | Avg Score 611.3
+  - Gen 2: Avg Depth **4.25** | Max Depth 9 | Avg Turns 3,457.4 | Avg Score 630.7
+  - Gen 3: Avg Depth **3.70** | Max Depth **10** | Avg Turns 4,332.6 | Avg Score **812.3** | Peak Score 2,932
+  - Gen 4: Avg Depth **4.00** | Max Depth 7 | Avg Turns 2,758.8 | Avg Score 633.7 | Peak Score 2,001
+  - Gen 5: Avg Depth **3.95** | Max Depth 8 | Avg Turns 2,113.2 | Avg Score 497.1
+  - Gen 6: Avg Depth **4.35** | Max Depth 9 | Avg Turns 3,035.1 | Avg Score 680.2
+  - Gen 7: Avg Depth **4.45** | Max Depth 9 | Avg Turns 2,853.3 | Avg Score **758.4** | Peak Score 2,745
+  - Gen 8: Avg Depth **4.10** | Max Depth 9 | Avg Turns 3,993.0 | Avg Score 682.7 | Peak Score 2,132
+  - Gen 9: Avg Depth **4.35** | Max Depth 8 | Avg Turns 3,587.7 | Avg Score 673.1 | **Peak Score 3,229**
+  - Gen 10: Avg Depth **4.15** | Max Depth 8 | Avg Turns **4,655.6** | Avg Score **722.3**
+- **Mortality Categorization & Telemetry**:
+  - **Divine Favor Prayer Verified**: 425 total prayers executed across 133 episodes (66.5% of runs utilized safe prayer), successfully curing hunger with `"Your stomach feels content."` and restoring full HP.
+  - **Passive Hazard Fatalities Collapsed**: Down from 20 (10.0%) in C59 to **ONLY 1 (0.5%)** in C60! Floating eyes and gas spores completely eliminated from top 20 killers.
+  - **Secret Door Stalls Collapsed**: Down from 47 (23.5%) in C59 to **ONLY 7 (3.5%)** in C60.
+
+### 12.2 Autopsy Discoveries & Autonomous Fixes Deployed
+1. **Stagnation Search Decay 50-Turn Cooldown**:
+   - In `step_to_dead_end`, search count decay was executing on every turn that `target == (-1, -1)`, resetting `self.searched_count` to 0 and preventing `searched_count < 12` from ever exhausting.
+   - **Fix Applied**: Gated decay with `turn - _last_search_decay_turn >= 50`. Once a tile is searched 12 times, the hero steps to the adjacent least-searched neighbor (`min_searched`), sweeping along walls to uncover hidden corridors.
+2. **Unreachable Door Blacklisting**:
+   - In `step_to_closed_door`, if all closed doors were unreachable (`target == (-1, -1)`), `has_closed_door` stayed True forever, preventing `handle_dead_end` from ever running.
+   - **Fix Applied**: When `find_nearest_target` returns `(-1, -1)`, all closed doors on the level are added to `self.blocked_tiles`, clearing `has_closed_door` and routing immediately to dead-end exploration.
+
 
