@@ -845,6 +845,14 @@ class NetHackAdapter(EnvironmentAdapter):
         if glyphs is not None:
             y_min, y_max = max(0, y - 8), min(21, y + 9)
             x_min, x_max = max(0, x - 8), min(79, x + 9)
+            if (y, x) in self.peaceful_positions:
+                self.peaceful_positions.discard((y, x))
+            if self.peaceful_positions:
+                for py, px in list(self.peaceful_positions):
+                    if y_min <= py < y_max and x_min <= px < x_max:
+                        pg = int(glyphs[py, px])
+                        if 0 <= pg < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[pg] and not GLYPH_IS_PEACEFUL_SPECIES_LUT[pg]:
+                            self.peaceful_positions.discard((py, px))
             sub_g = glyphs[y_min:y_max, x_min:x_max]
             valid_sub = np.clip(sub_g, 0, _MAX_GLYPH - 1)
             hostile_mask = GLYPH_IS_MON_HOSTILE_LUT[valid_sub]
@@ -1985,6 +1993,24 @@ class NetHackAdapter(EnvironmentAdapter):
             act_idx = self.char_to_act.get(".", 0)
             return self._step_sequence([act_idx])
 
+        # Vault Guard compliance: Drop gold immediately upon demand to avoid instant death from Level 12 guard
+        if (
+            obs_prev is not None
+            and obs_prev.hero.gold > 0
+            and any(
+                phrase in obs_prev.message.lower()
+                for phrase in (
+                    "drop that gold",
+                    "drop that money",
+                    "drop the gold",
+                    "drop the money",
+                )
+            )
+        ):
+            act_d = self.char_to_act.get("d", 0)
+            act_dollar = self.char_to_act.get("$", 0)
+            return self._step_sequence([act_d, act_dollar])
+
         # Handle composite navigation actions
         if action.name == "step_to_frontier" and obs_prev is not None:
             hero = obs_prev.hero
@@ -2768,6 +2794,9 @@ class NetHackAdapter(EnvironmentAdapter):
                         ty, tx = hero.y + dy, hero.x + dx
                         if 0 <= ty < 21 and 0 <= tx < 79 and (ty, tx) not in self.peaceful_positions and (ty, tx) not in self.blocked_tiles:
                             g = int(glyphs[ty, tx]) if glyphs is not None else 0
+                            if 0 <= g < _MAX_GLYPH and GLYPH_IS_PEACEFUL_SPECIES_LUT[g]:
+                                self.peaceful_positions.add((ty, tx))
+                                continue
                             if nethack.glyph_is_object(g) or g == nethack.GLYPH_CMAP_OFF + 15:
                                 best_dir = (dy, dx)
                                 break
@@ -2966,8 +2995,32 @@ class NetHackAdapter(EnvironmentAdapter):
                 or action.extra.get("target_pos")
                 or obs_prev.combat.closest_hostile_pos
             )
-            if target_pos and target_pos in self.peaceful_positions:
-                return self.step(Action(name="wait"))
+            peaceful_in_line = False
+            if target_pos:
+                dy = int(np.sign(target_pos[0] - hero.y))
+                dx = int(np.sign(target_pos[1] - hero.x))
+                for step_dist in range(1, 15):
+                    ry, rx = hero.y + dy * step_dist, hero.x + dx * step_dist
+                    if not (0 <= ry < 21 and 0 <= rx < 79):
+                        break
+                    if obs_prev.chars is not None and chr(obs_prev.chars[ry, rx]) in ("-", "|", " "):
+                        break
+                    if (ry, rx) in self.peaceful_positions:
+                        peaceful_in_line = True
+                        break
+                    if obs_prev.glyphs is not None:
+                        rg = int(obs_prev.glyphs[ry, rx])
+                        if 0 <= rg < _MAX_GLYPH and GLYPH_IS_PEACEFUL_SPECIES_LUT[rg]:
+                            if (ry, rx) not in getattr(self, "hostile_npc_positions", set()):
+                                self.peaceful_positions.add((ry, rx))
+                                peaceful_in_line = True
+                                break
+                    if (ry, rx) == target_pos:
+                        break
+            if peaceful_in_line or (target_pos and target_pos in self.peaceful_positions):
+                if obs_prev.combat.adjacent_hostile:
+                    return self.step(Action(name="melee_attack_hostile"))
+                return self.step(Action(name="step_away_from_hostile"))
             if slot and target_pos:
                 dy = int(np.sign(target_pos[0] - hero.y))
                 dx = int(np.sign(target_pos[1] - hero.x))
@@ -3243,8 +3296,32 @@ class NetHackAdapter(EnvironmentAdapter):
                 or action.extra.get("target_pos")
                 or obs_prev.combat.closest_hostile_pos
             )
-            if target_pos and target_pos in self.peaceful_positions:
-                return self.step(Action(name="wait"))
+            peaceful_in_line = False
+            if target_pos:
+                dy = int(np.sign(target_pos[0] - hero.y))
+                dx = int(np.sign(target_pos[1] - hero.x))
+                for step_dist in range(1, 15):
+                    ry, rx = hero.y + dy * step_dist, hero.x + dx * step_dist
+                    if not (0 <= ry < 21 and 0 <= rx < 79):
+                        break
+                    if obs_prev.chars is not None and chr(obs_prev.chars[ry, rx]) in ("-", "|", " "):
+                        break
+                    if (ry, rx) in self.peaceful_positions:
+                        peaceful_in_line = True
+                        break
+                    if obs_prev.glyphs is not None:
+                        rg = int(obs_prev.glyphs[ry, rx])
+                        if 0 <= rg < _MAX_GLYPH and GLYPH_IS_PEACEFUL_SPECIES_LUT[rg]:
+                            if (ry, rx) not in getattr(self, "hostile_npc_positions", set()):
+                                self.peaceful_positions.add((ry, rx))
+                                peaceful_in_line = True
+                                break
+                    if (ry, rx) == target_pos:
+                        break
+            if peaceful_in_line or (target_pos and target_pos in self.peaceful_positions):
+                if obs_prev.combat.adjacent_hostile:
+                    return self.step(Action(name="melee_attack_hostile"))
+                return self.step(Action(name="step_away_from_hostile"))
             slot = action.slot or obs_prev.inventory.get_dagger_slot()
             if target_pos and slot:
                 dy = int(np.sign(target_pos[0] - hero.y))

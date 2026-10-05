@@ -46,20 +46,23 @@ class Agent:
         Phase 0: Depths 1-2.
         Priority: Fast exploration & descent. Strict zero-loot staircase priority.
         """
+        if obs.inventory.get_superior_body_armor_slot() is not None:
+            obs = (yield replace_body_armor())
+            return obs
         if obs.inventory.has_unworn_body_armor and (not obs.inventory.has_worn_body_armor):
             obs = (yield wear_armor())
             return obs
         if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
             obs = (yield wear_armor())
             return obs
+        if obs.spatial.has_nearby_loot:
+            obs = (yield step_to_loot())
+            return obs
         if obs.hero.can_enhance_skills:
             obs = (yield enhance_weapon_skill())
             return obs
         if obs.spatial.stairs_down_known:
             obs = (yield step_to_stairs_down())
-            return obs
-        if obs.spatial.has_nearby_loot:
-            obs = (yield step_to_loot())
             return obs
         if obs.dungeon.adjacent_closed_door:
             if obs.dungeon.door_is_locked and (not obs.dungeon.in_shop):
@@ -266,13 +269,15 @@ class Agent:
                 obs = (yield step_away_from_hostile())
                 continue
             closest_name = obs.combat.closest_hostile_name.lower()
-            if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'):
+            if any(p in closest_name for p in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle')):
                 if obs.combat.adjacent_hostile and obs.combat.can_retreat:
                     obs = (yield retreat())
                     continue
                 elif obs.combat.adjacent_hostile:
                     obs = (yield step_away_from_hostile())
                     continue
+                else:
+                    break
             if 'yellow light' in closest_name or 'homunculus' in closest_name:
                 if obs.combat.closest_hostile_dist >= 2:
                     if obs.inventory.has_offensive_wand:
