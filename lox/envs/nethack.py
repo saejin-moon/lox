@@ -406,7 +406,7 @@ class NetHackAdapter(EnvironmentAdapter):
             if (ny, nx) in self.locked_doors:
                 if (
                     not obs.dungeon.in_shop
-                    and self.door_kick_count.get((ny, nx), 0) < 6
+                    and self.door_kick_count.get((ny, nx), 0) < 15
                 ):
                     return self.step(
                         Action(name="kick_closed_door", direction=(dy, dx))
@@ -996,7 +996,6 @@ class NetHackAdapter(EnvironmentAdapter):
             ord("="),
             ord("$"),
             ord("%"),
-            ord("*"),
         )
         if int(chars[y, x]) in loot_chars:
             self.looted_tiles.add((y, x))
@@ -2063,7 +2062,7 @@ class NetHackAdapter(EnvironmentAdapter):
                     and 0 <= lx < 79
                     and (
                         obs_prev.dungeon.in_shop
-                        or self.door_kick_count.get((ly, lx), 0) >= 6
+                        or self.door_kick_count.get((ly, lx), 0) >= 15
                     )
                 ):
                     chokepoint_mask[ly, lx] = False
@@ -2579,9 +2578,21 @@ class NetHackAdapter(EnvironmentAdapter):
                 self.door_kick_count[target_door] = (
                     self.door_kick_count.get(target_door, 0) + 1
                 )
-                if self.door_kick_count[target_door] >= 6:
+            obs, reward, term, trunc, info = self._step_sequence(
+                [48, self.char_to_act.get(dir_char, 0)]
+            )
+            if target_door:
+                msg_low = obs.message.lower()
+                if (
+                    "ouch" in msg_low
+                    or "hurt" in msg_low
+                    or self.door_kick_count[target_door] >= 15
+                ):
                     self.blocked_tiles.add(target_door)
-            return self._step_sequence([48, self.char_to_act.get(dir_char, 0)])
+                elif "crash" in msg_low or "shatter" in msg_low or "broken" in msg_low:
+                    self.locked_doors.discard(target_door)
+                    self.door_kick_count.pop(target_door, None)
+            return obs, reward, term, trunc, info
         elif action.name == "wear_armor":
             slot = action.slot or (
                 obs_prev.inventory.get_unworn_armor_slot() if obs_prev else None

@@ -169,6 +169,14 @@ lox/
    - Sub-5ms BM25 SQLite FTS5 index over 3,113 NetHack encyclopedia articles and redirects. Unblocks the LLM AuthorAgent's `query_wiki` tool during generational policy synthesis, supplying accurate domain knowledge (resistances, monster statistics, artifact dipping, Sokoban solutions, prayer mechanics).
 40. **Hierarchical True Dead End Prioritization & Hero Occlusion Attribution**:
    - `_compute_true_dead_ends_mask` recognizes any walkable tile with $\le 1$ walkable cardinal neighbors (for both `#` and lit `.`) as a true dead end. In `step_to_dead_end`, reachable true dead ends take absolute Priority 1 over generic room perimeter wall candidates, forcing the hero to traverse corridors and search dead ends across the entire floor. Eliminates the local room search trap that previously killed 17.5% of episodes on DL 1. In `_extract_obs`, `tile_type` checks static level fixtures (`known_fountain_pos`, `known_altar_pos`, `known_stairs_down`, `known_stairs_up`), preventing `@` hero occlusion from wiping feature identities.
+41. **Closed-Door Inter-Room Transitioning (`obs.dungeon.has_closed_door`)**:
+   - When all open tiles in the current room are visited (`has_unvisited_frontier == False`), policies MUST yield `step_to_closed_door()` before falling back to wall perimeter search (`handle_dead_end`). Omitting closed-door navigation trapped heroes in 1,000+ turn perimeter search loops while unexplored rooms lay directly behind closed doors.
+42. **15-Kick Door Breaching Threshold & Shatter/Hurt Message Discrimination**:
+   - In NetHack, wooden locked doors can take 7–12 kicks to breach. The adapter previously gave up after 6 kicks and permanently added the door to `blocked_tiles`, cutting off 31% of runs from the remainder of the dungeon. The kick limit is expanded to 15 kicks for wooden doors (`"WHAMMM!!!"`), immediately clearing locked doors from tracking upon breach (`"shatter"`, `"crash"`), and reserving `blocked_tiles` strictly for iron doors/shop doors that injure legs (`"ouch"`, `"hurt"`).
+43. **Autopickup Loot Ammunition Consistency**:
+   - `loot_chars` is strictly restricted to types matching `pickup_types` (`[`, `!`, `?`, `/`, `=`, `$`, `%`). Non-autopicked items like rocks/gems (`*`) are excluded, eliminating the 1,500-turn loop where the hero continuously stepped to rocks repeatedly dropped by the pet dog.
+44. **Gas Spore 4d6 Explosion Shield & Decisive Adjacent Melee**:
+   - Gas spores explode in a 3x3 radius upon destruction dealing 4d6 blast damage (killing 5.5% of heroes with up to 37 HP). Policies must NEVER attack or throw missiles at adjacent gas spores (`adjacent_gas_spore`), yielding `step_away_from_hostile()` to reach safe distance $\ge 2$ before ranged elimination. Against adjacent regular hostiles, policies strike decisively with melee (`melee_attack_hostile`) at `hp_frac > 0.35` rather than stepping away dealing 0 damage while taking repeated free unretaliated attacks.
 
 ---
 
