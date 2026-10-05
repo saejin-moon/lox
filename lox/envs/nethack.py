@@ -245,6 +245,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self._last_descended_stair: tuple[int, int, int] | None = None
         self.consecutive_zero_turns: int = 0
         self._prev_turn: int = 0
+        self._last_search_decay_turn: int = -1000
         self.known_chars = np.zeros((21, 79), dtype=np.uint8)
         self.can_enhance_skills: bool = False
         self.last_enhanced_level: int = 1
@@ -342,6 +343,12 @@ class NetHackAdapter(EnvironmentAdapter):
                 glyphs <= (nethack.GLYPH_CMAP_OFF + 14)
             )
             walkable[open_doors] = True
+            if np.any(open_doors):
+                oys, oxs = np.nonzero(open_doors)
+                for oy, ox in zip(oys, oxs):
+                    self.blocked_tiles.discard((oy, ox))
+                    self.locked_doors.discard((oy, ox))
+                    self.non_door_tiles.discard((oy, ox))
         doors_mask = (
             self._get_doors_mask(glyphs)
             if glyphs is not None
@@ -388,11 +395,6 @@ class NetHackAdapter(EnvironmentAdapter):
             for ly, lx in self.locked_doors:
                 if 0 <= ly < 21 and 0 <= lx < 79:
                     walkable_nav[ly, lx] = False
-
-        # Exclude non-door tiles
-        for ndy, ndx in self.non_door_tiles:
-            if 0 <= ndy < 21 and 0 <= ndx < 79:
-                walkable_nav[ndy, ndx] = False
 
         # Exclude passive and exploding hazards from pathfinding navigation
         if glyphs is not None:
@@ -600,6 +602,7 @@ class NetHackAdapter(EnvironmentAdapter):
             self.elbereth_positions.clear()
             self.looted_tiles.clear()
             self.shop_tiles.clear()
+            self._last_search_decay_turn = -1000
             if hasattr(self, "loot_attempts"):
                 self.loot_attempts.clear()
             self.altar_tested_on_floor = False
@@ -1042,21 +1045,6 @@ class NetHackAdapter(EnvironmentAdapter):
             (y, x), walkable_nav, target_mask=dead_ends_mask, is_door=all_doors
         )
         has_dead_ends = dead_end_target is not None and dead_end_target != (-1, -1)
-
-        # Stagnation Auto-Recovery: If no visible frontiers or reachable dead ends remain and stairs are unknown,
-        # decay search counts so the hero performs a fresh search sweep instead of freezing in place.
-        if not has_frontier and not has_dead_ends and self.known_stairs_down is None:
-            if turn - getattr(self, "last_search_decay_turn", -1000) >= 50:
-                self.last_search_decay_turn = turn
-                self.searched_count = np.maximum(0, self.searched_count - 10)
-                dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
-                dead_end_target = SpatialEngine.find_nearest_target(
-                    (y, x), walkable_nav, target_mask=dead_ends_mask, is_door=all_doors
-                )
-                has_dead_ends = dead_end_target is not None and dead_end_target != (
-                    -1,
-                    -1,
-                )
 
         # Nearby dropped loot discovery (armor, wands, potions, scrolls, rings, gold, food)
         has_nearby_loot = False
@@ -1804,6 +1792,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.hostile_npc_positions.clear()
         self.looted_tiles.clear()
         self.shop_tiles.clear()
+        self._last_search_decay_turn = -1000
         self.mines_stairs_positions.clear()
         self._last_descended_stair = None
         self.has_poison_res = False
@@ -2045,12 +2034,16 @@ class NetHackAdapter(EnvironmentAdapter):
                         is_door=all_doors,
                     )
 
-            # Priority 3: Stagnation Decay (decay only once every 50 turns when all dead ends are marked searched)
+            # Priority 3: Full-Floor Stagnation Decay
+            # Triggers ONLY when all reachable dead ends and perimeter tiles are exhausted (target == (-1, -1))
+            # and at least 500 turns have elapsed since the last floor-wide decay.
             if not target or target == (-1, -1):
-                if obs_prev.hero.turn - getattr(self, "_last_search_decay_turn", -1000) >= 50:
+                if obs_prev.hero.turn - getattr(self, "_last_search_decay_turn", -1000) >= 500:
                     self._last_search_decay_turn = obs_prev.hero.turn
                     self.searched_count = np.maximum(0, self.searched_count - 10)
-                    dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
+                    dead_ends_mask = self._compute_dead_ends_mask(
+                        chars, walkable, max_corridor=15, max_perimeter=12
+                    )
                     step_target_mask = dead_ends_mask.copy()
                     step_target_mask[hero.y, hero.x] = False
                     if np.any(step_target_mask):

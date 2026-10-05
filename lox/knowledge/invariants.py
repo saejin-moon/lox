@@ -500,13 +500,15 @@ def handle_corpse_consumption(self, obs):
         tags=["faint", "weak", "prayer", "divine feeding", "hunger_state"],
         rule=(
             "In NetHack, HungerState enum values are SATIATED=0, NORMAL=1, HUNGRY=2, WEAK=3, FAINTING=4. "
-            "Carried food should be eaten proactively at hunger_state >= 1 ('Hungry'). However, deities only grant "
-            "divine feeding for major trouble, which requires hunger_state >= 3 ('Weak' or 'Fainting'). Praying at "
-            "hunger_state == 2 ('Hungry') fails major trouble checks, wastes divine favor, and puts prayer on an 850-turn "
-            "cooldown, causing certain death 800 turns later when the hero actually starves/faints."
+            "Carried food should be eaten proactively at hunger_state >= 1 ('Hungry'). However, in NetHack 3.6 deities "
+            "only grant divine feeding for major trouble, which requires u.uhs > WEAK, meaning hunger_state >= 4 "
+            "('Fainting'). Praying at hunger_state == 3 ('Weak') or hunger_state == 2 ('Hungry') fails major trouble checks, "
+            "wastes divine favor, and puts prayer on an 850-turn cooldown without feeding the hero. When carrying food, "
+            "heroes must consume rations. Only when food is exhausted (not obs.inventory.has_food) AND the hero reaches "
+            "hunger_state >= 4 ('Fainting') should divine prayer be invoked for divine feeding."
         ),
         anti_pattern=(
-            "Praying for food when merely hunger_state == 2 ('Hungry'), angering deity or exhausting divine favor before genuine starvation."
+            "Praying for food when merely hunger_state == 3 ('Weak') or hunger_state == 2 ('Hungry'), wasting divine favor without receiving food."
         ),
         code_snippet="""
 # In handle_combat() and run():
@@ -515,8 +517,8 @@ if obs.hero.hunger_state >= 1 and obs.inventory.has_food:
     obs = (yield eat_carried_food())
     continue
 
-# 2. Major trouble divine feeding (strictly hunger_state >= 3 'Weak')
-if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 3 and not obs.inventory.has_food)) and obs.hero.turn - self.last_prayer_turn >= 850:
+# 2. Major trouble divine feeding (strictly hunger_state >= 4 'Fainting')
+if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
     if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth:
         self.last_prayer_turn = obs.hero.turn
         obs = (yield pray())

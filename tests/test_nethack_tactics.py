@@ -549,8 +549,26 @@ def test_passive_hazard_nav_buffering():
                 break
     eye_glyph = nh.GLYPH_MON_OFF + eye_mon_id
 
-    # Place eye 3 steps away horizontally in the open room
-    eye_pos = (hy, hx + 3)
+    walkable, _ = adapter._build_walkable_nav(obs)
+    candidates = []
+    for dy in range(-4, 5):
+        for dx in range(-4, 5):
+            ny, nx = hy + dy, hx + dx
+            if 0 <= ny < 21 and 0 <= nx < 79 and walkable[ny, nx] and (ny, nx) != (hy, hx):
+                for cdy, cdx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    ay, ax = ny + cdy, nx + cdx
+                    if (
+                        0 <= ay < 21
+                        and 0 <= ax < 79
+                        and walkable[ay, ax]
+                        and (ay, ax) != (hy, hx)
+                    ):
+                        candidates.append(((ny, nx), (ay, ax)))
+                        break
+        if candidates:
+            break
+
+    eye_pos, adj_pos = candidates[0]
     obs.glyphs[eye_pos[0], eye_pos[1]] = eye_glyph
     obs.raw_obs["glyphs"][eye_pos[0], eye_pos[1]] = eye_glyph
 
@@ -559,15 +577,15 @@ def test_passive_hazard_nav_buffering():
     adapter._last_obs = obs
 
     _, nav_no_ranged = adapter._build_walkable_nav(obs)
-    # The tile immediately next to the floating eye (hy, hx + 2) should be buffered (not walkable)
-    assert not nav_no_ranged[hy, hx + 2], "Tile adjacent to passive hazard must be buffered when lacking ranged weapons"
+    # The tile immediately next to the floating eye should be buffered (not walkable)
+    assert not nav_no_ranged[adj_pos[0], adj_pos[1]], "Tile adjacent to passive hazard must be buffered when lacking ranged weapons"
 
     # Now give hero a dagger
     obs.inventory.append(Item(slot="a", name="a dagger", category="weapon"))
     adapter._last_obs = obs
     _, nav_with_ranged = adapter._build_walkable_nav(obs)
     # With daggers, adjacent tile is walkable so hero can approach to throw missiles safely
-    assert nav_with_ranged[hy, hx + 2], "Tile adjacent to passive hazard must be walkable when possessing ranged weapons"
+    assert nav_with_ranged[adj_pos[0], adj_pos[1]], "Tile adjacent to passive hazard must be walkable when possessing ranged weapons"
 
     adapter.close()
 

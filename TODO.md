@@ -562,4 +562,44 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
 3. **Prayer Trigger Invariant**:
    - Enforced `hunger_state >= 4` and `obs.hero.can_pray` in `latest_policy.py` so prayer is not wasted at WEAK.
 
+---
+
+## 14. Campaign 62 Empirical Autopsy & Stagnation Search Decay Discovery
+
+### 14.1 Campaign 62 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_035028`
+- **Total Episodes**: 200 | **Avg Depth**: 3.88 | **Max Depth**: 10 | **Avg Score**: 559.1 | **Peak Score**: 2,472 | **Avg Turns**: 2,976.9 | **Peak Turns**: 21,194.
+- **Batch Progression**:
+  - Gen 1: Avg Depth **4.75** | Max Depth 9 | Avg Score **867.8** | Peak Score 2,472
+  - Gen 2: Avg Depth **4.05** | Max Depth 9 | Avg Score 536.9
+  - Gen 3: Avg Depth **3.50** | Max Depth **10** | Avg Score 509.1
+  - Gen 4: Avg Depth **3.55** | Max Depth 9 | Avg Score 597.8
+  - Gen 5: Avg Depth **3.70** | Max Depth 9 | Avg Score 481.7
+  - Gen 6: Avg Depth **4.15** | Max Depth 7 | Avg Score **674.1** | Peak Score 2,263
+  - Gen 7: Avg Depth **4.20** | Max Depth 8 | Avg Score 556.4
+  - Gen 8: Avg Depth **4.05** | Max Depth 7 | Avg Score 580.4
+  - Gen 9: Avg Depth **3.15** | Max Depth **10** | Avg Score 372.1
+  - Gen 10: Avg Depth **3.70** | Max Depth 8 | Avg Score 414.6
+- **Mortality Categorization**:
+  - **Zero Passive Hazard Fatalities**: Zero deaths to floating eyes or gas spores across 200 episodes! Passive hazard A* buffering completely eliminated approach/retreat ping-pongs and paralysis deaths.
+  - **Combat Deaths**: 158 (79.0%)
+  - **Starvation**: 41 (20.5%)
+  - **Aborted / ZeroProgress**: Only 1 (0.5%)
+
+### 14.2 Autopsy Discoveries & Autonomous Fixes Deployed
+1. **Non-Door Tiles False Obstacle Bug (`INV-NAV-005`)**:
+   - When `open_door` was called on a secret door or wall, NetHack responded `"You see no door there."`, adding the coordinate to `self.non_door_tiles`.
+   - `_build_walkable_nav` had contained `for ndy, ndx in self.non_door_tiles: walkable_nav[ndy, ndx] = False`.
+   - This turned secret doorways into permanently impassable walls in A* navigation! Even after a goblin opened the door into an open doorway, the hero could never walk through it, trapping the hero in rooms for 20,000+ turns.
+   - **Fix Deployed**: Removed `non_door_tiles` exclusion from `_build_walkable_nav` (it belongs strictly in `doors_mask` to prevent re-opening spellbooks). Added automatic clearance of `blocked_tiles`, `locked_doors`, and `non_door_tiles` whenever open door glyphs are observed.
+2. **The 50-Turn Stagnation Decay Search Trap (`INV-NAV-006`)**:
+   - In `step_to_dead_end`, decay was triggering every 50 turns. Searching a single tile takes 12 turns. In 4 tiles ($4 \times 12 = 48$ turns), 50 turns elapsed, resetting `searched_count` on the first tiles by -10.
+   - Priority 1 (Corridor Dead Ends) immediately re-targeted the decayed corridor tiles before Priority 2 (Room Perimeter) could ever search the level's rooms. In `g007_e004`, the hero searched ONLY 20 distinct tiles across 14,606 turns.
+   - Furthermore, `_extract_obs` contained redundant, mutating decay code using an unsynced attribute `last_search_decay_turn` vs `_last_search_decay_turn`.
+   - **Fix Deployed**: Removed state mutation from `_extract_obs`. Raised stagnation decay cooldown to **500 turns**, allowing the hero a full 500-turn window to sweep the perimeter of every room on the floor before any tiles are recycled.
+3. **Invariant Alignment for Fainting Prayer (`INV-NUT-003`)**:
+   - Discovered why the LLM reverted `hunger_state >= 4` back to `>= 3`: `INV-NUT-003` in `lox/knowledge/invariants.py` had instructed `hunger_state >= 3`.
+   - **Fix Deployed**: Updated `INV-NUT-003` rule and code snippet to ground-truth NetHack 3.6 (`hunger_state >= 4` 'Fainting'). Synchronized `latest_policy.py`.
+
+
 
