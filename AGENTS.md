@@ -177,6 +177,8 @@ lox/
    - `loot_chars` is strictly restricted to types matching `pickup_types` (`[`, `!`, `?`, `/`, `=`, `$`, `%`). Non-autopicked items like rocks/gems (`*`) are excluded, eliminating the 1,500-turn loop where the hero continuously stepped to rocks repeatedly dropped by the pet dog.
 44. **Gas Spore 4d6 Explosion Shield & Decisive Adjacent Melee**:
    - Gas spores explode in a 3x3 radius upon destruction dealing 4d6 blast damage (killing 5.5% of heroes with up to 37 HP). Policies must NEVER attack or throw missiles at adjacent gas spores (`adjacent_gas_spore`), yielding `step_away_from_hostile()` to reach safe distance $\ge 2$ before ranged elimination. Against adjacent regular hostiles, policies strike decisively with melee (`melee_attack_hostile`) at `hp_frac > 0.35` rather than stepping away dealing 0 damage while taking repeated free unretaliated attacks.
+45. **In-Combat Hunger Resolution & Conscious Weakness Prayer**:
+   - In extended combat encounters, heroes frequently transition to `HUNGER_WEAK` (`hunger_state >= 2`). If `handle_combat()` lacks eating logic, the hero never consumes carried rations or prays while hostiles remain in FOV, resulting in unconscious starvation fainting and defenseless deaths. `handle_combat()` must allow eating carried food (`eat_carried_food()`) whenever standing on Elbereth or out of direct melee contact, and trigger divine prayer (`pray()`) at `hunger_state >= 2` when packaged food is exhausted and safe cooldown has elapsed.
 
 ---
 
