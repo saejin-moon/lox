@@ -2263,7 +2263,7 @@ class NetHackAdapter(EnvironmentAdapter):
             # Triggers ONLY when all reachable dead ends and perimeter tiles are exhausted (target == (-1, -1))
             # and at least 500 turns have elapsed across all candidate tiles.
             if not target or target == (-1, -1):
-                decay_threshold = 500
+                decay_threshold = 100 if is_dl1_trap else 500
                 if obs_prev.hero.turn - getattr(self, "_last_search_decay_turn", -1000) >= decay_threshold:
                     self._last_search_decay_turn = obs_prev.hero.turn
                     self.searched_count = np.maximum(0, self.searched_count - 10)
