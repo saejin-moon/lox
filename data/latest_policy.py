@@ -143,7 +143,10 @@ class Agent:
                         obs = (yield melee_attack_hostile())
                         continue
                     else:
-                        obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
+                        if not obs.combat.standing_on_elbereth:
+                            obs = (yield engrave_dust_elbereth())
+                        else:
+                            obs = (yield melee_attack_hostile())
                         continue
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:

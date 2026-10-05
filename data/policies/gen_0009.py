@@ -139,7 +139,7 @@ class Agent:
                     obs = (yield engrave_dust_elbereth())
                     continue
                 if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.4 or not obs.combat.can_retreat:
                         obs = (yield melee_attack_hostile())
                         continue
                     else:

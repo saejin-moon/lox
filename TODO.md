@@ -770,6 +770,38 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
    - In `handle_combat`, `if obs.combat.has_safe_melee_target:` was never satisfied, preventing `melee_attack_hostile()` from dispatching strikes against the grid bug, trapping the hero in passive retreat.
    - **Fix Applied**: Restored `if not GLYPH_IS_PASSIVE_HAZARD_LUT[g]: has_safe_melee_target = True` in `NetHackAdapter._extract_obs`. When an active attacker is present alongside a passive hazard, the policy immediately executes `melee_attack_hostile()` to eliminate the active attacker while safely bypassing the passive hazard.
 
+---
+
+## 20. Campaign 68 Empirical Autopsy & Fast Predator Sanctuary Defense
+
+### 20.1 Campaign 68 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_060223`
+- **Total Episodes**: 200 | **Avg Depth**: **4.27** | **Max Depth**: **11** | **Avg Score**: 595.5 | **Peak Score**: **2,729** | **Avg Turns**: 2,826.3 | **Peak Turns**: 25,000.
+- **Batch Progression**:
+  - Gen 1: Avg Depth 3.75 | Max Depth 8 | Avg Score 498.4
+  - Gen 2: Avg Depth 4.15 | Max Depth 9 | Avg Score 549.4
+  - Gen 3: Avg Depth 4.20 | Max Depth 9 | Avg Score 546.6
+  - Gen 4: Avg Depth 4.20 | Max Depth 9 | Avg Score 574.6
+  - Gen 5: Avg Depth **4.80** | Max Depth **10** | Avg Score 667.2
+  - Gen 6: Avg Depth 4.15 | Max Depth 9 | Avg Score 642.4
+  - Gen 7: Avg Depth **4.80** | Max Depth **10** | Avg Score **817.1**
+  - Gen 8: Avg Depth 4.25 | Max Depth **11** | Avg Score 552.7
+  - Gen 9: Avg Depth 4.20 | Max Depth 8 | Avg Score 532.4
+  - Gen 10: Avg Depth **4.70** | Max Depth **10** | Avg Score 574.6
+- **Key Milestones Achieved**:
+  - **High Multi-Generation Consistency**: 9 of 10 generations achieved average depth $\ge 4.15$, with Gen 5 & Gen 7 hitting **4.80** (Gen 7 score **817.1**).
+  - **Grid Bug Deaths Collapsed**: Grid bug deaths collapsed by 69% (from 13 down to 4) due to the restored `has_safe_melee_target` multi-monster logic.
+  - **ZERO Passive Deaths**: 0 deaths to floating eyes or gas spores across 200 episodes.
+  - Reached Dungeon Depth **11** in Gen 8, Depth **10** across Gen 5, 7, and 10.
+
+### 20.2 Autopsy Discoveries & Autonomous Fixes Deployed
+1. **Adjacent Fast Predator Open-Room Retreat Vulnerability (`is_fast_dangerous`)**:
+   - Small fast predators (felines/kittens speed 18, giant bats speed 22) caused 13 deaths when hero HP dropped $\le 40\%$. In `latest_policy.py`, when adjacent at $\le 40\%$ HP, the policy executed `step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()`. In open rooms, trying to step away from a faster predator yields 0 damage while granting the predator free strikes.
+   - **Fix Applied**: Updated `handle_combat` in `data/latest_policy.py`, `lox/author/prompts.py`, and canonical invariant `INV-CBT-004` in `lox/knowledge/invariants.py`. When adjacent to a fast predator at low HP, if not on Elbereth, the policy yields `engrave_dust_elbereth()` immediately (causing non-humanoid beasts/animals to flee); if already on Elbereth or unable to engrave, the policy engages in melee attack rather than taking free damage while fleeing.
+2. **Multi-Clause Sentence Telemetry Attribution (`scripts/run_synthesis.py`)**:
+   - When NetHack outputs multi-sentence combat logs (`"The rothe hits! The rothe bites!"`), splitting on the hit verb without sentence isolation caused the killer to be recorded with leading clause text (`"rothe hits! the rothe"`).
+   - **Fix Applied**: Added sentence boundary isolation `part = part.split(".")[-1].split("!")[-1].strip()` to clean attacker names before extracting the subject.
+
 
 
 

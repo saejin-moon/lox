@@ -352,12 +352,18 @@ if obs.combat.adjacent_floating_eye:
         ),
         code_snippet="""
 if obs.combat.is_fast_dangerous:
+    if (obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2) and not obs.combat.standing_on_elbereth:
+        obs = (yield engrave_dust_elbereth())
+        continue
     if obs.combat.adjacent_hostile:
-        if obs.hero.hp_frac > 0.4 or not obs.combat.can_retreat:
+        if obs.hero.hp_frac > 0.40 or not obs.combat.can_retreat:
             obs = (yield melee_attack_hostile())
             continue
         else:
-            obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
+            if not obs.combat.standing_on_elbereth:
+                obs = (yield engrave_dust_elbereth())
+            else:
+                obs = (yield melee_attack_hostile())
             continue
 """,
         related_ids=["INV-CBT-001", "INV-CBT-003"],

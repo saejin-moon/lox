@@ -431,6 +431,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             ):
                 if hit_verb in m:
                     part = m.split(hit_verb)[0].strip()
+                    part = part.split(".")[-1].split("!")[-1].strip()
                     words = part.split()
                     if words and words[0] in ("the", "a", "an"):
                         killer = " ".join(words[1:])
