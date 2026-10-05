@@ -409,3 +409,48 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
    - When no dead ends were reachable, `step_to_dead_end` checked `adj_walls >= 1` and searched in place. Because the hero never moved, `adj_walls >= 1` remained true forever, causing up to 2,000 consecutive in-place searches.
    - **Fix Applied**: Capped in-place searches at `< 12` (`self.searched_count[y, x] < 12`). If $\ge 12$, the adapter forcibly steps to the adjacent walkable tile with the lowest search count, sweeping along walls and discovering genuine corridors.
 
+---
+
+## 10. Campaign 58 Empirical Autopsy & DL 15 Breakthrough
+
+### 10.1 Campaign 58 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_012236`
+- **Milestones Reached**:
+  - **All-Time Record Campaign Average Depth**: **4.11**!
+  - **New Peak Dungeon Depth Reached**: **Depth 15** (Gen 5)!
+  - **Two 5.0 Depth Batches**:
+    - Gen 5: Avg Depth **5.00** | Max Depth **15** | Avg Turns **2,037.9** | Peak Score **2,477**
+    - Gen 10: Avg Depth **5.00** | Max Depth **10** | Avg Score **573.4** | Peak Score **2,017**
+  - **Early Pest Fatalities Plunged**:
+    - `newt`: 16 $\to$ 6 (-62%)
+    - `grid bug`: 15 $\to$ 8 (-47%)
+    - `lichen`: 9 $\to$ 5 (-44%)
+    - `STALL_SECRET_DOOR`: 49 $\to$ 35 (-28%)
+- **Batch Progression**:
+  - Gen 1: Avg Depth **4.00** | Max Depth 9 | Avg Turns 1,690.0 | Avg Score 486.6
+  - Gen 2: Avg Depth **3.05** | Max Depth 9 | Avg Turns 1,500.3 | Avg Score 296.3
+  - Gen 3: Avg Depth **3.70** | Max Depth **11** | Avg Turns 1,350.9 | Avg Score 367.7
+  - Gen 4: Avg Depth **3.40** | Max Depth **10** | Avg Turns 2,040.7 | Avg Score 408.2
+  - Gen 5: Avg Depth **5.00** | Max Depth **15** | Avg Turns 2,037.9 | Avg Score **651.4** | Peak Score **2,477**
+  - Gen 6: Avg Depth **4.20** | Max Depth 9 | Avg Turns 1,442.8 | Avg Score 374.5
+  - Gen 7: Avg Depth **4.15** | Max Depth 7 | Avg Turns 1,983.2 | Avg Score 539.5
+  - Gen 8: Avg Depth **4.30** | Max Depth 8 | Avg Turns 1,837.4 | Avg Score 469.9
+  - Gen 9: Avg Depth **4.25** | Max Depth 8 | Avg Turns 1,521.4 | Avg Score 480.3
+  - Gen 10: Avg Depth **5.00** | Max Depth **10** | Avg Turns 1,688.9 | Avg Score **573.4**
+- **Overall C58 Metrics**: 200 episodes, Avg Depth **4.11**, Max Depth **15**, Avg Turns **1,709.3**, Avg Score **464.8**, Peak Score **2,477**.
+- **Root Cause Taxonomy (DuckDB)**:
+  1. `ARMOR_DEFICIT`: 70 (35.0%, avg depth 5.17)
+  2. `COMBAT_GENERAL`: 67 (33.5%, avg depth 4.34)
+  3. `STALL_SECRET_DOOR`: 35 (17.5%, avg depth 1.46)
+  4. `PASSIVE_HAZARD_PARALYSIS`: 16 (8.0%, avg depth 4.00)
+  5. `COMBAT_FAST_PREDATOR`: 12 (6.0%, avg depth 4.42)
+
+### 10.2 Empirical Diagnostic Insights
+1. **The Starting Valkyrie Armor Reality**:
+   - Valkyries start with small shield +3 (AC 6) and NO body armor.
+   - Out of 70 `ARMOR_DEFICIT` episodes, 69 had zero body armor in inventory because random early dungeon drops rarely spawn dwarvish mithril or plate mail before Minetown.
+   - Heroes that survive to depths 5–15 now consistently wear helmets (+0 orcish helm) and cloaks, driving AC down to 5.
+2. **Next Frontier for Depth 20**:
+   - Securing Excalibur early (XL $\ge 5$, fountain dipping) and navigating through the Minetown branch to donate gold ($400 \times \text{XL}$) to the aligned temple priest for permanent +2 to +4 AC protection.
+
+
