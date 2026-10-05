@@ -2586,7 +2586,7 @@ class NetHackAdapter(EnvironmentAdapter):
                 if (
                     "ouch" in msg_low
                     or "hurt" in msg_low
-                    or self.door_kick_count[target_door] >= 15
+                    or self.door_kick_count.get(target_door, 0) >= 15
                 ):
                     self.blocked_tiles.add(target_door)
                 elif "crash" in msg_low or "shatter" in msg_low or "broken" in msg_low:
