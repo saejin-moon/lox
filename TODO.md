@@ -186,3 +186,40 @@ All 12 concrete technical mechanisms across all priority tiers have been fully i
   `STALL_SECRET_DOOR`, `STARVATION_FAINTING`, `PING_PONG_OSCILLATION`, `ARMOR_DEFICIT`, `PREMATURE_PRAYER`, `PASSIVE_HAZARD_PARALYSIS`, `COMBAT_TACTICAL_SWARM`, `COMBAT_FAST_PREDATOR`, `COMBAT_GENERAL`.
 - Integrated directly into DuckDB `episodes` table (`root_cause`, `turns_fainting`, `has_body_armor`, `is_oscillating`), parquet logger, batch reporting, and LLM authoring prompts.
 - All 107 unit tests pass with zero regressions (`uv run pytest`).
+
+---
+
+## 4. Campaign 52 Empirical Autopsy & Targeted Progression Upgrades
+
+### 4.1 Campaign 52 Empirical Results (200 Episodes, 10 Generations)
+- **Batch Progression**:
+  - Gen 1: Avg Depth 3.65 | Max Depth 7 | Avg Turns 1,845.8
+  - Gen 2: Avg Depth 4.45 | Max Depth 11 | Avg Turns 2,485.2
+  - Gen 3: Avg Depth 3.85 | Max Depth 8 | Avg Turns 1,980.1
+  - Gen 4: Avg Depth 3.90 | Max Depth 9 | Avg Turns 2,050.4
+  - Gen 5: Avg Depth 3.65 | Max Depth 8 | Avg Turns 1,912.8
+  - Gen 6: Avg Depth **4.95** | Max Depth 10 | Avg Turns 2,320.5
+  - Gen 7: Avg Depth 4.25 | Max Depth 11 | Avg Turns 2,444.9
+  - Gen 8: Avg Depth 3.45 | Max Depth 8 | Avg Turns 1,850.3
+  - Gen 9: Avg Depth 3.35 | Max Depth 7 | Avg Turns 1,988.6
+  - Gen 10: Avg Depth 3.30 | Max Depth 7 | Avg Turns 2,007.4
+- **Overall C52 Metrics**: 200 episodes, Avg Depth **3.88**, Avg Turns **2,088.6**, Max Depth **11**, Peak Batch Avg **4.95**.
+
+### 4.2 Root Cause Taxonomy (from `diagnostics.py` & DuckDB)
+1. `COMBAT_GENERAL`: 69 (34.5%, avg depth 4.06)
+2. `ARMOR_DEFICIT`: 52 (26.0%, avg depth 5.31, avg turns 1,739.7)
+3. `STALL_SECRET_DOOR`: 38 (19.0%, avg depth 1.26, avg turns 2,657.5)
+4. `PASSIVE_HAZARD_PARALYSIS`: 26 (13.0%, avg depth 4.23, avg turns 2,535.7)
+5. `COMBAT_FAST_PREDATOR`: 14 (7.0%, avg depth 4.21, avg turns 1,703.8)
+6. `ABORTED_ZERO_PROGRESS`: 1 (0.5%)
+
+### 4.3 Key Root Causes Diagnosed & Hardened for Campaign 53
+1. **Loot Scooping vs Stair Descent Priority Inversion**:
+   - `step_to_stairs_down()` was checked before `step_to_loot()`, causing heroes to abandon dropped armor, helmets, cloaks, and boots on cleared floors.
+   - **Fix**: Reordered `obs.spatial.has_nearby_loot` ahead of `step_to_stairs_down()`, guaranteeing dropped monster equipment is scooped and equipped before descending.
+2. **Stationary Passive Hazard Starvation Trap**:
+   - Detailed autopsy of episode `g001_e002` revealed heroes stuck at `(42, 12)` doing `step_away_from_hostile()` for 2,100+ turns until starving to death because emergency strikes were vetoed against floating eyes.
+   - **Fix**: In `step_away_from_hostile()`, non-adjacent passive hazards (dist $\ge 2$) bypass waiting and continue exploration (`stairs_down`, `frontier`, `dead_end`). Adjacent deadlocks with exhausted searches execute emergency melee strikes rather than waiting in place to die of 100% certain starvation.
+3. **In-Combat Hunger Resolution & Emergency Prayer**:
+   - Added emergency prayer checks (`obs.hero.can_pray and (hp_frac < 0.15 or hunger_state >= 3)`) and allowed eating carried rations when adjacent to passive hazards inside `handle_combat()`.
+

@@ -2286,9 +2286,11 @@ class NetHackAdapter(EnvironmentAdapter):
 
             if best_tile:
                 self.consecutive_passive_waits = 0
+                self.passive_search_count = 0
                 return self._step_or_breach(obs_prev, best_tile[0], best_tile[1])
             elif not obs_prev.combat.closest_hostile_pos:
                 self.consecutive_passive_waits = 0
+                self.passive_search_count = 0
                 # No hostile in sight: safely fallback to navigation or search instead of engraving/waiting
                 if obs_prev.spatial.stairs_down_known:
                     return self.step(Action(name="step_to_stairs_down"))
@@ -2309,7 +2311,20 @@ class NetHackAdapter(EnvironmentAdapter):
                     or getattr(obs_prev.combat, "adjacent_floating_eye", False)
                     or getattr(obs_prev.combat, "adjacent_gas_spore", False)
                 )
-                if is_passive:
+                is_adjacent = closest_pos is not None and (
+                    abs(closest_pos[0] - hero.y) <= 1 and abs(closest_pos[1] - hero.x) <= 1
+                )
+                if is_passive and not is_adjacent:
+                    self.consecutive_passive_waits = 0
+                    self.passive_search_count = 0
+                    # Passive hazard is distant (>=2) and cannot chase us; safely explore/navigate around it
+                    if obs_prev.spatial.stairs_down_known:
+                        return self.step(Action(name="step_to_stairs_down"))
+                    elif obs_prev.spatial.has_unvisited_frontier:
+                        return self.step(Action(name="step_to_frontier"))
+                    else:
+                        return self.step(Action(name="step_to_dead_end"))
+                elif is_passive:
                     self.consecutive_passive_waits = (
                         getattr(self, "consecutive_passive_waits", 0) + 1
                     )
@@ -2336,6 +2351,7 @@ class NetHackAdapter(EnvironmentAdapter):
                                     and walkable_nav[ny, nx]
                                     and (ny, nx) != (hy, hx)
                                 ):
+                                    self.passive_search_count = 0
                                     return self._step_or_breach(obs_prev, dy, dx)
 
                         # 2. Ranged destruction (safe elimination)
@@ -2354,21 +2370,11 @@ class NetHackAdapter(EnvironmentAdapter):
                             )
                             return self.step(Action(name="search"))
 
-                        # 4. Emergency strike to break deadlock (strictly prohibited against floating eyes to prevent passive paralysis)
+                        # 4. Emergency strike to break deadlock (better to risk explosion/paralysis than 100% certain starvation)
                         if closest_pos:
                             hy, hx = closest_pos
-                            is_eye = (
-                                self.is_target_floating_eye(obs_prev.glyphs, hy, hx)
-                                or "floating eye" in closest_name
-                                or getattr(
-                                    obs_prev.combat, "adjacent_floating_eye", False
-                                )
-                            )
-                            if (
-                                not is_eye
-                                and abs(hy - hero.y) <= 1
-                                and abs(hx - hero.x) <= 1
-                            ):
+                            if abs(hy - hero.y) <= 1 and abs(hx - hero.x) <= 1:
+                                self.passive_search_count = 0
                                 return self.step(
                                     Action(
                                         name="melee_attack",
