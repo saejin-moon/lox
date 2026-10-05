@@ -900,6 +900,8 @@ class NetHackAdapter(EnvironmentAdapter):
                         adjacent_monsters.append(mname)
                         if GLYPH_IGNORES_ELBERETH_LUT[g]:
                             hostile_ignores_elbereth = True
+                        if not GLYPH_IS_PASSIVE_HAZARD_LUT[g]:
+                            has_safe_melee_target = True
         # Check if the hero was attacked by an unseen monster or disguised mimic
         msg_l = message.lower()
         was_attacked = any(

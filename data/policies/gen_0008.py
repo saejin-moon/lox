@@ -139,14 +139,11 @@ class Agent:
                     obs = (yield engrave_dust_elbereth())
                     continue
                 if obs.combat.adjacent_hostile:
-                    if obs.hero.hp_frac > 0.35 or not obs.combat.can_retreat:
+                    if obs.hero.hp_frac > 0.4 or not obs.combat.can_retreat:
                         obs = (yield melee_attack_hostile())
                         continue
                     else:
-                        if not obs.combat.standing_on_elbereth:
-                            obs = (yield engrave_dust_elbereth())
-                        else:
-                            obs = (yield melee_attack_hostile())
+                        obs = (yield (step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile()))
                         continue
             if obs.combat.standing_on_elbereth:
                 if obs.combat.hostile_ignores_elbereth and obs.combat.adjacent_hostile:
@@ -161,6 +158,9 @@ class Agent:
                         continue
                     if obs.inventory.has_daggers and obs.combat.closest_hostile_dist >= 2:
                         obs = (yield throw_dagger())
+                        continue
+                    if obs.spatial.stairs_down_known:
+                        obs = (yield step_to_stairs_down())
                         continue
                     obs = (yield step_away_from_hostile())
                     continue

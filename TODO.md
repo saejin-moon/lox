@@ -739,6 +739,38 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
    - NetHack's petrification messages (`"You turn to stone."`, `"You feel a slowing sensation."`) do not contain the substring `"petrif"`. Petrification deaths were previously misattributed to combat hit verbs from turns earlier.
    - **Fix Applied**: Added `"turn to stone"`, `"turning to stone"`, and `"slowing sensation"` to the petrification detector in `scripts/run_synthesis.py`.
 
+---
+
+## 19. Campaign 67 Empirical Autopsy & Multi-Monster Melee Target Restoration
+
+### 19.1 Campaign 67 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_053756`
+- **Total Episodes**: 200 | **Avg Depth**: 3.85 | **Max Depth**: **10** | **Avg Score**: 523.6 | **Peak Score**: **2,823** | **Avg Turns**: 2,536.2 | **Peak Turns**: 25,000.
+- **Batch Progression**:
+  - Gen 1: Avg Depth 3.20 | Max Depth 5 | Avg Score 431.7
+  - Gen 2: Avg Depth 3.70 | Max Depth 9 | Avg Score 615.0 | Peak Turns **25,000**
+  - Gen 3: Avg Depth 3.65 | Max Depth 7 | Avg Score **672.8**
+  - Gen 4: Avg Depth **4.20** | Max Depth 9 | Avg Score 390.8
+  - Gen 5: Avg Depth 3.95 | Max Depth 7 | Avg Score 343.1
+  - Gen 6: Avg Depth **4.10** | Max Depth 8 | Avg Score 526.1 | Peak Turns **18,844**
+  - Gen 7: Avg Depth 3.65 | Max Depth 9 | Avg Score 480.9
+  - Gen 8: Avg Depth **4.40** | Max Depth **10** | Avg Score **655.9** | Peak Score **2,823**
+  - Gen 9: Avg Depth 3.80 | Max Depth 8 | Avg Score 578.1 | Peak Score 2,436
+  - Gen 10: Avg Depth 3.85 | Max Depth **10** | Avg Score 541.6
+- **Key Milestones Achieved**:
+  - **Starvation Hit All-Time Historic Low**: Only **24 starvation deaths (12.0%)**, down from 20.5% in C62.
+  - **ZERO Petrification Deaths**: Cockatrice egg exclusion completely eliminated petrification.
+  - **ZERO Passive Deaths**: 0 deaths to floating eyes or gas spores across 200 episodes.
+  - Peak score reached **2,823** in Gen 8.
+
+### 19.2 Autopsy Discoveries & Autonomous Fixes Deployed
+1. **The Missing `has_safe_melee_target` Flag in Multi-Monster Combat (`g006_e006`)**:
+   - In episode `g006_e006` (Depth 7, HP 35), the hero was adjacent to a floating eye and a grid bug. The grid bug delivered 14 consecutive bites (`"The grid bug bites! You get zapped!"`), slowly killing the hero while the hero called `step_away_from_hostile()` on every single turn without fighting back.
+   - Code inspection of `lox/envs/nethack.py` revealed that `has_safe_melee_target` was accidentally omitted when adding unseen monster detection, remaining permanently `False`.
+   - In `handle_combat`, `if obs.combat.has_safe_melee_target:` was never satisfied, preventing `melee_attack_hostile()` from dispatching strikes against the grid bug, trapping the hero in passive retreat.
+   - **Fix Applied**: Restored `if not GLYPH_IS_PASSIVE_HAZARD_LUT[g]: has_safe_melee_target = True` in `NetHackAdapter._extract_obs`. When an active attacker is present alongside a passive hazard, the policy immediately executes `melee_attack_hostile()` to eliminate the active attacker while safely bypassing the passive hazard.
+
+
 
 
 
