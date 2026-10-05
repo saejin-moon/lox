@@ -601,5 +601,39 @@ Empirical SQL analysis of the 49 early stalls revealed 4 distinct tactical loop 
    - Discovered why the LLM reverted `hunger_state >= 4` back to `>= 3`: `INV-NUT-003` in `lox/knowledge/invariants.py` had instructed `hunger_state >= 3`.
    - **Fix Deployed**: Updated `INV-NUT-003` rule and code snippet to ground-truth NetHack 3.6 (`hunger_state >= 4` 'Fainting'). Synchronized `latest_policy.py`.
 
+---
+
+## 15. Campaign 63 Empirical Autopsy & Truthful Mortality Telemetry
+
+### 15.1 Campaign 63 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_041302`
+- **Total Episodes**: 200 | **Avg Depth**: 4.11 | **Max Depth**: 9 | **Avg Score**: 587.4 | **Peak Score**: 3,000 | **Avg Turns**: 2,837.7 | **Peak Turns**: 17,087.
+- **Batch Progression**:
+  - Gen 1: Avg Depth **4.20** | Max Depth 7 | Avg Score 621.5
+  - Gen 2: Avg Depth **4.00** | Max Depth 9 | Avg Score **735.6** | Avg Turns **4,688.1** | Peak Turns **17,087**
+  - Gen 3: Avg Depth **3.70** | Max Depth 7 | Avg Score 547.0
+  - Gen 4: Avg Depth **4.45** | Max Depth 8 | Avg Score 626.8
+  - Gen 5: Avg Depth **4.45** | Max Depth 8 | Avg Score 599.1
+  - Gen 6: Avg Depth **4.10** | Max Depth 9 | Avg Score 600.3
+  - Gen 7: Avg Depth **4.45** | Max Depth 8 | Avg Score 611.2
+  - Gen 8: Avg Depth **4.25** | Max Depth 8 | Avg Score 552.0
+  - Gen 9: Avg Depth **3.65** | Max Depth 8 | Avg Score 501.9 | Peak Score **3,000**
+  - Gen 10: Avg Depth **3.85** | Max Depth 8 | Avg Score 478.4
+- **Key Milestones Achieved**:
+  - Generations 4, 5, and 7 achieved **4.45 Avg Depth**.
+  - Generation 2 set a multi-generation turn duration record of **4,688.1 Avg Turns** per episode.
+  - Starvation deaths dropped by 25% (41 $\to$ 31 episodes).
+  - Zero-progress aborts collapsed to **ONLY 1 episode** (0.5%).
+
+### 15.2 Autopsy Discoveries & Autonomous Fixes Deployed
+1. **Misattributed Passive Hazard Fatalities (`scripts/run_synthesis.py`)**:
+   - In Campaign 63 DuckDB, 6 deaths were attributed to `floating eye`. Autopsy of tick telemetry revealed the heroes were at full/high HP, took 0 damage from floating eyes, fainted from hunger, and starved while unconscious.
+   - Because `recent_msgs` only inspected the last 6 messages, the fainting message from dozens of turns earlier was missed. The death reason defaulted to combat, and closest hostile (`floating eye`) was recorded as killer.
+   - **Fix Applied**: Widened `recent_msgs` to inspect the full recorder buffer (100 turns). Explicitly excluded immobile passive hazards (`floating eye`, `gas spore`) from adjacent/closest killer attribution, and mapped `is_starving` directly to `killer = "starvation"`.
+2. **Combat Gating of Fainting Prayer in `latest_policy.py`**:
+   - `handle_combat` previously had `hunger_state >= 3` gated behind `not adjacent_hostile or standing_on_elbereth`. When hungry adjacent to a passive hazard, the hero refused to pray until fainting.
+   - **Fix Applied**: Synchronized `handle_combat` to check `(obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and obs.hero.can_pray` directly without requiring non-adjacency, preventing fatal fainting blackouts.
+
+
 
 

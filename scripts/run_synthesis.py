@@ -298,7 +298,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             )
 
             recent_msgs = [
-                s.message for s in list(getattr(recorder, "buffer", []))[-6:]
+                s.message for s in list(getattr(recorder, "buffer", []))
             ]
             if getattr(obs.hero, "hp", 0) <= 0:
                 msg = getattr(obs, "message", "").strip()
@@ -376,7 +376,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         or "fatality" in death_reason.lower()
     ):
         recent_msgs = [
-            s.message for s in list(getattr(recorder, "buffer", []))[-6:]
+            s.message for s in list(getattr(recorder, "buffer", []))[-30:]
         ]
         if getattr(obs, "message", ""):
             recent_msgs.append(obs.message)
@@ -424,18 +424,22 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
                 break
 
         if not killer:
-            adj_mons = getattr(obs.combat, "adjacent_monsters", [])
+            adj_mons = [
+                m for m in getattr(obs.combat, "adjacent_monsters", [])
+                if m not in ("floating eye", "gas spore")
+            ]
             if adj_mons:
                 killer = adj_mons[0]
         if not killer and last_known_hostile:
-            killer = last_known_hostile
+            if last_known_hostile not in ("floating eye", "gas spore"):
+                killer = last_known_hostile
         if not killer:
             cname = getattr(obs.combat, "closest_hostile_name", "")
-            if cname and (
-                cname not in ("floating eye", "gas spore")
-                or getattr(obs.combat, "adjacent_hostile", False)
-            ):
+            if cname and cname not in ("floating eye", "gas spore"):
                 killer = cname
+        if not killer and is_starving:
+            death_reason = "Starvation"
+            killer = "starvation"
     ac_at_death = last_valid_ac
     hp_at_death = getattr(obs.hero, "hp", 0)
     max_hp_at_death = last_valid_max_hp
