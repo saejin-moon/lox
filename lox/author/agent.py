@@ -984,8 +984,8 @@ class Agent:
                 )
                 repaired_extracted = self.extract_code(repaired_response)
                 candidate_code = (
-                    self.splice_policy_methods(current_policy, repaired_extracted)
-                    if (current_policy and repaired_extracted)
+                    self.splice_policy_methods(candidate_code, repaired_extracted)
+                    if (candidate_code and repaired_extracted)
                     else repaired_extracted
                 )
 
