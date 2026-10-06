@@ -693,6 +693,7 @@ class Agent:
             f"\n--- Running Generation {gen} Evaluation ({eval_episodes} real episodes) ---"
         )
         gen_start_t = time.perf_counter()
+        just_promoted = False
         trigger_reason = ""
         gen_depths = []
         gen_turns = []
@@ -1027,11 +1028,11 @@ class Agent:
                 print(f"[Checkpoint Promoted] -> {policy_path} & {ckpt_path}")
                 last_falsification_feedback = ""
 
-                # Update baseline reference for next iteration
-                last_batch_seeds = list(current_seeds)
-                last_batch_results_by_seed = dict(current_results_by_seed)
-                last_batch_primary_cause = top_arch
-                last_baseline_depth = float(avg_d)
+                # Reset candidate and twin cache so the next generation evaluates the newly promoted baseline on FRESH seeds!
+                candidate_policy = None
+                last_batch_seeds = []
+                last_batch_results_by_seed = {}
+                just_promoted = True
 
                 # Log to DuckDB evolved_policies table
                 for attempt in range(3):
@@ -1054,6 +1055,7 @@ class Agent:
                     except Exception as e:
                         time.sleep(0.5)
             else:
+                just_promoted = False
                 print(f"  Outcome: FALSIFIED (Predicted: {pred})")
                 print(f"[Rollback] Discarding candidate policy. Retaining validated baseline (Depth {last_baseline_depth:.2f}).")
                 for r_msg in falsification_reasons:
@@ -1105,6 +1107,20 @@ class Agent:
 
             candidate_policy = None
             last_recorded_hypothesis = None
+
+            if just_promoted:
+                if target_depth is not None and avg_d >= target_depth:
+                    print("\n" + "=" * 65)
+                    print(
+                        f"[CAMPAIGN GOAL ACHIEVED] Generation {gen} reached target average depth {avg_d:.2f} >= {target_depth:.2f}!"
+                    )
+                    print(f"Max Depth: {max_d} | Average Turns: {avg_t:.1f}")
+                    print("=" * 65)
+                    break
+                print(
+                    f"\n[Seed Advance] Policy promoted! Generation {gen + 1} will calibrate baseline on a fresh batch of 20 unseen NetHack seeds..."
+                )
+                continue
         else:
             # Baseline or fresh generation
             last_batch_seeds = list(current_seeds)
