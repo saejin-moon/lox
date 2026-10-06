@@ -1247,5 +1247,50 @@ To ensure LLM synthesis sessions (targeting `google/gemma-4-31b-it`) generate po
    - Added unit test `test_in_combat_emergency_eating_unconditional()` in `tests/test_nethack_tactics.py`.
    - Verified all 123 unit tests passing (`uv run pytest`).
 
+---
+
+## 30. Campaign 79 Empirical Autopsy & Topological Synchronization Breakthrough
+
+### 30.1 Campaign 79 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_201847`
+- **Milestones & Breakthroughs**:
+  - **Dungeon Penetration**: Peak depth reached **DL 12** (Gen 7) and **DL 11** (Gen 3).
+  - **Generation Progression**:
+    * Gen 1: Avg Depth 4.30 | Max Depth 8  | Avg Turns 3,959.9 | Score 815.1
+    * Gen 2: Avg Depth 4.25 | Max Depth 8  | Avg Turns 3,958.7 | Score 729.6
+    * Gen 3: Avg Depth 4.45 | Max Depth 11 | Avg Turns 4,736.6 | Score 946.6
+    * Gen 4: Avg Depth 4.00 | Max Depth 9  | Avg Turns 3,496.2 | Score 650.4
+    * Gen 5: Avg Depth 4.05 | Max Depth 10 | Avg Turns 7,417.5 | Score 622.7
+    * Gen 6: Avg Depth **5.30** | Max Depth 10 | Avg Turns 3,777.2 | Score 931.5 (15% starvation)
+    * Gen 7: Avg Depth 4.70 | Max Depth **12** | Avg Turns 4,812.9 | Score 905.6 (**5.0% starvation**)
+    * Gen 8: Avg Depth 4.75 | Max Depth 9  | Avg Turns 5,010.5 | Score 1,246.4
+    * Gen 9: Avg Depth 3.95 | Max Depth 9  | Avg Turns 3,457.3 | Score 690.5
+    * Gen 10: Avg Depth 4.45 | Max Depth 8  | Avg Turns 3,104.4 | Score 727.0 (**5.0% starvation**)
+  - **Pathological Behavior Elimination**:
+    * Lichen holding loop (`"cannot escape"` redirection): **0 occurrences** (100% eliminated).
+    * Corrosive hazard retreat ping-pong: **0 occurrences** (100% eliminated).
+    * 25,000-turn timeouts reduced to **1 episode (0.5%)** across the entire 200-episode batch!
+
+### 30.2 Forensic Investigation of the Single Remaining Timeout (`g005_e014`)
+- **Autopsy Finding**:
+  * On DL 4, the hero spawned in an isolated 4x4 starting room (16 tiles) with secret doors and no known stairs.
+  * In `_extract_obs`: `_compute_dead_ends_mask` used default `max_perimeter = 10`, so once candidate perimeter tiles were searched 10 times, `obs.spatial.standing_on_dead_end` turned False.
+  * In `step_to_dead_end`: `is_confined` set `perim_limit = 20`. Since `10 < 20`, the tiles remained valid navigation targets.
+  * As a result, the policy yielded `step_to_dead_end()` without searching, while `step_to_dead_end()` navigated between adjacent perimeter tiles `(7, 2)` and `(8, 2)` without executing search.
+  * Furthermore, `_prev_hero_pos` was set to the hero's current tile, rendering `(ny, nx) == _prev_hero_pos` always False in the fallback neighbor selection.
+
+### 30.3 Engineering & Architectural Fixes Implemented
+1. **Perimeter Limit Synchronization**:
+   - `_extract_obs` and `step_to_dead_end` now share identical `is_confined` and `is_dl1_trap` logic, keeping `perim_limit` (20) and `corridor_limit` (25) 100% synchronized so observation state and action execution never diverge.
+2. **Immediate Perimeter Candidate Searching**:
+   - In `step_to_dead_end`: if the hero is standing on an unexhausted dead end or perimeter candidate (`dead_ends_mask[hero.y, hero.x] and searched_count < perim_limit`), the adapter immediately executes `search` in place rather than moving to an adjacent candidate tile.
+3. **Genuine Movement Origin Tracking (`last_move_from`)**:
+   - In `_step_sequence`: tracks the hero's previous coordinate whenever the hero successfully moves. The fallback neighbor selection applies a +100 penalty to `last_move_from`, preventing 2-tile ping-pong oscillations.
+4. **Policy Search Limit Generalization**:
+   - Updated `handle_dead_end` across `latest_policy.py` and `prompts.py` to search 20 times whenever stairs down are unknown (`not obs.spatial.stairs_down_known`) regardless of depth.
+5. **Test Suite Verification**:
+   - Added unit test `test_step_to_dead_end_immediate_search_when_unexhausted` in `tests/test_nethack_tactics.py`.
+   - All 131 unit tests pass (`uv run pytest`).
+
 
 
