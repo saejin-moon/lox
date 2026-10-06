@@ -884,6 +884,7 @@ class NetHackAdapter(EnvironmentAdapter):
                         continue
                     if (gy, gx) in self.peaceful_positions:
                         continue
+                    self.blocked_tiles.discard((gy, gx))
                     g = int(glyphs[gy, gx])
                     if g >= _MAX_GLYPH:
                         continue
@@ -2233,7 +2234,7 @@ class NetHackAdapter(EnvironmentAdapter):
                     is_door=all_doors,
                 )
 
-            # Check for starting room trap break on DL 1
+            # Check for starting room trap break or confined level partition (no known stairs down, no frontiers, no closed doors)
             is_dl1_trap = (
                 obs_prev.hero.depth == 1
                 and obs_prev.hero.dungeon_num == 0
@@ -2241,8 +2242,13 @@ class NetHackAdapter(EnvironmentAdapter):
                 and obs_prev.hero.turn >= 80
                 and not obs_prev.spatial.stairs_down_known
             )
-            perim_limit = 20 if is_dl1_trap else 10
-            corridor_limit = 20 if is_dl1_trap else 15
+            is_confined = (
+                not obs_prev.spatial.stairs_down_known
+                and not obs_prev.spatial.has_unvisited_frontier
+                and not obs_prev.dungeon.has_closed_door
+            )
+            perim_limit = 20 if (is_dl1_trap or is_confined) else 10
+            corridor_limit = 25 if (is_dl1_trap or is_confined) else 15
 
             # Priority 2: Room Perimeter Search
             if not target or target == (-1, -1):
@@ -2261,9 +2267,9 @@ class NetHackAdapter(EnvironmentAdapter):
 
             # Priority 3: Full-Floor Stagnation Decay
             # Triggers ONLY when all reachable dead ends and perimeter tiles are exhausted (target == (-1, -1))
-            # and at least 500 turns have elapsed across all candidate tiles.
+            # and cooldown has elapsed across all candidate tiles.
             if not target or target == (-1, -1):
-                decay_threshold = 100 if is_dl1_trap else 500
+                decay_threshold = 80 if (is_dl1_trap or is_confined) else 500
                 if obs_prev.hero.turn - getattr(self, "_last_search_decay_turn", -1000) >= decay_threshold:
                     self._last_search_decay_turn = obs_prev.hero.turn
                     self.searched_count = np.maximum(0, self.searched_count - 10)
@@ -2299,7 +2305,8 @@ class NetHackAdapter(EnvironmentAdapter):
                 and 0 <= hero.x + dx < 79
                 and chars[hero.y + dy, hero.x + dx] in (ord("|"), ord("-"), ord("#"))
             )
-            if adj_walls >= 1 and self.searched_count[hero.y, hero.x] < 12:
+            search_cap = 20 if (is_dl1_trap or is_confined) else 12
+            if adj_walls >= 1 and self.searched_count[hero.y, hero.x] < search_cap:
                 return self.step(Action(name="search"))
 
             best_dir = None
@@ -2307,7 +2314,8 @@ class NetHackAdapter(EnvironmentAdapter):
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 ny, nx = hero.y + dy, hero.x + dx
                 if 0 <= ny < 21 and 0 <= nx < 79 and walkable_nav[ny, nx]:
-                    score = self.searched_count[ny, nx]
+                    is_prev = (ny, nx) == getattr(self, "_prev_hero_pos", (-1, -1))
+                    score = self.searched_count[ny, nx] + (100 if is_prev else 0)
                     if score < min_searched:
                         min_searched = score
                         best_dir = (dy, dx)
@@ -2781,24 +2789,31 @@ class NetHackAdapter(EnvironmentAdapter):
         elif action.name == "melee_attack_hostile" and obs_prev is not None:
             hero = obs_prev.hero
             glyphs = obs_prev.glyphs
+            msg = getattr(obs_prev, "message", "").lower()
+            held_by_monster = any(
+                p in msg for p in ("cannot escape", "held by", "grabbed by", "fast in the")
+            )
             if glyphs is not None:
+                adjacent_targets = []
                 for dy in (-1, 0, 1):
                     for dx in (-1, 0, 1):
                         if dy == 0 and dx == 0:
                             continue
                         ty, tx = hero.y + dy, hero.x + dx
                         if 0 <= ty < 21 and 0 <= tx < 79:
-                            if (ty, tx) in self.peaceful_positions or (
-                                ty,
-                                tx,
-                            ) in self.blocked_tiles:
+                            if (ty, tx) in self.peaceful_positions:
                                 continue
                             g = int(glyphs[ty, tx])
                             if 0 <= g < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[g] and not GLYPH_IS_PEACEFUL_SPECIES_LUT[g]:
-                                if GLYPH_IS_FLOATING_EYE[g] or GLYPH_IS_GAS_SPORE[g]:
+                                self.blocked_tiles.discard((ty, tx))
+                                if not held_by_monster and (GLYPH_IS_FLOATING_EYE[g] or GLYPH_IS_GAS_SPORE[g]):
                                     continue
-                                action = Action(name="melee_attack", direction=(dy, dx))
-                                break
+                                mname = GLYPH_MON_NAME[g].lower()
+                                is_holding = held_by_monster and bool(mname and mname in msg)
+                                adjacent_targets.append(((dy, dx), is_holding))
+                if adjacent_targets:
+                    adjacent_targets.sort(key=lambda item: item[1], reverse=True)
+                    action = Action(name="melee_attack", direction=adjacent_targets[0][0])
             # If no adjacent non-passive monster, counter-attack adjacent disguised mimic / unseen hostile
             if action.direction is None and getattr(obs_prev.combat, "adjacent_hostile", False):
                 best_dir = None

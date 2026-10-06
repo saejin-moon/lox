@@ -329,9 +329,9 @@ class Agent:
                         obs = (yield melee_attack_hostile())
                         continue
 
-            # 1.2 Corrosive / acid hazards: strictly forbid melee attacks
+            # 1.2 Corrosive / acid hazards: prefer ranged elimination; attack in melee if healthy to break stalls
             if obs.combat.is_corrosive_target:
-                if obs.combat.closest_hostile_dist >= 2:
+                if obs.combat.closest_hostile_dist >= 1:
                     if obs.inventory.has_offensive_wand:
                         obs = (yield zap_offensive_wand())
                         continue
@@ -339,8 +339,12 @@ class Agent:
                         obs = (yield throw_dagger())
                         continue
                 if obs.combat.adjacent_hostile:
-                    obs = (yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile())
-                    continue
+                    if obs.hero.hp_frac > 0.4:
+                        obs = (yield melee_attack_hostile())
+                        continue
+                    else:
+                        obs = (yield step_to_chokepoint() if not obs.combat.in_corridor else step_away_from_hostile())
+                        continue
 
             # 1.3 Pack threat defense: immediate dust Elbereth or chokepoint retreat on turn 1
             if obs.combat.is_pack_threat and not obs.combat.in_corridor:
@@ -551,7 +555,7 @@ Every turn, `obs` provides rich sub-namespaces:
 28. **Weapon Skill Enhancement (`enhance_weapon_skill`, `obs.hero.can_enhance_skills`)**: In NetHack, Valkyries start at Basic (+0 to-hit, +0 damage). Striking enemies trains skills: 80 hits unlocks Skilled (+2 to-hit, +1 damage), 180 hits unlocks Expert (+3 to-hit, +2 damage). When `obs.hero.can_enhance_skills` is True outside combat, yield `enhance_weapon_skill()` to dramatically increase melee accuracy and damage.
 29. **Superior Body Armor Replacement (`replace_body_armor`)**: NetHack forbids wearing body armor while already wearing body armor. Dropped dwarvish mithril coats (AC 5) or iron cuirasses give vastly superior protection over the starting leather jacket (AC 1). When `obs.inventory.get_superior_body_armor_slot()` is not None, yield `replace_body_armor()` to take off the inferior jacket and wear the superior coat, dropping AC towards negative numbers.
 30. **Pack & Herd Tactical Defense (`obs.combat.is_pack_threat`)**: On DL 4–6, monsters like rothes spawn in herds of 3–5 animals. Each rothe executes 3 attacks per turn, dealing up to 25+ damage per turn against unarmored heroes. When `obs.combat.is_pack_threat` is True in open rooms (`not in_corridor`), do NOT stand and trade melee blows; engrave dust Elbereth (`engrave_dust_elbereth()`) or retreat to a 1-tile corridor chokepoint (`step_to_chokepoint()`).
-31. **Corrosive Hazard Melee Prohibition (`obs.combat.is_corrosive_target`)**: Striking acidic monsters (acid blobs, ochre jellies) in melee instantly corrodes weapons (-1 enchantment/damage) and deals passive acid splash damage. NEVER attack corrosive targets in melee. Eliminate them with ranged missiles (`throw_dagger()`) or offensive wands (`zap_offensive_wand()`), or retreat (`step_away_from_hostile()`).
+31. **Corrosive Hazard Mitigation (`obs.combat.is_corrosive_target`)**: Striking acidic monsters (acid blobs, ochre jellies) in melee can corrode non-artifact weapons and deals minor acid splash damage. Prefer eliminating them with ranged missiles (`throw_dagger()`) or offensive wands (`zap_offensive_wand()`). However, if lacking ranged options or cornered, healthy heroes (`obs.hero.hp_frac > 0.4`) MUST attack in melee (`melee_attack_hostile()`) to quickly destroy the immobile/slow target and eliminate 20,000-turn retreat oscillation loops.
 32. **Heavy Weapon Threat Gating (`obs.combat.is_heavy_weapon_threat`)**: Orc chieftains, captains, and gnomes wielding two-handed swords, battle-axes, or crossbows deal deadly burst damage capable of one-shotting heroes. When `is_heavy_weapon_threat` is detected at distance >= 2, harass with thrown missiles (`throw_dagger()`) or offensive wands, or retreat to 1-tile corridor chokepoints (`step_to_chokepoint()`) rather than rushing into open melee.
 33. **Emergency Unidentified Consumables Panic Consumption (`quaff_emergency_potion`, `read_emergency_scroll`)**: When HP is critically low (< 20%), prayer is on cooldown or unavailable, and no identified healing potions remain, sitting idle or taking another fatal attack is a catastrophic failure mode. Unidentified potions (extra healing, full healing, speed, gain energy) and unidentified scrolls (teleportation, earth, scare monster) have high probabilities of saving the hero's life. Yield `quaff_emergency_potion()` or `read_emergency_scroll()`.
 34. **Sokoban Branch Entrance Navigation (`obs.dungeon.has_sokoban_entrance`, `step_to_sokoban_entrance`)**: On Depths 6–10, the Sokoban entrance generates as a distinct up-stair `<` that is not the floor's arrival staircase. When `obs.dungeon.has_sokoban_entrance` is True, yield `step_to_sokoban_entrance()` to navigate to the entrance and ascend into Sokoban to acquire non-rotting food and the Bag of Holding or Amulet of Reflection.

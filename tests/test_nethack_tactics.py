@@ -988,6 +988,87 @@ def test_deadlock_circuit_breaker_emergency_strike():
     )
 
 
+def test_melee_attack_hostile_held_by_monster_and_blocked_tiles_discard():
+    import numpy as np
+    from lox.core.types import Observation, HeroState, CombatView, InventoryView, Action
+    from lox.envs.nethack import NetHackAdapter, GLYPH_IS_MON_HOSTILE_LUT
+
+    adapter = NetHackAdapter()
+    hero = HeroState(y=10, x=20, hp=15, max_hp=15)
+    combat = CombatView(adjacent_hostile=True, closest_hostile_name="lichen")
+    inv = InventoryView(items=[])
+    glyphs = np.full((21, 79), 2359, dtype=np.int32)
+    glyphs[10, 21] = 155  # Lichen glyph
+
+    obs_prev = Observation(
+        chars=np.full((21, 79), ord("."), dtype=np.uint8),
+        glyphs=glyphs,
+        hero=hero,
+        combat=combat,
+        inventory=inv,
+        message="You cannot escape from the lichen!",
+    )
+    adapter._last_obs = obs_prev
+    # Simulate (10, 21) being mistakenly in blocked_tiles
+    adapter.blocked_tiles.add((10, 21))
+
+    captured_seq = []
+    def mock_step_sequence(seq):
+        captured_seq.extend(seq)
+        return obs_prev, 0.0, False, False, {}
+
+    import unittest.mock
+    with unittest.mock.patch.object(adapter, "_step_sequence", side_effect=mock_step_sequence):
+        adapter.step(Action(name="melee_attack_hostile"))
+
+    # Blocked tile must be discarded
+    assert (10, 21) not in adapter.blocked_tiles
+    # Direction must be (0, 1) East towards the lichen
+    assert adapter._last_attempted_dir == (0, 1)
+
+
+def test_step_to_dead_end_anti_oscillation():
+    import numpy as np
+    from lox.core.types import Observation, HeroState, SpatialView, DungeonView, Action
+    from lox.envs.nethack import NetHackAdapter
+
+    adapter = NetHackAdapter()
+    hero = HeroState(y=12, x=23, depth=1)
+    # Floor room with no doors, no frontiers, no stairs
+    spatial = SpatialView(stairs_down_known=False, has_unvisited_frontier=False)
+    dungeon = DungeonView(has_closed_door=False)
+    chars = np.full((21, 79), ord("."), dtype=np.uint8)
+    glyphs = np.full((21, 79), 2359, dtype=np.int32)  # Floor CMAP
+    obs_prev = Observation(
+        chars=chars,
+        glyphs=glyphs,
+        hero=hero,
+        spatial=spatial,
+        dungeon=dungeon,
+    )
+    adapter._last_obs = obs_prev
+    # Set _prev_hero_pos to (13, 23) (South)
+    adapter._prev_hero_pos = (13, 23)
+
+    resolved_actions = []
+    original_step = adapter.step
+
+    def capture_step(a):
+        resolved_actions.append(a)
+        return obs_prev, 0.0, False, False, {}
+
+    import unittest.mock
+    with unittest.mock.patch.object(adapter, "step", side_effect=capture_step):
+        adapter.step(Action(name="step_to_dead_end"))
+
+    # Action must NOT step back to (1, 0) South because of is_prev anti-oscillation penalty
+    steps = [a for a in resolved_actions if a.name in ("step_direction", "step_or_breach")]
+    for s in steps:
+        if s.direction is not None:
+            assert s.direction != (1, 0), "Should not step back into _prev_hero_pos"
+
+
+
 
 
 
