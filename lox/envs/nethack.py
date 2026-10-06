@@ -309,6 +309,8 @@ class NetHackAdapter(EnvironmentAdapter):
         self.known_altar_pos: tuple[int, int] | None = None
         self.known_fountain_pos: tuple[int, int] | None = None
         self.known_priest_pos: tuple[int, int] | None = None
+        self.last_move_from: tuple[int, int] = (-1, -1)
+        self._last_obs_hero_pos: tuple[int, int] | None = None
 
         # Build ASCII char -> action index map
         unwrapped = getattr(self.env, "unwrapped", self.env)
@@ -1194,8 +1196,23 @@ class NetHackAdapter(EnvironmentAdapter):
             adjacent_monsters=adjacent_monsters,
         )
 
-        # Check for unsearched corridor dead ends or room perimeter tiles reachable from hero
-        dead_ends_mask = self._compute_dead_ends_mask(chars, walkable)
+        is_dl1_trap = (
+            depth == 1
+            and dnum == 0
+            and np.sum(self.visited) <= 20
+            and turn >= 80
+            and (self.known_stairs_down is None)
+        )
+        is_confined = (
+            self.known_stairs_down is None
+            and not has_frontier
+            and not bool(np.any(doors_mask))
+        )
+        perim_limit = 20 if (is_dl1_trap or is_confined) else 10
+        corridor_limit = 25 if (is_dl1_trap or is_confined) else 15
+        dead_ends_mask = self._compute_dead_ends_mask(
+            chars, walkable, max_corridor=corridor_limit, max_perimeter=perim_limit
+        )
         dead_end_target = SpatialEngine.find_nearest_target(
             (y, x), walkable_nav, target_mask=dead_ends_mask, is_door=all_doors
         )
@@ -1794,6 +1811,12 @@ class NetHackAdapter(EnvironmentAdapter):
         obs = self._extract_obs(raw_obs)
         self._last_obs = obs
 
+        prev_hero = getattr(self, "_last_obs_hero_pos", None)
+        curr_hero = (obs.hero.y, obs.hero.x)
+        if prev_hero is not None and prev_hero != curr_hero:
+            self.last_move_from = prev_hero
+        self._last_obs_hero_pos = curr_hero
+
         msg = obs.message.lower()
         all_doors = self._get_all_doors_mask(obs)
         if any(
@@ -1991,6 +2014,8 @@ class NetHackAdapter(EnvironmentAdapter):
         self.known_altar_pos = None
         self.known_fountain_pos = None
         self.known_priest_pos = None
+        self.last_move_from = (-1, -1)
+        self._last_obs_hero_pos = None
         raw_obs, _ = self.env.reset(seed=seed)
         raw_obs, _, _ = self._dismiss_more(raw_obs, False, False)
         self._last_raw_obs = raw_obs
@@ -2250,11 +2275,15 @@ class NetHackAdapter(EnvironmentAdapter):
             perim_limit = 20 if (is_dl1_trap or is_confined) else 10
             corridor_limit = 25 if (is_dl1_trap or is_confined) else 15
 
+            # Priority 0: If standing on an unexhausted dead end or perimeter candidate, search immediately
+            dead_ends_mask = self._compute_dead_ends_mask(
+                chars, walkable, max_corridor=corridor_limit, max_perimeter=perim_limit
+            )
+            if dead_ends_mask[hero.y, hero.x] and self.searched_count[hero.y, hero.x] < perim_limit:
+                return self.step(Action(name="search"))
+
             # Priority 2: Room Perimeter Search
             if not target or target == (-1, -1):
-                dead_ends_mask = self._compute_dead_ends_mask(
-                    chars, walkable, max_corridor=corridor_limit, max_perimeter=perim_limit
-                )
                 step_target_mask = dead_ends_mask.copy()
                 step_target_mask[hero.y, hero.x] = False
                 if np.any(step_target_mask):
@@ -2314,7 +2343,7 @@ class NetHackAdapter(EnvironmentAdapter):
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 ny, nx = hero.y + dy, hero.x + dx
                 if 0 <= ny < 21 and 0 <= nx < 79 and walkable_nav[ny, nx]:
-                    is_prev = (ny, nx) == getattr(self, "_prev_hero_pos", (-1, -1))
+                    is_prev = (ny, nx) == getattr(self, "last_move_from", (-1, -1))
                     score = self.searched_count[ny, nx] + (100 if is_prev else 0)
                     if score < min_searched:
                         min_searched = score

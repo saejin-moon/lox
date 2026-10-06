@@ -468,9 +468,13 @@ class Agent:
         return obs
 
     def handle_dead_end(self, obs):
+        if obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
         if obs.spatial.standing_on_dead_end:
             prev_hp = obs.hero.hp
-            for _ in range(12):
+            search_limit = 20 if (obs.hero.depth <= 2 or not obs.spatial.stairs_down_known) else 12
+            for _ in range(search_limit):
                 if (
                     obs.combat.hostile_count_fov > 0
                     or obs.combat.adjacent_hostile
@@ -484,12 +488,19 @@ class Agent:
                 obs = (yield step_to_stairs_down())
             elif obs.spatial.has_unvisited_frontier:
                 obs = (yield step_to_frontier())
+            elif obs.dungeon.has_closed_door:
+                obs = (yield step_to_closed_door())
             else:
                 obs = (yield step_to_dead_end())
             return obs
-        else:
-            obs = (yield step_to_dead_end())
+        if obs.dungeon.has_closed_door:
+            obs = (yield step_to_closed_door())
             return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        obs = (yield step_to_dead_end())
+        return obs
 ```
 
 ### Critical Generator Subroutine Rules:

@@ -1047,8 +1047,8 @@ def test_step_to_dead_end_anti_oscillation():
         dungeon=dungeon,
     )
     adapter._last_obs = obs_prev
-    # Set _prev_hero_pos to (13, 23) (South)
-    adapter._prev_hero_pos = (13, 23)
+    # Set last_move_from to (13, 23) (South)
+    adapter.last_move_from = (13, 23)
 
     resolved_actions = []
     original_step = adapter.step
@@ -1066,6 +1066,52 @@ def test_step_to_dead_end_anti_oscillation():
     for s in steps:
         if s.direction is not None:
             assert s.direction != (1, 0), "Should not step back into _prev_hero_pos"
+
+
+def test_step_to_dead_end_immediate_search_when_unexhausted():
+    import numpy as np
+    from lox.core.types import Observation, HeroState, SpatialView, DungeonView, Action
+    from lox.envs.nethack import NetHackAdapter
+
+    adapter = NetHackAdapter()
+    hero = HeroState(y=7, x=2, depth=4)
+    spatial = SpatialView(stairs_down_known=False, has_unvisited_frontier=False)
+    dungeon = DungeonView(has_closed_door=False)
+    chars = np.full((21, 79), ord(" "), dtype=np.uint8)
+    # 4x4 room with walls around
+    chars[6, 1:6] = ord("-")
+    chars[11, 1:6] = ord("-")
+    chars[7:11, 1] = ord("|")
+    chars[7:11, 6] = ord("|")
+    chars[7:11, 2:6] = ord(".")
+    glyphs = np.full((21, 79), 2359, dtype=np.int32)
+    obs_prev = Observation(
+        chars=chars,
+        glyphs=glyphs,
+        hero=hero,
+        spatial=spatial,
+        dungeon=dungeon,
+    )
+    adapter._last_obs = obs_prev
+    # Tile (7, 2) is a corner with 2 adjacent walls, searched_count is 0 (< 20)
+    assert adapter.searched_count[7, 2] == 0
+
+    resolved_actions = []
+    original_step = adapter.step
+
+    def capture_step(a):
+        resolved_actions.append(a)
+        if a.name == "search":
+            return obs_prev, 0.0, False, False, {}
+        return original_step(a)
+
+    import unittest.mock
+    with unittest.mock.patch.object(adapter, "step", side_effect=capture_step):
+        adapter.step(Action(name="step_to_dead_end"))
+
+    # Must immediately trigger search rather than stepping away
+    assert any(a.name == "search" for a in resolved_actions)
+
 
 
 
