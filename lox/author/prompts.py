@@ -94,6 +94,23 @@ class Agent:
         obs = (yield step_to_dead_end())
         return obs
 
+    ### Autonomous Skill Discovery & Invention Protocol:
+    You are NOT restricted to pre-existing skills. You are **strongly encouraged to invent and define new modular skill subroutines** whenever you diagnose a distinct failure mode or tactical opportunity from empirical telemetry:
+    - Examples: `skill_handle_nutrition`, `skill_tactical_retreat`, `skill_ranged_combat`, `skill_panic_escape`, `skill_flee_hazard`, `skill_manage_inventory`, etc.
+    - When introducing a new skill:
+      1. Define the new generator subroutine:
+         ```python
+         def skill_handle_nutrition(self, obs):
+             if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
+                 obs = (yield eat_carried_food())
+                 return obs
+             obs = (yield wait())
+             return obs
+         ```
+      2. Update `determine_goal` to return the new goal string when its preconditions are met.
+      3. Update `run` to dispatch to the new skill via `obs = (yield from self.skill_handle_nutrition(obs))`.
+    - The engine's AST splicer automatically appends any brand-new methods to `class Agent` and replaces modified methods in-place.
+
     def phase_early_scaling(self, obs):
         # Phase 1: Depths 3-5.
         # Priority: Character power-spiking. Forge Excalibur, upgrade starting armor to mithril/iron,
@@ -591,9 +608,9 @@ Every turn, `obs` provides rich sub-namespaces:
 No imports, no filesystem calls, no arbitrary exec/eval. All logic must reside within `class Agent`.
 
 ### Output Requirement (Targeted Method Splicing Required):
-Provide 1 brief rationale sentence, then your modified method(s) in a single ```python ... ``` block.
-Output ONLY the specific method(s) you are updating or adding (e.g. `def determine_goal(self, obs) -> str: ...`, `def skill_combat(self, obs): ...`, `def skill_scavenge_armor(self, obs): ...`, `def skill_forge_excalibur(self, obs): ...`, `def skill_explore_and_dive(self, obs): ...`, or `def run(self, obs): ...`).
-Do NOT output unchanged methods or the full `class Agent` wrapper. The engine automatically splices your updated method into `class Agent` via AST, preserving all other verified subroutines intact and eliminating indentation errors.
+Provide 1 brief rationale sentence, then your modified and/or newly invented method(s) in a single ```python ... ``` block.
+You may output one or multiple methods at once (e.g. adding a new `def skill_handle_nutrition(self, obs): ...` alongside updated `def determine_goal(self, obs) -> str: ...` and `def run(self, obs): ...`).
+The engine automatically splices your updated and brand-new methods into `class Agent` via AST, preserving all other verified subroutines intact and eliminating indentation errors.
 """
 
 
@@ -641,21 +658,21 @@ Call `get_death_autopsy_trace()` to inspect the exact final 15 ticks, `query_inv
 1. Formulate a structured scientific hypothesis in a ```yaml ... ``` block:
 ```yaml
 hypothesis:
-  causal_finding: "<specific root cause from causal timeline dossier, e.g. EQUIPMENT_NEGLECT with 80% naked body armor on DL 2-4>"
-  targeted_skill: "<e.g. skill_scavenge_armor, skill_combat, determine_goal, skill_forge_excalibur, etc.>"
+  causal_finding: "<specific root cause from causal timeline dossier, e.g. NUTRITION_BLINDNESS with 85% starvation deaths>"
+  targeted_skill: "<e.g. skill_handle_nutrition, skill_scavenge_armor, skill_combat, determine_goal, or a brand-new skill name>"
   mechanism: "<concrete behavioral/algorithmic change>"
   predicted_outcome:
     target_metric: "<e.g. avg_depth, ac_at_death>"
     expected_direction: "increase" | "decrease"
     min_improvement: 1.0
 ```
-2. Synthesize your revised method(s) in a single ```python ... ``` block. Output ONLY the specific modified method(s) starting at column 0 with standard 4-space body indentation:
+2. Synthesize your revised and/or newly invented method(s) in a single ```python ... ``` block. You are strongly encouraged to create new skills whenever a new problem or opportunity arises. Output ONLY the specific modified or new method(s) starting at column 0 with standard 4-space body indentation:
 ```python
 def determine_goal(self, obs) -> str:
     # 4 spaces indentation
     ...
 
-def skill_scavenge_armor(self, obs):
+def skill_handle_nutrition(self, obs):
     # 4 spaces indentation
     ...
 ```
