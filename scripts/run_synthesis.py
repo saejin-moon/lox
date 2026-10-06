@@ -535,17 +535,19 @@ def run_synthesis_loop(
     task: str = "MiniHack-ExploreMaze-Easy-Mapped-v0",
     max_generations: int = 500,
     eval_episodes: int = 20,
-    max_turns: int = 10000,
+    max_turns: int = 25000,
     policy_path: str = "data/latest_policy.py",
     fresh: bool = False,
     stall_threshold: int = 80,
     cluster_threshold: int = 2,
     db_path: str = "data/lox.duckdb",
-    target_depth: float | None = None,
+    target_depth: float | None = 20.0,
     workers: int = 10,
     starter_policy: str = "data/modular_starter_policy.py",
     twin_test: bool = True,
     seed_base: int = 42,
+    min_paired_delta: float = 0.25,
+    min_improved_seeds: int = 2,
 ):
     print("=" * 65)
     print("LOX Embodied Batched Empirical Policy Synthesis Engine")
@@ -559,6 +561,7 @@ def run_synthesis_loop(
     )
     print(f"Parallelism: {workers} workers ({min(workers, eval_episodes)} concurrent)")
     print(f"Validation:  Counterfactual Twin Replay = {twin_test} (base_seed={seed_base})")
+    print(f"Criteria:    min_delta >= +{min_paired_delta:.2f} | min_improved >= {min_improved_seeds} seeds")
     if target_depth is not None:
         print(f"Target:      Avg Depth >= {target_depth:.1f}")
     print(f"Policy Path: {policy_path} (fresh={fresh})")
@@ -672,10 +675,13 @@ class Agent:
         with open(policy_path, "w") as f:
             f.write(current_policy.strip() + "\n")
         print("\n[Initialized Seed Policy]:")
-    print(current_policy.strip())
+    print(f"[Loaded Policy]: {len(current_policy.splitlines())} lines from {policy_path}")
 
     compile_policy(current_policy)
 
+    baseline_policy = current_policy
+    candidate_policy: str | None = None
+    last_falsification_feedback: str = ""
     last_recorded_hypothesis: dict[str, Any] | None = None
     last_baseline_depth: float | None = None
     last_batch_seeds: list[int] = []
@@ -696,11 +702,19 @@ class Agent:
             run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=100
         )
 
+        # Active policy selection
+        if candidate_policy is not None:
+            active_policy_code = candidate_policy
+            is_candidate_eval = True
+        else:
+            active_policy_code = baseline_policy
+            is_candidate_eval = False
+
         # Seed assignment: Counterfactual Twin Replay or Fresh Batch
         if (
             twin_test
             and last_batch_seeds
-            and last_recorded_hypothesis is not None
+            and is_candidate_eval
         ):
             current_seeds = list(last_batch_seeds)
             is_twin_eval = True
@@ -718,7 +732,7 @@ class Agent:
                 "ep_idx": ep_idx,
                 "seed": current_seeds[ep_idx],
                 "gen_dir_id": gen_dir_id,
-                "policy_code": current_policy,
+                "policy_code": active_policy_code,
                 "env_type": env_type,
                 "role": role,
                 "task": task,
@@ -888,8 +902,8 @@ class Agent:
             f"\n[Gen {gen} Failure Diagnostics (saved to data/latest_diagnostics.yaml)]:\n{batch_summary.format_yaml()}\n"
         )
 
-        # Scientific Method: Evaluate previous generation's hypothesis if one was recorded
-        if last_recorded_hypothesis is not None and last_baseline_depth is not None:
+        # Scientific Method: Evaluate candidate hypothesis if this was a candidate evaluation
+        if is_candidate_eval and last_recorded_hypothesis is not None and last_baseline_depth is not None:
             pred = last_recorded_hypothesis.get("predicted_outcome", {})
             direction = (
                 pred.get("expected_direction", "increase")
@@ -897,7 +911,6 @@ class Agent:
                 else "increase"
             )
 
-            # Check if this was a paired counterfactual twin run
             paired_delta: float | None = None
             seeds_improved = 0
             seeds_regressed = 0
@@ -948,19 +961,39 @@ class Agent:
                         )
                         resolution_rate = float(resolved / len(failed_seeds))
 
+            falsification_reasons = []
             if paired_delta is not None:
-                if direction == "increase":
-                    validated = bool(paired_delta > 0 and (seeds_improved >= seeds_regressed))
-                else:
-                    validated = bool(paired_delta < 0)
+                # Criteria 1: Statistically meaningful minimum paired delta
+                if paired_delta < min_paired_delta:
+                    falsification_reasons.append(
+                        f"Paired delta {paired_delta:+.2f} below required minimum improvement (+{min_paired_delta:.2f})"
+                    )
+
+                # Criteria 2: Minimum number of improved seeds (reject 1-seed fluke with 19 ties!)
+                if seeds_improved < min_improved_seeds:
+                    falsification_reasons.append(
+                        f"Only {seeds_improved} seed(s) improved (minimum {min_improved_seeds} required, {seeds_unchanged} tied)"
+                    )
+
+                # Criteria 3: Strictly more improved than regressed
+                if seeds_improved <= seeds_regressed:
+                    falsification_reasons.append(
+                        f"Regressions ({seeds_regressed}) >= improvements ({seeds_improved})"
+                    )
+
+                # Criteria 4: Root cause resolution if incident seeds exist
+                if failed_seed_count >= 3 and resolution_rate is not None and resolution_rate == 0.0:
+                    falsification_reasons.append(
+                        f"0.0% of {failed_seed_count} '{last_batch_primary_cause}' incident seeds were resolved"
+                    )
+
+                validated = (len(falsification_reasons) == 0)
                 eval_metric_str = f"Paired Delta: {paired_delta:+.2f} (±{ci_95:.2f} 95% CI) | Improved: {seeds_improved}, Regressed: {seeds_regressed}, Tied: {seeds_unchanged}"
             else:
                 delta = avg_d - last_baseline_depth
-                validated = (
-                    bool(avg_d > last_baseline_depth)
-                    if direction == "increase"
-                    else bool(avg_d < last_baseline_depth)
-                )
+                validated = bool(delta >= min_paired_delta)
+                if not validated:
+                    falsification_reasons.append(f"Batch delta {delta:+.2f} below minimum {min_paired_delta:.2f}")
                 eval_metric_str = f"Batch Avg Delta: {avg_d - last_baseline_depth:+.2f}"
 
             print("\n[Scientific Method: Hypothesis Validation]")
@@ -980,10 +1013,64 @@ class Agent:
                 print(
                     f"  '{last_batch_primary_cause}' Resolution Rate: {resolution_rate * 100.0:.1f}% ({failed_seed_count} incident seeds)"
                 )
-            print(
-                f"  Outcome: {'VALIDATED' if validated else 'FALSIFIED'} (Predicted: {pred})"
-            )
 
+            if validated:
+                print(f"  Outcome: VALIDATED (Predicted: {pred})")
+                print(f"[Promotion] Candidate Policy VALIDATED! Promoting as new baseline checkpoint.")
+                baseline_policy = candidate_policy
+                current_policy = candidate_policy
+                with open(policy_path, "w") as f:
+                    f.write(baseline_policy.strip() + "\n")
+                ckpt_path = f"data/policies/gen_{gen:04d}_validated.py"
+                with open(ckpt_path, "w") as f:
+                    f.write(baseline_policy.strip() + "\n")
+                print(f"[Checkpoint Promoted] -> {policy_path} & {ckpt_path}")
+                last_falsification_feedback = ""
+
+                # Update baseline reference for next iteration
+                last_batch_seeds = list(current_seeds)
+                last_batch_results_by_seed = dict(current_results_by_seed)
+                last_batch_primary_cause = top_arch
+                last_baseline_depth = float(avg_d)
+
+                # Log to DuckDB evolved_policies table
+                for attempt in range(3):
+                    try:
+                        con = duckdb.connect(db_path)
+                        con.execute(
+                            "INSERT INTO evolved_policies VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            [
+                                gen,
+                                run_id,
+                                float(avg_d),
+                                int(max_d),
+                                float(avg_t),
+                                baseline_policy.strip(),
+                                datetime.datetime.now(),
+                            ],
+                        )
+                        con.close()
+                        break
+                    except Exception as e:
+                        time.sleep(0.5)
+            else:
+                print(f"  Outcome: FALSIFIED (Predicted: {pred})")
+                print(f"[Rollback] Discarding candidate policy. Retaining validated baseline (Depth {last_baseline_depth:.2f}).")
+                for r_msg in falsification_reasons:
+                    print(f"    - {r_msg}")
+                current_policy = baseline_policy
+                with open(policy_path, "w") as f:
+                    f.write(baseline_policy.strip() + "\n")
+                last_falsification_feedback = (
+                    f"PREVIOUS HYPOTHESIS FALSIFIED (Gen {gen - 1} candidate):\n"
+                    f"Targeted Skill: {last_recorded_hypothesis.get('targeted_skill', 'N/A')}\n"
+                    f"Causal Finding: {last_recorded_hypothesis.get('causal_finding', 'N/A')}\n"
+                    f"Falsification Drivers:\n"
+                    + "\n".join(f"- {r}" for r in falsification_reasons)
+                    + "\nDo NOT repeat this failed change. Formulate a fundamentally different hypothesis and mechanism."
+                )
+
+            # Update meta_experiments in DuckDB
             try:
                 con = duckdb.connect(db_path)
                 con.execute(
@@ -1016,7 +1103,15 @@ class Agent:
             except Exception as e:
                 print(f"[Warning] Failed to update meta_experiments validation: {e}")
 
+            candidate_policy = None
             last_recorded_hypothesis = None
+        else:
+            # Baseline or fresh generation
+            last_batch_seeds = list(current_seeds)
+            last_batch_results_by_seed = dict(current_results_by_seed)
+            last_batch_primary_cause = top_arch
+            last_baseline_depth = float(avg_d)
+            baseline_policy = current_policy
 
         if target_depth is not None and avg_d >= target_depth:
             print("\n" + "=" * 65)
@@ -1061,17 +1156,14 @@ class Agent:
             f.write(full_report_yaml)
 
         status_rep = f"```yaml\n{full_report_yaml.strip()}\n```"
-
-        # Record this batch's seeds, results, and primary failure archetype for the next generation's counterfactual validation
-        last_batch_seeds = list(current_seeds)
-        last_batch_results_by_seed = dict(current_results_by_seed)
-        last_batch_primary_cause = top_arch
+        if last_falsification_feedback:
+            status_rep = f"### Scientific Method Feedback:\n{last_falsification_feedback}\n\n" + status_rep
 
         print(
             "\n[Author Agent] Initiating empirical synthesis session (querying DuckDB & evaluating)..."
         )
         new_code, tree, error = author.synthesize_policy(
-            current_policy=current_policy,
+            current_policy=baseline_policy,
             trigger_reason=trigger_reason,
             status_report=status_rep,
             run_id=run_id,
@@ -1080,51 +1172,15 @@ class Agent:
 
         if error:
             print(f"[Validation Failed] {error}")
-            print(f"[Rejected Candidate Code]:\n{new_code.strip()}\n")
+            candidate_policy = None
         else:
-            print(f"[Policy Verified & Compiled! Generation {gen} accepted]")
-            current_policy = new_code
-            print("\nEvolved Policy Program:")
-            print(new_code.strip())
-
-            # Persist latest policy and archive checkpoint
-            with open(policy_path, "w") as f:
-                f.write(new_code.strip() + "\n")
-            ckpt_path = f"data/policies/gen_{gen:04d}.py"
-            with open(ckpt_path, "w") as f:
-                f.write(new_code.strip() + "\n")
-            print(f"[Checkpoint Saved] -> {policy_path} & {ckpt_path}")
-
-            # Log to DuckDB evolved_policies table with retry shield
-            for attempt in range(3):
-                try:
-                    con = duckdb.connect(db_path)
-                    con.execute(
-                        "INSERT INTO evolved_policies VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        [
-                            gen,
-                            run_id,
-                            float(avg_d),
-                            int(max_d),
-                            float(avg_t),
-                            new_code.strip(),
-                            datetime.datetime.now(),
-                        ],
-                    )
-                    con.close()
-                    break
-                except Exception as e:
-                    if attempt == 2:
-                        print(
-                            f"[Warning] Could not record evolved policy in DuckDB: {e}"
-                        )
-                    time.sleep(0.5)
+            print(f"[Candidate Synthesized for Gen {gen + 1} Twin Evaluation: {len(new_code.splitlines())} lines]")
+            candidate_policy = new_code
 
             # Log hypothesis to DuckDB meta_experiments table
             hypothesis = getattr(author, "last_hypothesis", None)
             if hypothesis:
                 last_recorded_hypothesis = hypothesis
-                last_baseline_depth = float(avg_d)
                 for attempt in range(3):
                     try:
                         con = duckdb.connect(db_path)
@@ -1145,7 +1201,7 @@ class Agent:
                                 yaml.dump(hypothesis),
                                 str(hypothesis.get("causal_finding", "")),
                                 str(hypothesis.get("predicted_outcome", "")),
-                                float(avg_d),
+                                float(last_baseline_depth or avg_d),
                                 None,
                                 None,
                                 new_code.strip(),
@@ -1209,7 +1265,7 @@ if __name__ == "__main__":
         help="Real evaluation episodes per generation batch (default: 20)",
     )
     parser.add_argument(
-        "--max-turns", type=int, default=10000, help="Max turns per episode"
+        "--max-turns", type=int, default=25000, help="Max turns per episode (default: 25000)"
     )
     parser.add_argument(
         "--policy-path",
@@ -1237,8 +1293,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--target-depth",
         type=float,
-        default=None,
-        help="Target average depth to reach before stopping",
+        default=20.0,
+        help="Target average depth to reach before stopping (default: 20.0)",
     )
     parser.add_argument(
         "--workers",
@@ -1263,6 +1319,18 @@ if __name__ == "__main__":
         default=42,
         help="Deterministic base seed for episode evaluations",
     )
+    parser.add_argument(
+        "--min-delta",
+        type=float,
+        default=0.25,
+        help="Minimum paired depth delta required to validate hypothesis (default: 0.25)",
+    )
+    parser.add_argument(
+        "--min-improved",
+        type=int,
+        default=2,
+        help="Minimum number of seeds improved to validate hypothesis (default: 2)",
+    )
     args = parser.parse_args()
 
     run_synthesis_loop(
@@ -1285,4 +1353,6 @@ if __name__ == "__main__":
         starter_policy=args.starter_policy,
         twin_test=args.twin_test,
         seed_base=args.seed_base,
+        min_paired_delta=args.min_delta,
+        min_improved_seeds=args.min_improved,
     )

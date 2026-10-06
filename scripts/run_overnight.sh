@@ -6,7 +6,10 @@ SESSION_NAME="lox-synthesis"
 LOG_FILE="synthesis.log"
 
 echo "=== LOX Overnight Policy Synthesis ==="
-echo "Resuming from active policy: data/latest_policy.py"
+echo "Clearing previous synthesis log: $LOG_FILE"
+> "$LOG_FILE"
+
+echo "Starting fresh campaign with modular baseline: data/modular_starter_policy.py"
 echo "Logging output to: $LOG_FILE"
 
 # Start detached tmux session
@@ -23,11 +26,14 @@ tmux new-session -d -s "$SESSION_NAME" \
      --model google/gemma-4-31b-it \
      --eval-episodes 20 \
      --max-turns 25000 \
-     --target-depth 50.0 \
+     --target-depth 20.0 \
+     --min-delta 0.25 \
+     --min-improved 2 \
+     --fresh \
      --policy-path data/latest_policy.py \
      --starter-policy data/modular_starter_policy.py \
      --twin-test \
-     --workers 10 2>&1 | tee -a $LOG_FILE"
+     --workers 10 2>&1 | tee $LOG_FILE"
 
 echo "Synthesis successfully running detached in tmux!"
 echo "------------------------------------------------"
