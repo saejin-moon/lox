@@ -78,29 +78,90 @@ class AuthorAgent:
             return base_code
 
         import textwrap
-        dedented_patch = textwrap.dedent(patch_code)
-        try:
-            patch_ast = ast.parse(dedented_patch)
-        except SyntaxError:
+        from lox.dsl.parser import repair_python_indentation
+
+        patch_code = patch_code.replace("\t", "    ")
+        repaired_patch = repair_python_indentation(patch_code)
+
+        # Multi-candidate AST parsing
+        patch_ast = None
+        for candidate in (
+            repaired_patch,
+            textwrap.dedent(repaired_patch),
+            patch_code,
+            textwrap.dedent(patch_code),
+        ):
             try:
-                patch_ast = ast.parse(patch_code)
+                patch_ast = ast.parse(candidate)
+                break
             except SyntaxError:
-                return patch_code
+                continue
 
         # Extract replacement methods from patch_ast
         replacements: dict[str, ast.FunctionDef] = {}
         patch_has_class = False
-        for node in patch_ast.body:
-            if isinstance(node, ast.FunctionDef):
-                replacements[node.name] = node
-            elif isinstance(node, ast.ClassDef):
-                patch_has_class = True
-                for item in node.body:
-                    if isinstance(item, ast.FunctionDef):
-                        replacements[item.name] = item
+        if patch_ast is not None:
+            for node in patch_ast.body:
+                if isinstance(node, ast.FunctionDef):
+                    replacements[node.name] = node
+                elif isinstance(node, ast.ClassDef):
+                    patch_has_class = True
+                    for item in node.body:
+                        if isinstance(item, ast.FunctionDef):
+                            replacements[item.name] = item
+
+        # Robust Fallback: Method Chunk Extraction
+        # If whole-block parsing failed or missed methods due to whitespace anomalies, extract each def chunk in isolation
+        if not replacements:
+            lines = repaired_patch.splitlines()
+            chunks = []
+            curr = []
+            def_pat = re.compile(r"^\s*def\s+\w+\s*\(")
+            for line in lines:
+                if def_pat.match(line):
+                    if curr:
+                        chunks.append("\n".join(curr))
+                        curr = []
+                curr.append(line)
+            if curr:
+                chunks.append("\n".join(curr))
+
+            for chunk in chunks:
+                norm = textwrap.dedent(chunk)
+                c_lines = norm.splitlines()
+                if c_lines and c_lines[0].startswith("def "):
+                    body_indents = [
+                        len(l) - len(l.lstrip(" "))
+                        for l in c_lines[1:]
+                        if l.strip()
+                    ]
+                    if body_indents and min(body_indents) > 4:
+                        excess = min(body_indents) - 4
+                        norm = "\n".join(
+                            [c_lines[0]]
+                            + [
+                                (
+                                    l[excess:]
+                                    if l.startswith(" " * excess)
+                                    else l.lstrip()
+                                )
+                                if l.strip()
+                                else ""
+                                for l in c_lines[1:]
+                            ]
+                        )
+                for c_cand in (norm, textwrap.dedent(norm), chunk):
+                    try:
+                        c_ast = ast.parse(c_cand)
+                        for node in c_ast.body:
+                            if isinstance(node, ast.FunctionDef):
+                                replacements[node.name] = node
+                        break
+                    except SyntaxError:
+                        continue
 
         if not replacements:
-            return patch_code
+            return repaired_patch
 
         try:
             base_ast = ast.parse(base_code)
@@ -589,16 +650,22 @@ class Agent:
         if not response_text:
             return ""
 
+        def _clean(c: str) -> str:
+            if not c:
+                return ""
+            c = c.replace("\t", "    ")
+            return "\n".join(l.rstrip() for l in c.splitlines()).strip()
+
         # 1. Search all code blocks, prioritizing class definitions or generator/plan structures
         blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", response_text, re.DOTALL)
         for block in reversed(blocks):
             if "class " in block and ("run" in block or "def " in block):
-                return block.strip()
+                return _clean(block)
             if "def " in block and ("yield" in block or "plan" in block):
-                return block.strip()
+                return _clean(block)
         for block in blocks:
             if "class " in block or "def " in block:
-                return block.strip()
+                return _clean(block)
 
         # 2. Unclosed python code block containing policy code
         match_unclosed = re.search(
@@ -607,16 +674,18 @@ class Agent:
         if match_unclosed:
             code = match_unclosed.group(1).strip()
             if "class " in code or "def " in code:
-                return re.sub(r"```+$", "", code).strip()
+                return _clean(re.sub(r"```+$", "", code))
 
         # 3. No backticks: find from first 'class ' or 'def '
         match_class = re.search(r"(class \w+.*)", response_text, re.DOTALL)
         if match_class:
-            return match_class.group(1).strip()
+            return _clean(match_class.group(1))
 
         match_def = re.search(r"(def \w+\(.*)", response_text, re.DOTALL)
         if match_def:
-            return match_def.group(1).strip()
+            return _clean(match_def.group(1))
+
+        return ""
 
     def extract_hypothesis(self, response_text: str) -> dict[str, Any] | None:
         """Extracts structured scientific hypothesis from response text."""

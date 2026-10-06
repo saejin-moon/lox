@@ -649,5 +649,14 @@ hypothesis:
     expected_direction: "increase" | "decrease"
     min_improvement: 1.0
 ```
-2. Synthesize your revised method(s) in a single ```python ... ``` block. Output ONLY the specific modified method(s) (e.g. `def skill_scavenge_armor(self, obs): ...` or `def determine_goal(self, obs): ...`).
+2. Synthesize your revised method(s) in a single ```python ... ``` block. Output ONLY the specific modified method(s) starting at column 0 with standard 4-space body indentation:
+```python
+def determine_goal(self, obs) -> str:
+    # 4 spaces indentation
+    ...
+
+def skill_scavenge_armor(self, obs):
+    # 4 spaces indentation
+    ...
+```
 """

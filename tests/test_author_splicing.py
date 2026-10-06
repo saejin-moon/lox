@@ -145,3 +145,67 @@ def test_splice_phase_subroutine_into_latest_policy():
     assert "phase_early_scaling" in method_names
     assert "skill_combat" in method_names
 
+
+def test_splice_whitespace_mismatched_outer_indentation():
+    """Verify that patches with mismatched outer indentation levels (e.g. def at 0, next def at 4, bodies at 8) splice cleanly."""
+    from lox.dsl.compiler import compile_policy
+
+    # Exact pattern that previously failed in Gen 2 / Gen 3 synthesis log
+    malformed_patch = """def determine_goal(self, obs) -> str:
+        if obs.hero.dungeon_branch == 'mines':
+            return 'escape_mines'
+        return 'explore_and_dive'
+
+    def skill_explore_and_dive(self, obs):
+        if obs.spatial.stairs_down_known:
+            obs = yield step_to_stairs_down()
+            return obs
+        obs = yield step_to_frontier()
+        return obs
+"""
+    spliced = AuthorAgent.splice_policy_methods(BASE_POLICY, malformed_patch)
+    assert "class Agent:" in spliced
+    assert "def determine_goal(self, obs)" in spliced
+    assert "def skill_explore_and_dive(self, obs)" in spliced
+
+    # Must compile cleanly via compiler
+    compiled = compile_policy(spliced)
+    assert compiled is not None
+
+
+def test_splice_tabs_and_excessive_indentation():
+    """Verify that patches with mixed tabs and excessive indents are normalized and spliced cleanly."""
+    from lox.dsl.compiler import compile_policy
+
+    tabbed_patch = "def skill_scavenge_armor(self, obs):\n\tif obs.inventory.has_unworn_armor:\n\t\tobs = yield wear_armor()\n\t\treturn obs\n\tobs = yield step_to_frontier()\n\treturn obs\n"
+    spliced = AuthorAgent.splice_policy_methods(BASE_POLICY, tabbed_patch)
+    assert "class Agent:" in spliced
+    assert "def skill_scavenge_armor(self, obs):" in spliced
+
+    compiled = compile_policy(spliced)
+    assert compiled is not None
+
+
+def test_repair_python_indentation_utility():
+    """Verify that repair_python_indentation repairs unaligned unindents and preserves docstrings."""
+    from lox.dsl.parser import repair_python_indentation
+
+    code = """def determine_goal(self, obs) -> str:
+        \"\"\"
+        Multiline docstring.
+          Inner indent.
+        \"\"\"
+        if obs.hero.dungeon_branch == 'mines':
+            return 'escape_mines'
+        return 'explore_and_dive'
+
+    def skill_combat(self, obs):
+        obs = yield wait()
+        return obs
+"""
+    repaired = repair_python_indentation(code)
+    parsed = ast.parse(repaired)
+    func_names = [n.name for n in parsed.body if isinstance(n, ast.FunctionDef)]
+    assert func_names == ["determine_goal", "skill_combat"]
+
+

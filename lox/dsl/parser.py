@@ -367,6 +367,106 @@ def normalize_code(code_str: str) -> str:
     return "\n".join(normalized)
 
 
+def repair_python_indentation(code_str: str) -> str:
+    """
+    Repairs Python indentation anomalies:
+    - Normalizes tabs to 4 spaces and strips trailing whitespace.
+    - Preserves multiline string and docstring contents.
+    - Re-aligns top-level function definitions if methods have mismatched outer indentations.
+    - Snaps unaligned unindents to the nearest valid level on the Python indentation stack,
+      completely preventing 'unindent does not match any outer indentation level'.
+    """
+    if not code_str:
+        return code_str
+
+    code = code_str.replace("\t", "    ")
+    lines = code.splitlines()
+    if not lines:
+        return code
+
+    # Step 1: Detect if this is a collection of methods without class Agent
+    has_class = any(line.strip().startswith("class ") for line in lines)
+    if not has_class:
+        def_indents = []
+        for line in lines:
+            if line.lstrip().startswith("def "):
+                def_indents.append(len(line) - len(line.lstrip()))
+        if len(def_indents) > 1 and len(set(def_indents)) > 1:
+            new_lines = []
+            current_def_orig_indent = 0
+            for line in lines:
+                if line.lstrip().startswith("def "):
+                    current_def_orig_indent = len(line) - len(line.lstrip())
+                    new_lines.append(line.lstrip())
+                else:
+                    if line.strip():
+                        if line.startswith(" " * current_def_orig_indent):
+                            new_lines.append(line[current_def_orig_indent:])
+                        else:
+                            new_lines.append(line.lstrip())
+                    else:
+                        new_lines.append("")
+            code = "\n".join(new_lines)
+            lines = code.splitlines()
+
+    # Step 2: Indentation stack tracking with unaligned unindent snapping
+    repaired_lines = []
+    indent_stack = [0]
+    prev_ended_colon = False
+    in_triple_quotes = False
+    triple_quote_char = ""
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Handle multiline string / docstring state
+        if in_triple_quotes:
+            repaired_lines.append(line)
+            t_count = line.count(triple_quote_char)
+            if t_count % 2 == 1:
+                in_triple_quotes = False
+            continue
+
+        if '"""' in stripped and stripped.count('"""') % 2 == 1:
+            in_triple_quotes = True
+            triple_quote_char = '"""'
+        elif "'''" in stripped and stripped.count("'''") % 2 == 1:
+            in_triple_quotes = True
+            triple_quote_char = "'''"
+
+        if not stripped or stripped.startswith("#"):
+            repaired_lines.append(line)
+            continue
+
+        raw_indent = len(line) - len(line.lstrip())
+
+        if raw_indent > indent_stack[-1]:
+            if prev_ended_colon:
+                indent_stack.append(raw_indent)
+                repaired_lines.append(line)
+            else:
+                repaired_lines.append(" " * indent_stack[-1] + stripped)
+        elif raw_indent == indent_stack[-1]:
+            repaired_lines.append(line)
+        else:
+            # Unindent: must match some level in indent_stack
+            if raw_indent in indent_stack:
+                while indent_stack and indent_stack[-1] > raw_indent:
+                    indent_stack.pop()
+                repaired_lines.append(line)
+            else:
+                # Snap to closest level in indent_stack that is <= raw_indent
+                valid_levels = [lvl for lvl in indent_stack if lvl <= raw_indent]
+                snapped_indent = valid_levels[-1] if valid_levels else 0
+                while indent_stack and indent_stack[-1] > snapped_indent:
+                    indent_stack.pop()
+                repaired_lines.append(" " * snapped_indent + stripped)
+
+        prev_ended_colon = stripped.endswith(":")
+
+    return "\n".join(repaired_lines)
+
+
 def _parse_with_expanded_stack(code: str) -> ast.Module:
     """Parses code, falling back to a dedicated 64MB stack thread if C stack margin is exceeded."""
     try:
@@ -407,10 +507,20 @@ def parse_and_validate(
         tree = _parse_with_expanded_stack(clean_code)
     except SyntaxError as e:
         import textwrap
+
         try:
             tree = _parse_with_expanded_stack(textwrap.dedent(clean_code))
         except SyntaxError:
-            raise DSLValidationError(f"Syntax error in policy program: {e}") from e
+            try:
+                repaired = repair_python_indentation(clean_code)
+                tree = _parse_with_expanded_stack(repaired)
+            except SyntaxError:
+                try:
+                    tree = _parse_with_expanded_stack(textwrap.dedent(repaired))
+                except SyntaxError:
+                    raise DSLValidationError(
+                        f"Syntax error in policy program: {e}"
+                    ) from e
     except MemoryError as e:
         raise DSLValidationError(f"Parser stack overflowed: {e}") from e
 
