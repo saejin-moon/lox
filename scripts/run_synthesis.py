@@ -541,7 +541,7 @@ def run_synthesis_loop(
     stall_threshold: int = 80,
     cluster_threshold: int = 2,
     db_path: str = "data/lox.duckdb",
-    target_depth: float | None = 20.0,
+    target_depth: float | None = 50.0,
     workers: int = 10,
     starter_policy: str = "data/modular_starter_policy.py",
     twin_test: bool = True,
@@ -1309,8 +1309,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--target-depth",
         type=float,
-        default=20.0,
-        help="Target average depth to reach before stopping (default: 20.0)",
+        default=50.0,
+        help="Target average depth to reach before stopping (default: 50.0)",
     )
     parser.add_argument(
         "--workers",

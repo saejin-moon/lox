@@ -26,7 +26,7 @@ tmux new-session -d -s "$SESSION_NAME" \
      --model google/gemma-4-31b-it \
      --eval-episodes 20 \
      --max-turns 25000 \
-     --target-depth 20.0 \
+     --target-depth 50.0 \
      --min-delta 0.25 \
      --min-improved 2 \
      --fresh \
