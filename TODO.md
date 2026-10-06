@@ -1292,5 +1292,47 @@ To ensure LLM synthesis sessions (targeting `google/gemma-4-31b-it`) generate po
    - Added unit test `test_step_to_dead_end_immediate_search_when_unexhausted` in `tests/test_nethack_tactics.py`.
    - All 131 unit tests pass (`uv run pytest`).
 
+---
+
+## 31. Campaign 80 Empirical Autopsy & Circuit Breaker Hardening
+
+### 31.1 Campaign 80 Empirical Results (200 Episodes, 10 Generations)
+- **Run ID**: `synth_openrouter_20261005_210512`
+- **Milestones Reached**:
+  - **Generation 2 Hit 5.60 Average Depth**, max depth **DL 10**!
+  - **Deep Penetration**: Peak depth hit **DL 11** across Gen 1, Gen 5, and Gen 6.
+  - **Starvation Rate Slashed**: Down to **16.5%** overall across all episodes.
+  - **Episodes $\ge 15,000$ Turns Reduced**: Dropped from 14 in C79 down to **9**.
+  - **Generation Progression**:
+    * Gen 1: Avg Depth 4.45 | Max Depth 11 | Avg Turns 3,322.0 | Score 779.6
+    * Gen 2: Avg Depth **5.60** | Max Depth 10 | Avg Turns 4,500.2 | Score 1,029.0
+    * Gen 3: Avg Depth 4.05 | Max Depth 9  | Avg Turns 3,212.0 | Score 707.0
+    * Gen 4: Avg Depth 4.45 | Max Depth 8  | Avg Turns 3,123.6 | Score 687.2
+    * Gen 5: Avg Depth 4.50 | Max Depth 11 | Avg Turns 3,456.8 | Score 891.4
+    * Gen 6: Avg Depth 4.95 | Max Depth 11 | Avg Turns 4,112.5 | Score 988.2
+    * Gen 7: Avg Depth 4.20 | Max Depth 9  | Avg Turns 3,554.1 | Score 742.0
+    * Gen 8: Avg Depth 4.10 | Max Depth 9  | Avg Turns 4,890.3 | Score 715.4
+    * Gen 9: Avg Depth 4.25 | Max Depth 8  | Avg Turns 3,678.9 | Score 760.1
+    * Gen 10: Avg Depth 4.30 | Max Depth 8  | Avg Turns 3,190.4 | Score 734.5
+
+### 31.2 Autopsy Discoveries: Two Residual Timeout Mechanisms
+1. **Unreachable Corpse `step_to` Infinite Stall (`g008_e017`: 23,089 `step_to` actions at `(6, 8)`)**:
+   - *Cause*: A small mimic disguised as a door died, causing `(6, 7)` to be marked `non_door_tiles`. An unreachable corpse at `(7, 3)` remained in `self.floor_corpses` and `obs.corpses`. High-level policy continuously called `step_to(7, 3)`. In `step_to`, pathfinding failed to find a path, returning `search` in place for 23,000 turns without clearing the target.
+   - *Fix in `lox/envs/nethack.py`*:
+     - When `SpatialEngine.find_path` returns empty in `step_to`, the target is popped from `self.floor_corpses` and added to `self.unreachable_targets`.
+     - `_extract_obs` filters out all coordinates in `self.unreachable_targets` from `obs.corpses`.
+     - `step_to` falls back to `step_to_frontier` or `step_to_dead_end` instead of calling `search` in place.
+     - `self.unreachable_targets` is cleared on depth transitions and resets.
+2. **Passive Hazard Ping-Pong Oscillation (`g002_e007`: 23,696 `step_away_from_hostile` at gas spore, `g009_e005`: 21,907 at floating eye)**:
+   - *Cause*: In `step_away_from_hostile`, when adjacent to an immobile passive hazard with no ranged weapons, `walkable_nav` buffers all tiles around the hazard to False, making `best_tile` None. After waiting twice (`consecutive_passive_waits >= 2`), Step 1 (`Try any walkable adjacent tile`) selected `(14, 69)`—the exact tile the hero just came from (`last_move_from`). At `(14, 69)`, distance check `d > curr_dist` immediately selected `(14, 70)`, ping-ponging indefinitely.
+   - *Fix in `lox/envs/nethack.py`*:
+     - Step 1 requires `(ny, nx) != getattr(self, "last_move_from", (-1, -1))`.
+     - If no alternative exit exists, Step 1 fails, allowing the deadlock circuit breaker to proceed to Step 2 (ranged destruction), Step 3 (search for secret exit up to 15 times), and Step 4 (emergency melee strike).
+
+### 31.3 Test Verification & Knowledge Invariants
+- Added unit tests `test_step_to_unreachable_target_pruning_and_fallback` and `test_step_away_from_hostile_passive_avoids_last_move_from` in `tests/test_nethack_tactics.py`.
+- All 133 unit tests pass with zero regressions (`uv run pytest`).
+
+
 
 

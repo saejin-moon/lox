@@ -1113,6 +1113,140 @@ def test_step_to_dead_end_immediate_search_when_unexhausted():
     assert any(a.name == "search" for a in resolved_actions)
 
 
+def test_step_to_unreachable_target_pruning_and_fallback():
+    import numpy as np
+    from lox.core.types import Observation, HeroState, SpatialView, DungeonView, Action, FloorCorpse
+    from lox.envs.nethack import NetHackAdapter
+
+    adapter = NetHackAdapter()
+    adapter.walkable = np.zeros((21, 79), dtype=bool)
+    hero = HeroState(y=6, x=8, depth=2)
+    adapter.walkable[hero.y, hero.x] = True
+    spatial = SpatialView(stairs_down_known=False, has_unvisited_frontier=True)
+    dungeon = DungeonView(has_closed_door=False)
+    chars = np.full((21, 79), ord(" "), dtype=np.uint8)
+    glyphs = np.full((21, 79), 2359, dtype=np.int32)
+    # Target corpse at (7, 3), blocked by walls (walkable is False)
+    target_pos = (7, 3)
+    adapter.floor_corpses[target_pos] = ("kobold corpse", 100, False, False)
+
+    obs_prev = Observation(
+        chars=chars,
+        glyphs=glyphs,
+        hero=hero,
+        spatial=spatial,
+        dungeon=dungeon,
+        corpses=[FloorCorpse(name="kobold corpse", y=target_pos[0], x=target_pos[1], is_fresh=True)],
+    )
+    adapter._last_obs = obs_prev
+
+    resolved_actions = []
+    original_step = adapter.step
+
+    def capture_step(a):
+        resolved_actions.append(a)
+        if a.name == "step_to":
+            return original_step(a)
+        return obs_prev, 0.0, False, False, {}
+
+    import unittest.mock
+    with unittest.mock.patch.object(adapter, "step", side_effect=capture_step):
+        adapter.step(Action(name="step_to", target_pos=target_pos))
+
+    # The unreachable corpse should be removed from floor_corpses and added to unreachable_targets
+    assert target_pos not in adapter.floor_corpses
+    assert target_pos in adapter.unreachable_targets
+    # And it should fallback to step_to_frontier (since has_unvisited_frontier is True), NOT search
+    assert any(a.name == "step_to_frontier" for a in resolved_actions)
+    assert not any(a.name == "search" for a in resolved_actions)
+
+    # When extracting obs, target_pos should be excluded
+    raw_obs = {
+        "chars": chars,
+        "glyphs": glyphs,
+        "blstats": np.zeros(25, dtype=np.int32),
+        "message": np.zeros(256, dtype=np.uint8),
+        "inv_letters": np.zeros(55, dtype=np.uint8),
+        "inv_glyphs": np.zeros(55, dtype=np.int32),
+        "inv_strs": np.zeros((55, 80), dtype=np.uint8),
+        "tty_chars": np.zeros((24, 80), dtype=np.uint8),
+    }
+    extracted = adapter._extract_obs(raw_obs)
+    assert not any((c.y, c.x) == target_pos for c in extracted.corpses)
+
+
+def test_step_away_from_hostile_passive_avoids_last_move_from():
+    import numpy as np
+    from lox.core.types import Observation, HeroState, CombatView, SpatialView, DungeonView, Action
+    from lox.envs.nethack import NetHackAdapter
+
+    adapter = NetHackAdapter()
+    adapter.walkable = np.zeros((21, 79), dtype=bool)
+    # Hero is at (14, 70), hazard at (13, 70)
+    hero = HeroState(y=14, x=70, depth=2)
+    combat = CombatView(
+        adjacent_hostile=True,
+        has_active_hostile=False,
+        adjacent_gas_spore=True,
+        gas_spore_in_fov=True,
+        closest_hostile_name="gas spore",
+        closest_hostile_pos=(13, 70),
+        can_retreat=False,
+    )
+    spatial = SpatialView(stairs_down_known=False, has_unvisited_frontier=False)
+    dungeon = DungeonView(has_closed_door=False, in_shop=False)
+    chars = np.full((21, 79), ord(" "), dtype=np.uint8)
+    glyphs = np.full((21, 79), 2359, dtype=np.int32)
+
+    # Walkable open floor at (14, 69) and (14, 70)
+    chars[14, 69] = ord(".")
+    chars[14, 70] = ord(".")
+    chars[13, 70] = ord("e")
+    # Glyph 6 is in GLYPH_IS_PASSIVE_HAZARD_LUT
+    glyphs[13, 70] = 6
+
+    adapter.walkable[14, 69] = True
+    adapter.walkable[14, 70] = True
+
+    obs_prev = Observation(
+        chars=chars,
+        glyphs=glyphs,
+        hero=hero,
+        combat=combat,
+        spatial=spatial,
+        dungeon=dungeon,
+    )
+    adapter._last_obs = obs_prev
+
+    # Simulate hero just arrived from (14, 69)
+    adapter.last_move_from = (14, 69)
+    adapter.consecutive_passive_waits = 2
+
+    # Step away from hostile
+    resolved_actions = []
+    original_step = adapter.step
+
+    def capture_step(a):
+        resolved_actions.append(a)
+        if a.name == "step_away_from_hostile":
+            return original_step(a)
+        return obs_prev, 0.0, False, False, {}
+
+    import unittest.mock
+    with unittest.mock.patch.object(adapter, "step", side_effect=capture_step):
+        adapter.step(Action(name="step_away_from_hostile"))
+
+    # Because (14, 69) was last_move_from, Step 1 should skip (14, 69).
+    # Since there are no other walkable tiles, it proceeds to Step 2/3 (e.g. search) rather than stepping back to (14, 69)
+    steps = [a for a in resolved_actions if a.name in ("step_direction", "step_or_breach")]
+    for s in steps:
+        if s.direction is not None:
+            # West direction would be (0, -1) towards (14, 69)
+            assert s.direction != (0, -1), "Should not step back into last_move_from"
+
+
+
+
 
 
 

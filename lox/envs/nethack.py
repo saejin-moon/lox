@@ -284,6 +284,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.hostile_npc_positions: set[tuple[int, int]] = set()
         self.looted_tiles: set[tuple[int, int]] = set()
         self.shop_tiles: set[tuple[int, int]] = set()
+        self.unreachable_targets: set[tuple[int, int]] = set()
         self.mines_stairs_positions: set[tuple[int, int, int]] = (
             set()
         )  # (y, x, depth) in Dungeons of Doom
@@ -670,6 +671,7 @@ class NetHackAdapter(EnvironmentAdapter):
             self.elbereth_positions.clear()
             self.looted_tiles.clear()
             self.shop_tiles.clear()
+            self.unreachable_targets.clear()
             self._last_search_decay_turn = -1000
             if hasattr(self, "loot_attempts"):
                 self.loot_attempts.clear()
@@ -1613,6 +1615,8 @@ class NetHackAdapter(EnvironmentAdapter):
         # Corpses
         corpse_list = []
         for (cy, cx), corpse_data in self.floor_corpses.items():
+            if (cy, cx) in getattr(self, "unreachable_targets", set()):
+                continue
             cname = corpse_data[0]
             dturn = corpse_data[1]
             is_pois = corpse_data[2] if len(corpse_data) > 2 else False
@@ -1986,6 +1990,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.hostile_npc_positions.clear()
         self.looted_tiles.clear()
         self.shop_tiles.clear()
+        self.unreachable_targets.clear()
         self._last_search_decay_turn = -1000
         self.mines_stairs_positions.clear()
         self._last_descended_stair = None
@@ -2372,7 +2377,13 @@ class NetHackAdapter(EnvironmentAdapter):
                 elif (hero.y, hero.x) == (ty, tx):
                     return self.step(Action(name="wait"))
                 else:
-                    return self.step(Action(name="search"))
+                    self.floor_corpses.pop((ty, tx), None)
+                    if not hasattr(self, "unreachable_targets"):
+                        self.unreachable_targets = set()
+                    self.unreachable_targets.add((ty, tx))
+                    if obs_prev.spatial.has_unvisited_frontier:
+                        return self.step(Action(name="step_to_frontier"))
+                    return self.step(Action(name="step_to_dead_end"))
 
         elif action.name == "step_to_altar" and obs_prev is not None:
             if getattr(self, "altar_tested_on_floor", False):
@@ -2748,7 +2759,8 @@ class NetHackAdapter(EnvironmentAdapter):
                     # If we've already waited once or twice and cannot retreat away:
                     if self.consecutive_passive_waits >= 2:
                         self.consecutive_passive_waits = 0
-                        # 1. Try any walkable adjacent tile that is not the monster's tile
+                        # 1. Try any alternative walkable adjacent tile that is not the monster's tile and not where we just came from
+                        alt_dir = None
                         if closest_pos:
                             hy, hx = closest_pos
                             for dy, dx in (
@@ -2768,11 +2780,15 @@ class NetHackAdapter(EnvironmentAdapter):
                                     and walkable[ny, nx]
                                     and (ny, nx) != (hy, hx)
                                     and (ny, nx) not in self.blocked_tiles
+                                    and (ny, nx) != getattr(self, "last_move_from", (-1, -1))
                                 ):
                                     if (ny, nx) in self.locked_doors and obs_prev.dungeon.in_shop:
                                         continue
-                                    self.passive_search_count = 0
-                                    return self._step_or_breach(obs_prev, dy, dx)
+                                    alt_dir = (dy, dx)
+                                    break
+                        if alt_dir:
+                            self.passive_search_count = 0
+                            return self._step_or_breach(obs_prev, alt_dir[0], alt_dir[1])
 
                         # 2. Ranged destruction (safe elimination)
                         if obs_prev.inventory.has_daggers:

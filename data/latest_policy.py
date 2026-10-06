@@ -342,12 +342,28 @@ class Agent:
                 obs = (yield step_away_from_hostile())
                 continue
             closest_name = obs.combat.closest_hostile_name.lower()
-            if any((p in closest_name for p in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'))):
-                if obs.combat.adjacent_hostile:
-                    obs = (yield (retreat() if obs.combat.can_retreat else step_away_from_hostile()))
+            if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest', 'priestess', 'oracle'):
+                if obs.combat.adjacent_hostile and obs.combat.can_retreat:
+                    obs = (yield retreat())
                     continue
-                else:
-                    break
+                elif obs.combat.adjacent_hostile:
+                    obs = (yield step_away_from_hostile())
+                    continue
+            if 'yellow light' in closest_name or 'homunculus' in closest_name:
+                if obs.combat.closest_hostile_dist >= 2:
+                    if obs.inventory.has_offensive_wand:
+                        obs = (yield zap_offensive_wand())
+                        continue
+                    elif obs.inventory.has_daggers:
+                        obs = (yield throw_dagger())
+                        continue
+                if obs.combat.adjacent_hostile:
+                    if not obs.combat.standing_on_elbereth:
+                        obs = (yield engrave_dust_elbereth())
+                        continue
+                    else:
+                        obs = (yield melee_attack_hostile())
+                        continue
             if obs.combat.is_corrosive_target:
                 if obs.combat.closest_hostile_dist >= 1:
                     if obs.inventory.has_offensive_wand:
@@ -434,7 +450,10 @@ class Agent:
                         obs = (yield melee_attack_hostile())
                         continue
                     else:
-                        obs = (yield (engrave_dust_elbereth() if not obs.combat.standing_on_elbereth else melee_attack_hostile()))
+                        if not obs.combat.standing_on_elbereth:
+                            obs = (yield engrave_dust_elbereth())
+                        else:
+                            obs = (yield melee_attack_hostile())
                         continue
                 elif not obs.combat.in_corridor and obs.combat.can_retreat:
                     obs = (yield step_to_chokepoint())
@@ -475,7 +494,7 @@ class Agent:
             return obs
         if obs.spatial.standing_on_dead_end:
             prev_hp = obs.hero.hp
-            search_limit = 20 if (obs.hero.depth <= 2 or not obs.spatial.stairs_down_known) else 12
+            search_limit = 20 if obs.hero.depth <= 2 or not obs.spatial.stairs_down_known else 12
             for _ in range(search_limit):
                 if obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier or (obs.hero.hp < prev_hp):
                     return obs
