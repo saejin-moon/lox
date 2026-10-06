@@ -76,7 +76,19 @@ This operational document outlines the concrete milestones to reach and the spec
 
 ## 2. Additional Capabilities & Mechanisms Implemented
 
-All 12 concrete technical mechanisms across all priority tiers have been fully implemented, verified, and integrated into the empirical synthesis engine and baseline policy.
+### Priority 0: Scientific Synthesis Rigor & Diagnostic Expansion [COMPLETED & VERIFIED]
+
+1. **Diagnostic Expansion to 18 Canonical Failure Archetypes** (`lox/telemetry/diagnostics.py`) [COMPLETED & VERIFIED]:
+   - Expanded failure classification from 11 general archetypes to 18 high-precision categories: `INSTADEATH_POISON`, `PETRIFICATION`, `PEACEFUL_NPC_PROVOCATION`, `TRAP_FATALITY`, `DROWNING_OR_LAVA`, `STATUS_EFFECT_HELPLESS`, `ENCUMBRANCE_IMMOBILITY`, `STALL_SECRET_DOOR`, `STARVATION_FAINTING`, `PING_PONG_OSCILLATION`, `ARMOR_DEFICIT`, `PREMATURE_PRAYER`, `PASSIVE_HAZARD_PARALYSIS`, `COMBAT_TACTICAL_SWARM`, `COMBAT_FAST_PREDATOR`, `COMBAT_GENERAL`, `MAX_TURNS_REACHED`, `ABORTED_ZERO_PROGRESS`.
+   - Chronological causal timeline tracing (`CausalTimelineAnalyzer`) with targeted skill recommendations.
+
+2. **Counterfactual Seed-Pinned Twin Evaluation (`--twin-test`)** (`scripts/run_synthesis.py`) [COMPLETED & VERIFIED]:
+   - Unshadowed NLE C-level seed methods in `NetHackAdapter.reset(seed=...)` to achieve 100% bit-for-bit deterministic level layouts and monster spawns.
+   - Hypothesis validation batches replay the exact identical seeds that failed previously, measuring paired delta ($\Delta_{\text{paired}}$), win/loss/draw rates, 95% bootstrap confidence intervals, and incident resolution rate with 0 environment variance.
+   - Rich validation telemetry logged permanently to DuckDB `meta_experiments` table.
+
+3. **Modular Invariant Registry Modernization** (`lox/knowledge/invariants.py`) [COMPLETED & VERIFIED]:
+   - Refactored all 45 empirical invariants away from monolithic routines (`handle_combat`, `phase_early_rush`, `handle_dead_end`) to decoupled modular skills (`determine_goal`, `skill_combat`, `skill_scavenge_armor`, `skill_forge_excalibur`, `skill_explore_and_dive`).
 
 ### Priority 1: Immediate DL 4–5 Plateau Breakers [ALL COMPLETED & VERIFIED]
 
@@ -1333,6 +1345,69 @@ To ensure LLM synthesis sessions (targeting `google/gemma-4-31b-it`) generate po
 - Added unit tests `test_step_to_unreachable_target_pruning_and_fallback` and `test_step_away_from_hostile_passive_avoids_last_move_from` in `tests/test_nethack_tactics.py`.
 - All 133 unit tests pass with zero regressions (`uv run pytest`).
 
+---
 
+## 32. Campaign 81 Autopsy, Paradigm Shift & The Autonomous Scientific Policy Synthesis Engine
 
+### 32.1 The 81-Campaign Retrospective: Why Brute-Force Mutation Stalled
+Across 81 continuous campaigns and over 14,900 evaluated episodes, the average dungeon depth plateaued near DL 4.5–5.0. Deep causal investigation revealed two systemic architectural bottlenecks:
+1. **The Credit Assignment Trap**:
+   - 84.3% of deaths were recorded in DuckDB as "Killed in combat" because the fatal hit was delivered by a monster strike.
+   - However, **80.7% of those heroes died with baseline AC 7 (completely naked body armor)** after skipping dropped armor on floors 1–4.
+   - Because the Author Agent received only final-hit death summaries, it spent 81 campaigns endlessly micro-tuning `handle_combat` thresholds (e.g. retreating at 35% vs 40% HP) while the true root cause (lack of early equipment scavenging) was invisible.
+2. **The Monolithic Mutation Trap**:
+   - The evolving policy had grown into a monolithic 521-line generator file. LLMs attempting whole-program mutations suffered high indentation and syntax failure rates, retreating to conservative 30-line modifications that prevented structural breakthroughs.
 
+### 32.2 The Four Architectural Pillars Implemented
+
+#### Pillar 1: Causal Timeline Telemetry Engine (`lox/telemetry/diagnostics.py`)
+- Implemented `CausalIncidentDossier` and `CausalTimelineAnalyzer`.
+- Traces the entire 4,000-turn trajectory of every run to identify true causal root causes:
+  * `EQUIPMENT_NEGLECT`: Reaching DL $\ge 3$ without equipping body armor (AC $\ge 6$).
+  * `PACING_STALL`: Spending $> 400$ turns on early floors without discovering down stairs.
+  * `NUTRITION_BLINDNESS`: Permitting hunger to reach `WEAK`/`FAINTING` while safe corpses were available.
+  * `TACTICAL_HOARDING`: Dying in combat with unused healing potions or offensive wands.
+  * `MISSED_ARTIFACT`: Reaching DL $\ge 5$ as a Valkyrie with long sword but failing to forge Excalibur.
+- Summarized automatically into `causal_summary` in `latest_diagnostics.yaml` and LLM synthesis prompts.
+
+#### Pillar 2: High-Level Macro Primitives & Environmental Agency (`lox/envs/nethack.py`)
+- Equipped `NetHackAdapter` with long-horizon macro primitives that allow the policy to command intentional behavior:
+  * `backtrack_to_depth(target_depth: int)`: Ascends or descends across dungeon levels to reach a target floor (e.g. returning to a known fountain on DL 3 to forge Excalibur).
+  * `scavenge_loot()`: Prioritizes sweeping the floor for dropped equipment (`[ ! ? / = $ %`) before stair descent.
+  * `set_strategic_goal(goal_name: str)`: Declares the policy's active strategic intention, logging it into tick telemetry.
+  * Global Sensory Knowledge: Exposes `obs.dungeon.has_known_fountain`, `obs.dungeon.closest_fountain_depth`, and `obs.dungeon.known_fountain_depths` across floors.
+
+#### Pillar 3: Decoupled Modular Skill Starter Policy (`data/modular_starter_policy.py`)
+- Replaced the monolithic 521-line legacy policy with a clean, decoupled modular template:
+  * `determine_goal(self, obs) -> str`: Explicit goal selector (`"escape_mines"`, `"emergency_heal"`, `"combat"`, `"scavenge_armor"`, `"forge_excalibur"`, `"explore_and_dive"`).
+  * `skill_combat(self, obs)`: Tactical combat, Elbereth, ranged attacks, and retreat.
+  * `skill_scavenge_armor(self, obs)`: Armor collection and equipping.
+  * `skill_forge_excalibur(self, obs)`: Fountain navigation and artifact forging.
+  * `skill_explore_and_dive(self, obs)`: Floor exploration and stair descent.
+  * `run(self, obs)`: Universal emergency reflexes and skill dispatch.
+- Coupled with AST-based `AuthorAgent.splice_policy_methods()`, allowing the synthesizer to surgically modify individual skills without whole-program syntax failures.
+
+#### Pillar 4: The Scientific Method Policy Synthesis Loop & Meta-Experiment Tracking
+- In `lox/author/prompts.py` and `lox/author/agent.py`: The Author Agent MUST formulate a structured, falsifiable scientific hypothesis in YAML before outputting code:
+  ```yaml
+  hypothesis:
+    causal_finding: "<specific root cause from causal timeline dossier>"
+    targeted_skill: "<e.g. skill_scavenge_armor>"
+    mechanism: "<concrete behavioral/algorithmic change>"
+    predicted_outcome:
+      target_metric: "<e.g. avg_depth, ac_at_death>"
+      expected_direction: "increase" | "decrease"
+      min_improvement: 1.0
+  ```
+- In `scripts/run_synthesis.py`:
+  * Every hypothesis is tracked, and on the subsequent generation its prediction is empirically evaluated against actual batch metrics (`VALIDATED` vs `FALSIFIED`).
+  * All experiments, hypotheses, predicted outcomes, actual outcomes, and policy versions are logged permanently into the `meta_experiments` table in `data/lox.duckdb` for 100% research reproducibility.
+  * Added `--starter-policy` CLI option to allow starting fresh from `data/modular_starter_policy.py` to benchmark true causal synthesis capability.
+
+### 32.3 Verification & Readiness
+- Implemented unit tests in `tests/test_scientific_synthesis.py`:
+  * `test_extract_hypothesis`: Validated YAML/markdown hypothesis parsing.
+  * `test_modular_starter_policy_compiles_and_runs`: Validated clean compilation and dry-run execution.
+  * `test_macro_primitives_dispatch`: Validated `backtrack_to_depth`, `scavenge_loot`, `set_strategic_goal`, and `global_fountains`.
+- Full project test suite: **137 passed in 3.61s** with 0 failures (`uv run pytest`).
+- The engine is fully primed for Campaign 82 clean launch.

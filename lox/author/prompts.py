@@ -22,10 +22,24 @@ Write clean Python with local state on `self`, loops (`while`, `for`), helper me
 class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
+        self.current_goal = "explore"
+
+    def determine_goal(self, obs) -> str:
+        if obs.hero.dungeon_branch == "mines":
+            return "escape_mines"
+        if obs.hero.hp_frac < 0.4 and obs.inventory.has_healing:
+            return "emergency_heal"
+        if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
+            return "combat"
+        if obs.hero.depth <= 4 and obs.hero.ac >= 6 and (obs.inventory.has_unworn_armor or obs.spatial.has_nearby_loot):
+            return "scavenge_armor"
+        if obs.dungeon.can_forge_excalibur and (obs.dungeon.standing_on_fountain or obs.dungeon.has_known_fountain):
+            return "forge_excalibur"
+        return "explore_and_dive"
 
     def run(self, obs):
         while True:
-            # Universal Reflex 1: Mines Immediate Evacuation (DL 2-4 branch trap elimination)
+            # Universal Emergency Reflex 1: Mines Evacuation
             if obs.hero.dungeon_branch == "mines":
                 if obs.spatial.standing_on_stairs_up:
                     obs = (yield ascend())
@@ -37,72 +51,47 @@ class Agent:
                     obs = (yield step_to_frontier())
                     continue
 
-            # Universal Reflex 2: Major Trouble Prayer (Fainting starvation or lethal HP emergency)
+            # Universal Emergency Reflex 2: Divine Prayer
             if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
 
-            # Universal Reflex 3: Immediate Stair Descent (even in combat)
+            # Universal Reflex 3: Stair Descent
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                 obs = (yield descend())
                 continue
 
-            # Universal Reflex 4: Active Combat Defense
-            if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
-                obs = (yield from self.handle_combat(obs))
-                continue
-
-            # Universal Reflex 5: Healing & Nutrition Recovery
-            if obs.hero.hp_frac < 0.35 and obs.inventory.has_healing:
+            # Goal Dispatch
+            goal = self.determine_goal(obs)
+            self.current_goal = goal
+            if goal == "emergency_heal":
                 obs = (yield quaff_healing())
                 continue
-            if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
-                obs = (yield eat_carried_food())
+            elif goal == "combat":
+                obs = (yield from self.skill_combat(obs))
+                continue
+            elif goal == "scavenge_armor":
+                obs = (yield from self.skill_scavenge_armor(obs))
+                continue
+            elif goal == "forge_excalibur":
+                obs = (yield from self.skill_forge_excalibur(obs))
+                continue
+            else:
+                obs = (yield from self.skill_explore_and_dive(obs))
                 continue
 
-            # HTN Strategic Phase Dispatch
-            phase = getattr(obs, "dungeon_phase", "early_rush")
-            if phase == "early_rush" or obs.hero.depth <= 2:
-                obs = (yield from self.phase_early_rush(obs))
-            elif phase == "early_scaling" or obs.hero.depth <= 5:
-                obs = (yield from self.phase_early_scaling(obs))
-            elif phase == "mid_branches" or obs.hero.depth <= 10:
-                obs = (yield from self.phase_mid_branches(obs))
-            else:
-                obs = (yield from self.phase_deep_dungeon(obs))
-
-    def phase_early_rush(self, obs):
-        # Phase 0: Depths 1-2.
-        # Priority: Fast exploration & descent. Strict zero-loot staircase priority.
-        if obs.inventory.has_unworn_body_armor and not obs.inventory.has_worn_body_armor:
+    def skill_scavenge_armor(self, obs):
+        if obs.inventory.has_unworn_armor:
             obs = (yield wear_armor())
-            return obs
-        if obs.inventory.has_unworn_armor and obs.epistemic.can_safely_wear_armor:
-            obs = (yield wear_armor())
-            return obs
-        if obs.hero.can_enhance_skills:
-            obs = (yield enhance_weapon_skill())
-            return obs
-        if obs.spatial.stairs_down_known:
-            obs = (yield step_to_stairs_down())
             return obs
         if obs.spatial.has_nearby_loot:
             obs = (yield step_to_loot())
             return obs
-        if obs.dungeon.adjacent_closed_door:
-            if obs.dungeon.door_is_locked and not obs.dungeon.in_shop:
-                obs = (yield kick_closed_door())
-            else:
-                obs = (yield open_door())
-            return obs
         if obs.spatial.has_unvisited_frontier:
             obs = (yield step_to_frontier())
             return obs
-        if obs.dungeon.has_closed_door:
-            obs = (yield step_to_closed_door())
-            return obs
-        obs = (yield from self.handle_dead_end(obs))
+        obs = (yield step_to_dead_end())
         return obs
 
     def phase_early_scaling(self, obs):
@@ -603,15 +592,18 @@ No imports, no filesystem calls, no arbitrary exec/eval. All logic must reside w
 
 ### Output Requirement (Targeted Method Splicing Required):
 Provide 1 brief rationale sentence, then your modified method(s) in a single ```python ... ``` block.
-Output ONLY the specific method(s) you are updating or adding (e.g. `def phase_early_rush(self, obs): ...`, `def phase_early_scaling(self, obs): ...`, `def phase_mid_branches(self, obs): ...`, `def handle_combat(self, obs): ...`, or `def run(self, obs): ...`).
+Output ONLY the specific method(s) you are updating or adding (e.g. `def determine_goal(self, obs) -> str: ...`, `def skill_combat(self, obs): ...`, `def skill_scavenge_armor(self, obs): ...`, `def skill_forge_excalibur(self, obs): ...`, `def skill_explore_and_dive(self, obs): ...`, or `def run(self, obs): ...`).
 Do NOT output unchanged methods or the full `class Agent` wrapper. The engine automatically splices your updated method into `class Agent` via AST, preserving all other verified subroutines intact and eliminating indentation errors.
 """
 
 
 def build_user_prompt(
-    current_policy: str, trigger_reason: str, status_report: str
+    current_policy: str,
+    trigger_reason: str,
+    status_report: str,
+    causal_summary: str = "",
 ) -> str:
-    """User prompt presenting the empirical autopsy, ranked mortality causes, relevant invariants, and current policy."""
+    """User prompt presenting the empirical autopsy, causal dossier, relevant invariants, and current policy."""
     from lox.knowledge import REGISTRY
 
     relevant_invs = REGISTRY.get_relevant_invariants_for_trigger(
@@ -621,9 +613,18 @@ def build_user_prompt(
     if invariants_block:
         invariants_block = f"\n{invariants_block}\n"
 
+    causal_block = ""
+    if causal_summary:
+        if isinstance(causal_summary, dict):
+            import yaml
+            causal_str = yaml.dump(causal_summary, sort_keys=False)
+        else:
+            causal_str = str(causal_summary)
+        causal_block = f"\n### Causal Timeline Dossier (Empirical Root Cause Analysis):\n```yaml\n{causal_str.strip()}\n```\n"
+
     return f"""### Empirical Incident Report:
 {status_report}
-
+{causal_block}
 ### Synthesis Objective:
 {trigger_reason}
 
@@ -636,5 +637,17 @@ Call `get_death_autopsy_trace()` to inspect the exact final 15 ticks, `query_inv
 {current_policy.strip()}
 ```
 
-Synthesize your revised method(s) to address the empirical mortality bottlenecks. Output ONLY the specific modified method(s) (e.g. `def handle_combat(self, obs): ...` or `def run(self, obs): ...`) in a single ```python ... ``` block.
+### Scientific Method Requirement:
+1. Formulate a structured scientific hypothesis in a ```yaml ... ``` block:
+```yaml
+hypothesis:
+  causal_finding: "<specific root cause from causal timeline dossier, e.g. EQUIPMENT_NEGLECT with 80% naked body armor on DL 2-4>"
+  targeted_skill: "<e.g. skill_scavenge_armor, skill_combat, determine_goal, skill_forge_excalibur, etc.>"
+  mechanism: "<concrete behavioral/algorithmic change>"
+  predicted_outcome:
+    target_metric: "<e.g. avg_depth, ac_at_death>"
+    expected_direction: "increase" | "decrease"
+    min_improvement: 1.0
+```
+2. Synthesize your revised method(s) in a single ```python ... ``` block. Output ONLY the specific modified method(s) (e.g. `def skill_scavenge_armor(self, obs): ...` or `def determine_goal(self, obs): ...`).
 """

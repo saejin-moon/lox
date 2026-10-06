@@ -133,15 +133,15 @@ def test_splice_phase_subroutine_into_latest_policy():
     spliced = AuthorAgent.splice_policy_methods(policy_code, patch)
     assert "def phase_early_scaling(self, obs):" in spliced
     assert "dip_excalibur()" in spliced
-    assert "phase_early_rush" in spliced
-    assert "phase_mid_branches" in spliced
-    assert "phase_deep_dungeon" in spliced
-    assert "handle_combat" in spliced
+    assert "skill_combat" in spliced
+    assert "skill_scavenge_armor" in spliced
+    assert "skill_explore_and_dive" in spliced
+    assert "determine_goal" in spliced
 
     # Check compilation
     parsed = ast.parse(spliced)
     agent_cls = [n for n in parsed.body if isinstance(n, ast.ClassDef)][0]
     method_names = {m.name for m in agent_cls.body if isinstance(m, ast.FunctionDef)}
     assert "phase_early_scaling" in method_names
-    assert "phase_early_rush" in method_names
+    assert "skill_combat" in method_names
 

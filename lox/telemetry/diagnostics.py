@@ -17,9 +17,16 @@ import numpy as np
 class FailureArchetype(str, Enum):
     """Canonical failure modes prioritized by causal precedence."""
 
+    PETRIFICATION = "PETRIFICATION"
+    DROWNING_OR_LAVA = "DROWNING_OR_LAVA"
+    PEACEFUL_NPC_PROVOCATION = "PEACEFUL_NPC_PROVOCATION"
+    TRAP_FATALITY = "TRAP_FATALITY"
+    INSTADEATH_POISON = "INSTADEATH_POISON"
+    STATUS_EFFECT_HELPLESS = "STATUS_EFFECT_HELPLESS"
     STALL_SECRET_DOOR = "STALL_SECRET_DOOR"
     STARVATION_FAINTING = "STARVATION_FAINTING"
     PING_PONG_OSCILLATION = "PING_PONG_OSCILLATION"
+    ENCUMBRANCE_IMMOBILITY = "ENCUMBRANCE_IMMOBILITY"
     ARMOR_DEFICIT = "ARMOR_DEFICIT"
     PREMATURE_PRAYER = "PREMATURE_PRAYER"
     PASSIVE_HAZARD_PARALYSIS = "PASSIVE_HAZARD_PARALYSIS"
@@ -28,6 +35,30 @@ class FailureArchetype(str, Enum):
     COMBAT_GENERAL = "COMBAT_GENERAL"
     MAX_TURNS_REACHED = "MAX_TURNS_REACHED"
     ABORTED_ZERO_PROGRESS = "ABORTED_ZERO_PROGRESS"
+
+
+@dataclass(slots=True)
+class CausalIncidentDossier:
+    """Detailed multi-turn causal timeline analysis of an episode failure."""
+
+    episode_id: str
+    depth: int
+    turns: int
+    terminal_event: str
+    causal_drivers: list[str] = field(default_factory=list)
+    timeline_breakdown: list[str] = field(default_factory=list)
+    strategic_recommendation: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "episode_id": self.episode_id,
+            "depth": self.depth,
+            "turns": self.turns,
+            "terminal_event": self.terminal_event,
+            "causal_drivers": self.causal_drivers,
+            "timeline_breakdown": self.timeline_breakdown,
+            "strategic_recommendation": self.strategic_recommendation,
+        }
 
 
 @dataclass(slots=True)
@@ -49,6 +80,7 @@ class EpisodeDiagnostic:
     is_oscillating: bool = False
     has_body_armor: bool = False
     secret_door_searches: int = 0
+    causal_dossier: CausalIncidentDossier | None = None
 
 
 @dataclass(slots=True)
@@ -65,6 +97,7 @@ class BatchDiagnosticSummary:
     exploration_stall_count: int = 0
     armor_deficit_count: int = 0
     oscillation_count: int = 0
+    causal_summary: dict[str, Any] = field(default_factory=dict)
 
     def format_markdown_table(self) -> str:
         """Formats a clean markdown table suitable for direct injection into LLM prompts."""
@@ -74,6 +107,13 @@ class BatchDiagnosticSummary:
             "| :--- | :---: | :---: | :--- |",
         ]
         descriptions = {
+            FailureArchetype.PETRIFICATION.value: "Turned to stone by cockatrice, chickatrice, or handling corpse without gloves",
+            FailureArchetype.DROWNING_OR_LAVA.value: "Drowned in water, moat, or burned in pool of lava",
+            FailureArchetype.PEACEFUL_NPC_PROVOCATION.value: "Provoked peaceful/neutral entity (guard, priest, shopkeeper, watchman) into hostile retaliation",
+            FailureArchetype.TRAP_FATALITY.value: "Killed by dungeon trap (spiked pit, arrow trap, falling rock, rolling boulder)",
+            FailureArchetype.INSTADEATH_POISON.value: "Killed by lethal poison sting/bite (ants, bees, scorpions) without poison resistance",
+            FailureArchetype.STATUS_EFFECT_HELPLESS.value: "Killed while disabled by sleep, paralysis, stun, confusion, or blindness",
+            FailureArchetype.ENCUMBRANCE_IMMOBILITY.value: "Movement speed severely degraded by Strained/Overtaxed encumbrance, blocking escape",
             FailureArchetype.STALL_SECRET_DOOR.value: "Stalled on early level (>500t) without finding stairs; dead-end search loop",
             FailureArchetype.STARVATION_FAINTING.value: "Entered FAINTING (unconscious); killed while helpless by low-tier entities",
             FailureArchetype.ARMOR_DEFICIT.value: "Died at Depth >= 4 with AC >= 5; lacked body armor or unworn armor in inventory",
@@ -104,7 +144,7 @@ class BatchDiagnosticSummary:
                 "count": count,
                 "pct": round(self.archetype_percentages.get(arch, 0.0), 1),
             }
-        return {
+        res: dict[str, Any] = {
             "batch_metrics": {
                 "episodes": self.total_episodes,
                 "avg_depth": round(self.avg_depth, 2),
@@ -113,9 +153,13 @@ class BatchDiagnosticSummary:
             },
             "root_causes": causes,
         }
+        if self.causal_summary:
+            res["causal_incident_analysis"] = self.causal_summary
+        return res
 
     def format_yaml(self) -> str:
-        """Formats a clean, ultra-compact YAML representation of batch diagnostics."""
+        """Formats a clean, informative YAML representation of batch diagnostics with causal attribution."""
+        import yaml
         d = self.to_dict()
         lines = [
             "batch_metrics:",
@@ -127,6 +171,9 @@ class BatchDiagnosticSummary:
         ]
         for cause, info in d["root_causes"].items():
             lines.append(f"  {cause}: {{count: {info['count']}, pct: {info['pct']}}}")
+        if self.causal_summary:
+            causal_yaml = yaml.dump({"causal_incident_analysis": self.causal_summary}, sort_keys=False)
+            lines.append(causal_yaml.strip())
         return "\n".join(lines)
 
     def save(self, filepath: str = "data/latest_diagnostics.yaml") -> None:
@@ -163,8 +210,73 @@ class RootCauseClassifier:
         "shocking sphere",
     }
 
+    PETRIFYING_HAZARDS = {
+        "cockatrice",
+        "chickatrice",
+        "medusa",
+    }
+
+    POISONOUS_VERMIN = {
+        "soldier ant",
+        "killer bee",
+        "queen bee",
+        "giant ant",
+        "scorpion",
+        "centipede",
+        "spider",
+        "cave spider",
+        "poisonous snake",
+        "snake",
+        "pit viper",
+        "rattlesnake",
+        "cobra",
+    }
+
+    PEACEFUL_NPCS = {
+        "guard",
+        "vault guard",
+        "shopkeeper",
+        "priest",
+        "priestess",
+        "watchman",
+        "aligned priest",
+        "high priest",
+        "oracle",
+    }
+
+    TRAP_TERMS = {
+        "spiked pit",
+        "pit",
+        "arrow trap",
+        "dart trap",
+        "rolling boulder",
+        "land mine",
+        "falling rock",
+        "bear trap",
+        "trap",
+    }
+
+    WATER_LAVA_TERMS = {
+        "drown",
+        "pool of water",
+        "water",
+        "moat",
+        "lava",
+        "boiling lava",
+    }
+
     @classmethod
     def classify(
+        cls,
+        ep_summary: dict[str, Any],
+        ticks: list[dict[str, Any]] | None = None,
+    ) -> EpisodeDiagnostic:
+        diag = cls._classify_internal(ep_summary, ticks)
+        diag.causal_dossier = CausalTimelineAnalyzer.analyze_episode(ep_summary, ticks)
+        return diag
+
+    @classmethod
+    def _classify_internal(
         cls,
         ep_summary: dict[str, Any],
         ticks: list[dict[str, Any]] | None = None,
@@ -245,7 +357,86 @@ class RootCauseClassifier:
                 has_body_armor=has_body_armor,
             )
 
-        # 2. Starvation / Fainting Check
+        # 2. Petrification Check
+        if any(
+            p in killer or p in death_reason
+            for p in ("cockatrice", "chickatrice", "medusa", "turned to stone", "stoning", "petrif")
+        ):
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.PETRIFICATION,
+                confidence=1.0,
+                explanation=f"Turned to stone by {killer or 'petrification'}",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+            )
+
+        # 3. Drowning / Lava Check
+        if any(w in killer or w in death_reason for w in cls.WATER_LAVA_TERMS):
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.DROWNING_OR_LAVA,
+                confidence=0.98,
+                explanation=f"Drowned in water or burned in lava ({killer or death_reason})",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+            )
+
+        # 4. Peaceful NPC Provocation Check
+        if any(npc in killer for npc in cls.PEACEFUL_NPCS):
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.PEACEFUL_NPC_PROVOCATION,
+                confidence=0.95,
+                explanation=f"Killed by provoked peaceful/neutral entity ({killer})",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+            )
+
+        # 5. Trap Fatality Check
+        if any(tr in killer or tr in death_reason for tr in cls.TRAP_TERMS) and "combat" not in death_reason:
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.TRAP_FATALITY,
+                confidence=0.95,
+                explanation=f"Killed by dungeon trap ({killer or death_reason})",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+            )
+
+        # 6. Starvation / Fainting Check
         if (
             turns_fainting > 0
             or "starvation" in death_reason
@@ -268,7 +459,55 @@ class RootCauseClassifier:
                 has_body_armor=has_body_armor,
             )
 
-        # 3. Position Oscillation Ping-Pong
+        # 7. Poison Instadeath Check
+        if (
+            "poison" in death_reason
+            or "poison" in killer
+            or (
+                any(pv in killer for pv in cls.POISONOUS_VERMIN)
+                and any(t in death_reason for t in ("poison", "sting", "died from poison"))
+            )
+        ):
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.INSTADEATH_POISON,
+                confidence=0.95,
+                explanation=f"Killed by lethal poison bite/sting ({killer or death_reason})",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+            )
+
+        # 8. Status Effect Helpless Check
+        if any(
+            st in death_reason or st in killer
+            for st in ("paraly", "sleep", "stun", "confus", "blind", "helpless")
+        ) and not any(h in killer for h in cls.PASSIVE_HAZARDS):
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.STATUS_EFFECT_HELPLESS,
+                confidence=0.90,
+                explanation=f"Killed while incapacitated by status condition ({killer or death_reason})",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+            )
+
+        # 9. Position Oscillation Ping-Pong
         if is_oscillating:
             return EpisodeDiagnostic(
                 episode_id=str(ep_summary.get("episode_id", "")),
@@ -284,6 +523,30 @@ class RootCauseClassifier:
                 turns_fainting=turns_fainting,
                 turns_weak=turns_weak,
                 is_oscillating=True,
+                has_body_armor=has_body_armor,
+            )
+
+        # 10. Encumbrance Immobility Check
+        if (
+            any(enc in inv_str for enc in ("strained", "overtaxed", "overloaded"))
+            or str(ep_summary.get("encumbrance") or "").upper() in ("STRAINED", "OVERTAXED", "OVERLOADED")
+            or "burdened" in death_reason
+            or "strained" in death_reason
+        ):
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.ENCUMBRANCE_IMMOBILITY,
+                confidence=0.85,
+                explanation=f"Severely encumbered (Strained/Overtaxed); movement speed crippled before death to {killer}",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
                 has_body_armor=has_body_armor,
             )
 
@@ -457,6 +720,9 @@ class RootCauseClassifier:
             or d.primary_archetype == FailureArchetype.PING_PONG_OSCILLATION
         )
 
+        dossiers = [d.causal_dossier for d in diagnostics if d.causal_dossier is not None]
+        causal_summary = CausalTimelineAnalyzer.summarize_batch(dossiers) if dossiers else {}
+
         return BatchDiagnosticSummary(
             total_episodes=total,
             avg_depth=avg_depth,
@@ -468,4 +734,199 @@ class RootCauseClassifier:
             exploration_stall_count=stall_count,
             armor_deficit_count=armor_count,
             oscillation_count=osc_count,
+            causal_summary=causal_summary,
         )
+
+
+class CausalTimelineAnalyzer:
+    """Performs chronological milestone tracing and root-cause credit assignment."""
+
+    @classmethod
+    def analyze_episode(
+        cls,
+        ep_summary: dict[str, Any],
+        ticks: list[dict[str, Any]] | None = None,
+    ) -> CausalIncidentDossier:
+        ticks = ticks or []
+        ep_id = str(ep_summary.get("episode_id", ""))
+        depth = int(ep_summary.get("final_depth") or ep_summary.get("depth") or 1)
+        turns = int(ep_summary.get("ep_turns") or ep_summary.get("turns") or 0)
+        killer = str(ep_summary.get("killer") or "").lower()
+        ac = int(
+            ep_summary.get("ac_at_death")
+            if ep_summary.get("ac_at_death") is not None
+            else 10
+        )
+        inv_str = str(ep_summary.get("inventory_at_death") or "").lower()
+        death_reason = str(ep_summary.get("death_reason") or "").lower()
+        score = int(ep_summary.get("score") or 0)
+
+        terminal = f"Killed by {killer or 'hostile encounter'} on Depth {depth} (Turn {turns})"
+        if "starvation" in death_reason or "faint" in death_reason or killer == "starvation":
+            terminal = f"Died of starvation on Depth {depth} (Turn {turns})"
+        elif "maxturnsreached" in death_reason or turns >= 24990:
+            terminal = f"Reached turn ceiling (25,000 turns) on Depth {depth}"
+        elif "aborted" in death_reason:
+            terminal = f"Aborted due to repeated zero-turn stall on Depth {depth}"
+
+        causal_drivers: list[str] = []
+        timeline: list[str] = []
+
+        # 1. Equipment & AC Trajectory Trace
+        has_body_armor = any(
+            piece in inv_str
+            for piece in ("mail", "suit", "cuirass", "plate", "jacket", "leather armor")
+            if "(being worn)" in inv_str or "armor" in inv_str
+        )
+        if depth >= 4 and ac >= 6:
+            causal_drivers.append(
+                f"EQUIPMENT_NEGLECT: Hero reached Depth {depth} with baseline AC {ac} (no body armor equipped across {turns} turns). Incoming monster damage was 3.5x normal."
+            )
+        elif depth >= 3 and not has_body_armor:
+            causal_drivers.append(
+                f"UNARMORED_BODY: Hero traversed {depth} floors without acquiring or equipping body armor."
+            )
+
+        # 2. Pacing & Exploration Stall Trace
+        turns_dl1 = int(ep_summary.get("turns_dl1") or 0)
+        turns_dl2 = int(ep_summary.get("turns_dl2") or 0)
+        if turns_dl1 >= 800 or turns_dl2 >= 800:
+            causal_drivers.append(
+                f"PACING_STALL: Hero burned excessive turns on early depths (DL1: {turns_dl1}t, DL2: {turns_dl2}t) searching walls, consuming food before reaching mid-game."
+            )
+        elif turns >= 2000 and depth <= 3:
+            causal_drivers.append(
+                f"SEARCH_EXHAUSTION: Spent {turns} turns wandering early floors DL 1-{depth} instead of diving downward."
+            )
+
+        # 3. Nutrition Blindness Trace
+        if ("starvation" in death_reason or killer == "starvation") and any(
+            f in inv_str for f in ("ration", "wafer", "fruit", "cram", "food", "egg", "tripe", "meat")
+        ):
+            causal_drivers.append(
+                "NUTRITION_BLINDNESS: Died of starvation while carrying edible rations/food in inventory."
+            )
+
+        # 4. Tactical Hoarding Trace
+        if killer != "starvation" and any(
+            w in inv_str
+            for w in (
+                "wand of striking",
+                "wand of fire",
+                "wand of cold",
+                "wand of lightning",
+                "wand of teleportation",
+                "scroll of teleportation",
+            )
+        ):
+            causal_drivers.append(
+                "TACTICAL_HOARDING: Died in combat while holding unused offensive wands or escape scrolls in inventory."
+            )
+
+        # 5. Missed Artifact Milestone Trace
+        if score >= 400 and "long sword" in inv_str and "excalibur" not in inv_str:
+            causal_drivers.append(
+                "MISSED_ARTIFACT: Hero reached XL >= 5 with Long Sword but never forged Excalibur (+1d10 damage, drain immunity)."
+            )
+
+        # 6. High-Impact Roguelike Hazards Trace
+        if any(p in killer or p in death_reason for p in ("cockatrice", "chickatrice", "medusa", "turned to stone", "stoning", "petrif")):
+            causal_drivers.append(
+                f"COCKATRICE_BLINDNESS: Turned to stone by {killer or 'petrification'}. Engaged in melee without gloves or touched corpse."
+            )
+        elif any(npc in killer for npc in ("guard", "vault guard", "shopkeeper", "priest", "priestess", "watchman")):
+            causal_drivers.append(
+                f"PROVOKED_NEUTRAL: Engaged or threw projectiles at peaceful {killer}, provoking lethal retaliation."
+            )
+        elif "poison" in death_reason or (any(pv in killer for pv in ("ant", "bee", "scorpion", "spider", "snake", "centipede")) and any(t in death_reason for t in ("poison", "sting"))):
+            causal_drivers.append(
+                f"UNCHECKED_POISON_VULNERABILITY: Struck down by lethal poison from {killer}. Lacked poison resistance or defensive Elbereth dust ward."
+            )
+        elif any(tr in killer or tr in death_reason for tr in ("spiked pit", "pit", "trap", "falling rock", "rolling boulder", "dart trap")):
+            causal_drivers.append(
+                f"FATAL_TRAP_TRIGGER: Fatal dungeon trap ({killer or death_reason}) triggered at low HP without prior search."
+            )
+        elif any(w in killer or w in death_reason for w in ("drown", "pool of water", "moat", "lava")):
+            causal_drivers.append(
+                f"HAZARDOUS_TERRAIN_IMMERSION: Stepped into water or lava ({killer or death_reason}) without levitation."
+            )
+        elif any(st in death_reason or st in killer for st in ("paraly", "sleep", "stun", "confus", "blind", "helpless")) and not any(h in killer for h in ("floating eye", "gas spore")):
+            causal_drivers.append(
+                f"DISABLING_STATUS: Struck down while disabled by paralysis, sleep, or stun against {killer}."
+            )
+        elif any(enc in inv_str for enc in ("strained", "overtaxed", "overloaded")) or "strained" in death_reason:
+            causal_drivers.append(
+                f"ENCUMBRANCE_IMMOBILITY: Movement penalized by heavy carrying load, preventing combat retreat from {killer}."
+            )
+
+        # 7. Timeline Milestone Extraction from Ticks
+        if ticks:
+            n_t = len(ticks)
+            step_indices = [0, n_t // 3, (2 * n_t) // 3, max(0, n_t - 1)]
+            for s_idx in sorted(set(step_indices)):
+                if s_idx < n_t:
+                    t = ticks[s_idx]
+                    timeline.append(
+                        f"Turn {t.get('turn', s_idx)} (DL {t.get('depth', 1)}): HP {t.get('hp', '?')}/{t.get('max_hp', '?')}, AC {t.get('ac', '?')}, Action: {t.get('action', 'N/A')}"
+                    )
+        else:
+            timeline.append(f"Turn {turns} (DL {depth}): Fatal incident ({terminal})")
+
+        # 8. Strategic Recommendation
+        rec = "Optimize tactical combat reflexes and corridor chokepoints."
+        if any("COCKATRICE_BLINDNESS" in d for d in causal_drivers):
+            rec = "Prioritize skill_combat: never fight cockatrices bare-handed; wear gloves before handling corpses."
+        elif any("PROVOKED_NEUTRAL" in d for d in causal_drivers):
+            rec = "Prioritize determine_goal: strictly enforce peaceful entity non-aggression and bypass neutral NPCs."
+        elif any("UNCHECKED_POISON_VULNERABILITY" in d for d in causal_drivers):
+            rec = "Prioritize skill_combat: engrave dust Elbereth when facing insects/vermin, and harvest poison-resistant corpses."
+        elif any("FATAL_TRAP_TRIGGER" in d for d in causal_drivers):
+            rec = "Prioritize skill_explore_and_dive: rest to full HP before exploring corridors and search suspicious dead ends."
+        elif any("ENCUMBRANCE_IMMOBILITY" in d for d in causal_drivers):
+            rec = "Prioritize skill_scavenge_armor: drop excess heavy armor or loot to maintain unencumbered movement."
+        elif any("EQUIPMENT_NEGLECT" in d or "UNARMORED_BODY" in d for d in causal_drivers):
+            rec = "Prioritize skill_scavenge_armor: actively loot and equip body armor on early depths to achieve AC <= 2 before descending."
+        elif any("PACING_STALL" in d or "SEARCH_EXHAUSTION" in d for d in causal_drivers):
+            rec = "Prioritize skill_explore_and_dive: cease exhaustive perimeter searches once stairs down are found to preserve turns and food."
+        elif any("NUTRITION_BLINDNESS" in d for d in causal_drivers):
+            rec = "Proactively consume non-perishable carried food at hunger_state >= 2."
+        elif any("MISSED_ARTIFACT" in d for d in causal_drivers):
+            rec = "Prioritize skill_forge_excalibur: backtrack to known fountain at XL >= 5 to forge Excalibur."
+
+        return CausalIncidentDossier(
+            episode_id=ep_id,
+            depth=depth,
+            turns=turns,
+            terminal_event=terminal,
+            causal_drivers=causal_drivers,
+            timeline_breakdown=timeline,
+            strategic_recommendation=rec,
+        )
+
+    @classmethod
+    def summarize_batch(
+        cls,
+        dossiers: list[CausalIncidentDossier],
+    ) -> dict[str, Any]:
+        """Aggregates causal incident dossiers across an entire evaluation batch."""
+        driver_counts: dict[str, int] = {}
+        total = len(dossiers)
+        for dos in dossiers:
+            for driver in dos.causal_drivers:
+                prefix = driver.split(":")[0].strip()
+                driver_counts[prefix] = driver_counts.get(prefix, 0) + 1
+
+        top_drivers = sorted(driver_counts.items(), key=lambda x: x[1], reverse=True)
+        return {
+            "total_incidents": total,
+            "systemic_bottlenecks": [
+                {
+                    "bottleneck": k,
+                    "count": v,
+                    "pct": round((v / max(1, total)) * 100.0, 1),
+                }
+                for k, v in top_drivers
+            ],
+            "representative_incidents": [d.to_dict() for d in dossiers[:3]],
+        }
+

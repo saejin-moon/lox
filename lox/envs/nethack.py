@@ -295,6 +295,10 @@ class NetHackAdapter(EnvironmentAdapter):
         self.known_chars = np.zeros((21, 79), dtype=np.uint8)
         self.can_enhance_skills: bool = False
         self.last_enhanced_level: int = 1
+        self.global_fountains: dict[int, set[tuple[int, int]]] = {}
+        self.global_stairs_up: dict[int, tuple[int, int]] = {}
+        self.global_stairs_down: dict[int, tuple[int, int]] = {}
+        self.current_strategic_goal: str = "explore"
 
         # Epistemic POMDP Engine & Hybrid HTN-BT Goal Agenda
         self.epistemic = EpistemicEngine()
@@ -1419,6 +1423,10 @@ class NetHackAdapter(EnvironmentAdapter):
         )
         if fountain_vanished:
             self.known_fountain_pos = None
+            if depth in self.global_fountains:
+                self.global_fountains[depth].discard((y, x))
+                if not self.global_fountains[depth]:
+                    del self.global_fountains[depth]
 
         fountain_in_fov = False
         closest_fountain_pos = None
@@ -1433,6 +1441,10 @@ class NetHackAdapter(EnvironmentAdapter):
                 int(fountain_coords[closest_idx][1]),
             )
             self.known_fountain_pos = closest_fountain_pos
+            for f_pt in fountain_coords:
+                self.global_fountains.setdefault(depth, set()).add(
+                    (int(f_pt[0]), int(f_pt[1]))
+                )
         elif getattr(self, "known_fountain_pos", None) is not None:
             kfy, kfx = self.known_fountain_pos
             if fountain_vanished:
@@ -1441,11 +1453,16 @@ class NetHackAdapter(EnvironmentAdapter):
                 # Hero is standing directly on the fountain tile; hero '@' occludes '{'
                 fountain_in_fov = True
                 closest_fountain_pos = self.known_fountain_pos
+                self.global_fountains.setdefault(depth, set()).add(self.known_fountain_pos)
             elif (
                 abs(kfy - y) <= 1 and abs(kfx - x) <= 1 and chr(chars[kfy, kfx]) != "{"
             ):
                 # Adjacent and fountain is genuinely gone
                 self.known_fountain_pos = None
+                if depth in self.global_fountains:
+                    self.global_fountains[depth].discard((kfy, kfx))
+                    if not self.global_fountains[depth]:
+                        del self.global_fountains[depth]
             else:
                 fountain_in_fov = True
                 closest_fountain_pos = self.known_fountain_pos
@@ -1521,6 +1538,19 @@ class NetHackAdapter(EnvironmentAdapter):
             and inv_view.has_candelabrum
         )
 
+        if self.known_stairs_down is not None:
+            self.global_stairs_down[depth] = self.known_stairs_down
+        if self.known_stairs_up is not None:
+            self.global_stairs_up[depth] = self.known_stairs_up
+
+        known_fountain_depths = sorted(list(self.global_fountains.keys()))
+        has_known_fountain = len(known_fountain_depths) > 0
+        closest_fountain_depth = (
+            min(known_fountain_depths, key=lambda d: abs(d - depth))
+            if has_known_fountain
+            else None
+        )
+
         dungeon = DungeonView(
             tile_type=tile_type,
             in_shop=in_shop_curr,
@@ -1548,6 +1578,9 @@ class NetHackAdapter(EnvironmentAdapter):
             adjacent_trap=adj_trap,
             standing_on_trap=(curr_char == "^"),
             can_forge_excalibur=can_forge,
+            has_known_fountain=has_known_fountain,
+            closest_fountain_depth=closest_fountain_depth,
+            known_fountain_depths=known_fountain_depths,
             is_sokoban=is_sokoban,
             has_boulders=has_boulders,
             drawbridge_in_fov=(closest_drawbridge is not None),
@@ -1975,6 +2008,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.blocked_tiles.discard((obs.hero.y, obs.hero.x))
         self.non_door_tiles.discard((obs.hero.y, obs.hero.x))
 
+        info["strategic_goal"] = getattr(self, "current_strategic_goal", "")
         return obs, total_reward, bool(term), bool(trunc), info
 
     def reset(self, seed: int | None = None) -> Observation:
@@ -1993,6 +2027,10 @@ class NetHackAdapter(EnvironmentAdapter):
         self.unreachable_targets.clear()
         self._last_search_decay_turn = -1000
         self.mines_stairs_positions.clear()
+        self.global_fountains.clear()
+        self.global_stairs_up.clear()
+        self.global_stairs_down.clear()
+        self.current_strategic_goal = "explore"
         self._last_descended_stair = None
         self.has_poison_res = False
         self.has_magic_res = False
@@ -2021,6 +2059,15 @@ class NetHackAdapter(EnvironmentAdapter):
         self.known_priest_pos = None
         self.last_move_from = (-1, -1)
         self._last_obs_hero_pos = None
+        if seed is not None:
+            try:
+                unwrapped = self.env.unwrapped
+                for attr in ("set_initial_seeds", "set_current_seeds", "get_current_seeds"):
+                    if attr in unwrapped.nethack.__dict__:
+                        delattr(unwrapped.nethack, attr)
+                super(type(unwrapped), unwrapped).seed(core=seed, disp=seed)
+            except Exception:
+                pass
         raw_obs, _ = self.env.reset(seed=seed)
         raw_obs, _, _ = self._dismiss_more(raw_obs, False, False)
         self._last_raw_obs = raw_obs
@@ -2627,6 +2674,55 @@ class NetHackAdapter(EnvironmentAdapter):
             if obs_prev.spatial.has_unvisited_frontier:
                 return self.step(Action(name="step_to_frontier"))
             return self.step(Action(name="step_to_dead_end"))
+
+        elif action.name == "scavenge_loot" and obs_prev is not None:
+            if obs_prev.spatial.has_nearby_loot:
+                return self.step(Action(name="step_to_loot"))
+            elif obs_prev.spatial.has_unvisited_frontier:
+                return self.step(Action(name="step_to_frontier"))
+            return self.step(Action(name="step_to_dead_end"))
+
+        elif action.name == "backtrack_to_depth" and obs_prev is not None:
+            target_depth = (
+                action.target_depth
+                if action.target_depth is not None
+                else action.extra.get(
+                    "target_depth", action.extra.get("depth", obs_prev.hero.depth)
+                )
+            )
+            curr_depth = obs_prev.hero.depth
+            if curr_depth > target_depth:
+                # Need to ascend towards target_depth
+                if obs_prev.spatial.standing_on_stairs_up:
+                    return self.step(Action(name="ascend"))
+                elif self.known_stairs_up:
+                    return self.step(Action(name="step_to_stairs_up"))
+                elif obs_prev.spatial.has_unvisited_frontier:
+                    return self.step(Action(name="step_to_frontier"))
+                return self.step(Action(name="step_to_dead_end"))
+            elif curr_depth < target_depth:
+                # Need to descend towards target_depth
+                if obs_prev.spatial.standing_on_stairs_down:
+                    return self.step(Action(name="descend"))
+                elif self.known_stairs_down:
+                    return self.step(Action(name="step_to_stairs_down"))
+                elif obs_prev.spatial.has_unvisited_frontier:
+                    return self.step(Action(name="step_to_frontier"))
+                return self.step(Action(name="step_to_dead_end"))
+            else:
+                # Already at target depth
+                if obs_prev.spatial.has_unvisited_frontier:
+                    return self.step(Action(name="step_to_frontier"))
+                return self.step(Action(name="wait"))
+
+        elif action.name == "set_strategic_goal":
+            self.current_strategic_goal = (
+                action.goal_name
+                or action.extra.get("goal_name")
+                or action.extra.get("goal")
+                or ""
+            )
+            return self.step(Action(name="wait"))
 
         elif (
             action.name in ("step_away_from_hostile", "retreat")

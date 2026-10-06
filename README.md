@@ -46,23 +46,25 @@ flowchart TD
    - Maintains full-floor topological memory across FOV boundaries and routes around passive hazards using Numba-accelerated A* pathfinding.
 2. **Level 1: The Inner-Loop Policy Synthesizer (`lox.author.agent.AuthorAgent`)**:
    - Driven by `google/gemma-4-31b-it` via OpenRouter.
-   - At the end of every evaluation batch, queries `data/lox.duckdb` for mortality taxonomies, killer rankings, and turn distributions.
-   - Uses an offline NetHack wiki retrieval engine to deduce counter-tactics, mutates the generator policy AST, and validates candidate policies against a strict sandbox and a 1.0-second hardware-timed dry-run.
+   - At the end of every evaluation batch, ingests the **Causal Timeline Dossier** (`CausalTimelineAnalyzer`), diagnosing true multi-thousand-turn failure mechanisms (`EQUIPMENT_NEGLECT`, `PACING_STALL`, `NUTRITION_BLINDNESS`, `TACTICAL_HOARDING`, `MISSED_ARTIFACT`).
+   - Formulates a structured, falsifiable scientific hypothesis in YAML before generating code.
+   - Surgically modifies individual modular skills via AST splicing, validating candidate policies against sandbox rules and a hardware-timed multi-scenario dry-run.
+   - Validates hypothesis predictions on subsequent batches and records complete experiment metadata in the `meta_experiments` DuckDB table.
 3. **Level 2: The Meta-Architect (Outer Loop / Developer & Meta-Agent)**:
    - Evaluates cross-campaign trends, profiles execution bottlenecks, and eliminates C-level edge-case bugs (e.g., character occlusion on fountain tiles, doorway chokepoint detection, zero-turn prompt dismissal).
-   - Consolidates domain invariants in [`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md) and maintains rigorous regression testing.
+   - Consolidates domain invariants in [`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md) and maintains 100% test suite verification.
 
 ---
 
-## 2. How LOX Works: End-to-End Generational Lifecycle
+## 2. How LOX Works: The Scientific Method Generational Lifecycle
 
-Each evolutionary generation in LOX executes a rigorous, closed-loop 6-stage lifecycle:
+Each evolutionary generation in LOX executes a closed-loop 6-stage scientific method lifecycle:
 
 ```
-[1. Parallel Batch Eval] ──► [2. Telemetry Ingestion] ──► [3. SQL Autopsy & Diagnosis]
+[1. Parallel Batch Eval] ──► [2. Causal Timeline Autopsy] ──► [3. Hypothesis Formulation]
         ▲                                                               │
         │                                                               ▼
-[6. Checkpoint Promotion] ◄── [5. Multi-Scenario Dry-Run] ◄── [4. AST Policy Mutation]
+[6. Empirical Validation] ◄── [5. Multi-Scenario Dry-Run] ◄── [4. Surgical Skill Splicing]
 ```
 
 ### Phase 1: Parallel Batch Evaluation
@@ -70,35 +72,48 @@ Each evolutionary generation in LOX executes a rigorous, closed-loop 6-stage lif
 - Each worker runs up to 25,000 game turns per episode using the current policy checkpoint ([`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py)).
 - Zero-lock buffered Parquet streams log every game tick (hero stats, inventory, spatial coordinates, messages) without disk I/O contention.
 
-### Phase 2: Telemetry Ingestion & Vectorized DuckDB Consolidation
+### Phase 2: Telemetry Ingestion & Causal Timeline Autopsy
 - Worker results are merged into `data/lox.duckdb`.
-- Official ground-truth scores are extracted from NetHack C-level `blstats[nh.NLE_BL_SCORE]`.
-- Fatal attacker attribution scans the rolling message buffer and adjacent entities, separating real combat deaths from starvation blackouts and passive hazard encounters.
+- Ground-truth scores are extracted from NetHack C-level `blstats[nh.NLE_BL_SCORE]`.
+- The **Causal Timeline Telemetry Engine** ([`lox/telemetry/diagnostics.py`](file:///home/moose/git/lox/lox/telemetry/diagnostics.py)) traces full 4,000-turn trajectories, identifying true root causes:
+  * `EQUIPMENT_NEGLECT`: Reaching DL $\ge 3$ naked with AC $\ge 6$ after skipping armor on floors 1–4.
+  * `PACING_STALL`: Spending $> 400$ turns on early floors without discovering stairs down.
+  * `NUTRITION_BLINDNESS`: Falling into starvation weakness while safe floor corpses were available.
+  * `TACTICAL_HOARDING`: Dying in combat with unused healing potions or offensive wands.
+  * `MISSED_ARTIFACT`: Failing to forge Excalibur despite having long sword and fountains on visited depths.
 
-#### Phase 3: Empirical Autopsy & Root Cause Diagnosis
-- The `AuthorAgent` executes ReAct tool calls querying DuckDB and the **Empirical Root Cause Diagnostic Engine** ([`lox/telemetry/diagnostics.py`](file:///home/moose/git/lox/lox/telemetry/diagnostics.py)):
-  - Classifies every episode into one of 9 canonical failure archetypes (`STALL_SECRET_DOOR`, `STARVATION_FAINTING`, `ARMOR_DEFICIT`, `PING_PONG_OSCILLATION`, `PREMATURE_PRAYER`, `PASSIVE_HAZARD_PARALYSIS`, `COMBAT_TACTICAL_SWARM`, `COMBAT_FAST_PREDATOR`, `COMBAT_GENERAL`).
-  - Formats clean, ultra-compact YAML reports (`data/latest_report.yaml` and `data/latest_diagnostics.yaml`) cutting token consumption by 70%.
-  - Identifies the primary bottleneck limiting the current generation's average depth without "Killed in combat" final-hit misattribution.
+### Phase 3: Falsifiable Scientific Hypothesis Formulation
+- The `AuthorAgent` analyzes the causal dossier, consults invariants and the offline NetHack encyclopedia (`lox.wiki.engine`), and formulates a structured scientific hypothesis in YAML:
+  ```yaml
+  hypothesis:
+    causal_finding: "EQUIPMENT_NEGLECT: 80% of heroes died with naked body armor (AC 7)"
+    targeted_skill: "skill_scavenge_armor"
+    mechanism: "Prioritize scavenge_loot() over downstairs dive on DL 1-4"
+    predicted_outcome:
+      target_metric: "avg_depth"
+      expected_direction: "increase"
+      min_improvement: 1.0
+  ```
 
-### Phase 4: AST-Constrained Mutation & Domain Guidance
-- The LLM consults the offline NetHack encyclopedia (`lox.wiki.engine`) to look up monster stats, resistances, and game mechanics.
-- The author generates an updated Python generator policy.
-- The policy AST is strictly validated against `ALLOWED_PREDICATES` and `ALLOWED_ACTIONS`. Unauthorized imports, `eval`, `exec`, or unrecognized methods are rejected before compilation.
+### Phase 4: Surgical Modular Skill Splicing
+- Rather than risking monolithic whole-program mutations, the LLM outputs only the modified method (e.g., `def skill_scavenge_armor(self, obs): ...`).
+- `AuthorAgent.splice_policy_methods()` splices the replacement method into `class Agent` via AST, preserving all other verified modular skills 100% intact.
+- The policy AST is strictly validated against `ALLOWED_PREDICATES` and `ALLOWED_ACTIONS`.
 
 ### Phase 5: Multi-Scenario Dry-Run & Loop-Guard Transformation
-- The candidate code is passed through the `LoopGuardTransformer`, injecting `_guard.tick()` into all `while` and `for` loops.
-- A multi-scenario dry-run validator runs the policy against simulated states (`normal`, `hungry`, `combat`, `floating_eye_combat`) under a hardware `SIGALRM` 1.0-second ceiling to verify that every branch yields actions without zero-yield infinite loops.
+- The candidate code is passed through `LoopGuardTransformer`, injecting `_guard.tick()` into all loops.
+- A multi-scenario dry-run validator tests the policy against simulated states (`normal`, `hungry_unsafe_corpse`, `combat`, `floating_eye_combat`) under a hardware `SIGALRM` 1.0-second ceiling to guarantee that every branch yields an action without infinite loops.
 
-### Phase 6: Checkpoint Promotion & Continuous Resumption
+### Phase 6: Counterfactual Twin Replay & Empirical Falsification
 - Verified policies are promoted to [`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py) and archived to `data/policies/gen_XXXX.py`.
-- If a candidate fails validation or regressions occur, the engine safely rolls back to the prior checkpoint.
+- **Counterfactual Seed-Pinned Twin Evaluation (`--twin-test`)**: The candidate policy is re-evaluated against the *exact identical NetHack seeds* that failed previously, measuring paired delta ($\Delta_{\text{paired}}$), win/loss/draw rates, 95% bootstrap confidence intervals, and incident resolution rate with 0 environment variance.
+- Complete scientific hypothesis dossiers and counterfactual outcomes are logged to the `meta_experiments` table in `data/lox.duckdb` for 100% research transparency and reproducibility.
 
 ---
 
 ## 3. Core Technical Invariants & Defensive Shields
 
-LOX's reliability is anchored on 32 consolidated technical invariants across 6 operational domains (documented in full in [`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md) and [`lox/knowledge/invariants.py`](file:///home/moose/git/lox/lox/knowledge/invariants.py)):
+LOX's reliability is anchored on 45 typed empirical invariants across 6 operational domains (documented in full in [`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md) and [`lox/knowledge/invariants.py`](file:///home/moose/git/lox/lox/knowledge/invariants.py)), alongside 18 canonical failure archetypes in [`lox/telemetry/diagnostics.py`](file:///home/moose/git/lox/lox/telemetry/diagnostics.py):
 
 1. **Python Generator Protocol & Subroutine Yields (`INV-ARC-001`)**:
    Policies yield actions (`obs = yield action`). Subroutines are invoked via `obs = yield from self.subroutine(obs)` and conclude with `return obs`.
@@ -192,6 +207,7 @@ uv run python -u -m scripts.run_synthesis \
   --max-turns 25000 \
   --target-depth 20.0 \
   --workers 20 \
+  --starter-policy data/modular_starter_policy.py \
   --policy-path data/latest_policy.py
 ```
 
@@ -208,11 +224,27 @@ uv run python -u -m scripts.run_synthesis \
 
 ## 6. Inspecting Campaign Telemetry with DuckDB & YAML
 
-Every tick, episode, and LLM token usage is recorded in `data/lox.duckdb`, with pure YAML summaries automatically exported to `data/latest_diagnostics.yaml` and `data/latest_report.yaml`:
+Every tick, episode, scientific hypothesis, and LLM token usage is recorded in `data/lox.duckdb`, with pure YAML summaries automatically exported to `data/latest_diagnostics.yaml` and `data/latest_report.yaml`:
 
 ### View Latest Generation Failure Breakdown (YAML)
 ```bash
 cat data/latest_diagnostics.yaml
+```
+
+### Inspect Scientific Hypotheses & Validation Outcomes
+```bash
+uv run python -c "
+import duckdb
+conn = duckdb.connect('data/lox.duckdb', read_only=True)
+rows = conn.execute('''
+    SELECT generation, targeted_skill, causal_finding, baseline_avg_depth, actual_avg_depth, outcome_validated
+    FROM meta_experiments
+    ORDER BY generation DESC
+    LIMIT 10
+''').fetchall()
+for r in rows:
+    print(r)
+"
 ```
 
 ### Check Generation Performance Summary

@@ -169,3 +169,128 @@ def test_summarize_batch():
         summary.save(y_path)
         assert os.path.exists(y_path)
         assert "batch_metrics:" in open(y_path).read()
+
+
+def test_causal_timeline_analyzer():
+    from lox.telemetry.diagnostics import CausalTimelineAnalyzer
+
+    ep_summary = {
+        "episode_id": "test_ep_01",
+        "depth": 6,
+        "turns": 3500,
+        "killer": "soldier ant",
+        "ac_at_death": 7,
+        "inventory_at_death": "a +1 long sword (weapon in hand), a +3 small shield (being worn)",
+        "death_reason": "killed by a soldier ant",
+        "score": 600,
+        "turns_dl1": 1200,
+        "turns_dl2": 900,
+    }
+    ticks = [
+        {"turn": 100, "depth": 1, "hp": 15, "max_hp": 15, "ac": 7, "action": "search"},
+        {"turn": 1500, "depth": 2, "hp": 22, "max_hp": 22, "ac": 7, "action": "search"},
+        {"turn": 3400, "depth": 6, "hp": 35, "max_hp": 35, "ac": 7, "action": "melee_attack_hostile"},
+    ]
+
+    dossier = CausalTimelineAnalyzer.analyze_episode(ep_summary, ticks)
+    assert dossier.episode_id == "test_ep_01"
+    assert dossier.depth == 6
+    assert any("EQUIPMENT_NEGLECT" in d for d in dossier.causal_drivers)
+    assert any("PACING_STALL" in d for d in dossier.causal_drivers)
+    assert any("MISSED_ARTIFACT" in d for d in dossier.causal_drivers)
+    assert "Prioritize skill_scavenge_armor" in dossier.strategic_recommendation
+
+    # Test batch summarization
+    batch_summary = CausalTimelineAnalyzer.summarize_batch([dossier])
+    assert batch_summary["total_incidents"] == 1
+    assert any(b["bottleneck"] == "EQUIPMENT_NEGLECT" for b in batch_summary["systemic_bottlenecks"])
+
+
+def test_classify_new_archetypes():
+    from lox.telemetry.diagnostics import CausalTimelineAnalyzer
+
+    # 1. Petrification
+    ep_pet = {
+        "episode_id": "ep_pet",
+        "depth": 8,
+        "turns": 2000,
+        "killer": "chickatrice",
+        "death_reason": "turned to stone",
+    }
+    diag_pet = RootCauseClassifier.classify(ep_pet)
+    assert diag_pet.primary_archetype == FailureArchetype.PETRIFICATION
+    assert any("COCKATRICE_BLINDNESS" in d for d in diag_pet.causal_dossier.causal_drivers)
+
+    # 2. Poison Instadeath
+    ep_poi = {
+        "episode_id": "ep_poi",
+        "depth": 3,
+        "turns": 1100,
+        "killer": "killer bee",
+        "death_reason": "died of poison from a killer bee's sting",
+    }
+    diag_poi = RootCauseClassifier.classify(ep_poi)
+    assert diag_poi.primary_archetype == FailureArchetype.INSTADEATH_POISON
+    assert any("UNCHECKED_POISON_VULNERABILITY" in d for d in diag_poi.causal_dossier.causal_drivers)
+
+    # 3. Peaceful NPC Provocation
+    ep_peace = {
+        "episode_id": "ep_peace",
+        "depth": 5,
+        "turns": 1500,
+        "killer": "vault guard",
+        "death_reason": "killed by a guard",
+    }
+    diag_peace = RootCauseClassifier.classify(ep_peace)
+    assert diag_peace.primary_archetype == FailureArchetype.PEACEFUL_NPC_PROVOCATION
+    assert any("PROVOKED_NEUTRAL" in d for d in diag_peace.causal_dossier.causal_drivers)
+
+    # 4. Trap Fatality
+    ep_trap = {
+        "episode_id": "ep_trap",
+        "depth": 4,
+        "turns": 900,
+        "killer": "spiked pit",
+        "death_reason": "fell into a spiked pit",
+    }
+    diag_trap = RootCauseClassifier.classify(ep_trap)
+    assert diag_trap.primary_archetype == FailureArchetype.TRAP_FATALITY
+    assert any("FATAL_TRAP_TRIGGER" in d for d in diag_trap.causal_dossier.causal_drivers)
+
+    # 5. Drowning or Lava
+    ep_drown = {
+        "episode_id": "ep_drown",
+        "depth": 7,
+        "turns": 2500,
+        "killer": "pool of water",
+        "death_reason": "drowned in a pool of water",
+    }
+    diag_drown = RootCauseClassifier.classify(ep_drown)
+    assert diag_drown.primary_archetype == FailureArchetype.DROWNING_OR_LAVA
+    assert any("HAZARDOUS_TERRAIN_IMMERSION" in d for d in diag_drown.causal_dossier.causal_drivers)
+
+    # 6. Status Effect Helpless
+    ep_status = {
+        "episode_id": "ep_status",
+        "depth": 4,
+        "turns": 1200,
+        "killer": "orc",
+        "death_reason": "killed while sleeping",
+    }
+    diag_status = RootCauseClassifier.classify(ep_status)
+    assert diag_status.primary_archetype == FailureArchetype.STATUS_EFFECT_HELPLESS
+    assert any("DISABLING_STATUS" in d for d in diag_status.causal_dossier.causal_drivers)
+
+    # 7. Encumbrance Immobility
+    ep_enc = {
+        "episode_id": "ep_enc",
+        "depth": 3,
+        "turns": 800,
+        "killer": "rothe",
+        "inventory_at_death": "a plate mail (strained)",
+        "death_reason": "killed in combat",
+    }
+    diag_enc = RootCauseClassifier.classify(ep_enc)
+    assert diag_enc.primary_archetype == FailureArchetype.ENCUMBRANCE_IMMOBILITY
+    assert any("ENCUMBRANCE_IMMOBILITY" in d for d in diag_enc.causal_dossier.causal_drivers)
+

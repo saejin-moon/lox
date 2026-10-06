@@ -618,7 +618,38 @@ class Agent:
         if match_def:
             return match_def.group(1).strip()
 
-        return response_text.strip()
+    def extract_hypothesis(self, response_text: str) -> dict[str, Any] | None:
+        """Extracts structured scientific hypothesis from response text."""
+        if not response_text:
+            return None
+        import yaml
+
+        # 1. Search for ```yaml ... ``` or ```json ... ``` blocks with hypothesis
+        blocks = re.findall(
+            r"```(?:ya?ml|json)?\s*\n(.*?)```", response_text, re.DOTALL
+        )
+        for block in blocks:
+            if "hypothesis" in block:
+                try:
+                    data = yaml.safe_load(block)
+                    if isinstance(data, dict):
+                        return data.get("hypothesis", data)
+                except Exception:
+                    pass
+
+        # 2. Search unclosed or raw block
+        match = re.search(
+            r"(?:^|\n)(hypothesis:\s*\n(?:[ \t]+[^\n]+\n?)+)", response_text
+        )
+        if match:
+            try:
+                data = yaml.safe_load(match.group(1))
+                if isinstance(data, dict):
+                    return data.get("hypothesis", data)
+            except Exception:
+                pass
+
+        return None
 
     def synthesize_policy(
         self,
@@ -628,6 +659,7 @@ class Agent:
         run_id: str = "synth_run",
         action_handlers: dict | None = None,
         max_repairs: int = 2,
+        causal_summary: str = "",
     ) -> tuple[str, Any, str | None]:
         """
         Runs one authoring session with tool calling, AST compilation, and self-repair retries.
@@ -635,8 +667,11 @@ class Agent:
         """
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
         self._current_run_id = run_id
+        self.last_hypothesis = None
         system_prompt = build_system_prompt()
-        user_prompt = build_user_prompt(current_policy, trigger_reason, status_report)
+        user_prompt = build_user_prompt(
+            current_policy, trigger_reason, status_report, causal_summary=causal_summary
+        )
 
         if self.provider == "gemini":
             raw_response = self._call_gemini(
@@ -652,6 +687,7 @@ class Agent:
             )
 
         # Compilation and Self-Repair Loop
+        self.last_hypothesis = self.extract_hypothesis(raw_response)
         extracted = self.extract_code(raw_response)
         candidate_code = (
             self.splice_policy_methods(current_policy, extracted)

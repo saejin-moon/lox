@@ -847,6 +847,9 @@ class DungeonView:
     adjacent_trap: bool = False
     standing_on_trap: bool = False
     can_forge_excalibur: bool = False
+    has_known_fountain: bool = False
+    closest_fountain_depth: int | None = None
+    known_fountain_depths: list[int] = field(default_factory=list)
     can_harvest_poison: bool = False
     is_sokoban: bool = False
     has_boulders: bool = False
@@ -939,4 +942,6 @@ class Action:
     target_pos: tuple[int, int] | None = None
     count: int = 1  # Repeat count
     subroutine: str = ""  # Policy goal/subroutine name
+    target_depth: int | None = None  # Target depth for backtrack_to_depth
+    goal_name: str | None = None  # Active goal name for set_strategic_goal
     extra: dict[str, Any] = field(default_factory=dict)

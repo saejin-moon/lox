@@ -12,13 +12,17 @@ This document provides complete operational context, architectural foundations, 
 - **Target Model**: `google/gemma-4-31b-it`.
 - **Max Turns**: 25,000 turns per episode (`--max-turns 25000`).
 - **Batch Size**: 20 evaluation episodes per generation (`--eval-episodes 20`).
+- **Starter Policy**: Clean modular baseline at [`data/modular_starter_policy.py`](file:///home/moose/git/lox/data/modular_starter_policy.py) with decoupled skills (`determine_goal`, `skill_combat`, `skill_scavenge_armor`, `skill_forge_excalibur`, `skill_explore_and_dive`).
 - **Checkpoint Resumption**: Policies resume seamlessly from [`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py).
 - **Completion Condition**: When a generation batch achieves `avg_depth >= 20.0`, the loop logs `[CAMPAIGN GOAL ACHIEVED]` and finishes.
-- **Mandatory End-of-Campaign Post-Mortem & Evolution Protocol**: At the conclusion of **EVERY** campaign run, the agent MUST ALWAYS perform a rigorous empirical post-mortem analysis:
-  1. **DuckDB Autopsy**: Query `episodes` and `ticks` to categorize all mortality causes, killer species, turn distributions, AC at death, and action frequencies across all generations.
-  2. **Unwanted Behavior Elimination**: Pinpoint pathological behaviors, loops, oscillations, or tactical stalls (e.g. 2-tile ping-pongs, unequipped armor, premature prayer, floating eye melee attacks, starvation deadlocks) and implement concrete code fixes.
-  3. **Progression Engineering**: Introduce architectural, harness, and policy enhancements targeted at advancing deeper into the 7 canonical NetHack ascension phases.
-  4. **Documentation & Test Verification**: Verify all unit tests pass with zero regressions and synchronize living documentation (`AGENTS.md`, `TODO.md`, `README.md`) before launching the next campaign.
+- **The Scientific Method Policy Synthesis Protocol**:
+  1. **Causal Timeline Autopsy & Expanded Archetypes**: At every generation batch, the engine computes full-trajectory causal incident dossiers across 4,000-turn runs classifying failures across 18 canonical archetypes (`EQUIPMENT_NEGLECT`, `PACING_STALL`, `NUTRITION_BLINDNESS`, `TACTICAL_HOARDING`, `MISSED_ARTIFACT`, `INSTADEATH_POISON`, `PETRIFICATION`, `PEACEFUL_NPC_PROVOCATION`, `TRAP_FATALITY`, `DROWNING_OR_LAVA`, `STATUS_EFFECT_HELPLESS`, `ENCUMBRANCE_IMMOBILITY`), completely eliminating the superficial "Killed in combat" final-hit misattribution trap.
+  2. **Hypothesis Formulation**: Before emitting code, the synthesizer MUST construct a structured, falsifiable scientific hypothesis YAML (`causal_finding`, `targeted_skill`, `mechanism`, `predicted_outcome`).
+  3. **Targeted Modular Skill Splicing**: Rather than risky monolithic whole-program rewrites, the synthesizer splices surgical AST modifications into specific modular skills (`determine_goal`, `skill_combat`, `skill_scavenge_armor`, `skill_forge_excalibur`, `skill_explore_and_dive`).
+  4. **Counterfactual Seed-Pinned Twin Replay (`--twin-test`)**: Candidate policies are evaluated against the *exact identical NetHack seeds* that failed previously, measuring paired delta ($\Delta_{\text{paired}} = \text{depth}_{\text{cand}} - \text{depth}_{\text{base}}$), 95% bootstrap confidence intervals, and incident resolution rate with 0 environment variance.
+  5. **Empirical Falsification & Audit Logging**: Each hypothesis outcome is evaluated and permanently logged into the DuckDB `meta_experiments` table with paired metrics for 100% research reproducibility.
+  6. **Multi-Benchmark Portability**: The three-layer synthesis architecture (Domain-Agnostic Causal Hypothesizer $\to$ Modular Skill Library $\to$ Verified Primitives) is fully decoupled and targets **NetHack** (Ascension), **Craftax** (JAX roguelike), and **Crafter** (open-world survival).
+  7. **End-of-Campaign Protocol**: Perform comprehensive post-mortem analysis across `episodes`, `ticks`, and `meta_experiments`, verify unit tests pass with zero regressions, and synchronize living documentation (`AGENTS.md`, `TODO.md`, `README.md`).
 
 ---
 
@@ -27,9 +31,10 @@ This document provides complete operational context, architectural foundations, 
 ```
 lox/
 ├── author/
-│   └── agent.py          # AuthorAgent: LLM tool-calling loop, AST validation, multi-scenario dry-run validator
+│   ├── agent.py          # AuthorAgent: LLM ReAct loop, hypothesis extraction, AST method splicing
+│   └── prompts.py        # System & user prompts: Causal Timeline Dossier, Scientific Method protocol
 ├── core/
-│   ├── types.py          # Observation, HeroState, CombatView, SpatialView, DungeonView, Action, FloorCorpse
+│   ├── types.py          # Observation, HeroState, CombatView, SpatialView, DungeonView, Action
 │   ├── spatial.py        # SpatialEngine: Numba JIT A* pathfinding, frontier discovery, distance grids
 │   └── tree.py           # AST-to-BT nodes (Selector, Sequence, Condition, ActionNode, Blackboard)
 ├── dsl/
@@ -38,20 +43,24 @@ lox/
 │   └── compiler.py       # Compiles class-based generator policies (Agent.run(obs)) and AST trees
 ├── envs/
 │   ├── base.py           # EnvironmentAdapter base class
-│   └── nethack.py        # NetHackAdapter: NLE gym wrapper, menu dismissal, navigation & tactical primitives
+│   └── nethack.py        # NetHackAdapter: NLE gym wrapper, macro primitives (backtrack, scavenge, goal), global memory
 ├── eval/
 │   └── runner.py         # Batch evaluation engine, DuckDB episode and tick telemetry logger
 ├── knowledge/
 │   └── invariants.py     # Canonical Empirical Knowledge Base: 45 typed, indexed invariants (REGISTRY)
 ├── telemetry/
 │   ├── consolidator.py   # DuckDB consolidation from Parquet buffers & schema evolution
-│   ├── diagnostics.py    # Multi-dimensional Empirical Root Cause Diagnostic Engine
+│   ├── diagnostics.py    # CausalTimelineAnalyzer, CausalIncidentDossier, Multi-dimensional Root Cause Engine
 │   ├── parquet.py        # High-throughput pyarrow Parquet telemetry logger
 │   ├── recorder.py       # Circular 100-turn in-memory flight recorder
 │   ├── tokens.py         # LLM token usage tracking & cost accounting
 │   └── triggers.py       # Dynamic incident triggers (stalls, cluster mortalities)
 ├── wiki/
 │   └── engine.py         # Offline NetHack wiki retrieval engine for LLM queries
+data/
+├── modular_starter_policy.py  # Decoupled modular starter template (clean scientific baseline)
+├── latest_policy.py           # Active promoted policy checkpoint
+└── lox.duckdb                 # Telemetry database: episodes, ticks, evolved_policies, meta_experiments
 ```
 
 ---
@@ -219,11 +228,42 @@ lox/
    - Acid blobs (`"blob"`) and gray oozes (`"ooze"`) added to `is_passive` in `step_away_from_hostile()` so the deadlock circuit breaker breaks proximity instead of looping `step_to_chokepoint()`.
    - `AuthorAgent.splice_policy_methods()` and `parse_and_validate()` automatically dedent candidate patches via `textwrap.dedent()`, eliminating LLM indentation mismatch compilation errors.
 
+### 3.7 Scientific Method, Causal Telemetry & Environmental Agency Invariants
+54. **Causal Timeline Analysis vs Fatal Hit Misattribution (`INV-CAU-001`)**:
+   - In NetHack, the fatal blow is almost always a monster attack, causing naive autopsies to label 84%+ of deaths "Killed in combat". In reality, 80%+ die because they skipped armor on floors 2–4 and face Depth 4 predators completely naked (AC 7).
+   - `CausalTimelineAnalyzer` traces 5 distinct full-trajectory causal patterns: `EQUIPMENT_NEGLECT` (naked body armor past DL 2), `PACING_STALL` (exceeding turn budget without down stairs), `NUTRITION_BLINDNESS` (ignoring safe floor corpses), `TACTICAL_HOARDING` (dying with unused wands/potions), and `MISSED_ARTIFACT` (reaching DL 5+ as Valkyrie without Excalibur).
+55. **Scientific Hypothesis Formulation & Empirical Falsification (`INV-SCI-001`)**:
+   - The LLM Author Agent does NOT perform blind whole-program edits. Before generating code, it MUST output a structured YAML hypothesis:
+     ```yaml
+     hypothesis:
+       causal_finding: "<specific root cause from causal timeline dossier>"
+       targeted_skill: "<e.g. skill_scavenge_armor>"
+       mechanism: "<concrete behavioral/algorithmic change>"
+       predicted_outcome:
+         target_metric: "<e.g. avg_depth, ac_at_death>"
+         expected_direction: "increase" | "decrease"
+         min_improvement: 1.0
+     ```
+   - On the subsequent generation, the engine checks whether the prediction was `VALIDATED` or `FALSIFIED` against actual batch metrics and updates the database record.
+56. **High-Level Macro Primitives & Environmental Agency (`INV-ENV-001`)**:
+   - Pure reactive policies struggle with long-horizon intentions. The environment adapter provides high-level macro primitives:
+     * `backtrack_to_depth(target_depth)`: Ascends or descends across levels to reach a target floor (e.g. returning to DL 3 fountain to forge Excalibur).
+     * `scavenge_loot()`: Scans the floor for dropped equipment (`[ ! ? / = $ %`) and pathfinds to collect it before diving.
+     * `set_strategic_goal(goal_name)`: Declares active intention (`'scavenge_armor'`, `'forge_excalibur'`, `'dive'`), logging it to tick telemetry.
+     * Global Multi-Floor Sensory Memory: Exposes `obs.dungeon.has_known_fountain`, `obs.dungeon.closest_fountain_depth`, and `obs.dungeon.known_fountain_depths`.
+57. **Decoupled Modular Skill Splicing & Clean Starter Template (`INV-MOD-001`)**:
+   - Monolithic 500-line generator files suffer from severe syntax failure rates and conservative LLM mutation.
+   - Policies are partitioned into cleanly decoupled modular skills: `determine_goal`, `skill_combat`, `skill_scavenge_armor`, `skill_forge_excalibur`, `skill_explore_and_dive`, and `run`.
+   - `AuthorAgent.splice_policy_methods()` splices individual method replacements surgically via AST, leaving all other validated skills 100% intact.
+   - Campaigns can start fresh from `data/modular_starter_policy.py` (`--starter-policy`) to evaluate true causal synthesis without legacy compounding.
+58. **Meta-Experiment Audit Reproducibility in DuckDB (`INV-EXP-001`)**:
+   - Every hypothesis, targeted skill, predicted outcome, actual outcome, and validation status is recorded in the `meta_experiments` table in `data/lox.duckdb`, ensuring 100% research transparency between meta-architect and autonomous synthesizer.
+
 ---
 
 ## 4. Key CLI Commands
 
-### Run Synthesis Campaign
+### Run Synthesis Campaign (with Modular Starter Policy)
 ```bash
 uv run python -u -m scripts.run_synthesis \
   --provider openrouter \
@@ -233,6 +273,7 @@ uv run python -u -m scripts.run_synthesis \
   --max-turns 25000 \
   --target-depth 20.0 \
   --workers 20 \
+  --starter-policy data/modular_starter_policy.py \
   --policy-path data/latest_policy.py
 ```
 
@@ -241,16 +282,16 @@ uv run python -u -m scripts.run_synthesis \
 uv run pytest -v
 ```
 
-### Query Campaign Progress via DuckDB
+### Query Scientific Hypotheses & Progress via DuckDB
 ```bash
-# Check recent episode performance
+# Query meta-experiments audit log (scientific method tracking)
 uv run python -c "
 import duckdb
 conn = duckdb.connect('data/lox.duckdb', read_only=True)
 rows = conn.execute('''
-    SELECT run_id, episode_id, depth, max_depth, turns, death_reason 
-    FROM episodes 
-    ORDER BY episode_id DESC 
+    SELECT generation, targeted_skill, causal_finding, baseline_avg_depth, actual_avg_depth, outcome_validated
+    FROM meta_experiments
+    ORDER BY generation DESC
     LIMIT 10
 ''').fetchall()
 for r in rows:

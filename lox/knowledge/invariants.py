@@ -62,11 +62,11 @@ INVARIANTS: list[Invariant] = [
         rule=(
             "If standing on stairs down and not levitating, policies must prioritize descend() "
             "immediately, even during combat. Escaping takes 1 turn and guarantees 100% survival "
-            "against lethal mid-dungeon threats. In handle_combat(), standing on stairs down must "
+            "against lethal mid-dungeon threats. In skill_combat(), standing on stairs down must "
             "instantly yield descend() and break combat."
         ),
         anti_pattern=(
-            "Placing handle_combat() before checking standing_on_stairs_down, or engaging in "
+            "Placing skill_combat() before checking standing_on_stairs_down, or engaging in "
             "melee combat while standing directly on the down-stairs."
         ),
         code_snippet="""
@@ -75,10 +75,10 @@ if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
     obs = (yield descend())
     continue
 
-# In handle_combat():
+# In skill_combat():
 if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
     obs = (yield descend())
-    break
+    return obs
 """,
         related_ids=["INV-NAV-002", "INV-CBT-001"],
     ),
@@ -119,20 +119,20 @@ if obs.hero.dungeon_branch == "mines":
             "heroes to spend 1,000+ turns searching walls while unexplored rooms lay directly behind closed doors."
         ),
         anti_pattern=(
-            "Falling directly into handle_dead_end() when has_unvisited_frontier is False while "
+            "Falling directly into wall search when has_unvisited_frontier is False while "
             "unopened closed doors are visible in the room."
         ),
         code_snippet="""
-elif obs.spatial.has_unvisited_frontier:
-    self.search_count = 0
+# In skill_explore_and_dive():
+if obs.spatial.has_unvisited_frontier:
     obs = (yield step_to_frontier())
-    continue
-elif obs.dungeon.has_closed_door:
+    return obs
+if obs.dungeon.has_closed_door:
     obs = (yield step_to_closed_door())
-    continue
-elif obs.spatial.has_unsearched_dead_end:
-    obs = (yield from self.handle_dead_end(obs))
-    continue
+    return obs
+if obs.spatial.has_unsearched_dead_end:
+    obs = (yield step_to_dead_end())
+    return obs
 """,
         related_ids=["INV-NAV-004"],
     ),
@@ -169,7 +169,7 @@ if obs.dungeon.adjacent_closed_door:
         rule=(
             "Corridor dead ends (walkable # or lit . with <= 1 cardinal neighbor) connect directly "
             "to unexplored rooms and must take absolute Priority 1 over room perimeter wall searching in "
-            "step_to_dead_end. In handle_dead_end(), execute up to 15 searches per tile (>91% discovery chance) "
+            "step_to_dead_end. In skill_explore_and_dive(), execute up to 15 searches per tile (>91% discovery chance) "
             "breaking immediately if stairs or frontiers are revealed. When dead ends are exhausted, decay searched "
             "count immediately to prevent 50-turn 2-tile ping-pong oscillations."
         ),
@@ -177,26 +177,24 @@ if obs.dungeon.adjacent_closed_door:
             "Searching only 5 times (44% failure rate) and then bouncing between 2 tiles in a 50-turn decay stall."
         ),
         code_snippet="""
-def handle_dead_end(self, obs):
-    if obs.spatial.standing_on_dead_end:
-        for _ in range(15):
-            if obs.combat.hostile_count_fov > 0:
-                return obs
-            if obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
-                return obs
-            obs = (yield search())
-        if obs.spatial.stairs_down_known:
-            obs = (yield step_to_stairs_down())
-        elif obs.spatial.has_unvisited_frontier:
-            obs = (yield step_to_frontier())
-        elif obs.dungeon.has_closed_door:
-            obs = (yield step_to_closed_door())
-        else:
-            obs = (yield step_to_dead_end())
-        return obs
-    else:
-        obs = (yield step_to_dead_end())
-        return obs
+# In skill_explore_and_dive(self, obs):
+if obs.spatial.standing_on_dead_end:
+    for _ in range(15):
+        if obs.combat.hostile_count_fov > 0 or obs.spatial.stairs_down_known or obs.spatial.has_unvisited_frontier:
+            return obs
+        obs = (yield search())
+    return obs
+if obs.spatial.stairs_down_known:
+    obs = (yield step_to_stairs_down())
+    return obs
+if obs.spatial.has_unvisited_frontier:
+    obs = (yield step_to_frontier())
+    return obs
+if obs.dungeon.has_closed_door:
+    obs = (yield step_to_closed_door())
+    return obs
+obs = (yield step_to_dead_end())
+return obs
 """,
         related_ids=["INV-NAV-003", "INV-NAV-006"],
     ),
@@ -253,7 +251,7 @@ if obs.dungeon.has_sokoban_entrance and obs.hero.hp_frac >= 0.70:
         tags=["early rush", "stairs_down", "descend", "dl1", "dl2", "zero-loot", "pacing"],
         rule=(
             "On shallow levels (DL 1–2), monster threat is minimal and dropped monster equipment consists mostly of junk weapons. "
-            "Lingering on DL 1–2 to scoop loot burns food nutrition and wastes hundreds of turns. In phase_early_rush(), discovering "
+            "Lingering on DL 1–2 to scoop loot burns food nutrition and wastes hundreds of turns. In skill_explore_and_dive(), discovering "
             "stairs down (obs.spatial.stairs_down_known) MUST take absolute precedence over step_to_loot(). Descend immediately to DL 3+ "
             "where mithril armor and fountains generate."
         ),
@@ -262,11 +260,11 @@ if obs.dungeon.has_sokoban_entrance and obs.hero.hp_frac >= 0.70:
             "dropped darts and daggers while starving."
         ),
         code_snippet="""
-# In phase_early_rush() [DL 1-2]:
+# In skill_explore_and_dive() [DL 1-2]:
 if obs.spatial.stairs_down_known:
     obs = (yield step_to_stairs_down())
     return obs
-if obs.spatial.has_nearby_loot:
+if obs.spatial.has_nearby_loot and obs.hero.depth >= 3:
     obs = (yield step_to_loot())
     return obs
 """,
@@ -280,7 +278,7 @@ if obs.spatial.has_nearby_loot:
         rule=(
             "On DL 1–2, procedural generation can seal the starting room behind secret doors with no external corridors or visible frontiers. "
             "In NetHackAdapter, when frontiers are empty and stairs down are unknown, search decay triggers after 100 turns (instead of 500), "
-            "and starting room perimeter search escalates to 20 sweeps. In policies, handle_dead_end() must abort searching immediately "
+            "and starting room perimeter search escalates to 20 sweeps. In policies, skill_explore_and_dive() must abort searching immediately "
             "upon taking unexpected damage or detecting adjacent hostiles."
         ),
         anti_pattern=(
@@ -545,7 +543,7 @@ if closest_name in ('shopkeeper', 'watchman', 'watch captain', 'guard', 'priest'
             "standing still while a disguised mimic or invisible monster beats the hero from 67 HP to death."
         ),
         code_snippet="""
-# In handle_dead_end: abort search immediately if taking damage or attacked
+# In skill_explore_and_dive: abort search immediately if taking damage or attacked
 prev_hp = obs.hero.hp
 for _ in range(12):
     if (
@@ -733,8 +731,8 @@ if obs.combat.adjacent_hostile and obs.hero.hp_frac > 0.35:
         ),
         code_snippet="""
 # Fresh floor corpses first, carried food second
-if any(c.is_safe for c in obs.corpses) and obs.hero.hunger_state >= 1:
-    obs = (yield from self.handle_corpse_consumption(obs))
+if any(c.is_safe for c in obs.corpses) and obs.hero.hunger_state >= 1 and not obs.combat.adjacent_hostile:
+    obs = (yield eat_floor_corpse())
     continue
 if obs.hero.hunger_state >= 1 and obs.inventory.has_food:
     obs = (yield eat_carried_food())
@@ -756,10 +754,8 @@ if obs.hero.hunger_state >= 1 and obs.inventory.has_food:
             "Eating an aged carried corpse from the backpack, causing fatal food poisoning or illness."
         ),
         code_snippet="""
-def handle_corpse_consumption(self, obs):
-    if obs.combat.hostile_count_fov > 0:
-        obs = (yield wait())
-        return obs
+# Safe floor corpse harvesting inside run() or skill_combat():
+if obs.combat.hostile_count_fov == 0:
     for corpse in obs.corpses:
         if corpse.is_safe:
             if (obs.hero.y, obs.hero.x) == (corpse.y, corpse.x):
@@ -768,8 +764,6 @@ def handle_corpse_consumption(self, obs):
             else:
                 obs = (yield step_to(corpse.y, corpse.x))
                 return obs
-    obs = (yield (step_to_frontier() if obs.spatial.has_unvisited_frontier else step_to_dead_end()))
-    return obs
 """,
         related_ids=["INV-NUT-001"],
     ),
@@ -791,7 +785,7 @@ def handle_corpse_consumption(self, obs):
             "Praying for food when merely hunger_state == 3 ('Weak') or hunger_state == 2 ('Hungry'), wasting divine favor without receiving food."
         ),
         code_snippet="""
-# In handle_combat() and run():
+# In skill_combat() and run():
 # 1. Proactive eating of packaged food
 if obs.hero.hunger_state >= 1 and obs.inventory.has_food:
     obs = (yield eat_carried_food())
@@ -848,18 +842,18 @@ if obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 2 and not obs.inventory.
             "and dying of starvation with food rations in inventory."
         ),
         code_snippet="""
-# In handle_combat():
+# In skill_combat():
 # 1. Emergency eating: unconditional at Weak/Fainting
 if obs.hero.hunger_state >= 2 and obs.inventory.has_food:
     if not obs.combat.adjacent_hostile or obs.combat.standing_on_elbereth or obs.hero.hunger_state >= 3:
         obs = (yield eat_carried_food())
-        continue
+        return obs
 
 # 2. Emergency prayer: unconditional at Fainting when food exhausted
 if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
     self.last_prayer_turn = obs.hero.turn
     obs = (yield pray())
-    continue
+    return obs
 """,
         related_ids=["INV-NUT-001", "INV-NUT-003", "INV-NUT-004"],
     ),
@@ -997,14 +991,14 @@ if obs.inventory.get_superior_body_armor_slot() is not None:
             "Treating rothe herds like isolated jackals and fighting in the open, allowing 3 rothes to deal 9 unretaliated attacks per turn."
         ),
         code_snippet="""
-# In handle_combat():
+# In skill_combat():
 if obs.combat.is_pack_threat and not obs.combat.in_corridor and not obs.combat.standing_on_elbereth:
     if not (obs.combat.adjacent_hostile and obs.combat.hostile_ignores_elbereth):
         obs = (yield engrave_dust_elbereth())
-        continue
+        return obs
     elif obs.combat.can_retreat:
         obs = (yield step_to_chokepoint())
-        continue
+        return obs
 """,
         related_ids=["INV-CBT-003", "INV-CBT-005"],
     ),
@@ -1110,14 +1104,17 @@ body_mask = GLYPH_IS_BODY_LUT[valid_glyphs]
 class Agent:
     def run(self, obs):
         while True:
-            if obs.combat.adjacent_hostile:
-                obs = (yield from self.handle_combat(obs))
+            goal = self.determine_goal(obs)
+            if goal == "combat":
+                obs = (yield from self.skill_combat(obs))
                 continue
-            obs = (yield step_to_frontier())
+            obs = (yield from self.skill_explore_and_dive(obs))
 
-    def handle_combat(self, obs):
-        while obs.combat.adjacent_hostile:
+    def skill_combat(self, obs):
+        if obs.combat.adjacent_hostile:
             obs = (yield melee_attack_hostile())
+            return obs
+        obs = (yield wait())
         return obs
 """,
         related_ids=["INV-ARC-002", "INV-ARC-003"],
@@ -1148,7 +1145,7 @@ class Agent:
         tags=["ast", "splicing", "synthesis", "methods", "tokens"],
         rule=(
             "AuthorAgent.splice_policy_methods() parses candidate code via Python AST, allowing LLMs to output only "
-            "the specific modified method(s) (e.g. def handle_combat(...)). Splicing merges the updated method into "
+            "the specific modified method(s) (e.g. def skill_combat(...)). Splicing merges the updated method into "
             "class Agent while keeping working subroutines intact, reducing completion tokens by 4x-5x and latency to ~15s."
         ),
         anti_pattern=(
@@ -1177,9 +1174,9 @@ new_policy_code = author.splice_policy_methods(base_code=current_policy, patch_c
         rule=(
             "Immobile passive hazards (floating eyes, gas spores, brown molds) at distance >= 2 do NOT hunt or pursue "
             "the hero. If the hero is not adjacent to hostiles, has no active hostile chasing them (not obs.combat.has_active_hostile), "
-            "and possesses no ranged weapons (daggers or offensive wands), handle_combat() MUST break immediately to return control "
+            "and possesses no ranged weapons (daggers or offensive wands), skill_combat() MUST return control "
             "to run(). The spatial pathfinding engine (walkable_nav) automatically routes around passive hazards. Staying inside "
-            "handle_combat() without this exit guard traps the hero in endless step_away_from_hostile() oscillations at distance 2-4, "
+            "skill_combat() without this exit guard traps the hero in endless step_away_from_hostile() oscillations at distance 2-4, "
             "starving and dying prematurely without exploring."
         ),
         anti_pattern=(
@@ -1187,19 +1184,13 @@ new_policy_code = author.splice_policy_methods(base_code=current_policy, patch_c
             "no ranged weapons. This traps the agent in combat mode against distant immobile eyes and spores."
         ),
         code_snippet="""
-# In handle_combat():
+# In skill_combat():
 if not obs.combat.adjacent_hostile and not obs.combat.has_active_hostile:
     if not (obs.inventory.has_offensive_wand or obs.inventory.has_daggers):
-        break
+        return obs
 
-# In run():
-if (
-    obs.combat.adjacent_hostile
-    or obs.combat.has_active_hostile
-    or (obs.combat.hostile_count_fov > 0 and (obs.inventory.has_offensive_wand or obs.inventory.has_daggers))
-):
-    obs = (yield from self.handle_combat(obs))
-    continue
+# In determine_goal():
+# Immobile hazards at distance >= 2 without active hostility allow goal 'explore_and_dive'
 """,
         related_ids=["INV-CBT-002", "INV-CBT-004", "INV-NAV-006"],
     ),

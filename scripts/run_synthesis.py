@@ -85,7 +85,8 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
 
     tree = compile_policy(policy_code)
     ep_id = f"{gen_dir_id}_e{ep_idx + 1:03d}"
-    obs = adapter.reset(seed=(gen * 1000 + ep_idx))
+    seed = payload.get("seed", gen * 1000 + ep_idx)
+    obs = adapter.reset(seed=seed)
     ep_turns = 0
     death_reason = "active"
     max_depth_reached = obs.hero.depth if obs.hero.depth > 0 else 1
@@ -491,6 +492,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "episode_id": ep_id,
+        "seed": seed,
         "final_depth": final_depth,
         "final_score": final_score,
         "ep_turns": ep_turns,
@@ -532,7 +534,7 @@ def run_synthesis_loop(
     role: str = "valkyrie",
     task: str = "MiniHack-ExploreMaze-Easy-Mapped-v0",
     max_generations: int = 500,
-    eval_episodes: int = 50,
+    eval_episodes: int = 20,
     max_turns: int = 10000,
     policy_path: str = "data/latest_policy.py",
     fresh: bool = False,
@@ -541,6 +543,9 @@ def run_synthesis_loop(
     db_path: str = "data/lox.duckdb",
     target_depth: float | None = None,
     workers: int = 10,
+    starter_policy: str = "data/modular_starter_policy.py",
+    twin_test: bool = True,
+    seed_base: int = 42,
 ):
     print("=" * 65)
     print("LOX Embodied Batched Empirical Policy Synthesis Engine")
@@ -553,9 +558,11 @@ def run_synthesis_loop(
         f"Config:      {max_generations} gens | {eval_episodes} eps/gen | {max_turns} max turns"
     )
     print(f"Parallelism: {workers} workers ({min(workers, eval_episodes)} concurrent)")
+    print(f"Validation:  Counterfactual Twin Replay = {twin_test} (base_seed={seed_base})")
     if target_depth is not None:
         print(f"Target:      Avg Depth >= {target_depth:.1f}")
     print(f"Policy Path: {policy_path} (fresh={fresh})")
+    print(f"Starter Ref: {starter_policy}")
     print("=" * 65)
 
     run_id = f"synth_{provider}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -567,7 +574,7 @@ def run_synthesis_loop(
     )
     FlightRecorder(capacity=100)
 
-    # Initialize DuckDB evolved_policies table
+    # Initialize DuckDB evolved_policies and meta_experiments tables
     try:
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         con = duckdb.connect(db_path)
@@ -582,9 +589,42 @@ def run_synthesis_loop(
                 timestamp TIMESTAMP
             )
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS meta_experiments (
+                campaign_id VARCHAR,
+                generation INTEGER,
+                timestamp TIMESTAMP,
+                targeted_skill VARCHAR,
+                hypothesis_yaml VARCHAR,
+                causal_finding VARCHAR,
+                predicted_outcome VARCHAR,
+                baseline_avg_depth DOUBLE,
+                actual_avg_depth DOUBLE,
+                outcome_validated BOOLEAN,
+                policy_code TEXT,
+                paired_seed_delta DOUBLE,
+                seeds_improved INTEGER,
+                seeds_regressed INTEGER,
+                seeds_unchanged INTEGER,
+                ci_95 DOUBLE,
+                incident_resolution_rate DOUBLE
+            )
+        """)
+        for col_def in (
+            ("paired_seed_delta", "DOUBLE"),
+            ("seeds_improved", "INTEGER"),
+            ("seeds_regressed", "INTEGER"),
+            ("seeds_unchanged", "INTEGER"),
+            ("ci_95", "DOUBLE"),
+            ("incident_resolution_rate", "DOUBLE"),
+        ):
+            try:
+                con.execute(f"ALTER TABLE meta_experiments ADD COLUMN {col_def[0]} {col_def[1]}")
+            except Exception:
+                pass
         con.close()
     except Exception as e:
-        print(f"[Warning] Failed to initialize evolved_policies table: {e}")
+        print(f"[Warning] Failed to initialize DuckDB synthesis tables: {e}")
 
     # Pre-warm SpatialEngine JIT kernels to populate disk cache before worker forks
     print("[SpatialEngine] Pre-warming Numba JIT spatial kernels...")
@@ -598,55 +638,49 @@ def run_synthesis_loop(
             current_policy = f.read().strip()
         print(f"\n[Resumed Policy from {policy_path}]")
     else:
-        current_policy = """
+        if starter_policy and os.path.exists(starter_policy):
+            with open(starter_policy, "r") as f:
+                current_policy = f.read().strip()
+            print(f"\n[Initialized Seed Policy from Modular Template: {starter_policy}]")
+        else:
+            current_policy = """
 class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
 
     def run(self, obs):
         while True:
-            # Emergency: self-monitored prayer and healing
-            if obs.hero.hp_frac < 0.15 and (obs.hero.turn - self.last_prayer_turn >= 350):
+            if obs.hero.hp_frac < 0.15 and (obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
-            elif obs.hero.hp_frac < 0.30 and obs.inventory.has_healing:
-                obs = yield quaff_healing()
-                continue
-            elif obs.hero.hunger_state >= HUNGRY and obs.inventory.has_food:
-                obs = yield eat_carried_food()
-                continue
-
-            # Tactical combat
             if obs.combat.adjacent_hostile:
-                if obs.combat.closest_hostile_name == "floating eye":
-                    obs = yield step_away_from_hostile()
-                elif obs.hero.hp_frac < 0.35 and obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint()
-                else:
-                    obs = yield melee_attack_hostile()
+                obs = yield melee_attack_hostile()
                 continue
-
-            # Navigation & Exploration
             if obs.spatial.standing_on_stairs_down:
                 obs = yield descend()
-            elif obs.dungeon.adjacent_closed_door:
-                obs = yield open_door()
-            elif obs.spatial.stairs_down_known:
+                continue
+            if obs.spatial.stairs_down_known:
                 obs = yield step_to_stairs_down()
-            elif obs.spatial.has_unvisited_frontier:
+                continue
+            if obs.spatial.has_unvisited_frontier:
                 obs = yield step_to_frontier()
-            elif obs.spatial.has_unsearched_dead_end:
-                obs = yield search()
-            else:
-                obs = yield wait()
+                continue
+            obs = yield wait()
 """
+            print("\n[Initialized Fallback Seed Policy]:")
         with open(policy_path, "w") as f:
             f.write(current_policy.strip() + "\n")
         print("\n[Initialized Seed Policy]:")
     print(current_policy.strip())
 
     compile_policy(current_policy)
+
+    last_recorded_hypothesis: dict[str, Any] | None = None
+    last_baseline_depth: float | None = None
+    last_batch_seeds: list[int] = []
+    last_batch_results_by_seed: dict[int, dict[str, Any]] = {}
+    last_batch_primary_cause: str = ""
 
     for gen in range(1, max_generations + 1):
         print(
@@ -662,10 +696,27 @@ class Agent:
             run_id=gen_dir_id, base_dir="data/telemetry", flush_interval=100
         )
 
+        # Seed assignment: Counterfactual Twin Replay or Fresh Batch
+        if (
+            twin_test
+            and last_batch_seeds
+            and last_recorded_hypothesis is not None
+        ):
+            current_seeds = list(last_batch_seeds)
+            is_twin_eval = True
+            print(
+                f"\n[Counterfactual Twin Evaluation] Replaying exact {len(current_seeds)} seeds from Gen {gen - 1} "
+                f"to measure hypothesis performance with 0 environment variance!"
+            )
+        else:
+            current_seeds = [seed_base + (gen - 1) * 1000 + i for i in range(eval_episodes)]
+            is_twin_eval = False
+
         payloads = [
             {
                 "gen": gen,
                 "ep_idx": ep_idx,
+                "seed": current_seeds[ep_idx],
                 "gen_dir_id": gen_dir_id,
                 "policy_code": current_policy,
                 "env_type": env_type,
@@ -696,6 +747,7 @@ class Agent:
                     ep_results = [
                         {
                             "episode_id": f"{gen_dir_id}_e{i + 1:03d}",
+                            "seed": current_seeds[i],
                             "final_depth": 1,
                             "final_score": 0,
                             "ep_turns": 100,
@@ -730,6 +782,11 @@ class Agent:
         recent_trajectory = ""
         batch_diagnostics = [RootCauseClassifier.classify(r) for r in ep_results]
         batch_summary = RootCauseClassifier.summarize_batch(batch_diagnostics)
+
+        current_results_by_seed = {}
+        for r, diag in zip(ep_results, batch_diagnostics):
+            r["root_cause"] = diag.primary_archetype.value
+            current_results_by_seed[r.get("seed", 0)] = r
 
         for r, diag in zip(ep_results, batch_diagnostics):
             gen_depths.append(r["final_depth"])
@@ -831,6 +888,136 @@ class Agent:
             f"\n[Gen {gen} Failure Diagnostics (saved to data/latest_diagnostics.yaml)]:\n{batch_summary.format_yaml()}\n"
         )
 
+        # Scientific Method: Evaluate previous generation's hypothesis if one was recorded
+        if last_recorded_hypothesis is not None and last_baseline_depth is not None:
+            pred = last_recorded_hypothesis.get("predicted_outcome", {})
+            direction = (
+                pred.get("expected_direction", "increase")
+                if isinstance(pred, dict)
+                else "increase"
+            )
+
+            # Check if this was a paired counterfactual twin run
+            paired_delta: float | None = None
+            seeds_improved = 0
+            seeds_regressed = 0
+            seeds_unchanged = 0
+            ci_95: float | None = None
+            resolution_rate: float | None = None
+            failed_seed_count = 0
+
+            if is_twin_eval and last_batch_results_by_seed:
+                paired_deltas = []
+                for s in current_seeds:
+                    if s in last_batch_results_by_seed and s in current_results_by_seed:
+                        d_new = current_results_by_seed[s]["final_depth"]
+                        d_old = last_batch_results_by_seed[s]["final_depth"]
+                        delta_s = d_new - d_old
+                        paired_deltas.append(delta_s)
+                        if delta_s > 0:
+                            seeds_improved += 1
+                        elif delta_s < 0:
+                            seeds_regressed += 1
+                        else:
+                            seeds_unchanged += 1
+
+                if paired_deltas:
+                    paired_delta = float(np.mean(paired_deltas))
+                    std_err = (
+                        float(np.std(paired_deltas) / np.sqrt(len(paired_deltas)))
+                        if len(paired_deltas) > 1
+                        else 0.0
+                    )
+                    ci_95 = float(1.96 * std_err)
+
+                # Check incident resolution rate on episodes that suffered the primary root cause
+                if last_batch_primary_cause:
+                    failed_seeds = [
+                        s
+                        for s, r in last_batch_results_by_seed.items()
+                        if r.get("root_cause") == last_batch_primary_cause
+                    ]
+                    failed_seed_count = len(failed_seeds)
+                    if failed_seeds:
+                        resolved = sum(
+                            1
+                            for s in failed_seeds
+                            if s in current_results_by_seed
+                            and current_results_by_seed[s]["final_depth"]
+                            > last_batch_results_by_seed[s]["final_depth"]
+                        )
+                        resolution_rate = float(resolved / len(failed_seeds))
+
+            if paired_delta is not None:
+                if direction == "increase":
+                    validated = bool(paired_delta > 0 and (seeds_improved >= seeds_regressed))
+                else:
+                    validated = bool(paired_delta < 0)
+                eval_metric_str = f"Paired Delta: {paired_delta:+.2f} (±{ci_95:.2f} 95% CI) | Improved: {seeds_improved}, Regressed: {seeds_regressed}, Tied: {seeds_unchanged}"
+            else:
+                delta = avg_d - last_baseline_depth
+                validated = (
+                    bool(avg_d > last_baseline_depth)
+                    if direction == "increase"
+                    else bool(avg_d < last_baseline_depth)
+                )
+                eval_metric_str = f"Batch Avg Delta: {avg_d - last_baseline_depth:+.2f}"
+
+            print("\n[Scientific Method: Hypothesis Validation]")
+            print(
+                f"  Targeted Skill: {last_recorded_hypothesis.get('targeted_skill', 'N/A')}"
+            )
+            print(
+                f"  Causal Finding: {last_recorded_hypothesis.get('causal_finding', 'N/A')}"
+            )
+            print(
+                f"  Evaluation Mode: {'Counterfactual Twin Replay (0 Variance)' if is_twin_eval else 'Fresh Seed Batch'}"
+            )
+            print(
+                f"  Baseline Depth: {last_baseline_depth:.2f} -> Actual Depth: {avg_d:.2f} ({eval_metric_str})"
+            )
+            if resolution_rate is not None and last_batch_primary_cause:
+                print(
+                    f"  '{last_batch_primary_cause}' Resolution Rate: {resolution_rate * 100.0:.1f}% ({failed_seed_count} incident seeds)"
+                )
+            print(
+                f"  Outcome: {'VALIDATED' if validated else 'FALSIFIED'} (Predicted: {pred})"
+            )
+
+            try:
+                con = duckdb.connect(db_path)
+                con.execute(
+                    """
+                    UPDATE meta_experiments
+                    SET actual_avg_depth = ?,
+                        outcome_validated = ?,
+                        paired_seed_delta = ?,
+                        seeds_improved = ?,
+                        seeds_regressed = ?,
+                        seeds_unchanged = ?,
+                        ci_95 = ?,
+                        incident_resolution_rate = ?
+                    WHERE campaign_id = ? AND generation = ?
+                """,
+                    [
+                        float(avg_d),
+                        validated,
+                        paired_delta,
+                        seeds_improved,
+                        seeds_regressed,
+                        seeds_unchanged,
+                        ci_95,
+                        resolution_rate,
+                        run_id,
+                        gen - 1,
+                    ],
+                )
+                con.close()
+            except Exception as e:
+                print(f"[Warning] Failed to update meta_experiments validation: {e}")
+
+            last_recorded_hypothesis = None
+
         if target_depth is not None and avg_d >= target_depth:
             print("\n" + "=" * 65)
             print(
@@ -875,6 +1062,11 @@ class Agent:
 
         status_rep = f"```yaml\n{full_report_yaml.strip()}\n```"
 
+        # Record this batch's seeds, results, and primary failure archetype for the next generation's counterfactual validation
+        last_batch_seeds = list(current_seeds)
+        last_batch_results_by_seed = dict(current_results_by_seed)
+        last_batch_primary_cause = top_arch
+
         print(
             "\n[Author Agent] Initiating empirical synthesis session (querying DuckDB & evaluating)..."
         )
@@ -883,6 +1075,7 @@ class Agent:
             trigger_reason=trigger_reason,
             status_report=status_rep,
             run_id=run_id,
+            causal_summary=batch_summary.causal_summary,
         )
 
         if error:
@@ -894,7 +1087,6 @@ class Agent:
             print("\nEvolved Policy Program:")
             print(new_code.strip())
 
-            # Persist latest policy and archive checkpoint
             # Persist latest policy and archive checkpoint
             with open(policy_path, "w") as f:
                 f.write(new_code.strip() + "\n")
@@ -926,6 +1118,50 @@ class Agent:
                         print(
                             f"[Warning] Could not record evolved policy in DuckDB: {e}"
                         )
+                    time.sleep(0.5)
+
+            # Log hypothesis to DuckDB meta_experiments table
+            hypothesis = getattr(author, "last_hypothesis", None)
+            if hypothesis:
+                last_recorded_hypothesis = hypothesis
+                last_baseline_depth = float(avg_d)
+                for attempt in range(3):
+                    try:
+                        con = duckdb.connect(db_path)
+                        con.execute(
+                            """
+                            INSERT INTO meta_experiments (
+                                campaign_id, generation, timestamp, targeted_skill,
+                                hypothesis_yaml, causal_finding, predicted_outcome,
+                                baseline_avg_depth, actual_avg_depth, outcome_validated,
+                                policy_code
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                run_id,
+                                gen,
+                                datetime.datetime.now(),
+                                str(hypothesis.get("targeted_skill", "")),
+                                yaml.dump(hypothesis),
+                                str(hypothesis.get("causal_finding", "")),
+                                str(hypothesis.get("predicted_outcome", "")),
+                                float(avg_d),
+                                None,
+                                None,
+                                new_code.strip(),
+                            ],
+                        )
+                        con.close()
+                        print(
+                            f"[Meta-Experiment Logged] Registered scientific hypothesis for Gen {gen} in DuckDB meta_experiments."
+                        )
+                        break
+                    except Exception as e:
+                        if attempt == 2:
+                            print(
+                                f"[Warning] Could not record meta_experiment in DuckDB: {e}"
+                            )
+                        time.sleep(0.5)
                     time.sleep(0.5)
 
     # Final report of token expenditure
@@ -969,8 +1205,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--eval-episodes",
         type=int,
-        default=50,
-        help="Real evaluation episodes per generation batch",
+        default=20,
+        help="Real evaluation episodes per generation batch (default: 20)",
     )
     parser.add_argument(
         "--max-turns", type=int, default=10000, help="Max turns per episode"
@@ -1010,6 +1246,23 @@ if __name__ == "__main__":
         default=10,
         help="Number of parallel worker processes for episode evaluation",
     )
+    parser.add_argument(
+        "--starter-policy",
+        default="data/modular_starter_policy.py",
+        help="Path to modular starter policy template to seed or reset from",
+    )
+    parser.add_argument(
+        "--twin-test",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable counterfactual seed-pinned twin evaluation for hypothesis validation (default: True)",
+    )
+    parser.add_argument(
+        "--seed-base",
+        type=int,
+        default=42,
+        help="Deterministic base seed for episode evaluations",
+    )
     args = parser.parse_args()
 
     run_synthesis_loop(
@@ -1029,4 +1282,7 @@ if __name__ == "__main__":
         db_path=args.db_path,
         target_depth=args.target_depth,
         workers=args.workers,
+        starter_policy=args.starter_policy,
+        twin_test=args.twin_test,
+        seed_base=args.seed_base,
     )
