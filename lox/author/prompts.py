@@ -16,6 +16,15 @@ def build_system_prompt() -> str:
 Synthesize robust NetHack policies using an unconstrained, object-oriented Python generator class: `class Agent`.
 The agent is instantiated fresh at the start of each episode. Every turn, its `run(self, obs)` method receives an `obs` object and yields an `Action`.
 
+### MANDATE: SIGNIFICANT ARCHITECTURAL LEAPS ONLY (ABSOLUTE BAN ON MICRO-TWEAKS)
+- **STRICT PROHIBITION ON MICRO-TWEAKS**: You are STRICTLY FORBIDDEN from submitting superficial, single-predicate micro-edits (such as changing `hp_frac < 0.40` to `hp_frac < 0.45`, tweaking an Elbereth check threshold, or reordering two lines in `skill_combat`). Micro-tweaks produce near-zero delta across 100 seeds and are mathematically guaranteed to fail the +0.40 paired delta threshold and be falsified.
+- **TARGET SYSTEMIC PROGRESSION LEAPS**: Every hypothesis and synthesis MUST introduce a substantial, game-changing leap:
+  1. **New Multi-Turn Modular Skills**: Invent completely new skills for unhandled phases (e.g., `skill_solve_sokoban`, `skill_harvest_poison_res`, `skill_altar_sacrifice`, `skill_priest_donation`, `skill_medusa_crossing`, `skill_stash_management`) and wire them into `determine_goal`.
+  2. **Floor Transit & Pacing Overhauls**: Overhaul `skill_explore_and_dive` or `determine_goal` to eliminate catastrophic pacing stalls where heroes burn 2,000–6,000 turns on early floors (DL 1–3). When stairs are found, descend aggressively to preserve food rations and outpace monster scaling!
+  3. **Phase-Driven Progression Architecture**: Leverage `obs.agenda` (`phase_early_rush`, `phase_early_scaling`, `phase_mid_branches`, `phase_deep_dungeon`, `phase_castle`) to structurally transform agent priorities as it penetrates deeper into the dungeon.
+  4. **Holistic State Acquisition**: Prioritize acquiring permanent character advantages early: forging Excalibur at XL >= 5, acquiring body armor to achieve AC <= 2, eating corpses of poisonous vermin for poison resistance, and building stacks of projectiles.
+- **TERMINAL HIT MISATTRIBUTION WARNING**: Never confuse the final death blow with the causal root cause. A hero that dies on DL 5 to a monster almost never died because of bad combat dodging; they died because they were still naked (AC 10), had no artifact weapon, lacked poison resistance, or wasted 4,000 turns wandering on DL 1–3. Target the upstream strategic foundation!
+
 ### Policy Architecture: Decoupled Modular Skills
 The policy is structured around high-level goal determination and decoupled modular skills:
 ```python
@@ -41,7 +50,7 @@ class Agent:
 
     def run(self, obs):
         while True:
-            # Universal Emergency Reflex 1: Mines Evacuation (avoid dark Gnomish Mines)
+            # Universal Emergency Reflexes
             if obs.hero.dungeon_branch == "mines":
                 if obs.spatial.standing_on_stairs_up:
                     obs = (yield ascend())
@@ -53,7 +62,6 @@ class Agent:
                     obs = (yield step_to_frontier())
                     continue
 
-            # Universal Emergency Reflex 2: Divine Prayer (Major Trouble: Fainting or <15% HP)
             if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
@@ -84,50 +92,12 @@ class Agent:
 
     def skill_combat(self, obs):
         while obs.combat.hostile_count_fov > 0 or obs.combat.adjacent_hostile:
-            # Escape via stairs down if standing on them
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
                 obs = (yield descend())
                 break
-            # Emergency healing
             if obs.hero.hp_frac < 0.50 and obs.inventory.has_healing:
                 obs = (yield quaff_healing())
                 continue
-            # Panic escape
-            if (obs.hero.hp_frac < 0.25 or obs.combat.is_surrounded) and obs.combat.has_panic_escape:
-                if obs.inventory.has_scroll_of_teleport:
-                    obs = (yield read_scroll_teleport())
-                    continue
-                elif obs.inventory.has_wand_of_teleport:
-                    obs = (yield zap_wand_teleport())
-                    continue
-            # Passive / exploding hazards
-            if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
-                if obs.combat.has_safe_melee_target:
-                    obs = (yield melee_attack_hostile())
-                    continue
-                if obs.combat.adjacent_floating_eye and obs.inventory.has_daggers:
-                    obs = (yield throw_dagger())
-                    continue
-                obs = (yield step_away_from_hostile())
-                continue
-            # Fast predators / swarms
-            if obs.combat.is_fast_dangerous:
-                if obs.combat.is_surrounded or obs.combat.hostile_count_fov >= 2 or obs.hero.hp_frac < 0.50:
-                    if not obs.combat.standing_on_elbereth:
-                        obs = (yield engrave_dust_elbereth())
-                        continue
-                if obs.combat.adjacent_hostile:
-                    obs = (yield melee_attack_hostile())
-                    continue
-            # Ranged harassment at distance >= 2
-            if not obs.combat.adjacent_hostile:
-                if obs.inventory.has_offensive_wand:
-                    obs = (yield zap_offensive_wand())
-                    continue
-                if obs.inventory.has_daggers and obs.combat.closest_hostile_dist <= 3:
-                    obs = (yield throw_dagger())
-                    continue
-            # Melee attack
             if obs.combat.adjacent_hostile:
                 obs = (yield melee_attack_hostile())
                 continue
@@ -328,11 +298,14 @@ def build_user_prompt(
 ### Synthesis Objective:
 {trigger_reason}
 
-### Empirical Tool Investigation & Synthesis Protocol:
-The pre-compiled Empirical Dossier above provides the **Trustworthy Triad** (Factor 1 Macro Breakdown, Factor 2 Orthogonal Drivers, Factor 3 Ground-Truth Telemetry) alongside Deep Wiki & Invariant Mechanics for the dominant failure causes.
-- **Budget**: You have up to 5 tool-calling turns if you need to run targeted queries (`query_duckdb`, `get_death_autopsy_trace`, `query_wiki`, `query_invariants`).
-- **Turn 0 Direct Synthesis**: If the dossier provides complete evidence to diagnose the failure mode, you may formulate your structured hypothesis and code patch immediately on Turn 0.
-- **Harmonization**: Target the #1 dominant failure cause in your hypothesis while ensuring secondary causes (#2 and #3) do not regress.
+### Significant Macro-Architectural Synthesis Directive:
+- **STRICT PROHIBITION ON MICRO-TWEAKS**: Do NOT submit minor parameter or threshold edits (e.g. changing an HP cutoff or tweaking lines in combat). Micro-tweaks are mathematically guaranteed to fail the +0.40 paired delta threshold across 100 seeds and be falsified.
+- **MANDATE SIGNIFICANT STRUCTURAL LEAPS**: Target the foundational bottlenecks holding back progression:
+  1. **Floor Pacing & Rapid Descent Overhaul**: Look at the average turns spent per depth! Eliminate multi-thousand-turn stalls on DL 1–3 by prioritizing rapid descent once stairs are found.
+  2. **Progression Phase Routing**: Restructure `determine_goal` or `run` to transition behaviors across dungeon depths using `obs.agenda`.
+  3. **New Multi-Turn Modular Skills**: Invent brand-new skills (`skill_harvest_poison_res`, `skill_altar_sacrifice`, `skill_solve_sokoban`, etc.) to acquire permanent scaling advantages.
+- **HOLISTIC ANALYSIS (NOT TERMINAL SYMPTOMS)**: Do not blindly react to the final death blow. A death on DL 5+ is almost always the result of an upstream pacing stall, unarmored AC, or missing artifact/poison resistance.
+- **Investigation Budget**: You have up to 5 tool-calling turns to query DuckDB, check flight recorders, or inspect wiki mechanics before writing code.
 {invariants_block}
 ### Current Policy:
 ```python

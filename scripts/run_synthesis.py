@@ -1159,17 +1159,31 @@ class Agent:
             print("=" * 65)
             break
 
+        avg_dl1 = sum(r.get("turns_dl1", 0) for r in ep_results) / max(1, len(ep_results))
+        avg_dl2 = sum(r.get("turns_dl2", 0) for r in ep_results) / max(1, len(ep_results))
+        top_bottlenecks = [
+            f"{b['bottleneck']} ({b['pct']}%)"
+            for b in batch_summary.causal_summary.get("systemic_bottlenecks", [])[:3]
+        ]
+        bottleneck_str = ", ".join(top_bottlenecks) if top_bottlenecks else f"'{top_arch}' ({top_arch_pct:.1f}%)"
+
         trigger_reason = (
-            f"Generation {gen} Empirical Diagnostic Autopsy ({eval_episodes} episodes): "
+            f"Generation {gen} Performance Dossier ({eval_episodes} episodes): "
             f"Avg Depth {avg_d:.2f}, Max Depth {max_d}, Avg Turns {avg_t:.1f}. "
-            f"#1 Empirical Root Cause: '{top_arch}' ({top_arch_pct:.1f}% of runs). "
-            f"Mitigate this specific failure mode, optimize stair navigation, and break through to Depth 10+."
+            f"Floor Pacing: DL1 ~{avg_dl1:.0f} turns, DL2 ~{avg_dl2:.0f} turns. "
+            f"Dominant Systemic Bottlenecks: {bottleneck_str}. "
+            f"MANDATE: Synthesize a SIGNIFICANT macro-architectural leap (pacing overhaul, progression phase routing, or newly invented modular skill) to break through to Depth 10+. DO NOT submit superficial single-line micro-tweaks."
         )
 
         # Build comprehensive, pure YAML incident report
         report_data: dict[str, Any] = {
             "generation": gen,
             **batch_summary.to_dict(),
+            "floor_pacing_telemetry": {
+                "avg_turns_on_dl1": round(avg_dl1, 1),
+                "avg_turns_on_dl2": round(avg_dl2, 1),
+                "avg_turns_per_floor": round(avg_t / max(1.0, avg_d), 1),
+            },
             "ranked_fatalities": [
                 {"cause": r[0], "count": r[1], "pct": float(r[2])} for r in top_deaths
             ],
