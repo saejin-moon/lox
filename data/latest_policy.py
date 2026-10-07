@@ -59,9 +59,15 @@ class Agent:
             elif goal == "explore_and_dive":
                 obs = (yield from self.skill_explore_and_dive(obs))
                 continue
-            else:
-                obs = (yield from self.skill_explore_and_dive(obs))
+
+            # Dynamic dispatch: automatically execute any author-synthesized skill_<goal> method
+            skill_fn = getattr(self, "skill_" + goal, None)
+            if skill_fn is not None:
+                obs = (yield from skill_fn(obs))
                 continue
+
+            obs = (yield from self.skill_explore_and_dive(obs))
+            continue
 
     def skill_combat(self, obs):
         """Primitive Combat: Attack adjacent hostiles in melee, otherwise wait."""

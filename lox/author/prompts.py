@@ -188,7 +188,7 @@ class Agent:
    You can emit multiple methods in your single ```python ... ``` patch block:
    1. Define your new skill: `def skill_my_new_skill(self, obs): ... return obs`
    2. Update `def determine_goal(self, obs) -> str:` to return `"my_new_skill"` when appropriate conditions hold.
-   3. Update `def run(self, obs):` to dispatch `elif goal == "my_new_skill": obs = (yield from self.skill_my_new_skill(obs)); continue`
+   (Note: `run()` automatically dispatches to `skill_<goal>` by name via `getattr(self, "skill_" + goal)`, so you do NOT need to rewrite `run()` unless changing top-level reflexes!)
    The AST compiler will automatically replace updated methods and append new skill methods onto `class Agent`!
 
 3. **GENERATOR SUBROUTINE PROTOCOL**:
@@ -203,7 +203,7 @@ class Agent:
 
 5. **POLICY CONTRACT INVARIANTS (AST LINTER ENFORCEMENT)**:
    - Method names must be exact (e.g. `skill_explore_and_dive`, not `skill_explore_and_div`). Near-duplicate method names with typos will fail AST compilation.
-   - Any goal returned by `determine_goal(self, obs)` must have an explicit `elif goal == "...":` branch in `run(self, obs)`.
+   - Any goal returned by `determine_goal(self, obs)` must have a corresponding `def skill_<goal>(self, obs):` method defined on `class Agent`, or an explicit `elif goal == "...":` dispatch in `run(self, obs)`.
    - Any subroutine invoked via `obs = (yield from self.skill_xxx(obs))` must be defined on `class Agent`.
 
 ### Ground-Truth NetHack 3.6 Mechanics:
@@ -302,7 +302,7 @@ def build_user_prompt(
 - **STRICT PROHIBITION ON MICRO-TWEAKS**: Do NOT submit minor parameter or threshold edits (e.g. changing an HP cutoff or tweaking lines in combat). Micro-tweaks are mathematically guaranteed to fail the +0.40 paired delta threshold across 100 seeds and be falsified.
 - **MANDATE SIGNIFICANT STRUCTURAL LEAPS**: Target the foundational bottlenecks holding back progression:
   1. **Floor Pacing & Rapid Descent Overhaul**: Look at the average turns spent per depth! Eliminate multi-thousand-turn stalls on DL 1–3 by prioritizing rapid descent once stairs are found.
-  2. **Progression Phase Routing**: Restructure `determine_goal` or `run` to transition behaviors across dungeon depths using `obs.agenda`.
+  2. **Progression Phase Routing**: Restructure `determine_goal` or `run` to transition behaviors across dungeon depths using `obs.dungeon.phase` or `obs.agenda.phase` (e.g. 'early_rush', 'sokoban', 'castle_breach', 'invocation', 'ascension_run').
   3. **New Multi-Turn Modular Skills**: Invent brand-new skills (`skill_harvest_poison_res`, `skill_altar_sacrifice`, `skill_solve_sokoban`, etc.) to acquire permanent scaling advantages.
 - **HOLISTIC ANALYSIS (NOT TERMINAL SYMPTOMS)**: Do not blindly react to the final death blow. A death on DL 5+ is almost always the result of an upstream pacing stall, unarmored AC, or missing artifact/poison resistance.
 - **Investigation Budget**: You have up to 5 tool-calling turns to query DuckDB, check flight recorders, or inspect wiki mechanics before writing code.

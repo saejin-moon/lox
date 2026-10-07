@@ -168,7 +168,9 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "can_safely_quaff_healing": "bool",
     # Strategic Goal Agenda
     "active_goal": "str",
+    "current_goal": "str",
     "dungeon_phase": "str",
+    "phase": "str",
 }
 
 # Whitelist of allowed action primitives

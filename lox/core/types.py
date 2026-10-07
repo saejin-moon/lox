@@ -961,6 +961,14 @@ class AgendaView:
     goal_stack: list[str] = field(default_factory=lambda: ["explore_floor"])
     dungeon_phase: str = "early_rush"
 
+    @property
+    def phase(self) -> str:
+        return self.dungeon_phase
+
+    @property
+    def current_goal(self) -> str:
+        return self.active_goal
+
     def is_active(self, goal_name: Any) -> bool:
         target = goal_name.value if hasattr(goal_name, "value") else str(goal_name)
         return self.active_goal == target

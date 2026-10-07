@@ -601,16 +601,34 @@ def validate_policy_contract(tree: ast.Module) -> None:
                         elif isinstance(comp, (ast.Name, ast.Attribute)) and isinstance(subnode.left, ast.Constant) and isinstance(subnode.left.value, str):
                             handled_goals.add(subnode.left.value)
 
+            PROGRESSION_PHASE_GOALS = {
+                "ascension_run",
+                "perform_invocation",
+                "breach_castle",
+                "solve_sokoban",
+            }
             if handled_goals and returned_goals:
-                # Goal returned by determine_goal must be checked in run() or present in run()
-                unhandled = {g for g in returned_goals if g not in handled_goals and g not in all_run_strings}
+                # Goal returned by determine_goal must be checked in run(), present in run(),
+                # have a corresponding skill_ method on Agent, or be the default explore_and_dive
+                unhandled = {
+                    g
+                    for g in returned_goals
+                    if g not in handled_goals
+                    and g not in all_run_strings
+                    and f"skill_{g}" not in methods
+                    and g != "explore_and_dive"
+                }
                 if unhandled:
                     raise DSLValidationError(
                         f"Goal(s) {sorted(unhandled)} returned by determine_goal() are never handled in run(). "
-                        f"Add 'elif goal == \"{sorted(unhandled)[0]}\":' dispatch in run()."
+                        f"Add 'elif goal == \"{sorted(unhandled)[0]}\":' dispatch in run(), or define 'def skill_{sorted(unhandled)[0]}(self, obs):'."
                     )
 
-                orphan = {g for g in handled_goals if g not in returned_goals}
+                orphan = {
+                    g
+                    for g in handled_goals
+                    if g not in returned_goals and g not in PROGRESSION_PHASE_GOALS
+                }
                 if orphan:
                     raise DSLValidationError(
                         f"Goal(s) {sorted(orphan)} are checked in run() but never returned by determine_goal(). "
