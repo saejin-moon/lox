@@ -1,6 +1,6 @@
 # LOX Agent Operational Guide (`AGENTS.md`)
 
-Welcome to LOX, an autonomous, empirical policy synthesis engine for NetHack.
+Welcome to LOX (LLM-Optimized CROSS-Discipline Policy Synthesis), an autonomous, empirical policy synthesis engine for NetHack, Craftax, and open-ended domains.
 This document provides complete operational context, architectural foundations, critical invariants, and debugging toolchains for any agent working in this repository.
 
 ---

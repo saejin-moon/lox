@@ -1,7 +1,7 @@
 [project]
 name = "lox"
 version = "2.0.0"
-description = "LOX: High-Performance Neuro-Symbolic Policy Synthesis"
+description = "LOX: LLM-Optimized Cross-Discipline Policy Synthesis"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

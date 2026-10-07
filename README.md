@@ -1,7 +1,7 @@
-# LOX: Autonomous Empirical Policy Synthesis Engine
+# LOX: LLM-Optimized Cross-Discipline Policy Synthesis
 
-> **LOX** (**L**earned **O**ptimal e**X**ecution / **L**evel-**O**ptimized e**X**ploration)  
-> *An Autonomous, Empirical Neuro-Symbolic Policy Synthesis Engine for Open-Ended Worlds (NetHack, Craftax, Crafter)*
+> **LOX**: **L**LM-**O**ptimized **CROSS**-Discipline Policy Synthesis  
+> *Named after the unstoppable Valheim beast — an autonomous, empirical policy synthesis engine for open-ended worlds (NetHack, Craftax, Crafter)*
 
 LOX enables open, efficient large language models (such as `qwen/qwen3.5-9b` and `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on empirical execution telemetry, DuckDB incident autopsies, and deep domain encyclopedias.
 
