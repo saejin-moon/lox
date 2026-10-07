@@ -1,9 +1,6 @@
-# LOX: LLM-Optimized Cross-Discipline Policy Synthesis
+# LOX: Autonomous Empirical Policy Synthesis Engine
 
-> **LOX**: **L**LM-**O**ptimized **CROSS**-Discipline Policy Synthesis  
-> *Named after the unstoppable Valheim beast — an autonomous, empirical policy synthesis engine for open-ended worlds (NetHack, Craftax, Crafter)*
-
-LOX enables open, efficient large language models (such as `qwen/qwen3.5-9b` and `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on empirical execution telemetry, DuckDB incident autopsies, and deep domain encyclopedias.
+LOX is an autonomous, empirical neuro-symbolic policy synthesis engine for NetHack, Craftax, and open-ended domains. It enables open, efficient large language models (such as `qwen/qwen3.5-9b` and `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on empirical execution telemetry, DuckDB incident autopsies, and deep domain encyclopedias.
 
 LOX achieves **826+ steps/second** (>1,000 game turns/second across 20 parallel workers) by executing sandboxed Python generator policies alongside precomputed vectorized glyph lookup tables and a disk-cached Numba JIT A* spatial navigation engine. Across 68 continuous evolutionary campaigns and over 12,800 real episodes evaluated (38.0M+ game ticks), LOX has systematically eliminated zero-progress stalls, locked-door loops, premature prayer smiting, and starvation blackouts, autonomously forged **the blessed rustproof +1 Excalibur**, achieved **Record Average Dungeon Depth 5.10**, reached **Dungeon Depth 15**, and achieved **Peak Score 4,612** with average lifespans exceeding **8,096 turns**—all for **~$0.03 per 100-episode batch**.
 

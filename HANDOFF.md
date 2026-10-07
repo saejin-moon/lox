@@ -1,6 +1,6 @@
 # LOX Agent Handoff Guide (`HANDOFF.md`)
 
-Welcome to LOX (LLM-Optimized CROSS-Discipline Policy Synthesis). This document is the comprehensive onboarding guide for any LLM agent or engineer taking over the LOX codebase. It provides full context on the mission, system architecture, policy generator paradigm, diagnostic engine, operational workflows, and the empirical roadmap to Dungeon Depth 20.
+Welcome to LOX. This document is the comprehensive onboarding guide for any LLM agent or engineer taking over the LOX codebase. It provides full context on the mission, system architecture, policy generator paradigm, diagnostic engine, operational workflows, and the empirical roadmap to Dungeon Depth 20.
 
 ---
 
