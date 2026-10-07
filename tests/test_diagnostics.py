@@ -207,8 +207,6 @@ def test_causal_timeline_analyzer():
 
 
 def test_classify_new_archetypes():
-    from lox.telemetry.diagnostics import CausalTimelineAnalyzer
-
     # 1. Petrification
     ep_pet = {
         "episode_id": "ep_pet",

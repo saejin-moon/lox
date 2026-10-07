@@ -132,6 +132,7 @@ class Agent:
                 obs = (yield melee_attack_hostile())
                 continue
             obs = (yield step_away_from_hostile())
+        obs = (yield wait())
         return obs
 
     def skill_scavenge_armor(self, obs):

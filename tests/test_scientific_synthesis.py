@@ -1,9 +1,8 @@
 from pathlib import Path
 import numpy as np
-import pytest
 
 from lox.author.agent import AuthorAgent
-from lox.core.types import Action, HeroState, HungerState, Observation, SpatialView
+from lox.core.types import Action, HeroState, Observation, SpatialView
 from lox.dsl.compiler import compile_policy
 from lox.envs.nethack import NetHackAdapter
 

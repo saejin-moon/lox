@@ -10,8 +10,6 @@ from __future__ import annotations
 import os
 import re
 
-import duckdb
-
 from lox.author.requests import queue_macro_request
 from lox.author.wiki import WikiEngine
 from lox.telemetry.consolidator import safe_duckdb_connect

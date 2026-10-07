@@ -46,6 +46,19 @@ class CastleDrawbridgeSolver:
         # Danger: If adjacent to closed drawbridge (dist == 1), step back immediately!
         if dist == 1:
             step_back_dir = (-dy, -dx)
+            by, bx = hy + step_back_dir[0], hx + step_back_dir[1]
+            if (
+                obs.chars is not None
+                and 0 <= by < obs.chars.shape[0]
+                and 0 <= bx < obs.chars.shape[1]
+            ):
+                if obs.chars[by, bx] == ord("}"):
+                    # Stepping directly back would enter moat water! Find safe non-water adjacent tile
+                    for cdy, cdx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        ay, ax = hy + cdy, hx + cdx
+                        if 0 <= ay < obs.chars.shape[0] and 0 <= ax < obs.chars.shape[1]:
+                            if obs.chars[ay, ax] != ord("}") and (ay, ax) != self.drawbridge_pos:
+                                return Action(name="step_direction", direction=(cdy, cdx))
             return Action(name="step_direction", direction=step_back_dir)
 
         # Ideal firing position: distance == 2 in a straight orthogonal line

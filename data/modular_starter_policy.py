@@ -5,6 +5,18 @@ class Agent:
         self.current_goal = "explore_and_dive"
 
     def determine_goal(self, obs) -> str:
+        # Phase 1: Endgame Ascension run
+        if obs.inventory.has_amulet_of_yendor or obs.dungeon.phase == "ascension_run":
+            return "ascension_run"
+        # Phase 2: Invocations & Sanctum
+        if obs.dungeon.phase == "invocation" or (obs.hero.depth >= 45 and obs.hero.turn > 15000):
+            return "perform_invocation"
+        # Phase 3: Castle Drawbridge Breach
+        if obs.dungeon.phase == "castle_breach" or (obs.hero.depth in (25, 26, 27) and obs.dungeon.is_castle_level):
+            return "breach_castle"
+        # Phase 4: Sokoban Solver
+        if obs.dungeon.phase == "sokoban" or obs.dungeon.is_sokoban_level:
+            return "solve_sokoban"
         if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
             return "combat"
         if obs.hero.hunger_state >= 2 or (obs.hero.hunger_state >= 1 and any(c.is_safe for c in obs.corpses)):
@@ -66,7 +78,19 @@ class Agent:
             # Strategic Goal Dispatch
             goal = self.determine_goal(obs)
             self.current_goal = goal
-            if goal == "combat":
+            if goal == "ascension_run":
+                obs = (yield from self.skill_ascension_run(obs))
+                continue
+            elif goal == "perform_invocation":
+                obs = (yield from self.skill_perform_invocation(obs))
+                continue
+            elif goal == "breach_castle":
+                obs = (yield from self.skill_breach_castle(obs))
+                continue
+            elif goal == "solve_sokoban":
+                obs = (yield from self.skill_solve_sokoban(obs))
+                continue
+            elif goal == "combat":
                 obs = (yield from self.skill_combat(obs))
                 continue
             elif goal == "nutrition":
@@ -84,6 +108,73 @@ class Agent:
             else:
                 obs = (yield from self.skill_explore_and_dive(obs))
                 continue
+
+    def skill_ascension_run(self, obs):
+        if obs.dungeon.standing_on_high_altar:
+            obs = (yield offer_amulet_on_altar())
+            return obs
+        if obs.dungeon.standing_on_plane_portal:
+            obs = (yield step_direction())
+            return obs
+        if obs.dungeon.has_plane_portal:
+            obs = (yield step_to_plane_portal())
+            return obs
+        if obs.spatial.standing_on_stairs_up and not obs.status.is_levitating:
+            obs = (yield ascend())
+            return obs
+        if obs.spatial.stairs_up_known:
+            obs = (yield step_to_stairs_up())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        obs = (yield step_to_dead_end())
+        return obs
+
+    def skill_perform_invocation(self, obs):
+        if obs.dungeon.standing_on_vibrating_square or obs.dungeon.can_perform_invocation:
+            obs = (yield perform_invocation_step())
+            return obs
+        if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
+            obs = (yield descend())
+            return obs
+        if obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        obs = (yield step_to_dead_end())
+        return obs
+
+    def skill_breach_castle(self, obs):
+        if obs.dungeon.can_breach_drawbridge or obs.dungeon.drawbridge_in_fov:
+            obs = (yield breach_drawbridge())
+            return obs
+        if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
+            obs = (yield descend())
+            return obs
+        if obs.spatial.stairs_down_known:
+            obs = (yield step_to_stairs_down())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        obs = (yield step_to_dead_end())
+        return obs
+
+    def skill_solve_sokoban(self, obs):
+        if obs.dungeon.can_solve_sokoban or obs.dungeon.is_sokoban:
+            obs = (yield solve_sokoban())
+            return obs
+        if obs.dungeon.has_sokoban_entrance:
+            obs = (yield step_to_sokoban_entrance())
+            return obs
+        if obs.spatial.has_unvisited_frontier:
+            obs = (yield step_to_frontier())
+            return obs
+        obs = (yield step_to_dead_end())
+        return obs
 
     def skill_combat(self, obs):
         # Emergency healing during combat

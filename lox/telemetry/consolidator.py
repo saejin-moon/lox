@@ -123,6 +123,34 @@ def init_db(db_path: str = "data/lox.duckdb") -> duckdb.DuckDBPyConnection:
             trigger_reason VARCHAR,
             tools_called VARCHAR
         );
+        CREATE TABLE IF NOT EXISTS evolved_policies (
+            generation INTEGER,
+            run_id VARCHAR,
+            avg_depth DOUBLE,
+            max_depth INTEGER,
+            avg_turns DOUBLE,
+            code TEXT,
+            timestamp TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS meta_experiments (
+            campaign_id VARCHAR,
+            generation INTEGER,
+            timestamp TIMESTAMP,
+            targeted_skill VARCHAR,
+            hypothesis_yaml VARCHAR,
+            causal_finding VARCHAR,
+            predicted_outcome VARCHAR,
+            baseline_avg_depth DOUBLE,
+            actual_avg_depth DOUBLE,
+            outcome_validated BOOLEAN,
+            policy_code TEXT,
+            paired_seed_delta DOUBLE,
+            seeds_improved INTEGER,
+            seeds_regressed INTEGER,
+            seeds_unchanged INTEGER,
+            ci_95 DOUBLE,
+            incident_resolution_rate DOUBLE
+        );
     """)
 
     # Check and add any missing columns in episodes table if upgraded from earlier schema
@@ -211,7 +239,7 @@ def consolidate_run(
     ticks_files = glob.glob(ticks_pattern)
     ticks_added = 0
     if ticks_files:
-        con.execute(f"INSERT INTO ticks SELECT * FROM read_parquet('{ticks_pattern}')")
+        con.execute(f"INSERT INTO ticks BY NAME SELECT * FROM read_parquet('{ticks_pattern}')")
         res = con.execute(
             "SELECT COUNT(*) FROM ticks WHERE run_id = ?", [run_id]
         ).fetchone()
@@ -221,7 +249,7 @@ def consolidate_run(
     ep_file = os.path.join(run_dir, "episodes.parquet")
     episodes_added = 0
     if os.path.exists(ep_file):
-        con.execute(f"INSERT INTO episodes SELECT * FROM read_parquet('{ep_file}')")
+        con.execute(f"INSERT INTO episodes BY NAME SELECT * FROM read_parquet('{ep_file}')")
         res = con.execute(
             "SELECT COUNT(*) FROM episodes WHERE run_id = ?", [run_id]
         ).fetchone()
@@ -231,7 +259,7 @@ def consolidate_run(
     ev_file = os.path.join(run_dir, "events.parquet")
     events_added = 0
     if os.path.exists(ev_file):
-        con.execute(f"INSERT INTO events SELECT * FROM read_parquet('{ev_file}')")
+        con.execute(f"INSERT INTO events BY NAME SELECT * FROM read_parquet('{ev_file}')")
         res = con.execute(
             "SELECT COUNT(*) FROM events WHERE run_id = ?", [run_id]
         ).fetchone()

@@ -465,15 +465,17 @@ class SpatialEngine:
         )
 
     @classmethod
-    def warmup(cls) -> None:
+    def warmup(cls, shape: tuple[int, int] = (21, 79)) -> None:
         """Pre-warms all Numba JIT kernels to populate disk cache before worker forks."""
-        dummy_chars = np.zeros((21, 79), dtype=np.int32)
-        dummy_walk = np.ones((21, 79), dtype=np.bool_)
-        dummy_searched = np.zeros((21, 79), dtype=np.int32)
-        dummy_door = np.zeros((21, 79), dtype=np.bool_)
-        cls.distance_grid((10, 40), dummy_walk, dummy_door)
-        cls.find_path((10, 40), (10, 42), dummy_walk, is_door=dummy_door)
-        cls.find_nearest_target((10, 40), dummy_walk, dummy_walk, is_door=dummy_door)
+        h, w = shape
+        dummy_chars = np.zeros((h, w), dtype=np.int32)
+        dummy_walk = np.ones((h, w), dtype=np.bool_)
+        dummy_searched = np.zeros((h, w), dtype=np.int32)
+        dummy_door = np.zeros((h, w), dtype=np.bool_)
+        sy, sx = h // 2, w // 2
+        cls.distance_grid((sy, sx), dummy_walk, dummy_door)
+        cls.find_path((sy, sx), (sy, min(w - 1, sx + 2)), dummy_walk, is_door=dummy_door)
+        cls.find_nearest_target((sy, sx), dummy_walk, dummy_walk, is_door=dummy_door)
         cls.compute_dead_ends_mask(dummy_chars, dummy_walk, dummy_searched)
         cls.compute_true_dead_ends_mask(dummy_chars, dummy_walk, dummy_searched)
 

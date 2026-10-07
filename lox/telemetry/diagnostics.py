@@ -7,6 +7,7 @@ failure archetypes to eliminate superficial final-hit combat misclassification.
 from __future__ import annotations
 
 import os
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -245,8 +246,28 @@ class BatchDiagnosticSummary:
             f.write(self.format_yaml() + "\n")
 
 
-class RootCauseClassifier:
-    """Classifies episodes into root cause archetypes from raw telemetry."""
+class BaseDiagnosticEngine(ABC):
+    """Abstract interface for multi-benchmark episode autopsy and root cause classification."""
+
+    @abstractmethod
+    def classify(
+        self,
+        ep_summary: dict[str, Any],
+        ticks: list[dict[str, Any]] | None = None,
+    ) -> EpisodeDiagnostic:
+        """Classifies a single episode from summary data and optional ticks."""
+        pass
+
+    @abstractmethod
+    def summarize_batch(
+        self, diagnostics: list[EpisodeDiagnostic]
+    ) -> BatchDiagnosticSummary:
+        """Aggregates episode diagnostics across an evaluation batch."""
+        pass
+
+
+class NetHackDiagnosticEngine(BaseDiagnosticEngine):
+    """NetHack-specific root cause classifier prioritizing causal failure archetypes."""
 
     FAST_PREDATORS = {
         "soldier ant",
@@ -832,6 +853,17 @@ class RootCauseClassifier:
         )
 
 
+RootCauseClassifier = NetHackDiagnosticEngine
+
+
+def get_diagnostic_engine(env_type: str = "nethack") -> BaseDiagnosticEngine:
+    """Factory retrieving domain-specific causal diagnostic engine."""
+    if env_type.lower() in ("nethack", "nle"):
+        return NetHackDiagnosticEngine()
+    # Defaults to NetHack engine (pluggable for Craftax / Crafter)
+    return NetHackDiagnosticEngine()
+
+
 class CausalTimelineAnalyzer:
     """Performs chronological milestone tracing and root-cause credit assignment."""
 
@@ -853,7 +885,7 @@ class CausalTimelineAnalyzer:
         )
         inv_str = str(ep_summary.get("inventory_at_death") or "").lower()
         death_reason = str(ep_summary.get("death_reason") or "").lower()
-        score = int(ep_summary.get("score") or 0)
+        score = int(ep_summary.get("final_score") or ep_summary.get("score") or 0)
 
         terminal = f"Killed by {killer or 'hostile encounter'} on Depth {depth} (Turn {turns})"
         if "starvation" in death_reason or "faint" in death_reason or killer == "starvation":

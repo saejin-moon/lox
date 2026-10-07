@@ -22,17 +22,21 @@ from lox.core.sokoban import SokobanSolver
 from lox.core.spatial import SpatialEngine, build_walkable_mask
 from lox.core.types import (
     Action,
+    AltarRecord,
     CombatView,
+    DungeonPhase,
     DungeonView,
     EncumbranceState,
     EpistemicView,
     FloorCorpse,
+    FountainRecord,
     HeroState,
     HeroStatus,
     HungerState,
     InventoryView,
     Item,
     Observation,
+    RunMemory,
     SpatialView,
 )
 from lox.envs.base import EnvironmentAdapter
@@ -228,6 +232,10 @@ for _g in range(_MAX_GLYPH):
             BODY_IS_POISONOUS[_g] = True
         if any(_k in _mname for _k in ("cockatrice", "chickatrice", "medusa")):
             BODY_IS_DEADLY[_g] = True
+ 
+LOOT_CHARS_LUT = np.zeros(256, dtype=bool)
+for _c in (ord("["), ord("!"), ord("?"), ord("/"), ord("="), ord("$"), ord("%")):
+    LOOT_CHARS_LUT[_c] = True
 
 
 class NetHackAdapter(EnvironmentAdapter):
@@ -237,15 +245,39 @@ class NetHackAdapter(EnvironmentAdapter):
         self.env_id = env_id
         self.role = role
         self.options = ("autopickup", "pickup_thrown", "pickup_types:?!/%=[$*")
+        self.observation_keys = (
+            "blstats",
+            "chars",
+            "glyphs",
+            "inv_letters",
+            "inv_oclasses",
+            "inv_strs",
+            "message",
+            "misc",
+        )
         self.env = gym.make(
             env_id,
             character=role,
             options=self.options,
+            observation_keys=self.observation_keys,
         )
         self.visited = np.zeros((21, 79), dtype=bool)
         self.turns_on_level = 0
         self.last_depth = 1
         self.last_dnum = 0
+
+        # Episodic & Persistent Run Memory
+        self.run_memory = RunMemory()
+
+        # Performance Caching Flags
+        self._cached_inv_hash: int | None = None
+        self._cached_inv_view: InventoryView | None = None
+        self._cached_inv_items: list[Item] = []
+        self._cached_has_magic_res: bool = False
+        self._cached_has_reflection: bool = False
+        self._cached_epistemic_view: EpistemicView | None = None
+        self._cached_walkable: np.ndarray | None = None
+        self._cached_walkable_nav: np.ndarray | None = None
 
         # Memory tracking
         self.last_prayer_turn = -1000
@@ -327,6 +359,10 @@ class NetHackAdapter(EnvironmentAdapter):
         )
         self.last_prayer_turn: int = -1000
 
+    def _char_to_action_idx(self, ch: str) -> int:
+        """Translates ASCII character to NLE action index, safely falling back to wait ('.') if unmapped."""
+        return self.char_to_act.get(ch, self.char_to_act.get(".", 0))
+
     def _get_doors_mask(self, glyphs: np.ndarray) -> np.ndarray:
         """Returns boolean mask of real closed doors using NLE CMAP glyphs and persistent door memory."""
         doors_mask = np.zeros((21, 79), dtype=bool)
@@ -361,6 +397,18 @@ class NetHackAdapter(EnvironmentAdapter):
         if hasattr(self, "known_chars"):
             door_mask |= self.known_chars == ord("+")
         return door_mask
+
+    def _get_cached_walkable(self, obs_or_raw: Any) -> tuple[np.ndarray, np.ndarray]:
+        """Returns cached walkable and walkable_nav grids when available, or recomputes them."""
+        if (
+            self._cached_walkable is not None
+            and self._cached_walkable_nav is not None
+        ):
+            return self._cached_walkable, self._cached_walkable_nav
+        w, wn = self._build_walkable_nav(obs_or_raw)
+        self._cached_walkable = w
+        self._cached_walkable_nav = wn
+        return w, wn
 
     def _build_walkable_nav(self, obs_or_raw: Any) -> tuple[np.ndarray, np.ndarray]:
         """Builds navigation mask with passable closed doors, excluding blocked tiles and shop/iron locked doors."""
@@ -452,31 +500,6 @@ class NetHackAdapter(EnvironmentAdapter):
             valid_glyphs = np.clip(glyphs, 0, _MAX_GLYPH - 1)
             passive_mask = GLYPH_IS_PASSIVE_HAZARD_LUT[valid_glyphs]
             walkable_nav[passive_mask] = False
-
-            # When hero lacks ranged weapons (daggers or offensive wands), buffer passive hazards
-            # so A* navigation routes around them at distance >= 2, eliminating approach/retreat ping-pongs.
-            has_ranged = False
-            last_obs = getattr(self, "_last_obs", None)
-            if last_obs and hasattr(last_obs, "inventory"):
-                has_ranged = bool(
-                    last_obs.inventory.has_daggers
-                    or last_obs.inventory.has_offensive_wand
-                )
-            elif hasattr(obs_or_raw, "inventory"):
-                has_ranged = bool(
-                    obs_or_raw.inventory.has_daggers
-                    or obs_or_raw.inventory.has_offensive_wand
-                )
-
-            if not has_ranged and np.any(passive_mask):
-                p_ys, p_xs = np.nonzero(passive_mask)
-                for py, px in zip(p_ys, p_xs):
-                    for dy in range(-1, 2):
-                        for dx in range(-1, 2):
-                            ny, nx = py + dy, px + dx
-                            if 0 <= ny < 21 and 0 <= nx < 79:
-                                if hy is None or (ny, nx) != (hy, hx):
-                                    walkable_nav[ny, nx] = False
 
         # Hero's current position is always walkable and can depart
         if hy is not None and 0 <= hy < 21 and 0 <= hx < 79:
@@ -685,67 +708,128 @@ class NetHackAdapter(EnvironmentAdapter):
 
         self.visited[y, x] = True
 
-        inventory_items: list[Item] = []
         inv_letters = raw_obs.get("inv_letters", [])
         inv_strs = raw_obs.get("inv_strs", [])
         inv_oclasses = raw_obs.get("inv_oclasses", [])
+        inv_hash = (
+            hash(inv_strs.tobytes())
+            if hasattr(inv_strs, "tobytes")
+            else hash(bytes(inv_strs))
+        )
 
-        for letter, desc_bytes, oclass in zip(inv_letters, inv_strs, inv_oclasses):
-            if letter > 0:
-                slot = chr(int(letter))
-                desc = self._decode_message(desc_bytes)
-                cat = OCLASS_MAP.get(int(oclass), "unknown")
-                is_equipped = (
-                    "weapon in hand" in desc
-                    or "(being worn)" in desc
-                    or ("wielded" in desc and "not wielded" not in desc)
-                )
-                buc = "uncursed"
-                if "cursed" in desc:
-                    buc = "cursed"
-                elif "blessed" in desc:
-                    buc = "blessed"
-                qty = 1
-                words = desc.split()
-                if words and words[0].isdigit():
-                    qty = int(words[0])
-                inventory_items.append(
-                    Item(
-                        slot=slot,
-                        name=desc,
-                        quantity=qty,
-                        category=cat,
-                        is_equipped=is_equipped,
-                        buc=buc,
+        if (
+            inv_hash == self._cached_inv_hash
+            and self._cached_inv_view is not None
+            and self._cached_epistemic_view is not None
+        ):
+            inventory_items = self._cached_inv_items
+            inv_view = self._cached_inv_view
+            has_magic_res = self._cached_has_magic_res
+            has_reflection = self._cached_has_reflection
+            epistemic_view = self._cached_epistemic_view
+        else:
+            inventory_items = []
+            for letter, desc_bytes, oclass in zip(inv_letters, inv_strs, inv_oclasses):
+                if letter > 0:
+                    slot = chr(int(letter))
+                    desc = self._decode_message(desc_bytes)
+                    cat = OCLASS_MAP.get(int(oclass), "unknown")
+                    is_equipped = (
+                        "weapon in hand" in desc
+                        or "(being worn)" in desc
+                        or ("wielded" in desc and "not wielded" not in desc)
                     )
+                    buc = "uncursed"
+                    if "cursed" in desc:
+                        buc = "cursed"
+                    elif "blessed" in desc:
+                        buc = "blessed"
+                    qty = 1
+                    words = desc.split()
+                    if words and words[0].isdigit():
+                        qty = int(words[0])
+                    inventory_items.append(
+                        Item(
+                            slot=slot,
+                            name=desc,
+                            quantity=qty,
+                            category=cat,
+                            is_equipped=is_equipped,
+                            buc=buc,
+                        )
+                    )
+
+            self.failed_wear_slots = {
+                s
+                for s in self.failed_wear_slots
+                if any(it.slot == s for it in inventory_items)
+            }
+            inv_view = InventoryView(
+                inventory_items, failed_armor_slots=self.failed_wear_slots
+            )
+
+            has_magic_res = getattr(self, "has_magic_res", False) or any(
+                (
+                    "gray dragon scale" in it.name.lower()
+                    or "cloak of magic resistance" in it.name.lower()
                 )
-
-        self.failed_wear_slots = {
-            s
-            for s in self.failed_wear_slots
-            if any(it.slot == s for it in inventory_items)
-        }
-        inv_view = InventoryView(
-            inventory_items, failed_armor_slots=self.failed_wear_slots
-        )
-
-        has_magic_res = getattr(self, "has_magic_res", False) or any(
-            (
-                "gray dragon scale" in it.name.lower()
-                or "cloak of magic resistance" in it.name.lower()
+                and it.is_equipped
+                for it in inventory_items
             )
-            and it.is_equipped
-            for it in inventory_items
-        )
-        has_reflection = getattr(self, "has_reflection", False) or any(
-            (
-                "silver dragon scale" in it.name.lower()
-                or "shield of reflection" in it.name.lower()
-                or "amulet of reflection" in it.name.lower()
+            has_reflection = getattr(self, "has_reflection", False) or any(
+                (
+                    "silver dragon scale" in it.name.lower()
+                    or "shield of reflection" in it.name.lower()
+                    or "amulet of reflection" in it.name.lower()
+                )
+                and it.is_equipped
+                for it in inventory_items
             )
-            and it.is_equipped
-            for it in inventory_items
-        )
+
+            for it in inventory_items:
+                self.epistemic.get_or_create(
+                    uid=it.name,
+                    name=it.name,
+                    item_class=it.category,
+                    slot_letter=it.slot,
+                )
+            untested_count = self.epistemic.count_untested_buc()
+
+            can_wear_armor = True
+            if inv_view.has_unworn_armor:
+                if not inv_view.has_worn_body_armor and inv_view.has_unworn_body_armor:
+                    can_wear_armor = True
+                else:
+                    arm_slot = inv_view.get_unworn_armor_slot()
+                    for it in inv_view:
+                        if it.slot == arm_slot:
+                            can_wear_armor = self.epistemic.can_safely_wear(
+                                it.name, max_cursed_prob=0.15
+                            )
+                            break
+
+            can_quaff_heal = True
+            heal_slot = inv_view.get_healing_slot()
+            if heal_slot:
+                for it in inv_view:
+                    if it.slot == heal_slot:
+                        can_quaff_heal = self.epistemic.can_safely_quaff(it.name)
+                        break
+
+            epistemic_view = EpistemicView(
+                untested_buc_count=untested_count,
+                has_untested_items=(untested_count > 0),
+                can_safely_wear_armor=can_wear_armor,
+                can_safely_quaff_healing=can_quaff_heal,
+                items_belief=self.epistemic.beliefs,
+            )
+
+            self._cached_inv_hash = inv_hash
+            self._cached_inv_items = inventory_items
+            self._cached_inv_view = inv_view
+            self._cached_has_magic_res = has_magic_res
+            self._cached_has_reflection = has_reflection
+            self._cached_epistemic_view = epistemic_view
 
         message = self._decode_message(raw_obs.get("message", ""))
         msg_low = message.lower()
@@ -1011,11 +1095,13 @@ class NetHackAdapter(EnvironmentAdapter):
         # Track stairs coordinates anywhere on the revealed map using CMAP glyphs and chars
         stair_down_glyph = nethack.GLYPH_CMAP_OFF + 24
         stair_up_glyph = nethack.GLYPH_CMAP_OFF + 23
-        glyph_stairs_down = np.argwhere(glyphs == stair_down_glyph)
-        stairs_candidates = [(int(pt[0]), int(pt[1])) for pt in glyph_stairs_down]
-        if not stairs_candidates:
-            chars_stairs_down = np.argwhere(chars == ord(">"))
-            stairs_candidates = [(int(pt[0]), int(pt[1])) for pt in chars_stairs_down]
+        stairs_candidates = []
+        if (glyphs is not None and np.any(glyphs == stair_down_glyph)) or (chars is not None and np.any(chars == ord(">"))):
+            glyph_stairs_down = np.argwhere(glyphs == stair_down_glyph) if glyphs is not None else []
+            stairs_candidates = [(int(pt[0]), int(pt[1])) for pt in glyph_stairs_down]
+            if not stairs_candidates and chars is not None:
+                chars_stairs_down = np.argwhere(chars == ord(">"))
+                stairs_candidates = [(int(pt[0]), int(pt[1])) for pt in chars_stairs_down]
 
         if dnum == 0 and hasattr(self, "mines_stairs_positions"):
             valid_stairs = [
@@ -1042,14 +1128,15 @@ class NetHackAdapter(EnvironmentAdapter):
         if self.known_stairs_down is not None and self.stairs_down_discovery_turn == -1:
             self.stairs_down_discovery_turn = turn
 
-        glyph_stairs_up = np.argwhere(glyphs == stair_up_glyph)
-        if len(glyph_stairs_up) > 0:
-            for pt in glyph_stairs_up:
-                self.known_stairs_up_set.add((int(pt[0]), int(pt[1])))
-        stairs_up = np.argwhere(chars == ord("<"))
-        if len(stairs_up) > 0:
-            for pt in stairs_up:
-                self.known_stairs_up_set.add((int(pt[0]), int(pt[1])))
+        if (glyphs is not None and np.any(glyphs == stair_up_glyph)) or (chars is not None and np.any(chars == ord("<"))):
+            if glyphs is not None:
+                glyph_stairs_up = np.argwhere(glyphs == stair_up_glyph)
+                for pt in glyph_stairs_up:
+                    self.known_stairs_up_set.add((int(pt[0]), int(pt[1])))
+            if chars is not None:
+                stairs_up = np.argwhere(chars == ord("<"))
+                for pt in stairs_up:
+                    self.known_stairs_up_set.add((int(pt[0]), int(pt[1])))
 
         if self.known_stairs_up_set:
             if self.arrival_stairs_up is None:
@@ -1080,6 +1167,8 @@ class NetHackAdapter(EnvironmentAdapter):
 
         # Spatial topology & navigation analysis
         walkable, walkable_nav = self._build_walkable_nav(raw_obs)
+        self._cached_walkable = walkable
+        self._cached_walkable_nav = walkable_nav
         all_doors = self._get_all_doors_mask(raw_obs)
         if self.known_stairs_down:
             walkable_nav[self.known_stairs_down[0], self.known_stairs_down[1]] = True
@@ -1272,27 +1361,31 @@ class NetHackAdapter(EnvironmentAdapter):
 
         if not in_shop_curr:
             loot_candidates = []
-            for dy in range(-8, 9):
-                for dx in range(-8, 9):
-                    if dy == 0 and dx == 0:
+            y_min, y_max = max(0, y - 8), min(21, y + 9)
+            x_min, x_max = max(0, x - 8), min(79, x + 9)
+            sub_chars = chars[y_min:y_max, x_min:x_max]
+            sub_walk = walkable_nav[y_min:y_max, x_min:x_max]
+            loot_mask = LOOT_CHARS_LUT[sub_chars] & sub_walk
+            if np.any(loot_mask):
+                lys, lxs = np.nonzero(loot_mask)
+                for ry, rx in zip(lys, lxs):
+                    ly, lx = y_min + int(ry), x_min + int(rx)
+                    if ly == y and lx == x:
                         continue
-                    ly, lx = y + dy, x + dx
-                    if 0 <= ly < 21 and 0 <= lx < 79 and walkable_nav[ly, lx]:
-                        c_val = int(chars[ly, lx])
-                        # Armor drops ([) detectable up to radius 8; other loot up to radius 4
-                        if (abs(dy) > 4 or abs(dx) > 4) and c_val != ord("["):
-                            continue
-                        if (
-                            (ly, lx) not in self.blocked_tiles
-                            and (ly, lx) not in self.looted_tiles
-                            and (ly, lx) not in self.shop_tiles
-                            and c_val in loot_chars
-                        ):
-                            if glyphs is not None:
-                                lg = int(glyphs[ly, lx])
-                                if 0 <= lg < _MAX_GLYPH and GLYPH_IS_MONSTER_LUT[lg]:
-                                    continue
-                            loot_candidates.append((ly, lx))
+                    c_val = int(chars[ly, lx])
+                    # Armor drops ([) detectable up to radius 8; other loot up to radius 4
+                    if (abs(ly - y) > 4 or abs(lx - x) > 4) and c_val != ord("["):
+                        continue
+                    if (
+                        (ly, lx) not in self.blocked_tiles
+                        and (ly, lx) not in self.looted_tiles
+                        and (ly, lx) not in self.shop_tiles
+                    ):
+                        if glyphs is not None:
+                            lg = int(glyphs[ly, lx])
+                            if 0 <= lg < _MAX_GLYPH and GLYPH_IS_MONSTER_LUT[lg]:
+                                continue
+                        loot_candidates.append((ly, lx))
             if loot_candidates:
                 has_nearby_loot = True
                 closest_idx = int(
@@ -1542,6 +1635,26 @@ class NetHackAdapter(EnvironmentAdapter):
             else None
         )
 
+        is_castle_lvl = (depth in (25, 26, 27) and (closest_drawbridge is not None or can_breach_drawbridge))
+        if inv_view.has_amulet_of_yendor:
+            current_phase = DungeonPhase.ASCENSION_RUN.value
+        elif depth >= 45 or can_perform_invocation or standing_on_vibrating_square:
+            current_phase = DungeonPhase.INVOCATION.value
+        elif depth >= 30:
+            current_phase = DungeonPhase.GEHENNOM_CRAWL.value
+        elif is_castle_lvl:
+            current_phase = DungeonPhase.CASTLE_BREACH.value
+        elif is_sokoban:
+            current_phase = DungeonPhase.SOKOBAN.value
+        elif (dnum == 3 or depth >= 14) and getattr(self, "known_quest_portal_pos", None) is not None:
+            current_phase = DungeonPhase.QUEST.value
+        elif depth >= 10:
+            current_phase = DungeonPhase.MID_GAME_DIVE.value
+        elif can_forge:
+            current_phase = DungeonPhase.EXCALIBUR_FORGE.value
+        else:
+            current_phase = DungeonPhase.EARLY_RUSH.value
+
         dungeon = DungeonView(
             tile_type=tile_type,
             in_shop=in_shop_curr,
@@ -1602,48 +1715,46 @@ class NetHackAdapter(EnvironmentAdapter):
             plane_portal_pos=getattr(self, "known_plane_portal_pos", None),
             can_wish=inv_view.has_wand_of_wishing,
             can_chat_with_leader=(adjacent_peaceful and (dnum == 3 or depth >= 14)),
+            phase=current_phase,
+            is_castle_level=is_castle_lvl,
+            is_sokoban_level=is_sokoban,
         )
-
-        # Register inventory items in Epistemic POMDP engine
-        for it in inventory_items:
-            self.epistemic.get_or_create(
-                uid=it.name,
-                name=it.name,
-                item_class=it.category,
-                slot_letter=it.slot,
-            )
-        untested_count = self.epistemic.count_untested_buc()
-
-        can_wear_armor = True
-        if inv_view.has_unworn_armor:
-            if not inv_view.has_worn_body_armor and inv_view.has_unworn_body_armor:
-                can_wear_armor = True
-            else:
-                arm_slot = inv_view.get_unworn_armor_slot()
-                for it in inv_view:
-                    if it.slot == arm_slot:
-                        can_wear_armor = self.epistemic.can_safely_wear(
-                            it.name, max_cursed_prob=0.15
-                        )
-                        break
-
-        can_quaff_heal = True
-        heal_slot = inv_view.get_healing_slot()
-        if heal_slot:
-            for it in inv_view:
-                if it.slot == heal_slot:
-                    can_quaff_heal = self.epistemic.can_safely_quaff(it.name)
-                    break
-
-        epistemic_view = EpistemicView(
-            untested_buc_count=untested_count,
-            has_untested_items=(untested_count > 0),
-            can_safely_wear_armor=can_wear_armor,
-            can_safely_quaff_healing=can_quaff_heal,
-            items_belief=self.epistemic.beliefs,
-        )
-
         agenda_view = self.agenda.create_view()
+        agenda_view.dungeon_phase = current_phase
+
+        # Update persistent, cross-floor RunMemory
+        self.run_memory.visited_depths.add(depth)
+        if self.known_stairs_down is not None:
+            self.run_memory.stairs_down[depth] = self.known_stairs_down
+        if self.known_stairs_up is not None:
+            self.run_memory.stairs_up[depth] = self.known_stairs_up
+        if self.known_altar_pos is not None:
+            alt_list = self.run_memory.altars.setdefault(depth, [])
+            ay, ax = self.known_altar_pos
+            if not any(a.y == ay and a.x == ax for a in alt_list):
+                alt_list.append(AltarRecord(y=ay, x=ax))
+        if depth in self.global_fountains:
+            f_list = self.run_memory.fountains.setdefault(depth, [])
+            for fy, fx in self.global_fountains[depth]:
+                if not any(f.y == fy and f.x == fx for f in f_list):
+                    f_list.append(FountainRecord(y=fy, x=fx, is_active=True))
+        if fountain_vanished and depth in self.run_memory.fountains:
+            for f in self.run_memory.fountains[depth]:
+                if (f.y, f.x) == (y, x):
+                    f.is_active = False
+        if self.shop_tiles:
+            self.run_memory.shops[depth] = list(self.shop_tiles)
+        if self.sokoban_entrance_pos:
+            self.run_memory.branch_stairs["sokoban"] = (dnum, depth, self.sokoban_entrance_pos[0], self.sokoban_entrance_pos[1])
+        if hasattr(self, "mines_stairs_positions") and self.mines_stairs_positions:
+            for ms in self.mines_stairs_positions:
+                self.run_memory.branch_stairs["mines"] = (0, ms[2], ms[0], ms[1])
+        if getattr(self, "known_quest_portal_pos", None):
+            qp = self.known_quest_portal_pos
+            self.run_memory.portals["quest"] = (dnum, depth, qp[0], qp[1])
+        if getattr(self, "known_plane_portal_pos", None):
+            pp = self.known_plane_portal_pos
+            self.run_memory.portals["plane"] = (dnum, depth, pp[0], pp[1])
 
         # Corpses
         corpse_list = []
@@ -1686,11 +1797,13 @@ class NetHackAdapter(EnvironmentAdapter):
             dungeon=dungeon,
             epistemic=epistemic_view,
             agenda=agenda_view,
+            memory=self.run_memory,
             corpses=corpse_list,
             message=message,
             raw_obs=raw_obs,
         )
         self.agenda.evaluate_milestones(obs)
+        self.run_memory.milestones_achieved = set(getattr(self.agenda, "achieved_milestones", set()))
         obs.agenda = self.agenda.create_view()
         self._last_hp = hero.hp
         return obs
@@ -1874,7 +1987,7 @@ class NetHackAdapter(EnvironmentAdapter):
         return raw_obs, term, trunc
 
     def _step_sequence(
-        self, action_indices: list[int]
+        self, action_indices: list[int | str]
     ) -> tuple[Observation, float, bool, bool, dict[str, Any]]:
         total_reward = 0.0
         term = False
@@ -1884,7 +1997,12 @@ class NetHackAdapter(EnvironmentAdapter):
         for idx, act in enumerate(action_indices):
             if term or trunc:
                 break
-            raw_obs, r, term, trunc, info = self.env.step(act)
+            act_idx = (
+                self._char_to_action_idx(act)
+                if isinstance(act, str)
+                else int(act)
+            )
+            raw_obs, r, term, trunc, info = self.env.step(act_idx)
             total_reward += float(r)
             is_intermediate = idx < len(action_indices) - 1
             raw_obs, term, trunc = self._dismiss_more(
@@ -2107,6 +2225,15 @@ class NetHackAdapter(EnvironmentAdapter):
         self.known_priest_pos = None
         self.last_move_from = (-1, -1)
         self._last_obs_hero_pos = None
+        self.run_memory = RunMemory()
+        self._cached_inv_hash = None
+        self._cached_inv_view = None
+        self._cached_inv_items = []
+        self._cached_has_magic_res = False
+        self._cached_has_reflection = False
+        self._cached_epistemic_view = None
+        self._cached_walkable = None
+        self._cached_walkable_nav = None
         if seed is not None:
             try:
                 unwrapped = self.env.unwrapped
@@ -2781,203 +2908,30 @@ class NetHackAdapter(EnvironmentAdapter):
             and obs_prev is not None
         ):
             hero = obs_prev.hero
-            walkable, walkable_nav = self._build_walkable_nav(obs_prev)
-            all_doors = self._get_all_doors_mask(obs_prev)
-            glyphs = obs_prev.glyphs
-            if glyphs is not None:
-                for dy in range(-2, 3):
-                    for dx in range(-2, 3):
-                        ny, nx = hero.y + dy, hero.x + dx
-                        if 0 <= ny < 21 and 0 <= nx < 79:
-                            g = int(glyphs[ny, nx])
-                            if 0 <= g < _MAX_GLYPH and GLYPH_IS_MON_HOSTILE_LUT[g]:
-                                walkable_nav[ny, nx] = False
-
-            best_tile = None
-            best_dist = -1.0
-            best_is_open = False
+            walkable, walkable_nav = self._get_cached_walkable(obs_prev)
             closest_pos = obs_prev.combat.closest_hostile_pos
             if closest_pos:
                 hy, hx = closest_pos
-                closest_name = getattr(obs_prev.combat, "closest_hostile_name", "").lower()
-                is_passive = (
-                    closest_name in ("floating eye", "gas spore")
-                    or "mold" in closest_name
-                    or "jelly" in closest_name
-                    or "sphere" in closest_name
-                    or "blob" in closest_name
-                    or "ooze" in closest_name
-                    or getattr(obs_prev.combat, "gas_spore_in_fov", False)
-                    or getattr(obs_prev.combat, "adjacent_floating_eye", False)
-                    or getattr(obs_prev.combat, "adjacent_gas_spore", False)
-                )
-                is_adjacent = abs(hy - hero.y) <= 1 and abs(hx - hero.x) <= 1
-                if is_passive and not is_adjacent and not obs_prev.combat.has_active_hostile:
-                    self.consecutive_passive_waits = 0
-                    self.passive_search_count = 0
-                    if obs_prev.spatial.stairs_down_known:
-                        return self.step(Action(name="step_to_stairs_down"))
-                    elif obs_prev.spatial.has_unvisited_frontier:
-                        return self.step(Action(name="step_to_frontier"))
-                    else:
-                        return self.step(Action(name="step_to_dead_end"))
-
                 curr_dist = math.hypot(hero.y - hy, hero.x - hx)
-                dirs = [
-                    (-1, 0),
-                    (1, 0),
-                    (0, -1),
-                    (0, 1),
-                    (-1, -1),
-                    (-1, 1),
-                    (1, -1),
-                    (1, 1),
-                ]
-                doors_mask = self._get_doors_mask(obs_prev.glyphs)
-                for i, (dy, dx) in enumerate(dirs):
+                best_dir = None
+                best_dist = curr_dist
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
                     ny, nx = hero.y + dy, hero.x + dx
                     if 0 <= ny < 21 and 0 <= nx < 79 and walkable_nav[ny, nx]:
-                        if i >= 4:
-                            # Diagonal doorway restriction
-                            if all_doors[hero.y, hero.x] or all_doors[ny, nx]:
-                                continue
-                            if (
-                                not walkable_nav[hero.y, nx]
-                                or not walkable_nav[ny, hero.x]
-                            ):
-                                continue
-                        if (ny, nx) in self.locked_doors and obs_prev.dungeon.in_shop:
-                            continue
                         d = math.hypot(ny - hy, nx - hx)
-                        if d > curr_dist:
-                            is_open = not doors_mask[ny, nx]
-                            if (is_open and not best_is_open) or (
-                                is_open == best_is_open and d > best_dist
-                            ):
-                                best_dist = d
-                                best_tile = (dy, dx)
-                                best_is_open = is_open
-
-            if best_tile:
-                self.consecutive_passive_waits = 0
-                self.passive_search_count = 0
-                return self._step_or_breach(obs_prev, best_tile[0], best_tile[1])
-            elif not obs_prev.combat.closest_hostile_pos:
-                self.consecutive_passive_waits = 0
-                self.passive_search_count = 0
-                # No hostile in sight: safely fallback to navigation or search instead of engraving/waiting
+                        if d > best_dist:
+                            best_dist = d
+                            best_dir = (dy, dx)
+                if best_dir:
+                    return self.step(Action(name="step_direction", direction=best_dir))
+            # Fallback when no tile increases distance or no hostile in view
+            if not obs_prev.combat.closest_hostile_pos:
                 if obs_prev.spatial.stairs_down_known:
                     return self.step(Action(name="step_to_stairs_down"))
                 elif obs_prev.spatial.has_unvisited_frontier:
                     return self.step(Action(name="step_to_frontier"))
-                else:
-                    return self.step(Action(name="step_to_dead_end"))
-            else:
-                closest_name = getattr(
-                    obs_prev.combat, "closest_hostile_name", ""
-                ).lower()
-                is_passive = (
-                    closest_name in ("floating eye", "gas spore")
-                    or "mold" in closest_name
-                    or "jelly" in closest_name
-                    or "sphere" in closest_name
-                    or "blob" in closest_name
-                    or "ooze" in closest_name
-                    or getattr(obs_prev.combat, "gas_spore_in_fov", False)
-                    or getattr(obs_prev.combat, "adjacent_floating_eye", False)
-                    or getattr(obs_prev.combat, "adjacent_gas_spore", False)
-                )
-                is_adjacent = closest_pos is not None and (
-                    abs(closest_pos[0] - hero.y) <= 1 and abs(closest_pos[1] - hero.x) <= 1
-                )
-                if is_passive and not is_adjacent:
-                    self.consecutive_passive_waits = 0
-                    self.passive_search_count = 0
-                    # Passive hazard is distant (>=2) and cannot chase us; safely explore/navigate around it
-                    if obs_prev.spatial.stairs_down_known:
-                        return self.step(Action(name="step_to_stairs_down"))
-                    elif obs_prev.spatial.has_unvisited_frontier:
-                        return self.step(Action(name="step_to_frontier"))
-                    else:
-                        return self.step(Action(name="step_to_dead_end"))
-                elif is_passive:
-                    self.consecutive_passive_waits = (
-                        getattr(self, "consecutive_passive_waits", 0) + 1
-                    )
-                    # If we've already waited once or twice and cannot retreat away:
-                    if self.consecutive_passive_waits >= 2:
-                        self.consecutive_passive_waits = 0
-                        # 1. Try any alternative walkable adjacent tile that is not the monster's tile and not where we just came from
-                        alt_dir = None
-                        if closest_pos:
-                            hy, hx = closest_pos
-                            for dy, dx in (
-                                (-1, 0),
-                                (1, 0),
-                                (0, -1),
-                                (0, 1),
-                                (-1, -1),
-                                (-1, 1),
-                                (1, -1),
-                                (1, 1),
-                            ):
-                                ny, nx = hero.y + dy, hero.x + dx
-                                if (
-                                    0 <= ny < 21
-                                    and 0 <= nx < 79
-                                    and walkable[ny, nx]
-                                    and (ny, nx) != (hy, hx)
-                                    and (ny, nx) not in self.blocked_tiles
-                                    and (ny, nx) != getattr(self, "last_move_from", (-1, -1))
-                                ):
-                                    if (ny, nx) in self.locked_doors and obs_prev.dungeon.in_shop:
-                                        continue
-                                    alt_dir = (dy, dx)
-                                    break
-                        if alt_dir:
-                            self.passive_search_count = 0
-                            return self._step_or_breach(obs_prev, alt_dir[0], alt_dir[1])
-
-                        # 2. Ranged destruction (safe elimination)
-                        if obs_prev.inventory.has_daggers:
-                            return self.step(Action(name="throw_dagger"))
-                        elif obs_prev.inventory.has_offensive_wand:
-                            return self.step(Action(name="zap_offensive_wand"))
-
-                        # 3. Search for secret exit
-                        if getattr(self, "passive_search_count", 0) < 15:
-                            self.passive_search_count = (
-                                getattr(self, "passive_search_count", 0) + 1
-                            )
-                            return self.step(Action(name="search"))
-
-                        # 4. Emergency strike when cornered with no escape routes
-                        if closest_pos:
-                            hy, hx = closest_pos
-                            if abs(hy - hero.y) <= 1 and abs(hx - hero.x) <= 1:
-                                self.passive_search_count = 0
-                                return self.step(
-                                    Action(
-                                        name="melee_attack",
-                                        direction=(hy - hero.y, hx - hero.x),
-                                    )
-                                )
-                        return self.step(Action(name="wait"))
-
-                    return self.step(Action(name="wait"))
-                is_on_elbereth = (
-                    (hero.y, hero.x) in self.elbereth_positions
-                    or getattr(obs_prev.combat, "standing_on_elbereth", False)
-                    or getattr(obs_prev.spatial, "standing_on_elbereth", False)
-                )
-                if not is_on_elbereth:
-                    return self.step(Action(name="engrave_dust_elbereth"))
-                else:
-                    if getattr(obs_prev.combat, "adjacent_gas_spore", False) or getattr(
-                        obs_prev.combat, "adjacent_floating_eye", False
-                    ):
-                        return self.step(Action(name="wait"))
-                    return self.step(Action(name="melee_attack_hostile"))
+                return self.step(Action(name="step_to_dead_end"))
+            return self.step(Action(name="wait"))
 
         elif action.name == "melee_attack_hostile" and obs_prev is not None:
             hero = obs_prev.hero
@@ -3385,102 +3339,37 @@ class NetHackAdapter(EnvironmentAdapter):
                 if not slot:
                     slot = obs_prev.inventory.get_unworn_armor_slot()
             if slot:
-                target_item = (
-                    next((it for it in obs_prev.inventory if it.slot == slot), None)
-                    if obs_prev
-                    else None
+                obs, reward, term, trunc, info = self._step_sequence(
+                    [self.char_to_act.get("W", 0), self.char_to_act.get(slot, 0)]
                 )
-                is_body = False
-                if target_item:
-                    n = target_item.name.lower()
-                    is_body = any(
-                        k in n
-                        for k in (
-                            "mail",
-                            "suit",
-                            "coat",
-                            "cuirass",
-                            "jacket",
-                            "plate",
-                            "leather armor",
-                            "dragon scale",
-                        )
-                    )
-                worn_cloak = (
-                    next(
-                        (
-                            it
-                            for it in obs_prev.inventory
-                            if it.is_equipped and "cloak" in it.name.lower()
-                        ),
-                        None,
-                    )
-                    if obs_prev
-                    else None
-                )
-                if is_body and worn_cloak and getattr(worn_cloak, "buc", "") != "cursed":
-                    seq = [
-                        self.char_to_act.get("T", 0),
-                        self.char_to_act.get(worn_cloak.slot, 0),
-                        self.char_to_act.get("W", 0),
-                        self.char_to_act.get(slot, 0),
-                        self.char_to_act.get("W", 0),
-                        self.char_to_act.get(worn_cloak.slot, 0),
-                    ]
-                    obs, reward, term, trunc, info = self._step_sequence(seq)
-                else:
-                    obs, reward, term, trunc, info = self._step_sequence(
-                        [self.char_to_act.get("W", 0), self.char_to_act.get(slot, 0)]
-                    )
                 item = next((it for it in obs.inventory if it.slot == slot), None)
                 if item is not None and not item.is_equipped:
                     self.failed_wear_slots.add(slot)
                     obs.inventory.failed_armor_slots.add(slot)
                 return obs, reward, term, trunc, info
             return self.step(Action(name="wait"))
+        elif action.name in ("take_off_armor", "take_off_item"):
+            slot = action.slot or (obs_prev.inventory.get_worn_body_armor_slot() if obs_prev else "a")
+            return self._step_sequence(
+                [self.char_to_act.get("T", 0), self.char_to_act.get(slot, 0)]
+            )
         elif action.name == "replace_body_armor":
             slots = (
                 obs_prev.inventory.get_superior_body_armor_slot() if obs_prev else None
             )
             if slots:
                 worn_slot, superior_slot = slots
-                worn_cloak = (
-                    next(
-                        (
-                            it
-                            for it in obs_prev.inventory
-                            if it.is_equipped and "cloak" in it.name.lower()
-                        ),
-                        None,
-                    )
-                    if obs_prev
-                    else None
+                obs, reward, term, trunc, info = self._step_sequence(
+                    [self.char_to_act.get("T", 0), self.char_to_act.get(worn_slot, 0)]
                 )
-                if worn_cloak and getattr(worn_cloak, "buc", "") != "cursed":
-                    seq = [
-                        self.char_to_act.get("T", 0),
-                        self.char_to_act.get(worn_cloak.slot, 0),
-                        self.char_to_act.get("T", 0),
-                        self.char_to_act.get(worn_slot, 0),
+                if term or trunc:
+                    return obs, reward, term, trunc, info
+                return self._step_sequence(
+                    [
                         self.char_to_act.get("W", 0),
                         self.char_to_act.get(superior_slot, 0),
-                        self.char_to_act.get("W", 0),
-                        self.char_to_act.get(worn_cloak.slot, 0),
                     ]
-                    return self._step_sequence(seq)
-                else:
-                    obs, reward, term, trunc, info = self._step_sequence(
-                        [self.char_to_act.get("T", 0), self.char_to_act.get(worn_slot, 0)]
-                    )
-                    if term or trunc:
-                        return obs, reward, term, trunc, info
-                    obs, reward, term, trunc, info = self._step_sequence(
-                        [
-                            self.char_to_act.get("W", 0),
-                            self.char_to_act.get(superior_slot, 0),
-                        ]
-                    )
-                    return obs, reward, term, trunc, info
+                )
             return self.step(Action(name="wait"))
         elif action.name == "enhance_weapon_skill":
             self.can_enhance_skills = False
@@ -3689,20 +3578,17 @@ class NetHackAdapter(EnvironmentAdapter):
             return self.step(Action(name="descend"))
 
         elif (
-            action.name in ("dip_excalibur", "dip_in_fountain") and obs_prev is not None
+            action.name in ("dip_excalibur", "dip_in_fountain", "dip_into")
+            and obs_prev is not None
         ):
-            if obs_prev.hero.dungeon_num == 2 or obs_prev.hero.dungeon_branch == "mines":
+            if not obs_prev.dungeon.standing_on_fountain:
                 return self.step(Action(name="wait"))
-            if not obs_prev.dungeon.standing_on_fountain and (
-                obs_prev.dungeon.closest_fountain_pos
-                or getattr(self, "known_fountain_pos", None)
-            ):
-                return self.step(Action(name="step_to_fountain"))
-            sword_slot = None
-            for it in obs_prev.inventory:
-                if "long sword" in it.name.lower() and "excalibur" not in it.name.lower():
-                    sword_slot = it.slot
-                    break
+            sword_slot = action.slot
+            if not sword_slot:
+                for it in obs_prev.inventory:
+                    if "long sword" in it.name.lower() and "excalibur" not in it.name.lower():
+                        sword_slot = it.slot
+                        break
             if sword_slot:
                 dip_idx = getattr(self, "dip_action_idx", 32)
                 seq = [

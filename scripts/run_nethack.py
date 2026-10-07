@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lox.core.types import Action
 from lox.dsl.compiler import compile_policy
 from lox.envs.nethack import NetHackAdapter
-from lox.telemetry.consolidator import consolidate_run
+from lox.telemetry.consolidator import consolidate_run, safe_duckdb_connect
 from lox.telemetry.parquet import ParquetLogger
 from lox.telemetry.recorder import FlightRecorder
 from lox.telemetry.triggers import DynamicTriggerEngine, TriggerType
@@ -77,7 +77,7 @@ class Agent:
     def run(self, obs):
         while True:
             # Emergency: prayer and healing
-            if obs.hero.hp_frac < 0.20 and (obs.hero.turn - self.last_prayer_turn >= 350):
+            if obs.hero.hp_frac < 0.20 and (obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = yield pray()
                 continue
@@ -467,13 +467,19 @@ class Agent:
         )
 
         # Query DuckDB summary statistics
-        con = duckdb.connect(db_path, read_only=True)
+        con = safe_duckdb_connect(db_path, read_only=True)
         res = con.execute(
             "SELECT AVG(depth), MAX(depth), AVG(turns), COUNT(*) FROM episodes WHERE run_id = ?",
             [run_id],
         ).fetchone()
         con.close()
-        avg_depth, max_depth, avg_turns, ep_count = res if res else (0.0, 0, 0.0, 0)
+        if res and res[3] > 0:
+            avg_depth = res[0] or 0.0
+            max_depth = res[1] or 0
+            avg_turns = res[2] or 0.0
+            ep_count = res[3]
+        else:
+            avg_depth, max_depth, avg_turns, ep_count = 0.0, 0, 0.0, 0
         print("\n" + "=" * 65)
         print("DuckDB Evaluation Summary:")
         print(f"Total Episodes Analyzed: {ep_count}")

@@ -501,41 +501,46 @@ def test_enhance_weapon_skill_and_superior_body_armor():
 
 
 def test_wear_armor_with_cloak_removal():
-    """Verify that wear_armor and replace_body_armor safely take off cloak before wearing body armor."""
+    """Verify that wear_armor executes atomic [W, slot] and HistoricalTactics preserves 6-key macro."""
     from lox.core.types import Item
+    from lox.envs.archived_tactics import HistoricalTactics
 
+    # 1. Historical tactics preserves the hand-tuned 6-key sequence
+    archived_seq = HistoricalTactics.build_wear_armor_sequence("e", "d")
+    assert archived_seq == ["T", "d", "W", "e", "W", "d"]
+
+    # 2. Pure synthesis adapter executes atomic wear primitive
     adapter = NetHackAdapter()
     obs = adapter.reset(seed=789)
 
-    # Mock inventory with worn cloak and unworn plate mail
     cloak = Item(slot="d", name="a dwarvish cloak (being worn)", category="armor", is_equipped=True)
     suit = Item(slot="e", name="a plate mail", category="armor", is_equipped=False)
     adapter._last_obs.inventory.clear()
     adapter._last_obs.inventory.extend([cloak, suit])
 
-    # Calling wear_armor should generate the 6-key sequence: T d W e W d
     executed_seq = []
     original_step_sequence = adapter._step_sequence
 
     def mock_step_sequence(seq):
         executed_seq.extend(seq)
-        return original_step_sequence(seq[:1])  # execute at least 1 action
+        return original_step_sequence(seq[:1])
 
     adapter._step_sequence = mock_step_sequence
     try:
         adapter.step(Action(name="wear_armor", slot="e"))
-        expected_chars = ["T", "d", "W", "e", "W", "d"]
+        expected_chars = ["W", "e"]
         expected_seq = [adapter.char_to_act.get(c, 0) for c in expected_chars]
-        assert executed_seq == expected_seq, f"Expected {expected_seq}, got {executed_seq}"
+        assert executed_seq == expected_seq, f"Expected atomic {expected_seq}, got {executed_seq}"
     finally:
         adapter._step_sequence = original_step_sequence
         adapter.close()
 
 
 def test_passive_hazard_nav_buffering():
-    """Verify that passive hazards (floating eyes) buffer adjacent tiles when lacking ranged weapons."""
+    """Verify that HistoricalTactics buffers passive hazard nav while adapter provides raw unbuffered nav for pure synthesis."""
     import nle.nethack as nh
     from lox.core.types import Item
+    from lox.envs.archived_tactics import HistoricalTactics
 
     adapter = NetHackAdapter()
     obs = adapter.reset(seed=123)
@@ -572,20 +577,15 @@ def test_passive_hazard_nav_buffering():
     obs.glyphs[eye_pos[0], eye_pos[1]] = eye_glyph
     obs.raw_obs["glyphs"][eye_pos[0], eye_pos[1]] = eye_glyph
 
-    # Remove daggers and offensive wands from inventory
-    obs.inventory.clear()
-    adapter._last_obs = obs
+    # 1. HistoricalTactics buffers the adjacent tile when lacking ranged weapons
+    buffered_nav = HistoricalTactics.build_buffered_walkable_nav(
+        walkable, obs.chars, obs.glyphs, [eye_pos], has_ranged_weapons=False
+    )
+    assert not buffered_nav[adj_pos[0], adj_pos[1]], "Archived tactic must buffer tile adjacent to passive hazard"
 
-    _, nav_no_ranged = adapter._build_walkable_nav(obs)
-    # The tile immediately next to the floating eye should be buffered (not walkable)
-    assert not nav_no_ranged[adj_pos[0], adj_pos[1]], "Tile adjacent to passive hazard must be buffered when lacking ranged weapons"
-
-    # Now give hero a dagger
-    obs.inventory.append(Item(slot="a", name="a dagger", category="weapon"))
-    adapter._last_obs = obs
-    _, nav_with_ranged = adapter._build_walkable_nav(obs)
-    # With daggers, adjacent tile is walkable so hero can approach to throw missiles safely
-    assert nav_with_ranged[adj_pos[0], adj_pos[1]], "Tile adjacent to passive hazard must be walkable when possessing ranged weapons"
+    # 2. Adapter provides unbuffered nav to allow policy autonomy
+    _, nav_adapter = adapter._build_walkable_nav(obs)
+    assert nav_adapter[adj_pos[0], adj_pos[1]], "Adapter nav must remain unbuffered for pure policy synthesis"
 
     adapter.close()
 
@@ -940,11 +940,21 @@ def test_deadlock_circuit_breaker_emergency_strike():
     import numpy as np
     from lox.envs.nethack import NetHackAdapter, Action
     from lox.core.types import Observation, HeroState, CombatView, InventoryView
+    from lox.envs.archived_tactics import HistoricalTactics
 
+    # 1. Historical tactics preserves the hand-tuned deadlock circuit breaker
+    archived_act = HistoricalTactics.solve_deadlock_emergency_strike(
+        consecutive_waits=2,
+        adjacent_hostiles=[(10, 21)],
+        has_daggers=False,
+        has_wands=False,
+    )
+    assert archived_act == "melee_attack_hostile"
+
+    # 2. Pure synthesis adapter executes pure retreat/wait without hardcoded combat overrides
     adapter = NetHackAdapter()
     adapter.reset(seed=42)
 
-    # Simulate being trapped in a 1-tile corner with floating eye adjacent at (10, 21)
     hero = HeroState(y=10, x=20, hp=30, max_hp=30, depth=1)
     combat = CombatView(
         adjacent_hostile=True,
@@ -961,31 +971,27 @@ def test_deadlock_circuit_breaker_emergency_strike():
         inventory=inv,
     )
     adapter._last_obs = obs_prev
-    adapter.consecutive_passive_waits = 2  # Already waited twice
-    adapter.passive_search_count = 15      # Searches exhausted
 
     # All neighbors are walls (' ') except the monster's tile (10, 21)
     obs_prev.chars[10, 20] = ord(".")
     obs_prev.chars[10, 21] = ord(".")
 
-    # Intercept step: calling step_away_from_hostile should execute emergency strike at (10, 21)
-    # i.e., direction (0, 1)
-    act = Action(name="step_away_from_hostile")
     resolved_actions = []
     original_step = adapter.step
 
     def capture_step(a):
         resolved_actions.append(a)
-        if a.name == "melee_attack":
+        if a.name == "wait":
             return obs_prev, 0.0, False, False, {}
         return original_step(a)
 
     with unittest.mock.patch.object(adapter, "step", side_effect=capture_step):
-        adapter.step(act)
+        adapter.step(Action(name="step_away_from_hostile"))
 
-    assert any(a.name == "melee_attack" and a.direction == (0, 1) for a in resolved_actions), (
-        f"Expected emergency melee attack towards (0, 1) but got {[a.name for a in resolved_actions]}"
+    assert any(a.name == "wait" for a in resolved_actions), (
+        f"Expected atomic retreat to wait when cornered, got {[a.name for a in resolved_actions]}"
     )
+    adapter.close()
 
 
 def test_melee_attack_hostile_held_by_monster_and_blocked_tiles_discard():
@@ -1236,13 +1242,9 @@ def test_step_away_from_hostile_passive_avoids_last_move_from():
     with unittest.mock.patch.object(adapter, "step", side_effect=capture_step):
         adapter.step(Action(name="step_away_from_hostile"))
 
-    # Because (14, 69) was last_move_from, Step 1 should skip (14, 69).
-    # Since there are no other walkable tiles, it proceeds to Step 2/3 (e.g. search) rather than stepping back to (14, 69)
+    # Pure gradient retreat steps to the walkable neighbor that increases distance from hostile at (13, 70)
     steps = [a for a in resolved_actions if a.name in ("step_direction", "step_or_breach")]
-    for s in steps:
-        if s.direction is not None:
-            # West direction would be (0, -1) towards (14, 69)
-            assert s.direction != (0, -1), "Should not step back into last_move_from"
+    assert any(s.direction == (0, -1) for s in steps), "Pure gradient retreat must step away towards (0, -1)"
 
 
 

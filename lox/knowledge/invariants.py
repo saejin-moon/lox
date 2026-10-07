@@ -1318,6 +1318,10 @@ class InvariantRegistry:
         self._invariants = invariants if invariants is not None else INVARIANTS
         self._by_id = {inv.id: inv for inv in self._invariants}
 
+    def __len__(self) -> int:
+        """Returns total number of registered invariants."""
+        return len(self._invariants)
+
     def get_all(self) -> list[Invariant]:
         """Returns all registered invariants."""
         return list(self._invariants)

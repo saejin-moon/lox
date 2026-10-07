@@ -46,10 +46,8 @@ lox/
 ├── envs/
 │   ├── base.py           # EnvironmentAdapter base class
 │   └── nethack.py        # NetHackAdapter: NLE gym wrapper, macro primitives (backtrack, scavenge, goal), global memory
-├── eval/
-│   └── runner.py         # Batch evaluation engine, DuckDB episode and tick telemetry logger
 ├── knowledge/
-│   └── invariants.py     # Canonical Empirical Knowledge Base: 45 typed, indexed invariants (REGISTRY)
+│   └── invariants.py     # Canonical Empirical Knowledge Base: 47 typed, indexed invariants (REGISTRY)
 ├── telemetry/
 │   ├── consolidator.py   # DuckDB consolidation from Parquet buffers & schema evolution
 │   ├── diagnostics.py    # CausalTimelineAnalyzer, CausalIncidentDossier, Multi-dimensional Root Cause Engine
@@ -57,8 +55,9 @@ lox/
 │   ├── recorder.py       # Circular 100-turn in-memory flight recorder
 │   ├── tokens.py         # LLM token usage tracking & cost accounting
 │   └── triggers.py       # Dynamic incident triggers (stalls, cluster mortalities)
-├── wiki/
-│   └── engine.py         # Offline NetHack wiki retrieval engine for LLM queries
+scripts/
+├── run_synthesis.py      # Core scientific synthesis loop, counterfactual twin replay, DuckDB logging
+└── run_overnight.sh      # Production unattended overnight runner
 data/
 ├── modular_starter_policy.py  # Decoupled modular starter template (clean scientific baseline)
 ├── latest_policy.py           # Active promoted policy checkpoint
@@ -70,7 +69,7 @@ data/
 ## 3. Consolidated Technical Invariants & Operational Rules
 
 > [!NOTE]
-> All 45 empirical invariants synthesized across 68 continuous campaigns are programmatically indexed and maintained in the typed knowledge base [`lox/knowledge/invariants.py`](file:///home/moose/git/lox/lox/knowledge/invariants.py) via `REGISTRY`. Each invariant specifies its canonical ID, category, tags, ground-truth rule, anti-pattern, and verified code snippet. LLMs can dynamically query this registry during authoring sessions via `query_invariants(query, category)`.
+> All 47 empirical invariants synthesized across 68 continuous campaigns are programmatically indexed and maintained in the typed knowledge base [`lox/knowledge/invariants.py`](file:///home/moose/git/lox/lox/knowledge/invariants.py) via `REGISTRY`. Each invariant specifies its canonical ID, category, tags, ground-truth rule, anti-pattern, and verified code snippet. LLMs can dynamically query this registry during authoring sessions via `query_invariants(query, category)`.
 
 ### 3.1 Policy Architecture & Anti-Loop Defense
 1. **Python Generator Paradigm & Subroutine Protocol (`INV-ARC-001`)**: Policies are Python classes yielding actions (`obs = yield action`). Subroutines MUST be called via `obs = yield from self.subroutine(obs)`.

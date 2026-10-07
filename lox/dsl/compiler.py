@@ -111,6 +111,9 @@ def _extract_val(node: ast.AST, bb: Blackboard) -> Any:
             sub_obj = getattr(bb.obs, sub_ns, None)
             if sub_obj and hasattr(sub_obj, name):
                 return getattr(sub_obj, name)
+        # Check top-level observation attributes / properties
+        if hasattr(bb.obs, name):
+            return getattr(bb.obs, name)
         # Check blackboard memory / flags
         return bb.memory.get(name, False)
     elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):

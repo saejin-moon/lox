@@ -59,7 +59,7 @@ from lox.core.types import Action, HungerState
 from lox.dsl.compiler import compile_policy
 from lox.envs.minihack import MiniHackAdapter
 from lox.envs.nethack import NetHackAdapter
-from lox.telemetry.consolidator import consolidate_run
+from lox.telemetry.consolidator import consolidate_run, safe_duckdb_connect
 from lox.telemetry.diagnostics import RootCauseClassifier
 from lox.telemetry.parquet import ParquetLogger
 from lox.telemetry.recorder import FlightRecorder
@@ -106,7 +106,7 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
     last_valid_ac = getattr(obs.hero, "ac", 10)
     last_valid_max_hp = getattr(obs.hero, "max_hp", 15)
     ep_start_time = time.perf_counter()
-    MAX_EPISODE_WALL_SEC = 90.0
+    MAX_EPISODE_WALL_SEC = max(180.0, max_turns * 0.025)
 
     recorder = FlightRecorder(capacity=100)
     logger = ParquetLogger(
@@ -209,76 +209,6 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
             hostiles_in_fov=hostiles_fov,
             tile_type=tile_type,
             dungeon_branch=dungeon_branch,
-        )
-
-        stairs_y = (
-            adapter.known_stairs_down[0]
-            if getattr(adapter, "known_stairs_down", None) is not None
-            else -1
-        )
-        stairs_x = (
-            adapter.known_stairs_down[1]
-            if getattr(adapter, "known_stairs_down", None) is not None
-            else -1
-        )
-        target_y = (
-            adapter.last_target_pos[0]
-            if getattr(adapter, "last_target_pos", None) is not None
-            else -1
-        )
-        target_x = (
-            adapter.last_target_pos[1]
-            if getattr(adapter, "last_target_pos", None) is not None
-            else -1
-        )
-        tiles_vis = (
-            int(np.sum(adapter.visited))
-            if hasattr(adapter, "visited") and adapter.visited is not None
-            else 0
-        )
-        adj_monsters = (
-            ",".join(obs.combat.adjacent_monsters)
-            if hasattr(obs, "combat") and hasattr(obs.combat, "adjacent_monsters")
-            else ""
-        )
-        act_subroutine = getattr(action, "subroutine", "") or action.name
-
-        logger.log_tick(
-            episode_id=ep_id,
-            turn=hero.turn,
-            depth=hero.depth,
-            hp=hero.hp,
-            max_hp=hero.max_hp,
-            hunger=hero.hunger_state.name,
-            y=hy,
-            x=hx,
-            action=action.name,
-            message=obs.message,
-            reward=0.0,
-            closest_hostile_name=closest_name,
-            closest_hostile_dist=closest_dist,
-            hostiles_in_fov=hostiles_fov,
-            tile_type=tile_type,
-            dungeon_branch=dungeon_branch,
-            target_y=target_y,
-            target_x=target_x,
-            stairs_down_y=stairs_y,
-            stairs_down_x=stairs_x,
-            stairs_down_turn=getattr(adapter, "stairs_down_discovery_turn", -1),
-            tiles_visited_count=tiles_vis,
-            unvisited_frontier_count=getattr(
-                obs.spatial, "unvisited_frontier_count", 0
-            ),
-            dead_ends_count=getattr(obs.spatial, "dead_ends_count", 0),
-            adjacent_monsters=adj_monsters,
-            ac=hero.ac,
-            xl=hero.level,
-            active_subroutine=act_subroutine,
-            food_count=getattr(obs.inventory, "food_count", 0),
-            potion_count=getattr(obs.inventory, "potion_count", 0),
-            scroll_count=getattr(obs.inventory, "scroll_count", 0),
-            dagger_count=getattr(obs.inventory, "dagger_count", 0),
-            weapon_in_hand=getattr(obs.inventory, "equipped_weapon_name", ""),
         )
 
         step_res = adapter.step(action)
@@ -482,6 +412,42 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     try:
+        for snap in recorder.buffer:
+            logger.log_tick(
+                episode_id=ep_id,
+                turn=snap.turn,
+                depth=snap.depth,
+                hp=snap.hp,
+                max_hp=snap.max_hp,
+                hunger=snap.hunger,
+                y=snap.pos[0],
+                x=snap.pos[1],
+                action=snap.action_name,
+                message=snap.message,
+                reward=0.0,
+                closest_hostile_name=snap.closest_hostile_name,
+                closest_hostile_dist=snap.closest_hostile_dist,
+                hostiles_in_fov=snap.hostiles_in_fov,
+                tile_type=snap.tile_type,
+                dungeon_branch=snap.dungeon_branch,
+                target_y=-1,
+                target_x=-1,
+                stairs_down_y=-1,
+                stairs_down_x=-1,
+                stairs_down_turn=-1,
+                tiles_visited_count=0,
+                unvisited_frontier_count=0,
+                dead_ends_count=0,
+                adjacent_monsters="",
+                ac=ac_at_death,
+                xl=1,
+                active_subroutine=snap.action_name,
+                food_count=0,
+                potion_count=0,
+                scroll_count=0,
+                dagger_count=0,
+                weapon_in_hand="",
+            )
         logger.flush_ticks()
     except Exception:
         pass
@@ -580,7 +546,7 @@ def run_synthesis_loop(
     # Initialize DuckDB evolved_policies and meta_experiments tables
     try:
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        con = duckdb.connect(db_path)
+        con = safe_duckdb_connect(db_path, read_only=False)
         con.execute("""
             CREATE TABLE IF NOT EXISTS evolved_policies (
                 generation INTEGER,
@@ -777,8 +743,9 @@ class Agent:
         if workers > 1:
             with mp.Pool(processes=min(workers, eval_episodes)) as pool:
                 async_res = pool.map_async(_run_single_episode_worker, payloads)
+                pool_timeout = max(360.0, max_turns * 0.05)
                 try:
-                    ep_results = async_res.get(timeout=180.0)
+                    ep_results = async_res.get(timeout=pool_timeout)
                 except (mp.TimeoutError, Exception) as exc:
                     reason = (
                         "WorkerPoolTimeout"
@@ -809,7 +776,7 @@ class Agent:
                             "prayers": 0,
                             "death_category": "timeout",
                             "inventory_at_death": "",
-                            "last_5_actions": ["wait"],
+                            "last_5_actions": "wait",
                             "turns_dl1": 100,
                             "turns_dl2": 0,
                             "turns_mines": 0,
@@ -892,22 +859,24 @@ class Agent:
         top_deaths = []
         recent_fatal_samples = []
         try:
-            con = duckdb.connect(db_path, read_only=True)
-            top_deaths = con.execute(f"""
-                SELECT death_reason, count(*) as count, round(count(*) * 100.0 / {eval_episodes}, 1) as pct
+            con = safe_duckdb_connect(db_path, read_only=True)
+            denom = max(1, eval_episodes)
+            like_pattern = f"{gen_dir_id}_%"
+            top_deaths = con.execute("""
+                SELECT death_reason, count(*) as count, round(count(*) * 100.0 / ?, 1) as pct
                 FROM episodes
-                WHERE episode_id LIKE '{gen_dir_id}_%'
+                WHERE episode_id LIKE ?
                 GROUP BY death_reason
                 ORDER BY count DESC
                 LIMIT 5
-            """).fetchall()
-            recent_fatal_samples = con.execute(f"""
+            """, [denom, like_pattern]).fetchall()
+            recent_fatal_samples = con.execute("""
                 SELECT death_reason, depth, turns, inventory_at_death, last_5_actions
                 FROM episodes
-                WHERE episode_id LIKE '{gen_dir_id}_%' AND death_reason NOT IN ('active', 'MaxTurnsReached')
+                WHERE episode_id LIKE ? AND death_reason NOT IN ('active', 'MaxTurnsReached')
                 ORDER BY rowid DESC
                 LIMIT 3
-            """).fetchall()
+            """, [like_pattern]).fetchall()
             con.close()
         except Exception:
             pass
@@ -937,11 +906,6 @@ class Agent:
         # Scientific Method: Evaluate candidate hypothesis if this was a candidate evaluation
         if is_candidate_eval and last_recorded_hypothesis is not None and last_baseline_depth is not None:
             pred = last_recorded_hypothesis.get("predicted_outcome", {})
-            direction = (
-                pred.get("expected_direction", "increase")
-                if isinstance(pred, dict)
-                else "increase"
-            )
 
             paired_delta: float | None = None
             seeds_improved = 0
@@ -1054,7 +1018,7 @@ class Agent:
 
             if validated:
                 print(f"  Outcome: VALIDATED (Predicted: {pred})")
-                print(f"[Promotion] Candidate Policy VALIDATED! Promoting as new baseline checkpoint.")
+                print("[Promotion] Candidate Policy VALIDATED! Promoting as new baseline checkpoint.")
                 baseline_policy = candidate_policy
                 current_policy = candidate_policy
                 with open(policy_path, "w") as f:
@@ -1075,7 +1039,7 @@ class Agent:
                 # Log to DuckDB evolved_policies table
                 for attempt in range(3):
                     try:
-                        con = duckdb.connect(db_path)
+                        con = safe_duckdb_connect(db_path, read_only=False)
                         con.execute(
                             "INSERT INTO evolved_policies VALUES (?, ?, ?, ?, ?, ?, ?)",
                             [
@@ -1090,7 +1054,7 @@ class Agent:
                         )
                         con.close()
                         break
-                    except Exception as e:
+                    except Exception:
                         time.sleep(0.5)
             else:
                 just_promoted = False
@@ -1124,7 +1088,7 @@ class Agent:
 
             # Update meta_experiments in DuckDB
             try:
-                con = duckdb.connect(db_path)
+                con = safe_duckdb_connect(db_path, read_only=False)
                 con.execute(
                     """
                     UPDATE meta_experiments
@@ -1253,7 +1217,7 @@ class Agent:
                 last_recorded_hypothesis = hypothesis
                 for attempt in range(3):
                     try:
-                        con = duckdb.connect(db_path)
+                        con = safe_duckdb_connect(db_path, read_only=False)
                         con.execute(
                             """
                             INSERT INTO meta_experiments (

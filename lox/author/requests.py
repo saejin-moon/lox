@@ -12,8 +12,6 @@ import os
 import uuid
 from typing import Any
 
-import duckdb
-
 from lox.telemetry.consolidator import init_db, safe_duckdb_connect
 
 QUEUE_FILE = "data/macro_requests.md"

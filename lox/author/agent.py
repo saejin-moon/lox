@@ -1030,7 +1030,13 @@ class Agent:
                         else:
                             import multiprocessing as mp
 
-                            q = mp.Queue()
+                            mp_ctx = (
+                                mp.get_context("fork")
+                                if hasattr(mp, "get_context")
+                                and "fork" in mp.get_all_start_methods()
+                                else mp
+                            )
+                            q = mp_ctx.Queue()
 
                             def _sub_worker():
                                 try:
@@ -1039,7 +1045,7 @@ class Agent:
                                 except Exception as exc:
                                     q.put(("ERR", exc))
 
-                            p = mp.Process(target=_sub_worker)
+                            p = mp_ctx.Process(target=_sub_worker)
                             p.start()
                             p.join(timeout=timeout)
                             if p.is_alive():

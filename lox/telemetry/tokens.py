@@ -11,8 +11,6 @@ import json
 import os
 from typing import Any
 
-import duckdb
-
 from lox.telemetry.consolidator import init_db, safe_duckdb_connect
 
 # Estimated cost in USD per 1,000,000 tokens

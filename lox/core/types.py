@@ -42,6 +42,20 @@ class EncumbranceState(IntEnum):
     OVERLOADED = 5
 
 
+class DungeonPhase(str, Enum):
+    """High-level progression phases of a complete NetHack ascension campaign."""
+
+    EARLY_RUSH = "early_rush"            # DL 1-4: scavenge armor, daggers, rations, dive
+    EXCALIBUR_FORGE = "excalibur_forge"  # XL >= 5: seek fountain and forge Excalibur
+    SOKOBAN = "sokoban"                  # DL 6-10: enter Sokoban, clear for reflection/holding
+    MID_GAME_DIVE = "mid_game_dive"      # DL 10-20: Medusa lair, Castle approach
+    CASTLE_BREACH = "castle_breach"      # DL 25-29: breach drawbridge, acquire Wand of Wishing
+    QUEST = "quest"                      # XL 14: enter Quest, chat with leader, defeat nemesis
+    GEHENNOM_CRAWL = "gehennom_crawl"    # DL 30-45: Vlad's Tower, Wizard's Tower, Vibrating Square
+    INVOCATION = "invocation"            # Vibrating Square: Bell, Book, Candelabrum
+    ASCENSION_RUN = "ascension_run"      # Has Amulet: reverse climb to Astral High Altar
+
+
 @dataclass(slots=True)
 class HeroState:
     """Hero attributes extracted from observation for fast predicate evaluation."""
@@ -76,6 +90,10 @@ class HeroState:
     has_reflection: bool = False
     can_enhance_skills: bool = False
     can_pray: bool = True
+
+    @property
+    def can_safely_pray(self) -> bool:
+        return self.can_pray
 
     @property
     def hp_frac(self) -> float:
@@ -148,6 +166,10 @@ class InventoryView(list):
     @property
     def has_food(self) -> bool:
         return any(self._is_safe_food_item(it) for it in self)
+
+    @property
+    def has_carried_food(self) -> bool:
+        return self.has_food
 
     @property
     def has_healing(self) -> bool:
@@ -726,10 +748,6 @@ class InventoryView(list):
         return sum(it.quantity for it in self if "candle" in it.name.lower())
 
     @property
-    def has_amulet_of_yendor(self) -> bool:
-        return any("amulet of yendor" in it.name.lower() for it in self)
-
-    @property
     def dagger_count(self) -> int:
         return sum(
             it.quantity
@@ -901,6 +919,9 @@ class DungeonView:
     plane_portal_pos: tuple[int, int] | None = None
     can_wish: bool = False
     can_chat_with_leader: bool = False
+    phase: str = DungeonPhase.EARLY_RUSH.value
+    is_castle_level: bool = False
+    is_sokoban_level: bool = False
 
 
 @dataclass(slots=True)
@@ -946,6 +967,36 @@ class AgendaView:
 
 
 @dataclass
+class AltarRecord:
+    y: int
+    x: int
+    alignment: str = "unaligned"  # "lawful", "neutral", "chaotic", "unaligned"
+
+
+@dataclass
+class FountainRecord:
+    y: int
+    x: int
+    is_active: bool = True
+
+
+@dataclass
+class RunMemory:
+    """Persistent, cross-floor episodic memory maintained across the entire episode."""
+
+    altars: dict[int, list[AltarRecord]] = field(default_factory=dict)
+    fountains: dict[int, list[FountainRecord]] = field(default_factory=dict)
+    shops: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
+    stairs_down: dict[int, tuple[int, int]] = field(default_factory=dict)
+    stairs_up: dict[int, tuple[int, int]] = field(default_factory=dict)
+    branch_stairs: dict[str, tuple[int, int, int]] = field(default_factory=dict)  # "mines", "sokoban" -> (dnum, dlevel, dl)
+    portals: dict[str, tuple[int, int, int]] = field(default_factory=dict)  # "quest", "plane"
+    stashes: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    visited_depths: set[int] = field(default_factory=set)
+    milestones_achieved: set[str] = field(default_factory=set)
+
+
+@dataclass
 class Observation:
     """Standardized environment observation across all domains."""
 
@@ -959,9 +1010,29 @@ class Observation:
     dungeon: DungeonView = field(default_factory=DungeonView)
     epistemic: EpistemicView = field(default_factory=EpistemicView)
     agenda: AgendaView = field(default_factory=AgendaView)
+    memory: RunMemory = field(default_factory=RunMemory)
     corpses: list[FloorCorpse] = field(default_factory=list)
     message: str = ""  # Last in-game message text
     raw_obs: Any = None  # Original environment observation dict
+
+    @property
+    def floor_corpse_adjacent(self) -> bool:
+        return any(
+            max(abs(c.y - self.hero.y), abs(c.x - self.hero.x)) <= 1
+            for c in self.corpses
+        )
+
+    @property
+    def corpse_is_safe(self) -> bool:
+        return any(c.is_safe for c in self.corpses)
+
+    @property
+    def corpse_is_fresh(self) -> bool:
+        return any(c.is_fresh for c in self.corpses)
+
+    @property
+    def corpse_is_deadly(self) -> bool:
+        return any(c.is_deadly for c in self.corpses)
 
 
 @dataclass(slots=True, frozen=True)
