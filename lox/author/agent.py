@@ -196,6 +196,56 @@ class AuthorAgent:
                 new_method.args.args.insert(0, ast.arg(arg="self"))
             new_body.append(new_method)
 
+        existing_method_names = {
+            m.name for m in new_body if isinstance(m, ast.FunctionDef)
+        }
+
+        # 1. Auto-stub any skill_ subroutines called in run() that are missing
+        run_node = next(
+            (m for m in new_body if isinstance(m, ast.FunctionDef) and m.name == "run"),
+            None,
+        )
+        if run_node is not None:
+            called_skills = set()
+            for subnode in ast.walk(run_node):
+                if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Attribute):
+                    if isinstance(subnode.func.value, ast.Name) and subnode.func.value.id == "self":
+                        if subnode.func.attr.startswith("skill_"):
+                            called_skills.add(subnode.func.attr)
+            for missing_skill in sorted(called_skills - existing_method_names):
+                stub_code = f"def {missing_skill}(self, obs):\n    obs = (yield from self.skill_explore_and_dive(obs))\n    return obs\n"
+                stub_ast = ast.parse(stub_code).body[0]
+                new_body.append(stub_ast)
+                existing_method_names.add(missing_skill)
+
+        # 2. Auto-stub any skill_<goal> methods returned by determine_goal() that are missing
+        det_node = next(
+            (m for m in new_body if isinstance(m, ast.FunctionDef) and m.name == "determine_goal"),
+            None,
+        )
+        if det_node is not None:
+            returned_goals = set()
+            for subnode in ast.walk(det_node):
+                if isinstance(subnode, ast.Return) and isinstance(subnode.value, ast.Constant):
+                    if isinstance(subnode.value.value, str):
+                        returned_goals.add(subnode.value.value)
+            for missing_goal in sorted(returned_goals):
+                skill_name = "skill_" + missing_goal
+                if skill_name not in existing_method_names and missing_goal not in (
+                    "ascension_run",
+                    "perform_invocation",
+                    "breach_castle",
+                    "solve_sokoban",
+                    "combat",
+                    "explore_and_dive",
+                    "scavenge_armor",
+                    "forge_excalibur",
+                ):
+                    stub_code = f"def {skill_name}(self, obs):\n    obs = (yield from self.skill_explore_and_dive(obs))\n    return obs\n"
+                    stub_ast = ast.parse(stub_code).body[0]
+                    new_body.append(stub_ast)
+                    existing_method_names.add(skill_name)
+
         agent_node.body = new_body
 
         try:
@@ -591,8 +641,8 @@ class Agent:
             f"The candidate policy program failed AST validation and compilation with error:\n"
             f"{compile_err}\n\n"
             f"Candidate Code:\n```python\n{candidate_code.strip()}\n```\n\n"
-            "Please fix all syntax and vocabulary violations to adhere strictly to the Approved Vocabulary and grammar rules. "
-            "Output ONLY the corrected method or complete corrected policy code in a single ```python ... ``` block."
+            "Please fix all syntax, attribute, and vocabulary violations to adhere strictly to the Approved Vocabulary and grammar rules. "
+            "Do NOT dump the entire class Agent—output ONLY the specific method definition(s) you are fixing or adding in a single ```python ... ``` block."
         )
 
         if self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):

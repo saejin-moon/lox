@@ -104,6 +104,8 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "corpse_is_safe": "bool",
     "corpse_is_deadly": "bool",
     "has_poison_res": "bool",
+    "has_poison_resistant": "bool",
+    "has_poisonous": "bool",
     "has_magic_res": "bool",
     "has_reflection": "bool",
     "can_harvest_poison": "bool",

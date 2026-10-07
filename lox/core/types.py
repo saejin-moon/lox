@@ -942,6 +942,30 @@ class FloorCorpse:
         return self.is_fresh and not self.is_poisonous and not self.is_deadly
 
 
+class FloorCorpseList(list):
+    """List of FloorCorpse records with tactical query affordances."""
+
+    @property
+    def has_poison_resistant(self) -> bool:
+        return any(c.is_poisonous for c in self)
+
+    @property
+    def has_poisonous(self) -> bool:
+        return any(c.is_poisonous for c in self)
+
+    @property
+    def has_safe(self) -> bool:
+        return any(c.is_safe for c in self)
+
+    @property
+    def has_fresh(self) -> bool:
+        return any(c.is_fresh for c in self)
+
+    @property
+    def has_deadly(self) -> bool:
+        return any(c.is_deadly for c in self)
+
+
 @dataclass
 class EpistemicView:
     """Belief state over latent properties (BUC, safe-gates, identity)."""
@@ -1019,9 +1043,13 @@ class Observation:
     epistemic: EpistemicView = field(default_factory=EpistemicView)
     agenda: AgendaView = field(default_factory=AgendaView)
     memory: RunMemory = field(default_factory=RunMemory)
-    corpses: list[FloorCorpse] = field(default_factory=list)
+    corpses: list[FloorCorpse] = field(default_factory=FloorCorpseList)
     message: str = ""  # Last in-game message text
     raw_obs: Any = None  # Original environment observation dict
+
+    def __post_init__(self):
+        if not isinstance(self.corpses, FloorCorpseList):
+            self.corpses = FloorCorpseList(self.corpses)
 
     @property
     def floor_corpse_adjacent(self) -> bool:
