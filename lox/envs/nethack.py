@@ -2174,6 +2174,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.blocked_tiles.discard((obs.hero.y, obs.hero.x))
         self.non_door_tiles.discard((obs.hero.y, obs.hero.x))
 
+        self._step_recursion_depth = 0
         info["strategic_goal"] = getattr(self, "current_strategic_goal", "")
         return obs, total_reward, bool(term), bool(trunc), info
 
@@ -2206,6 +2207,7 @@ class NetHackAdapter(EnvironmentAdapter):
         self.last_depth = 1
         self.last_dnum = 0
         self.consecutive_zero_turns = 0
+        self._step_recursion_depth = 0
         self._consecutive_failed_steps = 0
         self._prev_turn = 0
         self.last_prayer_turn = -1000
@@ -2262,6 +2264,11 @@ class NetHackAdapter(EnvironmentAdapter):
         self._last_attempted_dir = action.direction
         self._last_action_name = action.name
         target_char = "."
+        self._step_recursion_depth = getattr(self, "_step_recursion_depth", 0) + 1
+        if self._step_recursion_depth > 8:
+            self._step_recursion_depth = 0
+            act_idx = self.char_to_act.get("s", 0)
+            return self._step_sequence([act_idx])
 
         # Break any consecutive 0-turn loop before NLE aborts at 2500
         if getattr(self, "consecutive_zero_turns", 0) >= 4:
@@ -2552,9 +2559,13 @@ class NetHackAdapter(EnvironmentAdapter):
                     dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                     return self._step_or_breach(obs_prev, dy, dx)
 
-            # If no dead end target or wall target is reachable, and stairs down are known, step to stairs down!
+            # If no dead end target or wall target is reachable, and stairs down are known and reachable, step to stairs down!
             if (not target or target == (-1, -1)) and self.known_stairs_down is not None:
-                return self.step(Action(name="step_to_stairs_down"))
+                stairs_path = SpatialEngine.find_path(
+                    (hero.y, hero.x), self.known_stairs_down, walkable_nav, is_door=all_doors
+                )
+                if stairs_path:
+                    return self.step(Action(name="step_to_stairs_down"))
 
             # If no dead end target or wall target is reachable, do not oscillate back and forth.
             # Perform search() if adjacent to walls/doors and tile not exhausted, else step to least-searched neighbor

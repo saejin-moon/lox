@@ -667,6 +667,7 @@ class Agent:
     last_batch_seeds: list[int] = []
     last_batch_results_by_seed: dict[int, dict[str, Any]] = {}
     last_batch_primary_cause: str = ""
+    consecutive_falsifications_on_batch: int = 0
     start_gen = 1
     if not fresh and os.path.exists("data/policies"):
         import glob
@@ -755,6 +756,9 @@ class Agent:
                     print(
                         f"\n[Warning] Generation {gen} worker pool encountered {reason}! Terminating worker processes..."
                     )
+                    if not isinstance(exc, mp.TimeoutError):
+                        import traceback
+                        traceback.print_exc()
                     pool.terminate()
                     pool.join()
                     ep_results = [

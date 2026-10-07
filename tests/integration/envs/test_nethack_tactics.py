@@ -831,7 +831,12 @@ def test_in_combat_emergency_eating_unconditional():
     from lox.dsl.compiler import compile_policy
     from lox.core.types import Observation, HeroState, Item, HungerState
 
-    with open("data/policies/gen_0008.py") as f:
+    import os, glob
+    p_path = "data/policies/gen_0008.py"
+    if not os.path.exists(p_path):
+        archs = glob.glob("data/policies/archive_*/gen_0008.py")
+        p_path = archs[0] if archs else "data/latest_policy.py"
+    with open(p_path) as f:
         policy_code = f.read()
 
     executor = compile_policy(policy_code)
@@ -877,8 +882,12 @@ def test_peaceful_domestic_animal_protection_and_sokoban_sweep():
     assert not any("kitten" in n for n in peaceful_names), "Kitten must not be blanket peaceful in LUT"
     assert not any("little dog" in n for n in peaceful_names), "Little dog must not be blanket peaceful in LUT"
 
-    # 3. Sokoban sweep shielding in policy
-    with open("data/policies/gen_0008.py") as f:
+    import os, glob
+    p_path = "data/policies/gen_0008.py"
+    if not os.path.exists(p_path):
+        archs = glob.glob("data/policies/archive_*/gen_0008.py")
+        p_path = archs[0] if archs else "data/latest_policy.py"
+    with open(p_path) as f:
         policy_code = f.read()
 
     executor = compile_policy(policy_code)

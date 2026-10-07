@@ -36,7 +36,7 @@ tmux new-session -d -s "$SESSION_NAME" \
      --model qwen/qwen3.5-9b \
      --generations 1000 \
      --eval-episodes 100 \
-     --max-turns 25000 \
+     --max-turns 100000 \
      --target-depth 50.0 \
      --min-delta 0.40 \
      --min-improved 20 \
