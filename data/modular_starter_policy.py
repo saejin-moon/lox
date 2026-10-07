@@ -3,6 +3,7 @@ class Agent:
     def __init__(self):
         self.last_prayer_turn = -1000
         self.current_goal = "explore_and_dive"
+        self._dead_end_search_count = 0
 
     def determine_goal(self, obs) -> str:
         # Phase 1: Endgame Ascension run
@@ -17,19 +18,32 @@ class Agent:
         # Phase 4: Sokoban Solver
         if obs.dungeon.phase == "sokoban" or obs.dungeon.is_sokoban_level:
             return "solve_sokoban"
+        # Tactical & Survival Goals
         if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
             return "combat"
         if obs.hero.hunger_state >= 2 or (obs.hero.hunger_state >= 1 and any(c.is_safe for c in obs.corpses)):
             return "nutrition"
         if obs.dungeon.can_forge_excalibur and (obs.dungeon.standing_on_fountain or obs.dungeon.fountain_in_fov or obs.dungeon.has_known_fountain):
             return "forge_excalibur"
-        if obs.hero.ac >= 5 or obs.inventory.has_unworn_armor or obs.inventory.get_superior_body_armor_slot() is not None or obs.spatial.has_nearby_loot:
+        if obs.inventory.has_unworn_armor or obs.inventory.get_superior_body_armor_slot() is not None or obs.spatial.has_nearby_loot:
             return "scavenge_armor"
         return "explore_and_dive"
 
     def run(self, obs):
         while True:
-            # Reflex 1: Armor Upgrades
+            # Reflex 1: Mines Evacuation (avoid dark Gnomish Mines branch)
+            if obs.hero.dungeon_branch == "mines":
+                if obs.spatial.standing_on_stairs_up and not obs.status.is_levitating:
+                    obs = (yield ascend())
+                    continue
+                elif obs.spatial.stairs_up_known:
+                    obs = (yield step_to_stairs_up())
+                    continue
+                else:
+                    obs = (yield step_to_frontier())
+                    continue
+
+            # Reflex 2: Armor Upgrades
             if obs.inventory.get_superior_body_armor_slot() is not None:
                 obs = (yield replace_body_armor())
                 continue
@@ -37,7 +51,7 @@ class Agent:
                 obs = (yield wear_armor())
                 continue
 
-            # Reflex 2: Nutrition (Corpse at >=1, Carried food ONLY at >=2)
+            # Reflex 3: Nutrition (Fresh floor corpse at >=1, Carried food ONLY at >=2)
             if obs.hero.hunger_state >= 1 and any(c.is_safe for c in obs.corpses) and not obs.combat.adjacent_hostile:
                 obs = (yield eat_floor_corpse())
                 continue
@@ -45,33 +59,22 @@ class Agent:
                 obs = (yield eat_carried_food())
                 continue
 
-            # Reflex 3: Major Trouble Prayer
+            # Reflex 4: Major Trouble Divine Prayer (HP < 15% or Fainting without food)
             if (obs.hero.hp_frac < 0.15 or (obs.hero.hunger_state >= 4 and not obs.inventory.has_food)) and (obs.hero.can_pray and obs.hero.turn - self.last_prayer_turn >= 850):
                 self.last_prayer_turn = obs.hero.turn
                 obs = (yield pray())
                 continue
 
-            # Reflex 4: Combat Engagement
+            # Reflex 5: Combat Engagement
             if obs.combat.adjacent_hostile or obs.combat.has_active_hostile:
                 obs = (yield from self.skill_combat(obs))
                 continue
 
-            # Reflex 5: Paced Vertical Transit
-            should_descend = (
-                obs.spatial.stairs_down_known and (
-                    obs.hero.turns_on_level >= 100
-                    or not obs.spatial.has_unvisited_frontier
-                    or obs.hero.hunger_state >= 2
-                    or obs.hero.depth >= 3
-                    or obs.combat.adjacent_hostile
-                    or obs.hero.hp_frac < 0.35
-                )
-            )
+            # Reflex 6: Fast Vertical Transit (Descend immediately when on stairs down)
             if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
-                if should_descend:
-                    obs = (yield descend())
-                    continue
-            if should_descend:
+                obs = (yield descend())
+                continue
+            if obs.spatial.stairs_down_known and (not obs.spatial.has_nearby_loot or obs.hero.turns_on_level >= 30 or obs.hero.depth >= 3):
                 obs = (yield step_to_stairs_down())
                 continue
 
@@ -182,6 +185,11 @@ class Agent:
             obs = (yield quaff_healing())
             return obs
 
+        # Tactical stairs escape
+        if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating and obs.hero.hp_frac < 0.60:
+            obs = (yield descend())
+            return obs
+
         if obs.combat.adjacent_hostile:
             # Passive hazard discrimination
             if obs.combat.adjacent_floating_eye or obs.combat.adjacent_gas_spore:
@@ -197,8 +205,8 @@ class Agent:
                 obs = (yield step_away_from_hostile())
                 return obs
 
-            # Standard melee vs sanctuary
-            if obs.hero.hp_frac > 0.35:
+            # Decisive melee vs sanctuary
+            if obs.hero.hp_frac > 0.30 or obs.combat.in_corridor or not obs.combat.can_retreat:
                 obs = (yield melee_attack_hostile())
                 return obs
             else:
@@ -213,7 +221,7 @@ class Agent:
                 if obs.inventory.has_offensive_wand:
                     obs = (yield zap_offensive_wand())
                     return obs
-                if obs.inventory.has_daggers:
+                if obs.inventory.has_daggers and obs.combat.closest_hostile_dist <= 3:
                     obs = (yield throw_dagger())
                     return obs
             obs = (yield melee_attack_hostile())
@@ -242,26 +250,22 @@ class Agent:
         if obs.spatial.has_nearby_loot:
             obs = (yield step_to_loot())
             return obs
-        if obs.spatial.has_unvisited_frontier:
-            obs = (yield step_to_frontier())
-            return obs
-        obs = (yield step_to_dead_end())
+        obs = (yield from self.skill_explore_and_dive(obs))
         return obs
 
     def skill_explore_and_dive(self, obs):
-        should_descend = (
-            obs.spatial.stairs_down_known and (
-                obs.hero.turns_on_level >= 100
-                or not obs.spatial.has_unvisited_frontier
-                or obs.hero.hunger_state >= 2
-                or obs.hero.depth >= 3
-            )
-        )
-        if should_descend:
+        # Fast descent: take stairs down immediately if known and immediate loot cleared
+        if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
+            obs = (yield descend())
+            return obs
+        if obs.spatial.stairs_down_known and (not obs.spatial.has_nearby_loot or obs.hero.turns_on_level >= 30 or obs.hero.depth >= 3):
             obs = (yield step_to_stairs_down())
             return obs
         if obs.spatial.has_unvisited_frontier:
             obs = (yield step_to_frontier())
+            return obs
+        if obs.spatial.has_nearby_loot:
+            obs = (yield step_to_loot())
             return obs
         obs = (yield from self.handle_dead_end(obs))
         return obs
@@ -271,8 +275,11 @@ class Agent:
             obs = (yield step_to_stairs_down())
             return obs
         if obs.spatial.standing_on_dead_end:
-            obs = (yield search())
-            return obs
+            if getattr(self, "_dead_end_search_count", 0) < 5:
+                self._dead_end_search_count = getattr(self, "_dead_end_search_count", 0) + 1
+                obs = (yield search())
+                return obs
+            self._dead_end_search_count = 0
         if obs.spatial.has_unvisited_frontier:
             obs = (yield step_to_frontier())
             return obs
