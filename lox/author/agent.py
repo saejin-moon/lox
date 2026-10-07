@@ -178,16 +178,6 @@ class AuthorAgent:
         if agent_node is None:
             return patch_code
 
-        # If patch defines a class with all core methods (run and __init__), it's a complete replacement
-        base_method_names = {
-            item.name for item in agent_node.body if isinstance(item, ast.FunctionDef)
-        }
-        if (
-            patch_has_class
-            and "run" in replacements
-            and len(replacements) >= len(base_method_names)
-        ):
-            return patch_code
 
         new_body = []
         for item in agent_node.body:
