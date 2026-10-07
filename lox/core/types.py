@@ -599,6 +599,28 @@ class InventoryView(list):
                 return it.slot
         return None
 
+    def get_bag_of_holding_slot(self) -> str | None:
+        for it in self:
+            if it.category in ("tool", "container") and "bag of holding" in it.name.lower():
+                return it.slot
+        return None
+
+    def get_wand_of_wishing_slot(self) -> str | None:
+        for it in self:
+            if it.category == "wand" and "wishing" in it.name.lower():
+                return it.slot
+        return None
+
+    @property
+    def has_amulet_of_yendor(self) -> bool:
+        return any("amulet of yendor" in it.name.lower() for it in self)
+
+    def get_amulet_of_yendor_slot(self) -> str | None:
+        for it in self:
+            if "amulet of yendor" in it.name.lower():
+                return it.slot
+        return None
+
     @property
     def has_blindfold(self) -> bool:
         return any(
@@ -820,6 +842,7 @@ class SpatialView:
     floor_explored: bool = False
     has_nearby_loot: bool = False
     nearby_loot_pos: tuple[int, int] | None = None
+    should_descend_urgently: bool = False
 
 
 @dataclass(slots=True)
@@ -868,6 +891,16 @@ class DungeonView:
     can_tunnel_gehennom: bool = False
     standing_on_vibrating_square: bool = False
     can_perform_invocation: bool = False
+    # Endgame & Ascension Milestones
+    has_quest_portal: bool = False
+    has_plane_portal: bool = False
+    standing_on_quest_portal: bool = False
+    standing_on_plane_portal: bool = False
+    standing_on_high_altar: bool = False
+    quest_portal_pos: tuple[int, int] | None = None
+    plane_portal_pos: tuple[int, int] | None = None
+    can_wish: bool = False
+    can_chat_with_leader: bool = False
 
 
 @dataclass(slots=True)

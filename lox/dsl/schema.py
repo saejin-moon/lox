@@ -77,6 +77,7 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "unvisited_frontier_count": "int",
     "floor_explored": "bool",
     "has_nearby_loot": "bool",
+    "should_descend_urgently": "bool",
     # Dungeon Features & Environment
     "tile_type": "str",
     "in_shop": "bool",
@@ -151,6 +152,15 @@ ALLOWED_PREDICATES: dict[str, str] = {
     "can_tunnel_gehennom": "bool",
     "standing_on_vibrating_square": "bool",
     "can_perform_invocation": "bool",
+    # Endgame & Ascension Milestones
+    "has_quest_portal": "bool",
+    "has_plane_portal": "bool",
+    "standing_on_quest_portal": "bool",
+    "standing_on_plane_portal": "bool",
+    "standing_on_high_altar": "bool",
+    "has_amulet_of_yendor": "bool",
+    "can_wish": "bool",
+    "can_chat_with_leader": "bool",
     # Epistemic POMDP Belief & Safety Gates
     "untested_buc_count": "int",
     "has_untested_items": "bool",
@@ -233,6 +243,13 @@ ALLOWED_ACTIONS: set[str] = {
     "rest",
     "apply_unicorn_horn",
     "apply_blindfold",
+    # Endgame Ascension Primitives
+    "wish",
+    "chat_with_leader",
+    "step_to_quest_portal",
+    "stash_in_bag",
+    "step_to_plane_portal",
+    "offer_amulet_on_altar",
 }
 
 # Enum constants exposed to conditions

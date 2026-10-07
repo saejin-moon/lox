@@ -294,3 +294,33 @@ def test_classify_new_archetypes():
     assert diag_enc.primary_archetype == FailureArchetype.ENCUMBRANCE_IMMOBILITY
     assert any("ENCUMBRANCE_IMMOBILITY" in d for d in diag_enc.causal_dossier.causal_drivers)
 
+
+def test_trustworthy_triad_report():
+    diags = [
+        EpisodeDiagnostic(
+            episode_id=f"ep_{i}",
+            run_id="run_triad",
+            depth=2 if i < 3 else 5,
+            max_depth=2 if i < 3 else 5,
+            turns=1200 + i * 50,
+            killer="soldier ant" if i % 2 == 0 else "orc captain",
+            ac_at_death=8,
+            primary_archetype=FailureArchetype.COMBAT_FAST_PREDATOR if i % 2 == 0 else FailureArchetype.ARMOR_DEFICIT,
+            confidence=0.9,
+            explanation="test fatal encounter",
+        )
+        for i in range(10)
+    ]
+    summary = RootCauseClassifier.summarize_batch(diags)
+    assert len(summary.top_killers) > 0
+    assert summary.avg_ac_at_death == 8.0
+    assert "DL 1-2" in summary.depth_distribution
+
+    report = summary.format_trustworthy_triad_report()
+    assert "THE TRUSTWORTHY TRIAD: EMPIRICAL BATCH AUTOPSY REPORT" in report
+    assert "Factor 1: Macro Failure Archetype Distribution" in report
+    assert "Factor 2: Orthogonal Systemic Drivers" in report
+    assert "Factor 3: Ground-Truth Empirical Telemetry Context" in report
+    assert "soldier ant" in report or "orc captain" in report
+
+

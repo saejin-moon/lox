@@ -45,6 +45,8 @@ def _create_action_builder(name: str) -> Callable[..., Action]:
         direction = kwargs.get("direction")
         slot = kwargs.get("slot")
         target_pos = kwargs.get("target_pos")
+        target_depth = kwargs.get("target_depth")
+        goal_name = kwargs.get("goal_name")
         subroutine = kwargs.get("subroutine", "")
         if len(args) == 2 and isinstance(args[0], int) and isinstance(args[1], int):
             target_pos = (args[0], args[1])
@@ -52,13 +54,22 @@ def _create_action_builder(name: str) -> Callable[..., Action]:
             if len(args[0]) == 2:
                 target_pos = args[0]
                 direction = args[0]
+        elif args and isinstance(args[0], int):
+            target_depth = args[0]
         elif args and isinstance(args[0], str):
-            slot = args[0]
+            if name == "set_strategic_goal":
+                goal_name = args[0]
+            elif name == "wish":
+                kwargs["item_name"] = args[0]
+            else:
+                slot = args[0]
         return Action(
             name=name,
             direction=direction,
             slot=slot,
             target_pos=target_pos,
+            target_depth=target_depth,
+            goal_name=goal_name,
             subroutine=subroutine,
             extra=kwargs,
         )

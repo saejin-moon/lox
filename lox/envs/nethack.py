@@ -68,10 +68,8 @@ OCLASS_MAP: dict[int, str] = {
 }
 
 IGNORES_ELBERETH_SPECIES: tuple[str, ...] = (
-    "orc",
-    "uruk",
-    "elf",
     "human",
+    "elf",
     "soldier",
     "guard",
     "captain",
@@ -79,23 +77,11 @@ IGNORES_ELBERETH_SPECIES: tuple[str, ...] = (
     "priest",
     "shopkeeper",
     "minotaur",
-    "skeleton",
-    "demon",
-    "devil",
-    "ghost",
-    "goblin",
-    "hobgoblin",
-    "gnome",
-    "dwarf",
-    "giant",
-    "ogre",
-    "troll",
-    "zombie",
-    "mummy",
-    "vampire",
-    "shade",
-    "wraith",
-    "lich",
+    "angel",
+    "wizard of yendor",
+    "death",
+    "pestilence",
+    "famine",
 )
 
 BRANCH_NAMES: dict[int, str] = {
@@ -680,6 +666,7 @@ class NetHackAdapter(EnvironmentAdapter):
             if hasattr(self, "loot_attempts"):
                 self.loot_attempts.clear()
             self.altar_tested_on_floor = False
+            self.altar_solver.reset()
             self.known_fountain_pos = None
             self.known_altar_pos = None
             self.known_priest_pos = None
@@ -711,7 +698,7 @@ class NetHackAdapter(EnvironmentAdapter):
                 is_equipped = (
                     "weapon in hand" in desc
                     or "(being worn)" in desc
-                    or "wielded" in desc
+                    or ("wielded" in desc and "not wielded" not in desc)
                 )
                 buc = "uncursed"
                 if "cursed" in desc:
@@ -1315,6 +1302,9 @@ class NetHackAdapter(EnvironmentAdapter):
                 )
                 nearby_loot_pos = loot_candidates[closest_idx]
 
+        # Pacing logic is maintained purely in the policy layer; adapter sets default False
+        should_descend_urgently = False
+
         spatial = SpatialView(
             stairs_down_known=(self.known_stairs_down is not None),
             stairs_up_known=(self.known_stairs_up is not None),
@@ -1338,6 +1328,7 @@ class NetHackAdapter(EnvironmentAdapter):
             floor_explored=(not has_frontier and self.known_stairs_down is not None),
             has_nearby_loot=has_nearby_loot,
             nearby_loot_pos=nearby_loot_pos,
+            should_descend_urgently=should_descend_urgently,
         )
 
         # Dungeon tile type
@@ -1602,6 +1593,15 @@ class NetHackAdapter(EnvironmentAdapter):
             can_tunnel_gehennom=can_tunnel_gehennom,
             standing_on_vibrating_square=standing_on_vibrating_square,
             can_perform_invocation=can_perform_invocation,
+            has_quest_portal=(getattr(self, "known_quest_portal_pos", None) is not None),
+            has_plane_portal=(getattr(self, "known_plane_portal_pos", None) is not None),
+            standing_on_quest_portal=(getattr(self, "known_quest_portal_pos", None) == (y, x)),
+            standing_on_plane_portal=(getattr(self, "known_plane_portal_pos", None) == (y, x)),
+            standing_on_high_altar=(standing_on_altar and (dnum == 5 or depth >= 50)),
+            quest_portal_pos=getattr(self, "known_quest_portal_pos", None),
+            plane_portal_pos=getattr(self, "known_plane_portal_pos", None),
+            can_wish=inv_view.has_wand_of_wishing,
+            can_chat_with_leader=(adjacent_peaceful and (dnum == 3 or depth >= 14)),
         )
 
         # Register inventory items in Epistemic POMDP engine
@@ -1732,6 +1732,43 @@ class NetHackAdapter(EnvironmentAdapter):
                     "eat it?",
                     "eat that?",
                     "eat one?",
+                )
+            ):
+                hero_pos = getattr(self, "_last_obs_hero_pos", None) or (0, 0)
+                corpse_data = self.floor_corpses.get(hero_pos)
+                if corpse_data:
+                    is_pois = corpse_data[2] if len(corpse_data) > 2 else False
+                    is_deadly = corpse_data[3] if len(corpse_data) > 3 else False
+                    if not is_pois and not is_deadly:
+                        raw_obs, _, term, trunc, _ = self.env.step(
+                            self.char_to_act.get("y", space_idx)
+                        )
+                    else:
+                        raw_obs, _, term, trunc, _ = self.env.step(
+                            self.char_to_act.get("n", space_idx)
+                        )
+                else:
+                    is_safe_comestible = any(
+                        safe in msg.lower()
+                        for safe in (
+                            "lichen",
+                            "ration",
+                            "wafer",
+                            "pancake",
+                            "apple",
+                            "pear",
+                            "banana",
+                            "orange",
+                            "cookie",
+                            "food",
+                        )
+                    )
+                    raw_obs, _, term, trunc, _ = self.env.step(
+                        self.char_to_act.get("y" if is_safe_comestible else "n", space_idx)
+                    )
+            elif any(
+                phrase in msg.lower()
+                for phrase in (
                     "sacrifice it?",
                     "sacrifice that?",
                     "sacrifice one?",
@@ -1790,6 +1827,17 @@ class NetHackAdapter(EnvironmentAdapter):
                 raw_obs, _, term, trunc, _ = self.env.step(
                     self.char_to_act.get("n", space_idx)
                 )
+            elif any(
+                w in msg.lower()
+                for w in ("for what do you wish", "what do you want to wish for")
+            ):
+                wish_item = getattr(self, "_active_wish_item", None) or "blessed +2 silver dragon scale mail"
+                seq = [self.char_to_act.get(c, space_idx) for c in wish_item]
+                seq.append(self.char_to_act.get("\r", space_idx))
+                for a_idx in seq:
+                    raw_obs, _, term, trunc, _ = self.env.step(a_idx)
+                    if term or trunc:
+                        break
             elif any(
                 phrase in msg.lower()
                 for phrase in (
@@ -2376,6 +2424,10 @@ class NetHackAdapter(EnvironmentAdapter):
                 if path:
                     dy, dx = path[0][0] - hero.y, path[0][1] - hero.x
                     return self._step_or_breach(obs_prev, dy, dx)
+
+            # If no dead end target or wall target is reachable, and stairs down are known, step to stairs down!
+            if (not target or target == (-1, -1)) and self.known_stairs_down is not None:
+                return self.step(Action(name="step_to_stairs_down"))
 
             # If no dead end target or wall target is reachable, do not oscillate back and forth.
             # Perform search() if adjacent to walls/doors and tile not exhausted, else step to least-searched neighbor
@@ -3639,17 +3691,18 @@ class NetHackAdapter(EnvironmentAdapter):
         elif (
             action.name in ("dip_excalibur", "dip_in_fountain") and obs_prev is not None
         ):
+            if obs_prev.hero.dungeon_num == 2 or obs_prev.hero.dungeon_branch == "mines":
+                return self.step(Action(name="wait"))
             if not obs_prev.dungeon.standing_on_fountain and (
                 obs_prev.dungeon.closest_fountain_pos
                 or getattr(self, "known_fountain_pos", None)
             ):
                 return self.step(Action(name="step_to_fountain"))
-            sword_slot = obs_prev.inventory.get_weapon_slot()
-            if not sword_slot:
-                for it in obs_prev.inventory:
-                    if "long sword" in it.name.lower():
-                        sword_slot = it.slot
-                        break
+            sword_slot = None
+            for it in obs_prev.inventory:
+                if "long sword" in it.name.lower() and "excalibur" not in it.name.lower():
+                    sword_slot = it.slot
+                    break
             if sword_slot:
                 dip_idx = getattr(self, "dip_action_idx", 32)
                 seq = [
@@ -3671,7 +3724,113 @@ class NetHackAdapter(EnvironmentAdapter):
                             it.name, obs.hero.is_blind, obs.message
                         )
                         break
-            return obs, reward, term, trunc, info
+        elif action.name == "wish":
+            item_name = (
+                action.extra.get("item_name")
+                or getattr(action, "item_name", None)
+                or "blessed +2 silver dragon scale mail"
+            )
+            self._active_wish_item = item_name
+            wand_slot = (
+                obs_prev.inventory.get_wand_of_wishing_slot()
+                if obs_prev
+                else None
+            )
+            if wand_slot:
+                seq = [
+                    self.char_to_act.get("E", 0),
+                    self.char_to_act.get(wand_slot, 0),
+                    self.char_to_act.get("\r", 0),
+                ]
+                return self._step_sequence([c for c in seq if c > 0])
+            return self.step(Action(name="wait"))
+
+        elif action.name == "chat_with_leader" and obs_prev is not None:
+            hero = obs_prev.hero
+            dir_char = None
+            for dy, dx in (
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (-1, 1),
+                (1, -1),
+                (1, 1),
+            ):
+                if (hero.y + dy, hero.x + dx) in self.peaceful_positions:
+                    dir_char = DIR_CHARS.get((dy, dx))
+                    break
+            if not dir_char:
+                dir_char = "."
+            seq = [
+                self.char_to_act.get("#", 0),
+                self.char_to_act.get("c", 0),
+                self.char_to_act.get("h", 0),
+                self.char_to_act.get("a", 0),
+                self.char_to_act.get("t", 0),
+                self.char_to_act.get("\r", 0),
+                self.char_to_act.get(dir_char, 0),
+                self.char_to_act.get("\r", 0),
+                self.char_to_act.get("\x1b", 0),
+            ]
+            return self._step_sequence([c for c in seq if c > 0])
+
+        elif action.name == "step_to_quest_portal" and obs_prev is not None:
+            portal_pos = getattr(self, "known_quest_portal_pos", None)
+            if portal_pos:
+                if (obs_prev.hero.y, obs_prev.hero.x) == portal_pos:
+                    return self.step(Action(name="wait"))
+                return self.step(Action(name="step_to", target_pos=portal_pos))
+            if obs_prev.spatial.has_unvisited_frontier:
+                return self.step(Action(name="step_to_frontier"))
+            return self.step(Action(name="search"))
+
+        elif action.name == "stash_in_bag" and obs_prev is not None:
+            bag_slot = obs_prev.inventory.get_bag_of_holding_slot()
+            if bag_slot:
+                seq = [
+                    self.char_to_act.get("a", 0),
+                    self.char_to_act.get(bag_slot, 0),
+                    self.char_to_act.get("[", 0),
+                    self.char_to_act.get("\r", 0),
+                    self.char_to_act.get("\x1b", 0),
+                ]
+                return self._step_sequence([c for c in seq if c > 0])
+            return self.step(Action(name="wait"))
+
+        elif action.name == "step_to_plane_portal" and obs_prev is not None:
+            portal_pos = getattr(self, "known_plane_portal_pos", None)
+            if portal_pos:
+                if (obs_prev.hero.y, obs_prev.hero.x) == portal_pos:
+                    return self.step(Action(name="wait"))
+                return self.step(Action(name="step_to", target_pos=portal_pos))
+            if obs_prev.spatial.has_unvisited_frontier:
+                return self.step(Action(name="step_to_frontier"))
+            return self.step(Action(name="search"))
+
+        elif action.name == "offer_amulet_on_altar" and obs_prev is not None:
+            if not obs_prev.dungeon.standing_on_altar:
+                if obs_prev.dungeon.adjacent_altar or getattr(
+                    self, "known_altar_pos", None
+                ):
+                    return self.step(Action(name="step_to_altar"))
+                return self.step(Action(name="wait"))
+            amulet_slot = obs_prev.inventory.get_amulet_of_yendor_slot()
+            if amulet_slot:
+                seq = [
+                    self.char_to_act.get("#", 0),
+                    self.char_to_act.get("o", 0),
+                    self.char_to_act.get("f", 0),
+                    self.char_to_act.get("f", 0),
+                    self.char_to_act.get("e", 0),
+                    self.char_to_act.get("r", 0),
+                    self.char_to_act.get("\r", 0),
+                    self.char_to_act.get(amulet_slot, 0),
+                    self.char_to_act.get("\r", 0),
+                ]
+                return self._step_sequence([c for c in seq if c > 0])
+            return self.step(Action(name="wait"))
 
         elif action.name == "pickup":
             target_char = ","

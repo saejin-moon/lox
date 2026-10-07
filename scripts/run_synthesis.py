@@ -534,7 +534,7 @@ def run_synthesis_loop(
     role: str = "valkyrie",
     task: str = "MiniHack-ExploreMaze-Easy-Mapped-v0",
     max_generations: int = 500,
-    eval_episodes: int = 20,
+    eval_episodes: int = 100,
     max_turns: int = 25000,
     policy_path: str = "data/latest_policy.py",
     fresh: bool = False,
@@ -546,8 +546,8 @@ def run_synthesis_loop(
     starter_policy: str = "data/modular_starter_policy.py",
     twin_test: bool = True,
     seed_base: int = 42,
-    min_paired_delta: float = 0.25,
-    min_improved_seeds: int = 2,
+    min_paired_delta: float = 0.40,
+    min_improved_seeds: int = 20,
 ):
     print("=" * 65)
     print("LOX Embodied Batched Empirical Policy Synthesis Engine")
@@ -636,6 +636,20 @@ def run_synthesis_loop(
 
     # Load or Seed policy
     os.makedirs("data/policies", exist_ok=True)
+    if fresh and os.path.exists("data/policies"):
+        import glob
+        import shutil
+
+        old_ckpts = [p for p in glob.glob("data/policies/*.py") if os.path.isfile(p)]
+        if old_ckpts:
+            archive_dir = f"data/policies/archive_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            os.makedirs(archive_dir, exist_ok=True)
+            for p in old_ckpts:
+                shutil.move(p, os.path.join(archive_dir, os.path.basename(p)))
+            print(
+                f"\n[Fresh Campaign] Archived {len(old_ckpts)} prior policy checkpoints -> {archive_dir}"
+            )
+
     if not fresh and os.path.exists(policy_path):
         with open(policy_path, "r") as f:
             current_policy = f.read().strip()
@@ -687,8 +701,25 @@ class Agent:
     last_batch_seeds: list[int] = []
     last_batch_results_by_seed: dict[int, dict[str, Any]] = {}
     last_batch_primary_cause: str = ""
+    start_gen = 1
+    if not fresh and os.path.exists("data/policies"):
+        import glob
+        import re
 
-    for gen in range(1, max_generations + 1):
+        ckpts = glob.glob("data/policies/gen_*_validated.py")
+        if ckpts:
+            nums = [
+                int(m.group(1))
+                for p in ckpts
+                if (m := re.search(r"gen_(\d+)_validated", p))
+            ]
+            if nums:
+                start_gen = max(nums) + 1
+                print(
+                    f"\n[Resuming Campaign] Continuing from Generation {start_gen} (found {len(nums)} validated checkpoints)"
+                )
+
+    for gen in range(start_gen, max_generations + 1):
         print(
             f"\n--- Running Generation {gen} Evaluation ({eval_episodes} real episodes) ---"
         )
@@ -988,6 +1019,12 @@ class Agent:
                         f"0.0% of {failed_seed_count} '{last_batch_primary_cause}' incident seeds were resolved"
                     )
 
+                # Criteria 5: Positive 95% Confidence Interval Lower Bound for Large Batches (N >= 50)
+                if eval_episodes >= 50 and ci_95 is not None and (paired_delta - ci_95) <= 0.0:
+                    falsification_reasons.append(
+                        f"95% CI lower bound ({paired_delta - ci_95:+.2f}) is non-positive (insufficient statistical significance)"
+                    )
+
                 validated = (len(falsification_reasons) == 0)
                 eval_metric_str = f"Paired Delta: {paired_delta:+.2f} (±{ci_95:.2f} 95% CI) | Improved: {seeds_improved}, Regressed: {seeds_regressed}, Tied: {seeds_unchanged}"
             else:
@@ -1032,6 +1069,7 @@ class Agent:
                 candidate_policy = None
                 last_batch_seeds = []
                 last_batch_results_by_seed = {}
+                consecutive_falsifications_on_batch = 0
                 just_promoted = True
 
                 # Log to DuckDB evolved_policies table
@@ -1056,6 +1094,18 @@ class Agent:
                         time.sleep(0.5)
             else:
                 just_promoted = False
+                consecutive_falsifications_on_batch += 1
+                rotate_seeds = False
+                if consecutive_falsifications_on_batch >= 2:
+                    print(
+                        f"\n[Twin Seed Rotation] {consecutive_falsifications_on_batch} consecutive candidates falsified on current seed batch. "
+                        f"Rotating to a fresh batch of {eval_episodes} seeds on Gen {gen + 1} to break distribution deadlock."
+                    )
+                    last_batch_seeds = []
+                    last_batch_results_by_seed = {}
+                    consecutive_falsifications_on_batch = 0
+                    rotate_seeds = True
+
                 print(f"  Outcome: FALSIFIED (Predicted: {pred})")
                 print(f"[Rollback] Discarding candidate policy. Retaining validated baseline (Depth {last_baseline_depth:.2f}).")
                 for r_msg in falsification_reasons:
@@ -1121,6 +1171,9 @@ class Agent:
                     f"\n[Seed Advance] Policy promoted! Generation {gen + 1} will calibrate baseline on a fresh batch of 20 unseen NetHack seeds..."
                 )
                 continue
+
+            if not validated and rotate_seeds:
+                continue
         else:
             # Baseline or fresh generation
             last_batch_seeds = list(current_seeds)
@@ -1184,6 +1237,7 @@ class Agent:
             status_report=status_rep,
             run_id=run_id,
             causal_summary=batch_summary.causal_summary,
+            batch_summary=batch_summary,
         )
 
         if error:
@@ -1253,7 +1307,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--provider", default="mock", choices=["mock", "gemini", "openrouter"]
     )
-    parser.add_argument("--model", default=None)
+    parser.add_argument("--model", default="qwen/qwen3.5-9b")
     parser.add_argument(
         "--api-key",
         default=None,
@@ -1277,8 +1331,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--eval-episodes",
         type=int,
-        default=20,
-        help="Real evaluation episodes per generation batch (default: 20)",
+        default=100,
+        help="Real evaluation episodes per generation batch (default: 100)",
     )
     parser.add_argument(
         "--max-turns", type=int, default=25000, help="Max turns per episode (default: 25000)"
@@ -1338,14 +1392,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--min-delta",
         type=float,
-        default=0.25,
-        help="Minimum paired depth delta required to validate hypothesis (default: 0.25)",
+        default=0.40,
+        help="Minimum paired depth delta required to validate hypothesis (default: 0.40)",
     )
     parser.add_argument(
         "--min-improved",
         type=int,
-        default=2,
-        help="Minimum number of seeds improved to validate hypothesis (default: 2)",
+        default=20,
+        help="Minimum number of seeds improved to validate hypothesis (default: 20)",
     )
     args = parser.parse_args()
 

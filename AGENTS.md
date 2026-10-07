@@ -7,11 +7,13 @@ This document provides complete operational context, architectural foundations, 
 
 ## 1. Mission & Campaign Target
 
-- **Primary Goal**: Synthesize an empirical policy that achieves **Average Dungeon Depth $\ge 20.0$** over a batch of 20 real NetHack episodes.
+- **Primary Goal**: Synthesize an empirical policy that achieves **Average Dungeon Depth $\ge 20.0$** over a batch of 100 real NetHack episodes.
 - **Provider**: OpenRouter (`--provider openrouter`).
-- **Target Model**: `google/gemma-4-31b-it`.
+- **Target Model**: `qwen/qwen3.5-9b`.
 - **Max Turns**: 25,000 turns per episode (`--max-turns 25000`).
-- **Batch Size**: 20 evaluation episodes per generation (`--eval-episodes 20`).
+- **Batch Size**: 100 evaluation episodes per generation (`--eval-episodes 100`).
+- **Acceptance Criteria**: Paired delta $\Delta_{\text{paired}} \ge +0.40$, improved seeds $\ge 20$ (with strictly more improved than regressed), and positive 95% bootstrap confidence interval lower bound ($\Delta_{\text{paired}} - \text{CI}_{95} > 0.0$).
+- **Pre-Compiled Turn 0 Pareto Dossier & 5-Turn Budget**: Author Agent receives the pre-compiled Trustworthy Triad (Macro Archetype Table, Orthogonal Systemic Drivers, Ground-Truth Telemetry) alongside deep offline Wiki mechanics and Invariants directly on Turn 0 with a hard budget ceiling of 5 tool turns (`max_tool_turns = 5`, `tool_choice = "auto"`), eliminating prompt context snowballing.
 - **Starter Policy**: Clean modular baseline at [`data/modular_starter_policy.py`](file:///home/moose/git/lox/data/modular_starter_policy.py) with decoupled skills (`determine_goal`, `skill_combat`, `skill_scavenge_armor`, `skill_forge_excalibur`, `skill_explore_and_dive`).
 - **Checkpoint Resumption**: Policies resume seamlessly from [`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py).
 - **Completion Condition**: When a generation batch achieves `avg_depth >= 20.0`, the loop logs `[CAMPAIGN GOAL ACHIEVED]` and finishes.
@@ -269,7 +271,7 @@ uv run python -u -m scripts.run_synthesis \
   --provider openrouter \
   --model google/gemma-4-31b-it \
   --generations 10 \
-  --eval-episodes 20 \
+  --eval-episodes 100 \
   --max-turns 25000 \
   --target-depth 20.0 \
   --workers 20 \

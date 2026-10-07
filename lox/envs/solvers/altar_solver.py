@@ -29,6 +29,7 @@ class AltarBUCSolver:
         self.state = "IDLE"
         self.drop_queue.clear()
         self.dropped_count = 0
+        self.pickup_attempts = 0
         self.altar_pos = None
 
     def plan_step(
@@ -87,6 +88,7 @@ class AltarBUCSolver:
 
             self.state = "DROPPING"
             self.dropped_count = 0
+            self.pickup_attempts = 0
 
         # 2. Dropping untested items
         if self.state == "DROPPING":
@@ -95,7 +97,16 @@ class AltarBUCSolver:
                 self.dropped_count += 1
                 return Action(name="drop", slot=slot)
             else:
-                self.state = "DONE"
+                self.state = "PICKING_UP"
+                self.pickup_attempts = 0
+
+        # 3. Picking up tested items
+        if self.state == "PICKING_UP":
+            self.pickup_attempts = getattr(self, "pickup_attempts", 0) + 1
+            if self.pickup_attempts <= max(1, self.dropped_count):
                 return Action(name="pickup", char=",")
+            else:
+                self.state = "DONE"
+                return None
 
         return None

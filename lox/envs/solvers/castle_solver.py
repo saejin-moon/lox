@@ -63,9 +63,15 @@ class CastleDrawbridgeSolver:
             else:
                 return Action(name="wait")
 
-        # Otherwise step toward orthogonal stand position at distance 2
-        target_y = self.drawbridge_pos[0] + (2 if dy > 0 else (-2 if dy < 0 else 0))
-        target_x = self.drawbridge_pos[1] + (2 if dx > 0 else (-2 if dx < 0 else 0))
+        # Otherwise step toward orthogonal stand position at distance 2 on the hero's side of the moat
+        if abs(dy) >= abs(dx):
+            # Align vertically
+            target_y = self.drawbridge_pos[0] + (2 if hy > self.drawbridge_pos[0] else -2)
+            target_x = self.drawbridge_pos[1]
+        else:
+            # Align horizontally
+            target_y = self.drawbridge_pos[0]
+            target_x = self.drawbridge_pos[1] + (2 if hx > self.drawbridge_pos[1] else -2)
         return Action(name="step_to", target_pos=(target_y, target_x))
 
     @staticmethod

@@ -76,6 +76,30 @@ This operational document outlines the concrete milestones to reach and the spec
 
 ## 2. Additional Capabilities & Mechanisms Implemented
 
+### Priority -1: 500-Generation Autopsy, N=100 Scale-Up & ReAct Tool Calling Reboot [COMPLETED & VERIFIED]
+
+1. **Large-Sample Batch Scaling ($N=100$) & Statistical Significance** (`scripts/run_synthesis.py`):
+   - Scaled default `--eval-episodes` from 20 to 100 episodes per batch (~82s execution across 10 workers).
+   - Calibrated acceptance criteria: minimum paired delta $\Delta_{\text{paired}} \ge +0.40$, minimum improved seeds $\ge 20$, strictly more improved than regressed, and strictly positive 95% bootstrap confidence interval lower bound ($\Delta_{\text{paired}} - \text{CI}_{95} > 0.0$).
+
+2. **Mandatory ReAct Tool Calling Enforcement** (`lox/author/agent.py`):
+   - Configured `payload["tool_choice"] = "required"` on Turn 0 for OpenAI-compatible providers (`google/gemma-4-31b-it`), forcing the model to query DuckDB telemetry and offline Wiki encyclopedia before generating code. Transitions to `"auto"` on subsequent turns.
+   - Verified end-to-end with OpenRouter: `AuthorAgent` executes tool calls, formulates structured hypotheses, and synthesizes compiling AST policies.
+
+3. **Complete Harness & Action Solver Hardening** (`lox/envs/nethack.py`, `lox/envs/solvers/*`, `lox/dsl/compiler.py`):
+   - **Excalibur Dipping**: Rewrote `dip_excalibur` to explicitly search inventory for a non-artifact long sword (never dipping wielded daggers/darts) and shielded Minetown fountains.
+   - **Corpse Safety**: Fixed `_dismiss_more` to verify corpse freshness and non-toxicity before confirming `"eat it? [ynq]"` prompts with `'y'`.
+   - **Elbereth Discrimination**: Restricted `IGNORES_ELBERETH_SPECIES` to true NetHack 3.6 species (humans, elves, angels, minotaurs, unique bosses). Restored Elbereth effectiveness against orcs, goblins, gnomes, dwarves, and trolls.
+   - **Alternate Weapon Recognition**: Fixed `is_equipped` to exclude `"not wielded"` text.
+   - **Altar BUC Solver**: Added solver reset on level changes and multi-item pickup loop to prevent items being abandoned on altars.
+   - **Castle Drawbridge Solver**: Fixed orthogonal alignment coordinates on hero's side of moat.
+   - **Compiler Positional Arguments**: Fixed `_create_action_builder` in `lox/dsl/compiler.py` to accept positional `int` and `str` arguments.
+
+4. **Baseline Policy Repair** (`data/latest_policy.py`, `data/modular_starter_policy.py`):
+   - Fixed catastrophic Turn-1 food exhaustion: packaged rations eaten strictly at `hunger_state >= 2` ("Hungry" or "Weak").
+   - Added early-floor exploration before diving to prevent premature Level-1 descent.
+   - Added in-combat healing potion consumption at HP $< 50\%$ and fountain dipping for Excalibur.
+
 ### Priority 0: Scientific Synthesis Rigor & Diagnostic Expansion [COMPLETED & VERIFIED]
 
 1. **Diagnostic Expansion to 18 Canonical Failure Archetypes** (`lox/telemetry/diagnostics.py`) [COMPLETED & VERIFIED]:
@@ -1411,3 +1435,41 @@ Across 81 continuous campaigns and over 14,900 evaluated episodes, the average d
   * `test_macro_primitives_dispatch`: Validated `backtrack_to_depth`, `scavenge_loot`, `set_strategic_goal`, and `global_fountains`.
 - Full project test suite: **137 passed in 3.61s** with 0 failures (`uv run pytest`).
 - The engine is fully primed for Campaign 82 clean launch.
+
+---
+
+## 33. Campaign 83: Trustworthy Diagnostics, Cost Optimization, Policy-Layer Pacing & Full NetHack Ascension Primitives
+
+### 33.1 Pillar 1: The Trustworthy Triad (Triangulated Diagnostic Autopsy)
+- **Resolved**: Eliminated the single-label cascade priority bias in `RootCauseClassifier`.
+- **Delivered**: `BatchDiagnosticSummary.format_trustworthy_triad_report()`:
+  1. **Factor 1: Macro Failure Archetype Distribution**: 100-episode batch counts and percentage table across 18 archetypes.
+  2. **Factor 2: Orthogonal Systemic Bottlenecks**: Cross-cutting failure indicators computed independently by `CausalTimelineAnalyzer` (`EQUIPMENT_NEGLECT`, `TACTICAL_HOARDING`, `PACING_STALL`, `NUTRITION_BLINDNESS`, `POISON_VULNERABILITY`).
+  3. **Factor 3: Ground-Truth Empirical Telemetry**: Top 5 fatal monsters by name and count, mortality depth distribution, average AC at death, and concrete 15-tick micro-traces.
+
+### 33.2 Pillar 2: Turn 0 Pre-Compiled Pareto Hybrid Dossier & 5-Turn Tool Ceiling
+- **Resolved**: Eliminated the 50-turn tool loop token explosion and context snowballing (284k tokens/session).
+- **Delivered**:
+  - `self.max_tool_turns = 5` and `tool_choice = "auto"` in `AuthorAgent`.
+  - Implemented `compile_empirical_dossier()`: Injects the Trustworthy Triad + Top 2-3 deep offline Wiki mechanics and canonical Invariants directly onto Turn 0.
+  - Synthesizer can generate code immediately on Turn 0 with zero prompt bloat, or execute up to 5 targeted queries.
+
+### 33.3 Pillar 3: Policy-Layer Pacing Purity
+- **Resolved**: Removed subjective `should_descend_urgently` pacing calculations from `lox/envs/nethack.py`.
+- **Delivered**:
+  - Pure separation of concerns: Adapter exposes objective facts (`obs.hero.turns_on_level`, `obs.spatial.stairs_down_known`, `obs.spatial.has_unvisited_frontier`).
+  - Objective pacing rules embedded cleanly in `Agent.run()` and `skill_explore_and_dive()` in `data/modular_starter_policy.py` and `data/latest_policy.py`.
+
+### 33.4 Pillar 4: Complete Endgame NetHack Ascension Primitives (Beating the Game)
+- **Delivered**: Full action space and execution sequences for the 5 Ascension primitives:
+  1. `wish(item_name)`: Engraves with wand of wishing or intercepts wish prompts with target wish strings.
+  2. `chat_with_leader()`: Executes `#chat` with adjacent Quest Leader to unlock the role quest at XL 14.
+  3. `step_to_quest_portal()`: Routes hero to the magic portal leading into the Quest branch.
+  4. `stash_in_bag()`: Applies Bag of Holding to stash heavy armor and eliminate encumbrance speed penalties.
+  5. `step_to_plane_portal()`: Routes hero through magic portals across Earth, Air, Fire, and Water planes.
+  6. `offer_amulet_on_altar()`: Standing on the High Altar on the Astral Plane, `#offer`s the Amulet of Yendor to win NetHack.
+
+### 33.5 Automated Verification & Regression Zero
+- **154 / 154 unit tests pass** in 4.35s across all 24 test suites (`uv run pytest`).
+- Dedicated tests in `tests/test_ascension_milestones.py` (15/15 pass) and `tests/test_diagnostics.py` (10/10 pass).
+- Pre-compiled dossier dry-run verified with 100% assertions satisfied.

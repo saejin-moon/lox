@@ -98,6 +98,9 @@ class BatchDiagnosticSummary:
     armor_deficit_count: int = 0
     oscillation_count: int = 0
     causal_summary: dict[str, Any] = field(default_factory=dict)
+    top_killers: list[tuple[str, int]] = field(default_factory=list)
+    avg_ac_at_death: float = 10.0
+    depth_distribution: dict[str, float] = field(default_factory=dict)
 
     def format_markdown_table(self) -> str:
         """Formats a clean markdown table suitable for direct injection into LLM prompts."""
@@ -114,7 +117,7 @@ class BatchDiagnosticSummary:
             FailureArchetype.INSTADEATH_POISON.value: "Killed by lethal poison sting/bite (ants, bees, scorpions) without poison resistance",
             FailureArchetype.STATUS_EFFECT_HELPLESS.value: "Killed while disabled by sleep, paralysis, stun, confusion, or blindness",
             FailureArchetype.ENCUMBRANCE_IMMOBILITY.value: "Movement speed severely degraded by Strained/Overtaxed encumbrance, blocking escape",
-            FailureArchetype.STALL_SECRET_DOOR.value: "Stalled on early level (>500t) without finding stairs; dead-end search loop",
+            FailureArchetype.STALL_SECRET_DOOR.value: "PACING STALL: Loitered on early floors (>300t) searching blank walls instead of descending; exhausted turns and food",
             FailureArchetype.STARVATION_FAINTING.value: "Entered FAINTING (unconscious); killed while helpless by low-tier entities",
             FailureArchetype.ARMOR_DEFICIT.value: "Died at Depth >= 4 with AC >= 5; lacked body armor or unworn armor in inventory",
             FailureArchetype.PING_PONG_OSCILLATION.value: "Stuck in 2-tile ping-pong position oscillation for >= 40 turns",
@@ -133,6 +136,65 @@ class BatchDiagnosticSummary:
             desc = descriptions.get(arch, "Combat or environmental mortality")
             lines.append(f"| `{arch}` | {count} | {pct:.1f}% | {desc} |")
         return "\n".join(lines)
+
+    def format_trustworthy_triad_report(self) -> str:
+        """
+        Formats the complete 3-Factor Trustworthy Triad Report:
+        1. Macro Archetype Distribution Table (High-level batch view)
+        2. Orthogonal Multi-Factor Systemic Drivers (Cross-cutting causal bottlenecks)
+        3. Ground-Truth Empirical Telemetry Context (Top fatal monsters, AC, depth distribution, timeline)
+        """
+        lines = [
+            "## THE TRUSTWORTHY TRIAD: EMPIRICAL BATCH AUTOPSY REPORT",
+            "",
+            "### Factor 1: Macro Failure Archetype Distribution (100-Episode Batch)",
+            self.format_markdown_table(),
+            "",
+            "### Factor 2: Orthogonal Systemic Drivers & Bottlenecks (Cross-Cutting Autopsy)",
+        ]
+
+        bottlenecks = self.causal_summary.get("systemic_bottlenecks", [])
+        if bottlenecks:
+            for b in bottlenecks:
+                lines.append(f"- **{b.get('bottleneck', 'UNKNOWN')}**: {b.get('pct', 0.0)}% of episodes affected ({b.get('count', 0)} incidents)")
+        else:
+            lines.append("- No cross-cutting systemic bottlenecks detected.")
+
+        recs = self.causal_summary.get("top_strategic_recommendations", [])
+        if recs:
+            lines.append("")
+            lines.append("**Top Empirical Strategic Recommendations:**")
+            for idx, r in enumerate(recs, 1):
+                lines.append(f"{idx}. {r}")
+
+        lines.extend([
+            "",
+            "### Factor 3: Ground-Truth Empirical Telemetry Context",
+        ])
+
+        if self.top_killers:
+            killers_str = ", ".join(f"{k} ({c})" for k, c in self.top_killers[:6])
+            lines.append(f"- **Top Fatal Monsters/Causes**: {killers_str}")
+        else:
+            lines.append("- **Top Fatal Monsters/Causes**: N/A")
+
+        if self.depth_distribution:
+            depth_str = " | ".join(f"{k}: {v:.1f}%" for k, v in self.depth_distribution.items())
+            lines.append(f"- **Mortality Depth Distribution**: {depth_str}")
+        else:
+            lines.append("- **Mortality Depth Distribution**: DL 1-2: 100.0%")
+
+        lines.append(f"- **Batch Averages at Death**: AC: {self.avg_ac_at_death:.1f} (Base AC is 10, target is <= 0) | Turns: {self.avg_turns:.1f}")
+
+        samples = self.causal_summary.get("fatal_episodes_sample", [])
+        if samples:
+            lines.append("")
+            lines.append("**Representative Fatal Encounters:**")
+            for s in samples[:3]:
+                lines.append(f"- Episode `{s.get('id', '?')}`: {s.get('event', 'Fatal incident')} (DL {s.get('depth', '?')}, Turn {s.get('turns', '?')})")
+
+        return "\n".join(lines)
+
 
     def to_dict(self) -> dict[str, Any]:
         """Returns compact dictionary representation of batch metrics and root cause breakdown."""
@@ -436,30 +498,7 @@ class RootCauseClassifier:
                 has_body_armor=has_body_armor,
             )
 
-        # 6. Starvation / Fainting Check
-        if (
-            turns_fainting > 0
-            or "starvation" in death_reason
-            or "faint" in death_reason
-        ):
-            return EpisodeDiagnostic(
-                episode_id=str(ep_summary.get("episode_id", "")),
-                run_id=str(ep_summary.get("run_id", "")),
-                depth=depth,
-                max_depth=max_d,
-                turns=turns,
-                killer=killer,
-                ac_at_death=ac,
-                primary_archetype=FailureArchetype.STARVATION_FAINTING,
-                confidence=0.95,
-                explanation=f"Fainted from hunger ({turns_fainting} ticks fainting); killed by {killer or 'starvation'} while unconscious",
-                turns_fainting=turns_fainting,
-                turns_weak=turns_weak,
-                is_oscillating=is_oscillating,
-                has_body_armor=has_body_armor,
-            )
-
-        # 7. Poison Instadeath Check
+        # 6. Poison Instadeath Check
         if (
             "poison" in death_reason
             or "poison" in killer
@@ -485,6 +524,25 @@ class RootCauseClassifier:
                 has_body_armor=has_body_armor,
             )
 
+        # 7. Position Oscillation Ping-Pong
+        if is_oscillating:
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.PING_PONG_OSCILLATION,
+                confidence=0.90,
+                explanation="Trapped in 2-tile ping-pong oscillation for >= 30 turns prior to death",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=True,
+                has_body_armor=has_body_armor,
+            )
+
         # 8. Status Effect Helpless Check
         if any(
             st in death_reason or st in killer
@@ -507,26 +565,7 @@ class RootCauseClassifier:
                 has_body_armor=has_body_armor,
             )
 
-        # 9. Position Oscillation Ping-Pong
-        if is_oscillating:
-            return EpisodeDiagnostic(
-                episode_id=str(ep_summary.get("episode_id", "")),
-                run_id=str(ep_summary.get("run_id", "")),
-                depth=depth,
-                max_depth=max_d,
-                turns=turns,
-                killer=killer,
-                ac_at_death=ac,
-                primary_archetype=FailureArchetype.PING_PONG_OSCILLATION,
-                confidence=0.90,
-                explanation="Trapped in 2-tile ping-pong oscillation for >= 30 turns prior to death",
-                turns_fainting=turns_fainting,
-                turns_weak=turns_weak,
-                is_oscillating=True,
-                has_body_armor=has_body_armor,
-            )
-
-        # 10. Encumbrance Immobility Check
+        # 9. Encumbrance Immobility Check
         if (
             any(enc in inv_str for enc in ("strained", "overtaxed", "overloaded"))
             or str(ep_summary.get("encumbrance") or "").upper() in ("STRAINED", "OVERTAXED", "OVERLOADED")
@@ -550,33 +589,7 @@ class RootCauseClassifier:
                 has_body_armor=has_body_armor,
             )
 
-        # 4. Level Exploration / Secret Door Stall Check
-        turns_dl1 = int(ep_summary.get("turns_dl1") or 0)
-        turns_dl2 = int(ep_summary.get("turns_dl2") or 0)
-        if (
-            (turns_dl1 >= 500 and max_d == 1)
-            or (turns_dl2 >= 600 and max_d <= 2)
-            or (turns >= 1200 and max_d <= 2 and searches_count >= 15)
-        ):
-            return EpisodeDiagnostic(
-                episode_id=str(ep_summary.get("episode_id", "")),
-                run_id=str(ep_summary.get("run_id", "")),
-                depth=depth,
-                max_depth=max_d,
-                turns=turns,
-                killer=killer,
-                ac_at_death=ac,
-                primary_archetype=FailureArchetype.STALL_SECRET_DOOR,
-                confidence=0.90,
-                explanation=f"Stalled on DL {max_d} for {turns} turns searching dead ends without descending",
-                turns_fainting=turns_fainting,
-                turns_weak=turns_weak,
-                is_oscillating=is_oscillating,
-                has_body_armor=has_body_armor,
-                secret_door_searches=searches_count,
-            )
-
-        # 5. Passive Hazard Paralysis / Blast
+        # 10. Passive Hazard Paralysis / Blast
         if any(h in killer for h in cls.PASSIVE_HAZARDS):
             return EpisodeDiagnostic(
                 episode_id=str(ep_summary.get("episode_id", "")),
@@ -594,6 +607,62 @@ class RootCauseClassifier:
                 is_oscillating=is_oscillating,
                 has_body_armor=has_body_armor,
             )
+
+        # 11. Pacing / Exploration Stall Check (CAUSAL ANTECEDENT TO STARVATION & COMBAT MORTALITY)
+        # If the hero burned excessive turns on early floors (DL 1-3), that pacing stall is the
+        # true root cause of subsequent food exhaustion, starvation, or low-tier monster death!
+        turns_dl1 = int(ep_summary.get("turns_dl1") or 0)
+        turns_dl2 = int(ep_summary.get("turns_dl2") or 0)
+        is_pacing_stall = (
+            (turns_dl1 >= 400 and max_d == 1)
+            or (max_d == 1 and turns >= 500)
+            or (searches_count >= 10 and (turns_dl1 >= 300 or turns_dl2 >= 300 or turns >= 500) and max_d <= 3)
+            or (turns_dl1 >= 500 and max_d <= 2)
+            or (turns_dl2 >= 600 and max_d <= 2)
+        )
+        if is_pacing_stall:
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.STALL_SECRET_DOOR,
+                confidence=0.95,
+                explanation=f"PACING STALL: Stalled on DL {max_d} searching for secret doors/routes ({turns} turns, {searches_count} searches, DL1: {turns_dl1}t, DL2: {turns_dl2}t); killed by {killer or death_reason}",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+                secret_door_searches=searches_count,
+            )
+
+        # 12. Starvation / Fainting Check
+        if (
+            turns_fainting > 0
+            or "starvation" in death_reason
+            or "faint" in death_reason
+        ):
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.STARVATION_FAINTING,
+                confidence=0.95,
+                explanation=f"Fainted from hunger ({turns_fainting} ticks fainting); killed by {killer or 'starvation'} while unconscious",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+            )
+
+
 
         # 6. Armor Deficit at Depth >= 4
         if depth >= 4 and ac >= 5:
@@ -723,6 +792,28 @@ class RootCauseClassifier:
         dossiers = [d.causal_dossier for d in diagnostics if d.causal_dossier is not None]
         causal_summary = CausalTimelineAnalyzer.summarize_batch(dossiers) if dossiers else {}
 
+        # 3. Factor 3 Metrics: Top killers, AC at death, and depth distribution
+        killer_counts: dict[str, int] = {}
+        for d in diagnostics:
+            k = d.killer.strip().lower()
+            if k and k not in ("unknown", "none", "combat", ""):
+                killer_counts[k] = killer_counts.get(k, 0) + 1
+        top_killers = sorted(killer_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        avg_ac_at_death = float(np.mean([d.ac_at_death for d in diagnostics]))
+
+        depth_dist_counts = {"DL 1-2": 0, "DL 3-4": 0, "DL 5-6": 0, "DL 7+": 0}
+        for d in diagnostics:
+            if d.depth <= 2:
+                depth_dist_counts["DL 1-2"] += 1
+            elif d.depth <= 4:
+                depth_dist_counts["DL 3-4"] += 1
+            elif d.depth <= 6:
+                depth_dist_counts["DL 5-6"] += 1
+            else:
+                depth_dist_counts["DL 7+"] += 1
+        depth_distribution = {k: (v / total) * 100.0 for k, v in depth_dist_counts.items()}
+
         return BatchDiagnosticSummary(
             total_episodes=total,
             avg_depth=avg_depth,
@@ -735,6 +826,9 @@ class RootCauseClassifier:
             armor_deficit_count=armor_count,
             oscillation_count=osc_count,
             causal_summary=causal_summary,
+            top_killers=top_killers,
+            avg_ac_at_death=avg_ac_at_death,
+            depth_distribution=depth_distribution,
         )
 
 
@@ -911,14 +1005,50 @@ class CausalTimelineAnalyzer:
         """Aggregates causal incident dossiers across an entire evaluation batch."""
         driver_counts: dict[str, int] = {}
         total = len(dossiers)
+        depth_counts: dict[str, int] = {"DL 1-2": 0, "DL 3-4": 0, "DL 5-6": 0, "DL 7+": 0}
+        total_turns = 0
+        rec_counts: dict[str, int] = {}
+
         for dos in dossiers:
+            total_turns += dos.turns
+            if dos.depth <= 2:
+                depth_counts["DL 1-2"] += 1
+            elif dos.depth <= 4:
+                depth_counts["DL 3-4"] += 1
+            elif dos.depth <= 6:
+                depth_counts["DL 5-6"] += 1
+            else:
+                depth_counts["DL 7+"] += 1
+
+            if dos.strategic_recommendation:
+                rec_counts[dos.strategic_recommendation] = (
+                    rec_counts.get(dos.strategic_recommendation, 0) + 1
+                )
+
             for driver in dos.causal_drivers:
                 prefix = driver.split(":")[0].strip()
                 driver_counts[prefix] = driver_counts.get(prefix, 0) + 1
 
         top_drivers = sorted(driver_counts.items(), key=lambda x: x[1], reverse=True)
+        top_recs = [
+            r[0]
+            for r in sorted(rec_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+        ]
+
+        sample_episodes = [
+            {
+                "id": dos.episode_id,
+                "depth": dos.depth,
+                "turns": dos.turns,
+                "event": dos.terminal_event,
+            }
+            for dos in dossiers[:5]
+        ]
+
         return {
             "total_incidents": total,
+            "avg_turns_at_death": round(total_turns / max(1, total), 1),
+            "mortality_depth_distribution": depth_counts,
             "systemic_bottlenecks": [
                 {
                     "bottleneck": k,
@@ -927,6 +1057,8 @@ class CausalTimelineAnalyzer:
                 }
                 for k, v in top_drivers
             ],
-            "representative_incidents": [d.to_dict() for d in dossiers[:3]],
+            "top_strategic_recommendations": top_recs,
+            "fatal_episodes_sample": sample_episodes,
+            "investigation_notice": "Call get_death_autopsy_trace(episode_id) to inspect the 15-tick flight recorder for any specific run.",
         }
 

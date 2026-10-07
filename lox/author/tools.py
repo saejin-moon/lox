@@ -410,30 +410,56 @@ class DuckDBToolRegistry:
             con.close()
             return f"Error querying floor stash report: {e}"
 
-    def get_death_autopsy_trace(self, episode_id: str = "") -> str:
+    def get_death_autopsy_trace(self, episode_id: str = "", limit: int = 30) -> str:
         """
-        Returns the granular tick-by-tick flight trace of the final 15 ticks of an episode.
+        Returns granular tick-by-tick flight trace of the final ticks of an episode in chronological order.
         """
         if not os.path.exists(self.db_path):
             return "No database found."
 
+        try:
+            limit_int = min(max(int(limit), 5), 100)
+        except Exception:
+            limit_int = 30
+
         con = safe_duckdb_connect(self.db_path, read_only=True)
         try:
+            cols = [c[0] for c in con.execute("DESCRIBE ticks").fetchall()]
+            wanted = [
+                "turn",
+                "depth",
+                "hp",
+                "max_hp",
+                "ac",
+                "hunger",
+                "tile_type",
+                "action",
+                "active_subroutine",
+                "closest_hostile_name",
+                "closest_hostile_dist",
+                "message",
+            ]
+            selected_cols = [c for c in wanted if c in cols]
+            cols_sql = ", ".join(selected_cols)
+
             where = (
                 f"WHERE episode_id = '{episode_id}'"
                 if episode_id
                 else "WHERE episode_id = (SELECT episode_id FROM episodes ORDER BY rowid DESC LIMIT 1)"
             )
             cur = con.execute(f"""
-                SELECT turn, depth, hp, max_hp, hunger, tile_type, action, closest_hostile_name, closest_hostile_dist, message
-                FROM ticks
-                {where}
-                ORDER BY turn DESC
-                LIMIT 15
+                WITH recent_ticks AS (
+                    SELECT {cols_sql}
+                    FROM ticks
+                    {where}
+                    ORDER BY turn DESC
+                    LIMIT {limit_int}
+                )
+                SELECT * FROM recent_ticks ORDER BY turn ASC
             """)
             res = _format_table(cur)
             con.close()
-            return "### Final 15 Ticks Autopsy Trace:\n" + res
+            return f"### Final {limit_int} Ticks Autopsy Trace (Chronological Order):\n" + res
         except Exception as e:
             con.close()
             return f"Error querying autopsy trace: {e}"
@@ -669,14 +695,18 @@ OPENAI_TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "get_death_autopsy_trace",
-            "description": "Returns granular tick-by-tick flight trace of the final 15 ticks leading up to fatal termination.",
+            "description": "Returns granular tick-by-tick flight trace of the final ticks leading up to fatal termination in chronological order.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "episode_id": {
                         "type": "string",
                         "description": "Optional episode ID. If omitted, returns trace of the most recent death.",
-                    }
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of final ticks to retrieve (default 30, max 100).",
+                    },
                 },
             },
         },

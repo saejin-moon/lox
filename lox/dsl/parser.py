@@ -44,6 +44,8 @@ SAFE_BUILTINS = {
     "hasattr",
     "any",
     "all",
+    "filter",
+    "map",
     "sorted",
     "reversed",
     "chr",
@@ -149,6 +151,7 @@ class SafeASTVisitor(ast.NodeVisitor):
         ast.Load,
         ast.Store,
         ast.Del,
+        ast.Lambda,
     )
 
     def __init__(self):
@@ -197,6 +200,17 @@ class SafeASTVisitor(ast.NodeVisitor):
         old_scope = self.local_scope.copy()
         for arg in node.args.args:
             self.local_scope.add(arg.arg)
+        self.generic_visit(node)
+        self.local_scope = old_scope
+
+    def visit_Lambda(self, node: ast.Lambda):
+        old_scope = self.local_scope.copy()
+        for arg in node.args.args:
+            self.local_scope.add(arg.arg)
+        if node.args.vararg:
+            self.local_scope.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            self.local_scope.add(node.args.kwarg.arg)
         self.generic_visit(node)
         self.local_scope = old_scope
 
@@ -495,6 +509,115 @@ def _parse_with_expanded_stack(code: str) -> ast.Module:
         return result[0]
 
 
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """Computes Levenshtein edit distance between two strings."""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    previous_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def validate_policy_contract(tree: ast.Module) -> None:
+    """
+    Validates structural contracts for class-based generator policies (Agent):
+    1. Near-duplicate method name detection (Levenshtein distance <= 2) to prevent typo drift.
+    2. Subroutine existence validation: any 'self.<method>(...)' or 'yield from self.<method>(...)'
+       must resolve to an existing method on Agent.
+    3. Goal contract validation: all string literals returned by determine_goal() must be
+       handled in run(), and all goals checked in run() must be returned by determine_goal().
+    """
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name not in ("Agent", "Policy"):
+            continue
+
+        methods = {
+            item.name: item
+            for item in node.body
+            if isinstance(item, ast.FunctionDef)
+        }
+        method_names = list(methods.keys())
+
+        # 1. Near-duplicate method name check
+        for i in range(len(method_names)):
+            for j in range(i + 1, len(method_names)):
+                m1, m2 = method_names[i], method_names[j]
+                if len(m1) >= 5 and len(m2) >= 5 and levenshtein_distance(m1, m2) <= 2:
+                    raise DSLValidationError(
+                        f"Policy defines near-duplicate methods with suspected typo: '{m1}' and '{m2}'. "
+                        "Did you intend to overwrite an existing method?"
+                    )
+
+        # 2. Subroutine existence validation
+        for mname, mdef in methods.items():
+            for subnode in ast.walk(mdef):
+                if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Attribute):
+                    if isinstance(subnode.func.value, ast.Name) and subnode.func.value.id == "self":
+                        called_attr = subnode.func.attr
+                        if called_attr not in methods:
+                            candidates = [
+                                m for m in method_names
+                                if levenshtein_distance(called_attr, m) <= 3
+                            ]
+                            suggestion = f" Did you mean '{candidates[0]}'?" if candidates else ""
+                            raise DSLValidationError(
+                                f"Method '{mname}' calls nonexistent subroutine 'self.{called_attr}()'.{suggestion} "
+                                f"Defined methods on {node.name} are: {sorted(method_names)}"
+                            )
+
+        # 3. Goal contract validation
+        if "determine_goal" in methods and "run" in methods:
+            det_goal_node = methods["determine_goal"]
+            run_node = methods["run"]
+
+            returned_goals = set()
+            for subnode in ast.walk(det_goal_node):
+                if isinstance(subnode, ast.Return) and isinstance(subnode.value, ast.Constant):
+                    if isinstance(subnode.value.value, str):
+                        returned_goals.add(subnode.value.value)
+
+            handled_goals = set()
+            all_run_strings = set()
+            for subnode in ast.walk(run_node):
+                if isinstance(subnode, ast.Constant) and isinstance(subnode.value, str):
+                    all_run_strings.add(subnode.value)
+                if isinstance(subnode, ast.Compare):
+                    left_is_goal = (
+                        (isinstance(subnode.left, ast.Name) and subnode.left.id in ("goal", "current_goal"))
+                        or (isinstance(subnode.left, ast.Attribute) and subnode.left.attr in ("goal", "current_goal"))
+                    )
+                    for comp in subnode.comparators:
+                        if left_is_goal and isinstance(comp, ast.Constant) and isinstance(comp.value, str):
+                            handled_goals.add(comp.value)
+                        elif isinstance(comp, (ast.Name, ast.Attribute)) and isinstance(subnode.left, ast.Constant) and isinstance(subnode.left.value, str):
+                            handled_goals.add(subnode.left.value)
+
+            if handled_goals and returned_goals:
+                # Goal returned by determine_goal must be checked in run() or present in run()
+                unhandled = {g for g in returned_goals if g not in handled_goals and g not in all_run_strings}
+                if unhandled:
+                    raise DSLValidationError(
+                        f"Goal(s) {sorted(unhandled)} returned by determine_goal() are never handled in run(). "
+                        f"Add 'elif goal == \"{sorted(unhandled)[0]}\":' dispatch in run()."
+                    )
+
+                orphan = {g for g in handled_goals if g not in returned_goals}
+                if orphan:
+                    raise DSLValidationError(
+                        f"Goal(s) {sorted(orphan)} are checked in run() but never returned by determine_goal(). "
+                        f"Ensure determine_goal() returns '{sorted(orphan)[0]}' under appropriate conditions."
+                    )
+
+
 def parse_and_validate(
     code_str: str,
 ) -> tuple[ast.Module, list[str], dict[str, ast.FunctionDef], SafeASTVisitor]:
@@ -532,6 +655,8 @@ def parse_and_validate(
         raise DSLValidationError(
             "Policy program must define at least one function or class."
         )
+
+    validate_policy_contract(tree)
 
     plan_order = visitor.plan_order
     if not plan_order and not visitor.classes and not visitor.has_generator:

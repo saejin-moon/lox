@@ -462,3 +462,125 @@ def test_invocation_solver_full_sequence():
     act4 = solver.plan_step(obs_open)
     assert act4 is not None
     assert act4.name == "descend"
+
+
+def test_wishing_action():
+    """Verify wish action engraves with wand of wishing to trigger guaranteed wish."""
+    adapter = NetHackAdapter()
+    adapter.env = DummyEnv()
+    wand_item = Item(slot="w", name="wand of wishing (0:3)", category="wand")
+    inv = InventoryView([wand_item])
+    obs = make_obs(hero=HeroState(y=10, x=10), inventory=inv)
+    adapter._last_obs = obs
+
+    act = Action(name="wish", extra={"item_name": "blessed +2 silver dragon scale mail"})
+    adapter.step(act)
+
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
+    seq_str = "".join(executed_chars)
+    assert "Ew\r" in seq_str
+    assert adapter._active_wish_item == "blessed +2 silver dragon scale mail"
+
+
+def test_chat_with_leader_action():
+    """Verify chat_with_leader executes #chat in direction of adjacent peaceful Quest leader."""
+    adapter = NetHackAdapter()
+    adapter.env = DummyEnv()
+    adapter.peaceful_positions.add((10, 11))  # Quest leader to the east
+    obs = make_obs(hero=HeroState(y=10, x=10))
+    adapter._last_obs = obs
+
+    act = Action(name="chat_with_leader")
+    adapter.step(act)
+
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
+    seq_str = "".join(executed_chars)
+    assert "#chat" in seq_str
+    assert "l" in seq_str  # east direction character
+
+
+def test_stash_in_bag_action():
+    """Verify stash_in_bag applies bag of holding to mitigate encumbrance."""
+    adapter = NetHackAdapter()
+    adapter.env = DummyEnv()
+    bag_item = Item(slot="b", name="bag of holding", category="tool")
+    inv = InventoryView([bag_item])
+    obs = make_obs(hero=HeroState(y=10, x=10), inventory=inv)
+    adapter._last_obs = obs
+
+    act = Action(name="stash_in_bag")
+    adapter.step(act)
+
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
+    seq_str = "".join(executed_chars)
+    assert "ab[" in seq_str  # apply, slot b, armor [
+
+
+def test_step_to_plane_portal_and_quest_portal():
+    """Verify portal navigation actions route to tracked coordinates."""
+    adapter = NetHackAdapter()
+    adapter.env = DummyEnv()
+    adapter.known_quest_portal_pos = (5, 5)
+    adapter.known_plane_portal_pos = (7, 8)
+    obs = make_obs(hero=HeroState(y=10, x=10))
+    adapter._last_obs = obs
+
+    act_quest = Action(name="step_to_quest_portal")
+    res_quest = adapter.step(act_quest)
+    assert res_quest is not None
+
+    act_plane = Action(name="step_to_plane_portal")
+    res_plane = adapter.step(act_plane)
+    assert res_plane is not None
+
+
+def test_offer_amulet_on_altar():
+    """Verify offer_amulet_on_altar executes #offer with the Amulet of Yendor on High Altar."""
+    adapter = NetHackAdapter()
+    adapter.env = DummyEnv()
+    amulet_item = Item(slot="y", name="Amulet of Yendor", category="amulet")
+    inv = InventoryView([amulet_item])
+    dungeon = DungeonView(standing_on_altar=True)
+    obs = make_obs(hero=HeroState(y=10, x=10), inventory=inv, dungeon=dungeon)
+    adapter._last_obs = obs
+
+    act = Action(name="offer_amulet_on_altar")
+    adapter.step(act)
+
+    executed_chars = [
+        chr(
+            adapter.actions[idx].value
+            if hasattr(adapter.actions[idx], "value")
+            else adapter.actions[idx]
+        )
+        for idx in adapter.env.step_history
+        if idx in adapter.char_to_act.values()
+    ]
+    seq_str = "".join(executed_chars)
+    assert "#offer" in seq_str
+    assert "y" in seq_str  # amulet slot
+

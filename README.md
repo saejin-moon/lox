@@ -68,7 +68,7 @@ Each evolutionary generation in LOX executes a closed-loop 6-stage scientific me
 ```
 
 ### Phase 1: Parallel Batch Evaluation
-- 20 real NetHack episodes are dispatched concurrently across 20 CPU workers via `multiprocessing.Pool`.
+- 100 real NetHack episodes are dispatched concurrently across 20 CPU workers via `multiprocessing.Pool`.
 - Each worker runs up to 25,000 game turns per episode using the current policy checkpoint ([`data/latest_policy.py`](file:///home/moose/git/lox/data/latest_policy.py)).
 - Zero-lock buffered Parquet streams log every game tick (hero stats, inventory, spatial coordinates, messages) without disk I/O contention.
 
@@ -203,7 +203,7 @@ uv run python -u -m scripts.run_synthesis \
   --provider openrouter \
   --model google/gemma-4-31b-it \
   --generations 10 \
-  --eval-episodes 20 \
+  --eval-episodes 100 \
   --max-turns 25000 \
   --target-depth 20.0 \
   --workers 20 \

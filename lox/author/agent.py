@@ -46,7 +46,7 @@ class AuthorAgent:
         api_key: str | None = None,
         base_url: str | None = None,
         db_path: str = "data/lox.duckdb",
-        max_tool_turns: int = 50,
+        max_tool_turns: int = 5,
     ):
         self.provider = provider
         self.model = model
@@ -258,7 +258,8 @@ class AuthorAgent:
                 return self.tools.get_floor_stash_report()
             elif tool_name == "get_death_autopsy_trace":
                 return self.tools.get_death_autopsy_trace(
-                    episode_id=args.get("episode_id", "")
+                    episode_id=args.get("episode_id", ""),
+                    limit=args.get("limit", 30),
                 )
             elif tool_name == "get_macro_requests":
                 return self.tools.get_macro_requests()
@@ -422,7 +423,7 @@ class Agent:
             "HTTP-Referer": "https://github.com/saejin-moon/lox",
             "X-Title": "LOX Policy Synthesis",
         }
-        model_name = self.model or "google/gemini-2.5-flash"
+        model_name = self.model or "qwen/qwen3.5-9b"
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
@@ -435,7 +436,7 @@ class Agent:
 
         with httpx.Client(timeout=120.0) as client:
             use_tools = True
-            max_tool_turns = self.max_tool_turns  # Configurable ceiling (default 50) allowing extensive empirical exploration
+            max_tool_turns = self.max_tool_turns  # Budget ceiling (default 5 turns)
             for turn in range(max_tool_turns):
                 payload: dict[str, Any] = {
                     "model": model_name,
@@ -445,6 +446,7 @@ class Agent:
                 }
                 if use_tools:
                     payload["tools"] = OPENAI_TOOL_SPECS
+                    payload["tool_choice"] = "auto"
 
                 max_retries = 6
                 resp = None
@@ -520,7 +522,10 @@ class Agent:
                 if tool_calls:
                     for tc in tool_calls:
                         fn_name = tc["function"]["name"]
-                        fn_args = json.loads(tc["function"].get("arguments", "{}"))
+                        try:
+                            fn_args = json.loads(tc["function"].get("arguments", "{}"))
+                        except Exception:
+                            fn_args = {}
                         tools_invoked.append(fn_name)
                         result_text = self._execute_tool(fn_name, fn_args)
                         messages.append(
@@ -718,7 +723,81 @@ class Agent:
             except Exception:
                 pass
 
-        return None
+    def compile_empirical_dossier(
+        self,
+        batch_summary: Any = None,
+        top_k_deep: int = 3,
+    ) -> str:
+        """
+        Synthesizes the Pareto Hybrid Dossier on Turn 0:
+        1. The Trustworthy Triad:
+           - Factor 1: Macro Archetype Distribution Table (Top 5 causes)
+           - Factor 2: Orthogonal Systemic Bottlenecks & Strategic Recommendations
+           - Factor 3: Ground-Truth Empirical Telemetry Context (Killers, Depth, Flight Traces)
+        2. Deep Mechanics Dossier for the Top 2-3 Dominant Causes:
+           - Automatic Wiki Mechanics retrieval
+           - Ground-truth Canonical Invariants retrieval
+        """
+        lines = []
+        top_archetypes: list[str] = []
+
+        if batch_summary is not None:
+            if hasattr(batch_summary, "format_trustworthy_triad_report"):
+                lines.append(batch_summary.format_trustworthy_triad_report())
+                if hasattr(batch_summary, "archetype_counts") and batch_summary.archetype_counts:
+                    sorted_archs = sorted(
+                        batch_summary.archetype_counts.items(),
+                        key=lambda x: x[1],
+                        reverse=True,
+                    )
+                    top_archetypes = [a[0] for a in sorted_archs[:top_k_deep]]
+            elif isinstance(batch_summary, dict):
+                import yaml
+                lines.append("## THE TRUSTWORTHY TRIAD: EMPIRICAL BATCH AUTOPSY REPORT\n")
+                lines.append(yaml.dump(batch_summary, sort_keys=False))
+                rc = batch_summary.get("root_causes", {})
+                if isinstance(rc, dict):
+                    sorted_rc = sorted(
+                        rc.items(),
+                        key=lambda x: x[1].get("count", 0) if isinstance(x[1], dict) else x[1],
+                        reverse=True,
+                    )
+                    top_archetypes = [a[0] for a in sorted_rc[:top_k_deep]]
+
+        # Deep Mechanics Dossier for Top Dominant Archetypes
+        if top_archetypes:
+            lines.append("\n## DEEP MECHANICS & INVARIANTS DOSSIER (TOP DOMINANT CAUSES)")
+            archetype_to_wiki = {
+                "ARMOR_DEFICIT": "Armor class",
+                "STALL_SECRET_DOOR": "Secret door",
+                "STARVATION_FAINTING": "Hunger",
+                "COMBAT_FAST_PREDATOR": "Speed",
+                "COMBAT_TACTICAL_SWARM": "Elbereth",
+                "PASSIVE_HAZARD_PARALYSIS": "Floating eye",
+                "INSTADEATH_POISON": "Poison resistance",
+                "PETRIFICATION": "Cockatrice",
+                "TRAP_FATALITY": "Traps",
+                "DROWNING_OR_LAVA": "Water",
+                "ENCUMBRANCE_IMMOBILITY": "Encumbrance",
+                "PEACEFUL_NPC_PROVOCATION": "Peaceful monster",
+            }
+            for arch in top_archetypes:
+                wiki_topic = archetype_to_wiki.get(arch, arch.lower().replace("_", " "))
+                lines.append(f"\n### Deep Mechanics for `{arch}`:")
+                try:
+                    wiki_res = self.tools.query_wiki(wiki_topic, top_k=1)
+                    if wiki_res and "No NetHack wiki" not in wiki_res:
+                        lines.append(wiki_res)
+                except Exception:
+                    pass
+                try:
+                    inv_res = self.tools.query_invariants(query=arch, top_k=2)
+                    if inv_res and "No matching invariants" not in inv_res:
+                        lines.append(inv_res)
+                except Exception:
+                    pass
+
+        return "\n".join(lines).strip()
 
     def synthesize_policy(
         self,
@@ -728,7 +807,8 @@ class Agent:
         run_id: str = "synth_run",
         action_handlers: dict | None = None,
         max_repairs: int = 2,
-        causal_summary: str = "",
+        causal_summary: Any = "",
+        batch_summary: Any = None,
     ) -> tuple[str, Any, str | None]:
         """
         Runs one authoring session with tool calling, AST compilation, and self-repair retries.
@@ -737,9 +817,51 @@ class Agent:
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
         self._current_run_id = run_id
         self.last_hypothesis = None
+
+        # Pre-compile Turn 0 Pareto Hybrid Dossier if batch summary is available
+        if batch_summary is not None:
+            dossier_text = self.compile_empirical_dossier(batch_summary=batch_summary)
+            if dossier_text:
+                status_report = f"{dossier_text}\n\n{status_report}".strip()
+        elif causal_summary:
+            dossier_text = self.compile_empirical_dossier(batch_summary=causal_summary)
+            if dossier_text:
+                status_report = f"{dossier_text}\n\n{status_report}".strip()
+
+        recent_experiments_str = ""
+        if os.path.exists(self.db_path):
+            try:
+                from lox.telemetry.consolidator import safe_duckdb_connect
+                con = safe_duckdb_connect(self.db_path, read_only=True)
+                tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
+                if "meta_experiments" in tables:
+                    rows = con.execute("""
+                        SELECT generation, targeted_skill, causal_finding, paired_seed_delta, outcome_validated
+                        FROM meta_experiments
+                        ORDER BY generation DESC
+                        LIMIT 5
+                    """).fetchall()
+                    if rows:
+                        items = []
+                        for r in rows:
+                            gen_num, skill, finding, delta, val = r
+                            status = "VALIDATED" if val else "FALSIFIED"
+                            delta_str = f"{delta:+.2f}" if delta is not None else "N/A"
+                            items.append(
+                                f"- Gen {gen_num} [{status}]: skill='{skill}', delta={delta_str}, finding='{finding}'"
+                            )
+                        recent_experiments_str = "\n".join(items)
+                con.close()
+            except Exception:
+                pass
+
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(
-            current_policy, trigger_reason, status_report, causal_summary=causal_summary
+            current_policy,
+            trigger_reason,
+            status_report,
+            causal_summary=causal_summary,
+            recent_experiments=recent_experiments_str,
         )
 
         if self.provider == "gemini":

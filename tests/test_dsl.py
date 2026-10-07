@@ -161,3 +161,114 @@ class Agent:
     act = runner.send(obs) if hasattr(runner, "send") else next(runner)
     assert act.name == "step_to"
     assert act.target_pos == (12, 34)
+
+
+def test_dsl_lambda_syntax():
+    code = """
+class Agent:
+    def run(self, obs):
+        items = sorted(obs.inventory, key=lambda it: it.slot)
+        safe = list(filter(lambda c: c.is_safe, obs.corpses))
+        obs = yield wait()
+"""
+    executor = compile_policy(code)
+    assert executor is not None
+
+
+def test_dsl_lambda_exploit_rejected():
+    code = """
+class Agent:
+    def run(self, obs):
+        fn = lambda x: x.__class__
+        obs = yield wait()
+"""
+    with pytest.raises(DSLValidationError):
+        compile_policy(code)
+
+
+def test_policy_contract_near_duplicate_method_rejected():
+    """Verify that near-duplicate methods (e.g. typos like skill_explore_and_div) are rejected."""
+    code = """
+class Agent:
+    def determine_goal(self, obs):
+        return "explore"
+
+    def run(self, obs):
+        while True:
+            goal = self.determine_goal(obs)
+            if goal == "explore":
+                obs = yield from self.skill_explore_and_dive(obs)
+
+    def skill_explore_and_dive(self, obs):
+        obs = yield wait()
+        return obs
+
+    def skill_explore_and_div(self, obs):
+        obs = yield wait()
+        return obs
+"""
+    with pytest.raises(DSLValidationError, match="near-duplicate methods with suspected typo"):
+        compile_policy(code)
+
+
+def test_policy_contract_nonexistent_subroutine_rejected():
+    """Verify that calling self.nonexistent() is caught with suggestions."""
+    code = """
+class Agent:
+    def determine_goal(self, obs):
+        return "combat"
+
+    def run(self, obs):
+        while True:
+            goal = self.determine_goal(obs)
+            if goal == "combat":
+                obs = yield from self.skill_combatt(obs)
+
+    def skill_combat(self, obs):
+        obs = yield wait()
+        return obs
+"""
+    with pytest.raises(DSLValidationError, match="calls nonexistent subroutine 'self.skill_combatt.*Did you mean 'skill_combat'"):
+        compile_policy(code)
+
+
+def test_policy_contract_unhandled_goal_rejected():
+    """Verify that a goal returned by determine_goal() that is never handled in run() is rejected."""
+    code = """
+class Agent:
+    def determine_goal(self, obs):
+        if obs.hero.depth >= 10:
+            return "solve_castle"
+        return "combat"
+
+    def run(self, obs):
+        while True:
+            goal = self.determine_goal(obs)
+            if goal == "combat":
+                obs = yield wait()
+
+    def skill_combat(self, obs):
+        obs = yield wait()
+        return obs
+"""
+    with pytest.raises(DSLValidationError, match="Goal.*solve_castle.*never handled in run"):
+        compile_policy(code)
+
+
+def test_policy_contract_orphan_goal_rejected():
+    """Verify that a goal checked in run() that is never returned by determine_goal() is rejected."""
+    code = """
+class Agent:
+    def determine_goal(self, obs):
+        return "combat"
+
+    def run(self, obs):
+        while True:
+            goal = self.determine_goal(obs)
+            if goal == "combat":
+                obs = yield wait()
+            elif goal == "pacing_decay":
+                obs = yield wait()
+"""
+    with pytest.raises(DSLValidationError, match="Goal.*pacing_decay.*never returned by determine_goal"):
+        compile_policy(code)

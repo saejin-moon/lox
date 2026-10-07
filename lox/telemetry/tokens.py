@@ -25,6 +25,8 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o": (2.50, 10.00),
     "claude-3-5-haiku": (0.80, 4.00),
     "claude-3-5-sonnet": (3.00, 15.00),
+    "qwen3.5-9b": (0.10, 0.15),
+    "qwen/qwen3.5-9b": (0.10, 0.15),
 }
 
 
