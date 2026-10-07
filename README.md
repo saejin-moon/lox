@@ -1,6 +1,9 @@
-# LOX: Autonomous Empirical Policy Synthesis for NetHack
+# LOX: Autonomous Empirical Policy Synthesis Engine
 
-**LOX** is an autonomous, empirical neuro-symbolic policy synthesis engine for NetHack. It enables open, efficient large language models (such as `qwen/qwen3.5-9b` and `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on execution telemetry, DuckDB incident autopsies, and an offline NetHack encyclopedia.
+> **LOX** (**L**earned **O**ptimal e**X**ecution / **L**evel-**O**ptimized e**X**ploration)  
+> *An Autonomous, Empirical Neuro-Symbolic Policy Synthesis Engine for Open-Ended Worlds (NetHack, Craftax, Crafter)*
+
+LOX enables open, efficient large language models (such as `qwen/qwen3.5-9b` and `google/gemma-4-31b-it`) to iteratively author, evaluate, diagnose, and evolve pure Python generator policies based on empirical execution telemetry, DuckDB incident autopsies, and deep domain encyclopedias.
 
 LOX achieves **826+ steps/second** (>1,000 game turns/second across 20 parallel workers) by executing sandboxed Python generator policies alongside precomputed vectorized glyph lookup tables and a disk-cached Numba JIT A* spatial navigation engine. Across 68 continuous evolutionary campaigns and over 12,800 real episodes evaluated (38.0M+ game ticks), LOX has systematically eliminated zero-progress stalls, locked-door loops, premature prayer smiting, and starvation blackouts, autonomously forged **the blessed rustproof +1 Excalibur**, achieved **Record Average Dungeon Depth 5.10**, reached **Dungeon Depth 15**, and achieved **Peak Score 4,612** with average lifespans exceeding **8,096 turns**—all for **~$0.03 per 100-episode batch**.
 
@@ -315,7 +318,44 @@ con.close()
 
 ---
 
-## 7. Key Operational Documents
+## 7. Modular Test Suite & Verification
+
+The test suite is structured into typed subpackages matching `lox/`:
+
+```
+tests/
+├── conftest.py             # Shared fixtures (dummy_obs, dummy_hero_state, auto-markers)
+├── unit/                   # Fast in-memory tests (<1ms each, no Gym or external dependencies)
+│   ├── core/               # Spatial A*, BehaviorTree nodes, Epistemic belief, Agenda
+│   ├── dsl/                # AST compiler, parser whitelist, infinite loop protection
+│   ├── telemetry/          # Causal diagnostics, DuckDB consolidation, token accounting
+│   ├── knowledge/          # 47-invariant registry, offline wiki engine
+│   └── author/             # LLM ReAct loop, AST method splicing, tools
+└── integration/            # Multi-component and environment tests
+    ├── envs/               # NetHackAdapter, tactics, solvers, Sokoban push solver
+    └── synthesis/          # Counterfactual seed twin replay, pure synthesis contract
+```
+
+### Pytest Execution Modes
+
+Run fast in-memory unit tests in **<0.6s**:
+```bash
+uv run pytest -m unit
+```
+
+Run non-gym integration and unit tests:
+```bash
+uv run pytest -m "not gym"
+```
+
+Run the entire 166-test suite:
+```bash
+uv run pytest -v
+```
+
+---
+
+## 8. Key Operational Documents
 
 - **[`HANDOFF.md`](file:///home/moose/git/lox/HANDOFF.md)**: Master onboarding manual for LLM agents taking over the codebase (mission targets, policy generator rules, diagnostic engine, and ascension roadmap).
 - **[`AGENTS.md`](file:///home/moose/git/lox/AGENTS.md)**: Authoritative operational guide, architectural foundations, and 47 consolidated technical invariants across 6 domains.

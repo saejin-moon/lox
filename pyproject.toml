@@ -36,6 +36,12 @@ testpaths = ["tests"]
 norecursedirs = ["archive", ".venv", "build", "dist"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+markers = [
+    "unit: Fast in-memory unit tests with no gym or external dependencies (<10ms).",
+    "integration: Multi-module integration tests.",
+    "gym: Tests requiring NetHack Gym / NLE C-bindings.",
+    "slow: Tests with multi-turn loops or benchmarks.",
+]
 
 [tool.ruff]
 line-length = 88
