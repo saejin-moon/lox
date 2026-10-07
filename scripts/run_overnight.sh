@@ -29,7 +29,7 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
 fi
 
 echo "Launching tmux session '$SESSION_NAME'..."
-WORKERS="${WORKERS:-10}"
+WORKERS="${WORKERS:-20}"
 tmux new-session -d -s "$SESSION_NAME" \
   "uv run python -u scripts/run_synthesis.py \
      --provider openrouter \
