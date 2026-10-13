@@ -502,34 +502,67 @@ class Agent:
                     payload["tool_choice"] = "auto"
 
                 print(
-                    f"[Author Agent] LLM Turn {turn + 1}/{max_tool_turns} requesting ({model_name}, tools={use_tools})..."
+                    f"[Author Agent] LLM Turn {turn + 1}/{max_tool_turns} requesting ({model_name}, tools={use_tools})...",
+                    flush=True,
                 )
                 max_retries = 6
                 resp = None
                 for attempt in range(max_retries):
+                    t_attempt_start = time.time()
+                    stop_heartbeat = threading.Event()
+
+                    def _heartbeat():
+                        while not stop_heartbeat.wait(timeout=15.0):
+                            elapsed = int(time.time() - t_attempt_start)
+                            print(
+                                f"[Author Agent] LLM generating response & reasoning tokens (elapsed: {elapsed}s)...",
+                                flush=True,
+                            )
+
+                    hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+                    hb_thread.start()
                     try:
                         resp = client.post(url, headers=headers, json=payload)
-                        status = getattr(resp, "status_code", 200)
-                        if (
-                            status in (429, 500, 502, 503, 504)
-                            and attempt < max_retries - 1
-                        ):
-                            backoff = (2**attempt) + random.uniform(1.0, 3.0)
-                            time.sleep(backoff)
-                            continue
-                        break
                     except (
                         httpx.RemoteProtocolError,
                         httpx.NetworkError,
                         httpx.TimeoutException,
                     ) as exc:
+                        stop_heartbeat.set()
+                        hb_thread.join(timeout=0.5)
                         if attempt < max_retries - 1:
                             backoff = (2**attempt) + random.uniform(1.0, 3.0)
+                            print(
+                                f"[Author Agent] Request failed ({type(exc).__name__}), retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})...",
+                                flush=True,
+                            )
                             time.sleep(backoff)
                             continue
                         raise RuntimeError(
                             f"OpenRouter network error after {max_retries} attempts: {exc}"
                         ) from exc
+                    finally:
+                        stop_heartbeat.set()
+                        hb_thread.join(timeout=0.5)
+
+                    duration = time.time() - t_attempt_start
+                    status = getattr(resp, "status_code", 200)
+                    print(
+                        f"[Author Agent] OpenRouter responded in {duration:.1f}s (status={status}).",
+                        flush=True,
+                    )
+                    if (
+                        status in (429, 500, 502, 503, 504)
+                        and attempt < max_retries - 1
+                    ):
+                        backoff = (2**attempt) + random.uniform(1.0, 3.0)
+                        print(
+                            f"[Author Agent] HTTP {status} received, retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})...",
+                            flush=True,
+                        )
+                        time.sleep(backoff)
+                        continue
+                    break
 
                 if resp is None:
                     raise RuntimeError("No response received from OpenRouter API")
@@ -699,26 +732,61 @@ class Agent:
                 "HTTP-Referer": "https://github.com/saejin-moon/lox",
                 "X-Title": "LOX Policy Synthesis",
             }
-            messages = getattr(self, "_last_messages", [])
-            messages.append({"role": "user", "content": repair_user_msg})
+            repair_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert Python AST policy repair assistant for NetHack. "
+                        "Fix the specific invariant regression, syntax error, or compilation failure reported. "
+                        "Output ONLY the corrected Python method definition(s) inside a ```python ... ``` block."
+                    ),
+                },
+                {"role": "user", "content": repair_user_msg},
+            ]
             model_name = getattr(
-                self, "_last_model_name", self.model or "google/gemini-2.5-flash"
+                self, "_last_model_name", self.model or "google/gemma-4-31b-it"
             )
 
+            print(
+                f"[Author Agent] Requesting LLM code repair ({model_name})...",
+                flush=True,
+            )
+            t_repair_start = time.time()
+            stop_hb = threading.Event()
+
+            def _hb_repair():
+                while not stop_hb.wait(timeout=15.0):
+                    el = int(time.time() - t_repair_start)
+                    print(
+                        f"[Author Agent] LLM generating code repair (elapsed: {el}s)...",
+                        flush=True,
+                    )
+
+            hb_t = threading.Thread(target=_hb_repair, daemon=True)
+            hb_t.start()
             try:
-                with httpx.Client(timeout=240.0) as client:
+                with httpx.Client(timeout=120.0) as client:
                     payload = {
                         "model": model_name,
-                        "messages": messages,
+                        "messages": repair_messages,
                         "temperature": 0.1,
-                        "max_tokens": self.max_tokens,
+                        "max_tokens": min(self.max_tokens, 8192),
                     }
                     if self.provider == "openrouter":
                         payload["reasoning"] = {
-                            "effort": self.reasoning_effort,
+                            "effort": "low",
                             "exclude": False,
                         }
                     resp = client.post(url, headers=headers, json=payload)
+                    stop_hb.set()
+                    hb_t.join(timeout=0.5)
+
+                    dur = time.time() - t_repair_start
+                    status = getattr(resp, "status_code", 200)
+                    print(
+                        f"[Author Agent] Repair response received in {dur:.1f}s (status={status}).",
+                        flush=True,
+                    )
                     if not resp.is_error:
                         data = resp.json()
                         usage = data.get("usage", {})
@@ -734,10 +802,14 @@ class Agent:
                         )
                         choice = data["choices"][0]
                         msg = choice["message"]
-                        messages.append(msg)
                         return str(msg.get("content") or msg.get("reasoning") or "")
             except Exception as exc:
+                stop_hb.set()
+                hb_t.join(timeout=0.5)
                 print(f"[Warning] Policy repair LLM call failed: {exc}")
+            finally:
+                stop_hb.set()
+                hb_t.join(timeout=0.5)
         return candidate_code
 
     def extract_code(self, response_text: str) -> str:
