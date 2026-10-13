@@ -46,7 +46,9 @@ class AuthorAgent:
         api_key: str | None = None,
         base_url: str | None = None,
         db_path: str = "data/lox.duckdb",
-        max_tool_turns: int = 5,
+        max_tool_turns: int = 3,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ):
         self.provider = provider
         self.model = model
@@ -63,6 +65,12 @@ class AuthorAgent:
         self.base_url = base_url
         self.db_path = db_path
         self.max_tool_turns = max_tool_turns
+        if max_tokens is None:
+            max_tokens = int(os.environ.get("MAX_TOKENS", 65536))
+        self.max_tokens = max_tokens
+        if reasoning_effort is None:
+            reasoning_effort = os.environ.get("REASONING_EFFORT", "medium")
+        self.reasoning_effort = reasoning_effort
         self.tools = DuckDBToolRegistry(db_path=db_path)
 
     @staticmethod
@@ -474,7 +482,7 @@ class Agent:
         total_completion_tokens = 0
         tools_invoked = []
 
-        with httpx.Client(timeout=120.0) as client:
+        with httpx.Client(timeout=240.0) as client:
             use_tools = True
             max_tool_turns = self.max_tool_turns  # Budget ceiling (default 5 turns)
             for turn in range(max_tool_turns):
@@ -482,12 +490,20 @@ class Agent:
                     "model": model_name,
                     "messages": messages,
                     "temperature": 0.2,
-                    "max_tokens": 3000,
+                    "max_tokens": self.max_tokens,
                 }
+                if self.provider == "openrouter":
+                    payload["reasoning"] = {
+                        "effort": self.reasoning_effort,
+                        "exclude": False,
+                    }
                 if use_tools:
                     payload["tools"] = OPENAI_TOOL_SPECS
                     payload["tool_choice"] = "auto"
 
+                print(
+                    f"[Author Agent] LLM Turn {turn + 1}/{max_tool_turns} requesting ({model_name}, tools={use_tools})..."
+                )
                 max_retries = 6
                 resp = None
                 for attempt in range(max_retries):
@@ -543,6 +559,23 @@ class Agent:
                         use_tools = False
                         continue
 
+                    # If endpoint rejects reasoning parameter, remove it
+                    if (
+                        "reasoning" in payload
+                        and resp.status_code == 400
+                        and "reasoning" in err_msg.lower()
+                    ):
+                        payload.pop("reasoning", None)
+                        continue
+
+                    # If endpoint complains max_tokens is too large, reduce ceiling
+                    if (
+                        resp.status_code == 400
+                        and "max_tokens" in err_msg.lower()
+                    ):
+                        payload["max_tokens"] = max(4096, payload["max_tokens"] // 2)
+                        continue
+
                     raise RuntimeError(
                         f"OpenRouter API error ({resp.status_code}): {err_msg}"
                     )
@@ -567,6 +600,7 @@ class Agent:
                         except Exception:
                             fn_args = {}
                         tools_invoked.append(fn_name)
+                        print(f"[Author Agent] Executing tool: {fn_name}({fn_args})")
                         result_text = self._execute_tool(fn_name, fn_args)
                         messages.append(
                             {
@@ -577,6 +611,9 @@ class Agent:
                         )
                 else:
                     # Model provided text/code without requesting more tools
+                    print(
+                        f"[Author Agent] LLM completed synthesis (reasoning={len(msg.get('reasoning') or '')} chars, content={len(msg.get('content') or '')} chars)."
+                    )
                     break
             else:
                 # If tool budget ceiling was reached without dynamic exit, prompt for final code synthesis
@@ -594,7 +631,13 @@ class Agent:
                     "model": model_name,
                     "messages": messages,
                     "temperature": 0.2,
+                    "max_tokens": self.max_tokens,
                 }
+                if self.provider == "openrouter":
+                    payload["reasoning"] = {
+                        "effort": self.reasoning_effort,
+                        "exclude": False,
+                    }
                 resp = client.post(url, headers=headers, json=payload)
                 if not resp.is_error:
                     data = resp.json()
@@ -623,9 +666,11 @@ class Agent:
 
         final_content = ""
         for m in reversed(messages):
-            if m.get("role") == "assistant" and m.get("content"):
-                final_content = m["content"]
-                break
+            if m.get("role") == "assistant":
+                text = m.get("content") or m.get("reasoning") or ""
+                if text:
+                    final_content = text
+                    break
         return str(final_content)
 
     def _repair_code(
@@ -661,13 +706,18 @@ class Agent:
             )
 
             try:
-                with httpx.Client(timeout=120.0) as client:
+                with httpx.Client(timeout=240.0) as client:
                     payload = {
                         "model": model_name,
                         "messages": messages,
                         "temperature": 0.1,
-                        "max_tokens": 3000,
+                        "max_tokens": self.max_tokens,
                     }
+                    if self.provider == "openrouter":
+                        payload["reasoning"] = {
+                            "effort": self.reasoning_effort,
+                            "exclude": False,
+                        }
                     resp = client.post(url, headers=headers, json=payload)
                     if not resp.is_error:
                         data = resp.json()
@@ -685,7 +735,7 @@ class Agent:
                         choice = data["choices"][0]
                         msg = choice["message"]
                         messages.append(msg)
-                        return str(msg.get("content") or "")
+                        return str(msg.get("content") or msg.get("reasoning") or "")
             except Exception as exc:
                 print(f"[Warning] Policy repair LLM call failed: {exc}")
         return candidate_code
@@ -701,20 +751,26 @@ class Agent:
             c = c.replace("\t", "    ")
             return "\n".join(l.rstrip() for l in c.splitlines()).strip()
 
-        # 1. Search all code blocks, prioritizing class definitions or generator/plan structures
-        blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", response_text, re.DOTALL)
-        for block in reversed(blocks):
-            if "class " in block and ("run" in block or "def " in block):
-                return _clean(block)
-            if "def " in block and ("yield" in block or "plan" in block):
-                return _clean(block)
+        # 1. Search all code blocks (support ``` or ```` fences)
+        blocks = re.findall(r"```+(?:python)?\s*\n(.*?)```+", response_text, re.DOTALL)
+        candidate_blocks = []
         for block in blocks:
             if "class " in block or "def " in block:
-                return _clean(block)
+                cleaned = _clean(block)
+                if cleaned:
+                    candidate_blocks.append(cleaned)
+
+        if candidate_blocks:
+            # If any block contains a full class Agent definition, prefer the last one
+            class_blocks = [b for b in candidate_blocks if "class " in b]
+            if class_blocks:
+                return class_blocks[-1]
+            # Otherwise, combine all replacement method blocks so multiple methods aren't lost
+            return "\n\n".join(candidate_blocks)
 
         # 2. Unclosed python code block containing policy code
         match_unclosed = re.search(
-            r"```(?:python)?\s*\n(.*?)(?:```|$)", response_text, re.DOTALL
+            r"```+(?:python)?\s*\n(.*?)(?:```+|$)", response_text, re.DOTALL
         )
         if match_unclosed:
             code = match_unclosed.group(1).strip()

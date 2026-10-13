@@ -514,10 +514,16 @@ def run_synthesis_loop(
     seed_base: int = 42,
     min_paired_delta: float = 0.40,
     min_improved_seeds: int = 20,
+    max_tokens: int = 65536,
+    reasoning_effort: str = "medium",
+    max_tool_turns: int = 3,
 ):
     print("=" * 65)
     print("LOX Embodied Batched Empirical Policy Synthesis Engine")
     print(f"Provider:    {provider} | Model: {model or 'default'}")
+    print(
+        f"Tokens/Eff:  max_tokens={max_tokens} | reasoning_effort={reasoning_effort} | max_tool_turns={max_tool_turns}"
+    )
     print(
         f"Environment: {env_type.upper()} ({role if env_type == 'nethack' else task})"
     )
@@ -536,7 +542,13 @@ def run_synthesis_loop(
 
     run_id = f"synth_{provider}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     author = AuthorAgent(
-        provider=provider, model=model, api_key=api_key, db_path=db_path
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        db_path=db_path,
+        max_tool_turns=max_tool_turns,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
     )
     DynamicTriggerEngine(
         stall_threshold=stall_threshold, cluster_threshold=cluster_threshold
@@ -1289,7 +1301,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--provider", default="mock", choices=["mock", "gemini", "openrouter"]
     )
-    parser.add_argument("--model", default="qwen/qwen3.5-9b")
+    parser.add_argument("--model", default="google/gemma-4-31b-it")
     parser.add_argument(
         "--api-key",
         default=None,
@@ -1383,6 +1395,24 @@ if __name__ == "__main__":
         default=20,
         help="Minimum number of seeds improved to validate hypothesis (default: 20)",
     )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=65536,
+        help="Max tokens per LLM completion / reasoning ceiling (default: 65536, e.g. 64k or 131072 for 128k)",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        default="medium",
+        choices=["high", "medium", "low", "max", "xhigh"],
+        help="Reasoning effort for reasoning models on OpenRouter (default: medium)",
+    )
+    parser.add_argument(
+        "--max-tool-turns",
+        type=int,
+        default=3,
+        help="Maximum tool calling turns before forced code synthesis (default: 3)",
+    )
     args = parser.parse_args()
 
     run_synthesis_loop(
@@ -1407,4 +1437,7 @@ if __name__ == "__main__":
         seed_base=args.seed_base,
         min_paired_delta=args.min_delta,
         min_improved_seeds=args.min_improved,
+        max_tokens=args.max_tokens,
+        reasoning_effort=args.reasoning_effort,
+        max_tool_turns=args.max_tool_turns,
     )

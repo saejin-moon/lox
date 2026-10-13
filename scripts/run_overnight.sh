@@ -33,7 +33,9 @@ WORKERS="${WORKERS:-20}"
 tmux new-session -d -s "$SESSION_NAME" \
   "uv run python -u scripts/run_synthesis.py \
      --provider openrouter \
-     --model qwen/qwen3.5-9b \
+     --model google/gemma-4-31b-it \
+     --reasoning-effort medium \
+     --max-tool-turns 3 \
      --generations 1000 \
      --eval-episodes 100 \
      --max-turns 100000 \
