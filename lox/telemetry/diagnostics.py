@@ -386,13 +386,20 @@ class NetHackDiagnosticEngine(BaseDiagnosticEngine):
         )
         searches_count = int(ep_summary.get("searches") or 0)
 
-        # Detect position oscillation in last 60 ticks or summary flag
+        # Detect position oscillation in last 40 ticks or summary flag
         is_oscillating = bool(ep_summary.get("is_oscillating", False))
         if len(ticks) >= 30:
             recent_positions = [(t.get("y", -1), t.get("x", -1)) for t in ticks[-40:]]
             unique_pos = set(recent_positions)
-            if len(unique_pos) <= 2 and len(recent_positions) >= 30:
-                is_oscillating = True
+            if len(unique_pos) == 2 and len(recent_positions) >= 30:
+                transitions = sum(
+                    1
+                    for i in range(len(recent_positions) - 1)
+                    if recent_positions[i] != recent_positions[i + 1]
+                )
+                is_oscillating = (transitions >= 8)
+            else:
+                is_oscillating = False
 
         # Check body armor
         has_body_armor = any(
@@ -545,7 +552,30 @@ class NetHackDiagnosticEngine(BaseDiagnosticEngine):
                 has_body_armor=has_body_armor,
             )
 
-        # 7. Position Oscillation Ping-Pong
+        # 7. Starvation / Fainting Check (Must precede oscillation: fainting/starving in place is NOT ping-pong)
+        if (
+            turns_fainting > 0
+            or "starv" in death_reason
+            or "faint" in death_reason
+        ):
+            return EpisodeDiagnostic(
+                episode_id=str(ep_summary.get("episode_id", "")),
+                run_id=str(ep_summary.get("run_id", "")),
+                depth=depth,
+                max_depth=max_d,
+                turns=turns,
+                killer=killer,
+                ac_at_death=ac,
+                primary_archetype=FailureArchetype.STARVATION_FAINTING,
+                confidence=0.95,
+                explanation=f"Fainted from hunger ({turns_fainting} ticks fainting); killed by {killer or 'starvation'} while unconscious",
+                turns_fainting=turns_fainting,
+                turns_weak=turns_weak,
+                is_oscillating=is_oscillating,
+                has_body_armor=has_body_armor,
+            )
+
+        # 8. Position Oscillation Ping-Pong
         if is_oscillating:
             return EpisodeDiagnostic(
                 episode_id=str(ep_summary.get("episode_id", "")),
@@ -564,7 +594,7 @@ class NetHackDiagnosticEngine(BaseDiagnosticEngine):
                 has_body_armor=has_body_armor,
             )
 
-        # 8. Status Effect Helpless Check
+        # 9. Status Effect Helpless Check
         if any(
             st in death_reason or st in killer
             for st in ("paraly", "sleep", "stun", "confus", "blind", "helpless")
@@ -586,7 +616,7 @@ class NetHackDiagnosticEngine(BaseDiagnosticEngine):
                 has_body_armor=has_body_armor,
             )
 
-        # 9. Encumbrance Immobility Check
+        # 10. Encumbrance Immobility Check
         if (
             any(enc in inv_str for enc in ("strained", "overtaxed", "overloaded"))
             or str(ep_summary.get("encumbrance") or "").upper() in ("STRAINED", "OVERTAXED", "OVERLOADED")
@@ -610,7 +640,7 @@ class NetHackDiagnosticEngine(BaseDiagnosticEngine):
                 has_body_armor=has_body_armor,
             )
 
-        # 10. Passive Hazard Paralysis / Blast
+        # 11. Passive Hazard Paralysis / Blast
         if any(h in killer for h in cls.PASSIVE_HAZARDS):
             return EpisodeDiagnostic(
                 episode_id=str(ep_summary.get("episode_id", "")),
@@ -629,7 +659,7 @@ class NetHackDiagnosticEngine(BaseDiagnosticEngine):
                 has_body_armor=has_body_armor,
             )
 
-        # 11. Pacing / Exploration Stall Check (CAUSAL ANTECEDENT TO STARVATION & COMBAT MORTALITY)
+        # 12. Pacing / Exploration Stall Check (CAUSAL ANTECEDENT TO STARVATION & COMBAT MORTALITY)
         # If the hero burned excessive turns on early floors (DL 1-3), that pacing stall is the
         # true root cause of subsequent food exhaustion, starvation, or low-tier monster death!
         turns_dl1 = int(ep_summary.get("turns_dl1") or 0)
@@ -658,29 +688,6 @@ class NetHackDiagnosticEngine(BaseDiagnosticEngine):
                 is_oscillating=is_oscillating,
                 has_body_armor=has_body_armor,
                 secret_door_searches=searches_count,
-            )
-
-        # 12. Starvation / Fainting Check
-        if (
-            turns_fainting > 0
-            or "starvation" in death_reason
-            or "faint" in death_reason
-        ):
-            return EpisodeDiagnostic(
-                episode_id=str(ep_summary.get("episode_id", "")),
-                run_id=str(ep_summary.get("run_id", "")),
-                depth=depth,
-                max_depth=max_d,
-                turns=turns,
-                killer=killer,
-                ac_at_death=ac,
-                primary_archetype=FailureArchetype.STARVATION_FAINTING,
-                confidence=0.95,
-                explanation=f"Fainted from hunger ({turns_fainting} ticks fainting); killed by {killer or 'starvation'} while unconscious",
-                turns_fainting=turns_fainting,
-                turns_weak=turns_weak,
-                is_oscillating=is_oscillating,
-                has_body_armor=has_body_armor,
             )
 
 

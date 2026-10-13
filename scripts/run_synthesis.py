@@ -485,7 +485,15 @@ def _run_single_episode_worker(payload: dict[str, Any]) -> dict[str, Any]:
         "excalibur_forged": excalibur_forged,
         "turns_fainting": sum(1 for s in recorder.buffer if s.hunger == "FAINTING"),
         "turns_weak": sum(1 for s in recorder.buffer if s.hunger == "WEAK"),
-        "is_oscillating": (len(set(s.pos for s in list(recorder.buffer)[-40:])) <= 2)
+        "is_oscillating": (
+            len(set(s.pos for s in list(recorder.buffer)[-40:])) == 2
+            and sum(
+                1
+                for i in range(len(list(recorder.buffer)[-40:]) - 1)
+                if list(recorder.buffer)[-40:][i].pos != list(recorder.buffer)[-40:][i + 1].pos
+            )
+            >= 8
+        )
         if len(recorder.buffer) >= 30
         else False,
         "trajectory": recorder.get_last_10_turns_trajectory(),

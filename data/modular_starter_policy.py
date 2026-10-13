@@ -94,17 +94,29 @@ class Agent:
         return obs
 
     def skill_explore_and_dive(self, obs):
-        """Primitive Exploration: Move toward known stairs down, frontiers, or dead ends."""
+        """Primitive Exploration: Move toward known stairs down, frontiers, doors, or dead ends."""
         if obs.spatial.standing_on_stairs_down and not obs.status.is_levitating:
             obs = (yield descend())
             return obs
         if obs.spatial.stairs_down_known:
             obs = (yield step_to_stairs_down())
             return obs
+        if obs.dungeon.adjacent_closed_door:
+            if obs.dungeon.door_is_locked and not obs.dungeon.in_shop:
+                obs = (yield kick_closed_door())
+            else:
+                obs = (yield open_door())
+            return obs
         if obs.spatial.has_unvisited_frontier:
             obs = (yield step_to_frontier())
             return obs
-        obs = (yield step_to_dead_end())
+        if obs.dungeon.has_closed_door:
+            obs = (yield step_to_closed_door())
+            return obs
+        if obs.spatial.has_unsearched_dead_end:
+            obs = (yield step_to_dead_end())
+            return obs
+        obs = (yield search())
         return obs
 
     def skill_solve_sokoban(self, obs):
