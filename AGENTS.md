@@ -9,7 +9,7 @@ This document provides complete operational context, architectural foundations, 
 
 - **Primary Goal**: Synthesize an empirical policy that achieves **Average Dungeon Depth $\ge 20.0$** over a batch of 100 real NetHack episodes.
 - **Provider**: OpenRouter (`--provider openrouter`).
-- **Target Model**: `qwen/qwen3.5-9b`.
+- **Target Model**: `z-ai/glm-5.3:floor` (with OpenRouter routing mode `--routing floor`).
 - **Max Turns**: 25,000 turns per episode (`--max-turns 25000`).
 - **Batch Size**: 100 evaluation episodes per generation (`--eval-episodes 100`).
 - **Acceptance Criteria**: Paired delta $\Delta_{\text{paired}} \ge +0.40$, improved seeds $\ge 20$ (with strictly more improved than regressed), and positive 95% bootstrap confidence interval lower bound ($\Delta_{\text{paired}} - \text{CI}_{95} > 0.0$).

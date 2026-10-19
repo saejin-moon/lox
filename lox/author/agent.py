@@ -31,7 +31,7 @@ import numpy as np
 
 from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.tools import OPENAI_TOOL_SPECS, DuckDBToolRegistry
-from lox.core.types import Action, HeroState, Observation
+from lox.core.types import Action, CombatView, DungeonView, HeroState, Observation
 from lox.dsl.compiler import compile_policy
 from lox.telemetry.tokens import log_token_usage
 
@@ -49,6 +49,7 @@ class AuthorAgent:
         max_tool_turns: int = 3,
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        routing: str = "floor",
     ):
         self.provider = provider
         self.model = model
@@ -71,6 +72,7 @@ class AuthorAgent:
         if reasoning_effort is None:
             reasoning_effort = os.environ.get("REASONING_EFFORT", "medium")
         self.reasoning_effort = reasoning_effort
+        self.routing = routing
         self.tools = DuckDBToolRegistry(db_path=db_path)
 
     @staticmethod
@@ -471,7 +473,9 @@ class Agent:
             "HTTP-Referer": "https://github.com/saejin-moon/lox",
             "X-Title": "LOX Policy Synthesis",
         }
-        model_name = self.model or "qwen/qwen3.5-9b"
+        model_name = self.model or "z-ai/glm-5.3:floor"
+        if self.provider == "openrouter" and self.routing == "floor" and not model_name.endswith(":floor"):
+            model_name = f"{model_name}:floor"
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
@@ -497,6 +501,10 @@ class Agent:
                         "effort": self.reasoning_effort,
                         "exclude": False,
                     }
+                    if self.routing == "floor":
+                        payload["provider"] = {"sort": "price"}
+                    elif self.routing in ("price", "throughput"):
+                        payload["provider"] = {"sort": self.routing}
                 if use_tools:
                     payload["tools"] = OPENAI_TOOL_SPECS
                     payload["tool_choice"] = "auto"
@@ -671,6 +679,10 @@ class Agent:
                         "effort": self.reasoning_effort,
                         "exclude": False,
                     }
+                    if self.routing == "floor":
+                        payload["provider"] = {"sort": "price"}
+                    elif self.routing in ("price", "throughput"):
+                        payload["provider"] = {"sort": self.routing}
                 resp = client.post(url, headers=headers, json=payload)
                 if not resp.is_error:
                     data = resp.json()
@@ -744,8 +756,10 @@ class Agent:
                 {"role": "user", "content": repair_user_msg},
             ]
             model_name = getattr(
-                self, "_last_model_name", self.model or "google/gemma-4-31b-it"
+                self, "_last_model_name", self.model or "z-ai/glm-5.3:floor"
             )
+            if self.provider == "openrouter" and self.routing == "floor" and not model_name.endswith(":floor"):
+                model_name = f"{model_name}:floor"
 
             print(
                 f"[Author Agent] Requesting LLM code repair ({model_name})...",
@@ -777,6 +791,10 @@ class Agent:
                             "effort": "low",
                             "exclude": False,
                         }
+                        if self.routing == "floor":
+                            payload["provider"] = {"sort": "price"}
+                        elif self.routing in ("price", "throughput"):
+                            payload["provider"] = {"sort": self.routing}
                     resp = client.post(url, headers=headers, json=payload)
                     stop_hb.set()
                     hb_t.join(timeout=0.5)
@@ -1104,6 +1122,18 @@ class Agent:
                                     depth=1,
                                     turn=750,
                                     hunger_state=HungerState.HUNGRY,
+                                ),
+                                combat=CombatView(
+                                    floor_corpse_adjacent=True,
+                                    corpse_is_safe=False,
+                                    corpse_is_deadly=True,
+                                    corpse_is_fresh=False,
+                                ),
+                                dungeon=DungeonView(
+                                    floor_corpse_adjacent=True,
+                                    corpse_is_safe=False,
+                                    corpse_is_deadly=True,
+                                    corpse_is_fresh=False,
                                 ),
                                 corpses=[
                                     FloorCorpse(

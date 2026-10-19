@@ -838,6 +838,10 @@ class CombatView:
     has_active_hostile: bool = False
     active_hostile_count: int = 0
     adjacent_monsters: list[str] = field(default_factory=list)
+    floor_corpse_adjacent: bool = False
+    corpse_is_safe: bool = False
+    corpse_is_fresh: bool = False
+    corpse_is_deadly: bool = False
 
 
 @dataclass(slots=True)
@@ -922,6 +926,10 @@ class DungeonView:
     phase: str = DungeonPhase.EARLY_RUSH.value
     is_castle_level: bool = False
     is_sokoban_level: bool = False
+    floor_corpse_adjacent: bool = False
+    corpse_is_safe: bool = False
+    corpse_is_fresh: bool = False
+    corpse_is_deadly: bool = False
 
 
 @dataclass(slots=True)
@@ -1050,6 +1058,21 @@ class Observation:
     def __post_init__(self):
         if not isinstance(self.corpses, FloorCorpseList):
             self.corpses = FloorCorpseList(self.corpses)
+        if self.corpses and self.hero is not None:
+            is_corpse_adj = self.floor_corpse_adjacent
+            is_c_safe = self.corpse_is_safe
+            is_c_fresh = self.corpse_is_fresh
+            is_c_deadly = self.corpse_is_deadly
+            if self.combat is not None:
+                self.combat.floor_corpse_adjacent = is_corpse_adj
+                self.combat.corpse_is_safe = is_c_safe
+                self.combat.corpse_is_fresh = is_c_fresh
+                self.combat.corpse_is_deadly = is_c_deadly
+            if self.dungeon is not None:
+                self.dungeon.floor_corpse_adjacent = is_corpse_adj
+                self.dungeon.corpse_is_safe = is_c_safe
+                self.dungeon.corpse_is_fresh = is_c_fresh
+                self.dungeon.corpse_is_deadly = is_c_deadly
 
     @property
     def floor_corpse_adjacent(self) -> bool:

@@ -33,7 +33,8 @@ WORKERS="${WORKERS:-20}"
 tmux new-session -d -s "$SESSION_NAME" \
   "uv run python -u scripts/run_synthesis.py \
      --provider openrouter \
-     --model google/gemma-4-31b-it \
+     --model z-ai/glm-5.3:floor \
+     --routing floor \
      --reasoning-effort medium \
      --max-tool-turns 3 \
      --generations 1000 \

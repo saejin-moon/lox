@@ -1779,12 +1779,22 @@ class NetHackAdapter(EnvironmentAdapter):
                 )
             )
 
-        dungeon.can_harvest_poison = self.poison_solver.can_harvest_from_corpses(
-            corpse_list,
-            has_poison_res=getattr(self, "has_poison_res", False),
-            hostile_count=combat.hostile_count_fov,
-            adjacent_hostile=combat.adjacent_hostile,
+        is_corpse_adj = any(
+            max(abs(c.y - y), abs(c.x - x)) <= 1 for c in corpse_list
         )
+        is_c_safe = any(c.is_safe for c in corpse_list)
+        is_c_fresh = any(c.is_fresh for c in corpse_list)
+        is_c_deadly = any(c.is_deadly for c in corpse_list)
+
+        dungeon.floor_corpse_adjacent = is_corpse_adj
+        dungeon.corpse_is_safe = is_c_safe
+        dungeon.corpse_is_fresh = is_c_fresh
+        dungeon.corpse_is_deadly = is_c_deadly
+
+        combat.floor_corpse_adjacent = is_corpse_adj
+        combat.corpse_is_safe = is_c_safe
+        combat.corpse_is_fresh = is_c_fresh
+        combat.corpse_is_deadly = is_c_deadly
 
         obs = Observation(
             chars=chars,

@@ -234,3 +234,74 @@ def test_openrouter_ast_self_repair():
     assert tree is not None
     assert "adjacent_hostile" in code
     assert mock_post.call_count == 2
+
+
+def test_openrouter_routing_modes():
+    """Verifies that OpenRouter routing configuration appends :floor and sets provider sort properly."""
+    # Test 1: model without :floor gets :floor appended when routing="floor"
+    agent_floor = AuthorAgent(
+        provider="openrouter",
+        api_key="sk-test-key",
+        model="z-ai/glm-5.3",
+        routing="floor",
+        reasoning_effort="medium",
+    )
+    resp_mock = MagicMock(spec=httpx.Response)
+    resp_mock.is_error = False
+    resp_mock.json.return_value = {
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20},
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "```python\nclass Agent:\n    def run(self, obs):\n        while True:\n            obs = yield wait()\n```",
+                }
+            }
+        ],
+    }
+
+    with patch("httpx.Client.post", return_value=resp_mock) as mock_post:
+        agent_floor.synthesize_policy(
+            current_policy="",
+            trigger_reason="Test routing floor",
+            status_report="Status",
+        )
+    payload = mock_post.call_args[1]["json"]
+    assert payload["model"] == "z-ai/glm-5.3:floor"
+    assert payload["provider"] == {"sort": "price"}
+    assert payload["reasoning"] == {"effort": "medium", "exclude": False}
+
+    # Test 2: model already ending with :floor does not get duplicate suffix
+    agent_floor_explicit = AuthorAgent(
+        provider="openrouter",
+        api_key="sk-test-key",
+        model="z-ai/glm-5.3:floor",
+        routing="floor",
+    )
+    with patch("httpx.Client.post", return_value=resp_mock) as mock_post:
+        agent_floor_explicit.synthesize_policy(
+            current_policy="",
+            trigger_reason="Test explicit floor",
+            status_report="Status",
+        )
+    payload2 = mock_post.call_args[1]["json"]
+    assert payload2["model"] == "z-ai/glm-5.3:floor"
+    assert payload2["provider"] == {"sort": "price"}
+
+    # Test 3: throughput routing
+    agent_throughput = AuthorAgent(
+        provider="openrouter",
+        api_key="sk-test-key",
+        model="custom/model",
+        routing="throughput",
+    )
+    with patch("httpx.Client.post", return_value=resp_mock) as mock_post:
+        agent_throughput.synthesize_policy(
+            current_policy="",
+            trigger_reason="Test throughput routing",
+            status_report="Status",
+        )
+    payload3 = mock_post.call_args[1]["json"]
+    assert payload3["model"] == "custom/model"
+    assert payload3["provider"] == {"sort": "throughput"}
+

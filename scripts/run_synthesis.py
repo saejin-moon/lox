@@ -525,10 +525,11 @@ def run_synthesis_loop(
     max_tokens: int = 65536,
     reasoning_effort: str = "medium",
     max_tool_turns: int = 3,
+    routing: str = "floor",
 ):
     print("=" * 65)
     print("LOX Embodied Batched Empirical Policy Synthesis Engine")
-    print(f"Provider:    {provider} | Model: {model or 'default'}")
+    print(f"Provider:    {provider} | Model: {model or 'default'} | Routing: {routing}")
     print(
         f"Tokens/Eff:  max_tokens={max_tokens} | reasoning_effort={reasoning_effort} | max_tool_turns={max_tool_turns}"
     )
@@ -557,6 +558,7 @@ def run_synthesis_loop(
         max_tool_turns=max_tool_turns,
         max_tokens=max_tokens,
         reasoning_effort=reasoning_effort,
+        routing=routing,
     )
     DynamicTriggerEngine(
         stall_threshold=stall_threshold, cluster_threshold=cluster_threshold
@@ -1309,7 +1311,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--provider", default="mock", choices=["mock", "gemini", "openrouter"]
     )
-    parser.add_argument("--model", default="google/gemma-4-31b-it")
+    parser.add_argument("--model", default="z-ai/glm-5.3:floor")
     parser.add_argument(
         "--api-key",
         default=None,
@@ -1421,6 +1423,12 @@ if __name__ == "__main__":
         default=3,
         help="Maximum tool calling turns before forced code synthesis (default: 3)",
     )
+    parser.add_argument(
+        "--routing",
+        default="floor",
+        choices=["floor", "price", "throughput", "default"],
+        help="OpenRouter provider routing mode (default: floor)",
+    )
     args = parser.parse_args()
 
     run_synthesis_loop(
@@ -1448,4 +1456,5 @@ if __name__ == "__main__":
         max_tokens=args.max_tokens,
         reasoning_effort=args.reasoning_effort,
         max_tool_turns=args.max_tool_turns,
+        routing=args.routing,
     )
