@@ -73,6 +73,7 @@ class AuthorAgent:
             reasoning_effort = os.environ.get("REASONING_EFFORT", "medium")
         self.reasoning_effort = reasoning_effort
         self.routing = routing
+        self.last_reasoning_trace = ""
         self.tools = DuckDBToolRegistry(db_path=db_path)
 
     @staticmethod
@@ -485,6 +486,7 @@ class Agent:
         total_prompt_tokens = 0
         total_completion_tokens = 0
         tools_invoked = []
+        reasoning_chunks: list[str] = []
 
         with httpx.Client(timeout=240.0) as client:
             use_tools = True
@@ -631,6 +633,10 @@ class Agent:
                 msg = choice["message"]
                 messages.append(msg)
 
+                r_text = msg.get("reasoning") or msg.get("reasoning_content") or ""
+                if r_text:
+                    reasoning_chunks.append(f"### Turn {turn + 1} Reasoning:\n{r_text.strip()}\n")
+
                 # Check if tool was called
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
@@ -641,6 +647,7 @@ class Agent:
                         except Exception:
                             fn_args = {}
                         tools_invoked.append(fn_name)
+                        reasoning_chunks.append(f"*(Invoked tool: `{fn_name}({json.dumps(fn_args)})`)*\n")
                         print(f"[Author Agent] Executing tool: {fn_name}({fn_args})")
                         result_text = self._execute_tool(fn_name, fn_args)
                         messages.append(
@@ -692,6 +699,18 @@ class Agent:
                     choice = data["choices"][0]
                     msg = choice["message"]
                     messages.append(msg)
+                    wrap_r = msg.get("reasoning") or msg.get("reasoning_content") or ""
+                    if wrap_r:
+                        reasoning_chunks.append(f"### Final Wrap-Up Turn Reasoning:\n{wrap_r.strip()}\n")
+
+        self.last_reasoning_trace = "\n\n".join(reasoning_chunks)
+        if self.last_reasoning_trace:
+            try:
+                os.makedirs("data/thinking", exist_ok=True)
+                with open("data/thinking/latest_thinking.md", "w") as f:
+                    f.write(f"# Synthesis Thinking Trace ({model_name})\n\n" + self.last_reasoning_trace + "\n")
+            except Exception:
+                pass
 
         log_token_usage(
             run_id=run_id,

@@ -692,8 +692,8 @@ class NetHackDiagnosticEngine(BaseDiagnosticEngine):
 
 
 
-        # 6. Armor Deficit at Depth >= 4
-        if depth >= 4 and ac >= 5:
+        # 6. Armor Deficit at Depth >= 6 (Mid-Game Deficit)
+        if depth >= 6 and ac >= 6:
             return EpisodeDiagnostic(
                 episode_id=str(ep_summary.get("episode_id", "")),
                 run_id=str(ep_summary.get("run_id", "")),
@@ -911,13 +911,13 @@ class CausalTimelineAnalyzer:
             for piece in ("mail", "suit", "cuirass", "plate", "jacket", "leather armor")
             if "(being worn)" in inv_str or "armor" in inv_str
         )
-        if depth >= 4 and ac >= 6:
+        if depth >= 6 and ac >= 7:
             causal_drivers.append(
-                f"EQUIPMENT_NEGLECT: Hero reached Depth {depth} with baseline AC {ac} (no body armor equipped across {turns} turns). Incoming monster damage was 3.5x normal."
+                f"EQUIPMENT_NEGLECT: Hero reached Depth {depth} with baseline AC {ac} (no body armor upgrades across {turns} turns). Incoming monster damage was 3.5x normal."
             )
-        elif depth >= 3 and not has_body_armor:
+        elif depth >= 5 and not has_body_armor:
             causal_drivers.append(
-                f"UNARMORED_BODY: Hero traversed {depth} floors without acquiring or equipping body armor."
+                f"UNARMORED_BODY: Hero reached deep floor {depth} without acquiring or equipping body armor."
             )
 
         # 2. Pacing & Exploration Stall Trace
@@ -1018,7 +1018,7 @@ class CausalTimelineAnalyzer:
         elif any("ENCUMBRANCE_IMMOBILITY" in d for d in causal_drivers):
             rec = "Prioritize skill_scavenge_armor: drop excess heavy armor or loot to maintain unencumbered movement."
         elif any("EQUIPMENT_NEGLECT" in d or "UNARMORED_BODY" in d for d in causal_drivers):
-            rec = "Prioritize skill_scavenge_armor: actively loot and equip body armor on early depths to achieve AC <= 2 before descending."
+            rec = "Prioritize skill_scavenge_armor: opportunistically equip unworn armor via wear_armor(), but maintain rapid descent tempo without stalling on early floors to hunt loot."
         elif any("PACING_STALL" in d or "SEARCH_EXHAUSTION" in d for d in causal_drivers):
             rec = "Prioritize skill_explore_and_dive: cease exhaustive perimeter searches once stairs down are found to preserve turns and food."
         elif any("NUTRITION_BLINDNESS" in d for d in causal_drivers):

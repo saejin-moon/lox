@@ -208,12 +208,12 @@ class Agent:
 
 ### Ground-Truth NetHack 3.6 Mechanics:
 - **Nutrition**: Hunger states: 0=Satiated, 1=Normal, 2=Hungry, 3=Weak, 4=Fainting. Eat packaged food ONLY when `hunger_state >= 2` ("Hungry" or "Weak"). Eating at 0 or 1 wastes food rations on turn 1. Pray for divine feeding ONLY when `hunger_state >= 4` ("Fainting") without food.
-- **Armor Class (AC)**: Base AC is 10. Dropped armor MUST be equipped via `wear_armor()` to lower AC to 0 or negative numbers. Lower AC drastically cuts physical monster damage.
+- **Armor Class (AC)**: Base AC is 10; Valkyrie starts with AC 7 (leather armor + shield). Equip dropped armor opportunistically via `wear_armor()` during peaceful exploration to improve AC, but NEVER stall or delay descent on early floors just to scavenge armor.
 - **Speeds & Fast Predators**: Hero speed is 12. Fast predators outrun the hero: foxes (15), soldier ants (18), killer bees (18), giant bats (22). In open rooms, NEVER step away from an adjacent fast predator (it gives them free hits); fight in melee or engrave dust Elbereth!
 - **Elbereth**: Dust Elbereth (`engrave_dust_elbereth()`) wards against non-humanoids (ants, bees, wolves, canines, beasts). In NetHack 3.6, orcs, goblins, gnomes, dwarves, trolls, and undead respect Elbereth! Only humans/elves (`@`), minotaurs, angels, and unique quest bosses ignore it.
 - **Excalibur**: Lawful Valkyrie XL >= 5 dipping a non-artifact long sword into a fountain has 1/6 chance per dip of forging Excalibur (+1d10 damage, secret door searching, life drain immunity). NEVER dip in Minetown.
 - **Passive Hazards**: Floating eyes inflict 70 turns of paralysis on melee contact. Gas spores explode for lethal blast. Attack floating eyes ONLY with ranged missiles (`throw_dagger()`, safe at distance 1) or offensive wands. If no ranged ammo, step away or detour around them.
-- **Pacing & Descent Protocol**: Lingering on DL 1–3 for > 150 turns or searching endless walls is lethal. When stairs down are found (`obs.spatial.stairs_down_known`), descend promptly once immediate nearby loot is scooped or when `obs.hero.turns_on_level >= 100` or hungry.
+- **Pacing & Descent Protocol**: Lingering on DL 1–3 for > 150 turns or searching endless walls is lethal. When stairs down are found (`obs.spatial.stairs_down_known`), descend promptly! Do NOT detour for distant floor loot—descending preserves food rations and outpaces dangerous monster spawns.
 
 ### Observation Interface & Tactical Predicates:
 Every turn, `obs` provides rich sub-namespaces:

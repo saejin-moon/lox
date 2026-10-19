@@ -608,6 +608,7 @@ def run_synthesis_loop(
             ("seeds_unchanged", "INTEGER"),
             ("ci_95", "DOUBLE"),
             ("incident_resolution_rate", "DOUBLE"),
+            ("thinking_trace", "TEXT"),
         ):
             try:
                 con.execute(f"ALTER TABLE meta_experiments ADD COLUMN {col_def[0]} {col_def[1]}")
@@ -1251,8 +1252,17 @@ class Agent:
             print(f"[Candidate Synthesized for Gen {gen + 1} Twin Evaluation: {len(new_code.splitlines())} lines]")
             candidate_policy = new_code
 
-            # Log hypothesis to DuckDB meta_experiments table
+            # Log hypothesis and thinking trace to DuckDB meta_experiments table
             hypothesis = getattr(author, "last_hypothesis", None)
+            thinking_trace = getattr(author, "last_reasoning_trace", "")
+            if thinking_trace:
+                try:
+                    os.makedirs("data/thinking", exist_ok=True)
+                    with open(f"data/thinking/gen_{gen:04d}.md", "w") as f:
+                        f.write(f"# Generation {gen} Reasoning Trace\n\n{thinking_trace}\n")
+                except Exception:
+                    pass
+
             if hypothesis:
                 last_recorded_hypothesis = hypothesis
                 for attempt in range(3):
@@ -1264,8 +1274,8 @@ class Agent:
                                 campaign_id, generation, timestamp, targeted_skill,
                                 hypothesis_yaml, causal_finding, predicted_outcome,
                                 baseline_avg_depth, actual_avg_depth, outcome_validated,
-                                policy_code
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                policy_code, thinking_trace
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             [
                                 run_id,
@@ -1279,6 +1289,7 @@ class Agent:
                                 None,
                                 None,
                                 new_code.strip(),
+                                thinking_trace or None,
                             ],
                         )
                         con.close()
