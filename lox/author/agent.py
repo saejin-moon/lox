@@ -1,1337 +1,445 @@
 """
-LOX Author Agent: Asynchronous LLM policy synthesis engine with DuckDB analytical tooling.
-Queries LLMs across multiple providers (Gemini, OpenRouter, local vLLM, or Mock),
-enables interactive empirical data investigation (ReAct),
-logs token usage directly into DuckDB, and validates proposed policies against AST invariants.
+Stateless Per-Generation Author Agent with Compiler-in-the-Loop Self-Correction.
+Supports OpenRouter (including Gemma 4 31B with thinking, GLM-5, DeepSeek, Qwen, Claude),
+Gemini, OpenAI-compatible endpoints, and deterministic Mock mode for testing.
 """
 
 from __future__ import annotations
 
-import ast
+from dataclasses import dataclass
 import json
 import os
-import random
 import re
-import signal
-import threading
 import time
-import uuid
 from typing import Any
 
 import httpx
-
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except ImportError:
-    pass
-
-import numpy as np
+import yaml
 
 from lox.author.prompts import build_system_prompt, build_user_prompt
-from lox.author.tools import OPENAI_TOOL_SPECS, DuckDBToolRegistry
-from lox.core.types import Action, CombatView, DungeonView, HeroState, Observation
-from lox.dsl.compiler import compile_policy
-from lox.telemetry.tokens import log_token_usage
+from lox.author.tools import OPENAI_TOOL_SPECS, AuthorToolRegistry
+from lox.db.schema import DEFAULT_DB_PATH
+from lox.lang.macros import DEFAULT_MACROS_PATH
+from lox.lang.validator import splice_functions_into_policy
+from lox.ui.console import ui
+
+
+@dataclass(slots=True)
+class SynthesisProposal:
+    """Validated output from an Author Agent synthesis session."""
+
+    mode: str
+    hypothesis: dict[str, Any]
+    raw_code_patch: str
+    full_policy_code: str
+    full_macros_code: str
+    target_functions: list[str]
+    tool_calls_made: int
 
 
 class AuthorAgent:
-    """Manages LLM policy authoring sessions with DuckDB analytical tools and token tracking."""
+    """
+    Stateless Author Agent.
+    Starts a fresh conversation each generation with a static cached System Prompt,
+    executes tool calls (`query_db`, `query_wiki`, `query_policy_docs`, `dry_run_policy`),
+    and runs a compiler-in-the-loop gate to ensure emitted code compiles and runs cleanly.
+    """
 
     def __init__(
         self,
-        provider: str = "mock",
-        model: str | None = None,
+        provider: str = "openrouter",
+        model: str = "google/gemma-4-31b-it",
         api_key: str | None = None,
         base_url: str | None = None,
-        db_path: str = "data/lox.duckdb",
-        max_tool_turns: int = 3,
-        max_tokens: int | None = None,
-        reasoning_effort: str | None = None,
+        db_path: str = DEFAULT_DB_PATH,
+        macros_path: str = DEFAULT_MACROS_PATH,
+        max_tokens: int = 16384,
+        reasoning_effort: str = "medium",
         routing: str = "floor",
     ):
-        self.provider = provider
+        self.provider = provider.lower()
         self.model = model
-        if api_key:
-            self.api_key = api_key
-        elif provider == "openrouter":
-            self.api_key = os.environ.get("OPENROUTER_API_KEY")
-        elif provider == "gemini":
-            self.api_key = os.environ.get("GEMINI_API_KEY")
-        else:
-            self.api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get(
-                "GEMINI_API_KEY"
-            )
+        self.api_key = (
+            api_key
+            or os.environ.get("OPENROUTER_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        )
         self.base_url = base_url
         self.db_path = db_path
-        self.max_tool_turns = max_tool_turns
-        if max_tokens is None:
-            max_tokens = int(os.environ.get("MAX_TOKENS", 65536))
+        self.macros_path = macros_path
         self.max_tokens = max_tokens
-        if reasoning_effort is None:
-            reasoning_effort = os.environ.get("REASONING_EFFORT", "medium")
         self.reasoning_effort = reasoning_effort
         self.routing = routing
-        self.last_reasoning_trace = ""
-        self.tools = DuckDBToolRegistry(db_path=db_path)
+        self.tools = AuthorToolRegistry(db_path=db_path, macros_path=macros_path)
 
     @staticmethod
-    def splice_policy_methods(base_code: str, patch_code: str) -> str:
-        """
-        Surgically splices replacement and new methods from patch_code into base_code via AST.
-        Supports both standalone `def foo(self, ...):` and `class Agent:` wrapped method definitions.
-        If patch_code is a complete standalone policy or base_code is empty, returns patch_code.
-        """
-        if not base_code or not base_code.strip():
-            return patch_code
-        if not patch_code or not patch_code.strip():
-            return base_code
+    def extract_yaml_and_python(content: str) -> tuple[dict[str, Any], str]:
+        """Extracts the YAML hypothesis dict and Python code block from an LLM response."""
+        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL).strip()
 
-        import textwrap
-        from lox.dsl.parser import repair_python_indentation
-
-        patch_code = patch_code.replace("\t", "    ")
-        repaired_patch = repair_python_indentation(patch_code)
-
-        # Multi-candidate AST parsing
-        patch_ast = None
-        for candidate in (
-            repaired_patch,
-            textwrap.dedent(repaired_patch),
-            patch_code,
-            textwrap.dedent(patch_code),
-        ):
+        yaml_dict: dict[str, Any] = {}
+        yaml_blocks = re.findall(r"```(?:yaml|yml)\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        for yb in yaml_blocks:
             try:
-                patch_ast = ast.parse(candidate)
-                break
-            except SyntaxError:
+                parsed = yaml.safe_load(yb)
+                if isinstance(parsed, dict):
+                    yaml_dict = parsed
+                    break
+            except Exception:
                 continue
 
-        # Extract replacement methods from patch_ast
-        replacements: dict[str, ast.FunctionDef] = {}
-        patch_has_class = False
-        if patch_ast is not None:
-            for node in patch_ast.body:
-                if isinstance(node, ast.FunctionDef):
-                    replacements[node.name] = node
-                elif isinstance(node, ast.ClassDef):
-                    patch_has_class = True
-                    for item in node.body:
-                        if isinstance(item, ast.FunctionDef):
-                            replacements[item.name] = item
+        py_blocks = re.findall(r"```python\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        if not py_blocks:
+            py_blocks = re.findall(r"```\s*\n(.*?)```", text, flags=re.DOTALL)
+            py_blocks = [b for b in py_blocks if "def " in b or "class " in b]
 
-        # Robust Fallback: Method Chunk Extraction
-        # If whole-block parsing failed or missed methods due to whitespace anomalies, extract each def chunk in isolation
-        if not replacements:
-            lines = repaired_patch.splitlines()
-            chunks = []
-            curr = []
-            def_pat = re.compile(r"^\s*def\s+\w+\s*\(")
-            for line in lines:
-                if def_pat.match(line):
-                    if curr:
-                        chunks.append("\n".join(curr))
-                        curr = []
-                curr.append(line)
-            if curr:
-                chunks.append("\n".join(curr))
+        code_str = py_blocks[-1].strip() if py_blocks else ""
+        return yaml_dict, code_str
 
-            for chunk in chunks:
-                norm = textwrap.dedent(chunk)
-                c_lines = norm.splitlines()
-                if c_lines and c_lines[0].startswith("def "):
-                    body_indents = [
-                        len(l) - len(l.lstrip(" "))
-                        for l in c_lines[1:]
-                        if l.strip()
-                    ]
-                    if body_indents and min(body_indents) > 4:
-                        excess = min(body_indents) - 4
-                        norm = "\n".join(
-                            [c_lines[0]]
-                            + [
-                                (
-                                    l[excess:]
-                                    if l.startswith(" " * excess)
-                                    else l.lstrip()
-                                )
-                                if l.strip()
-                                else ""
-                                for l in c_lines[1:]
-                            ]
-                        )
-                for c_cand in (norm, textwrap.dedent(norm), chunk):
-                    try:
-                        c_ast = ast.parse(c_cand)
-                        for node in c_ast.body:
-                            if isinstance(node, ast.FunctionDef):
-                                replacements[node.name] = node
-                        break
-                    except SyntaxError:
-                        continue
+    def _execute_tool_call(self, turn_idx: int, name: str, args: dict[str, Any]) -> str:
+        t0 = time.perf_counter()
+        if name == "query_db":
+            sql = str(args.get("sql", ""))
+            out, summary = self.tools.query_db(sql)
+            arg_disp = sql
+        elif name == "query_wiki":
+            q = str(args.get("query", ""))
+            tk = int(args.get("top_k", 3))
+            out, summary = self.tools.query_wiki(q, top_k=tk)
+            arg_disp = q
+        elif name == "query_policy_docs":
+            topic = str(args.get("topic", "all"))
+            out, summary = self.tools.query_policy_docs(topic)
+            arg_disp = topic
+        elif name == "dry_run_policy":
+            code = str(args.get("code", ""))
+            is_macro = bool(args.get("is_macro", False))
+            seed = int(args.get("seed", 42))
+            mt = int(args.get("max_turns", 60))
+            out, summary = self.tools.dry_run_policy(
+                code=code, is_macro=is_macro, seed=seed, max_turns=mt
+            )
+            arg_disp = f"{len(code.splitlines())} lines, seed={seed}"
+        else:
+            out, summary = f"Unknown tool '{name}'.", "unknown"
+            arg_disp = str(args)
 
-        if not replacements:
-            return repaired_patch
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        ui.tool_call(turn_idx, name, arg_disp, summary, elapsed_ms)
+        return out
 
-        try:
-            base_ast = ast.parse(base_code)
-        except SyntaxError:
-            return patch_code
+    def _call_llm_api(
+        self,
+        messages: list[dict[str, Any]],
+        allow_tools: bool = True,
+    ) -> dict[str, Any]:
+        """Dispatches a single chat completion request to OpenRouter, OpenAI, or Gemini."""
+        if self.provider == "openrouter":
+            url = self.base_url or "https://openrouter.ai/api/v1/chat/completions"
+        elif self.provider == "gemini":
+            url = self.base_url or "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        else:
+            url = self.base_url or "https://api.openai.com/v1/chat/completions"
 
-        # Locate class Agent in base_ast
-        agent_node = None
-        for node in base_ast.body:
-            if isinstance(node, ast.ClassDef) and node.name == "Agent":
-                agent_node = node
-                break
+        model_id = self.model
+        if (
+            self.provider == "openrouter"
+            and self.routing == "floor"
+            and ":" not in model_id
+        ):
+            model_id = f"{model_id}:floor"
 
-        if agent_node is None:
-            return patch_code
-
-
-        new_body = []
-        for item in agent_node.body:
-            if isinstance(item, ast.FunctionDef) and item.name in replacements:
-                new_method = replacements.pop(item.name)
-                # Ensure 'self' is the first parameter if missing
-                if not new_method.args.args or new_method.args.args[0].arg != "self":
-                    new_method.args.args.insert(0, ast.arg(arg="self"))
-                new_body.append(new_method)
-            else:
-                new_body.append(item)
-
-        # Append any brand-new helper methods defined in patch
-        for new_method in replacements.values():
-            if not new_method.args.args or new_method.args.args[0].arg != "self":
-                new_method.args.args.insert(0, ast.arg(arg="self"))
-            new_body.append(new_method)
-
-        existing_method_names = {
-            m.name for m in new_body if isinstance(m, ast.FunctionDef)
+        payload: dict[str, Any] = {
+            "model": model_id,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "temperature": 0.4,
         }
+        if allow_tools:
+            payload["tools"] = OPENAI_TOOL_SPECS
+            payload["tool_choice"] = "auto"
+        if self.provider == "openrouter" and self.reasoning_effort:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
 
-        # 1. Auto-stub any skill_ subroutines called in run() that are missing
-        run_node = next(
-            (m for m in new_body if isinstance(m, ast.FunctionDef) and m.name == "run"),
-            None,
-        )
-        if run_node is not None:
-            called_skills = set()
-            for subnode in ast.walk(run_node):
-                if isinstance(subnode, ast.Call) and isinstance(subnode.func, ast.Attribute):
-                    if isinstance(subnode.func.value, ast.Name) and subnode.func.value.id == "self":
-                        if subnode.func.attr.startswith("skill_"):
-                            called_skills.add(subnode.func.attr)
-            for missing_skill in sorted(called_skills - existing_method_names):
-                stub_code = f"def {missing_skill}(self, obs):\n    obs = (yield from self.skill_explore_and_dive(obs))\n    return obs\n"
-                stub_ast = ast.parse(stub_code).body[0]
-                new_body.append(stub_ast)
-                existing_method_names.add(missing_skill)
-
-        # 2. Auto-stub any skill_<goal> methods returned by determine_goal() that are missing
-        det_node = next(
-            (m for m in new_body if isinstance(m, ast.FunctionDef) and m.name == "determine_goal"),
-            None,
-        )
-        if det_node is not None:
-            returned_goals = set()
-            for subnode in ast.walk(det_node):
-                if isinstance(subnode, ast.Return) and isinstance(subnode.value, ast.Constant):
-                    if isinstance(subnode.value.value, str):
-                        returned_goals.add(subnode.value.value)
-            for missing_goal in sorted(returned_goals):
-                skill_name = "skill_" + missing_goal
-                if skill_name not in existing_method_names and missing_goal not in (
-                    "ascension_run",
-                    "perform_invocation",
-                    "breach_castle",
-                    "solve_sokoban",
-                    "combat",
-                    "explore_and_dive",
-                    "scavenge_armor",
-                    "forge_excalibur",
-                ):
-                    stub_code = f"def {skill_name}(self, obs):\n    obs = (yield from self.skill_explore_and_dive(obs))\n    return obs\n"
-                    stub_ast = ast.parse(stub_code).body[0]
-                    new_body.append(stub_ast)
-                    existing_method_names.add(skill_name)
-
-        agent_node.body = new_body
-
-        try:
-            return ast.unparse(base_ast)
-        except Exception:
-            return patch_code
-
-    def _execute_tool(self, tool_name: str, args: dict[str, Any]) -> str:
-        """Dispatches tool execution against the DuckDBToolRegistry with robust error shielding."""
-        try:
-            if tool_name == "query_duckdb":
-                return self.tools.query_duckdb(args.get("sql", ""))
-            elif tool_name == "get_duckdb_schema":
-                return self.tools.get_duckdb_schema()
-            elif tool_name == "get_death_taxonomy":
-                return self.tools.get_death_taxonomy(window=args.get("window", 20))
-            elif tool_name == "query_root_causes":
-                return self.tools.query_root_causes(
-                    run_id=args.get("run_id", ""),
-                    window=args.get("window", 10),
-                )
-            elif tool_name == "get_floor_pacing_stats":
-                return self.tools.get_floor_pacing_stats(depth=args.get("depth", 1))
-            elif tool_name == "get_action_distribution":
-                return self.tools.get_action_distribution(run_id=args.get("run_id", ""))
-            elif tool_name == "query_wiki":
-                return self.tools.query_wiki(
-                    args.get("query", ""), top_k=args.get("top_k", 2)
-                )
-            elif tool_name == "query_invariants":
-                return self.tools.query_invariants(
-                    query=args.get("query", ""),
-                    category=args.get("category", ""),
-                    top_k=args.get("top_k", 3),
-                )
-            elif tool_name == "request_macro":
-                run_id = getattr(self, "_current_run_id", "synth_session")
-                return self.tools.request_macro(
-                    macro_name=args.get("macro_name", ""),
-                    rationale=args.get("rationale", ""),
-                    proposed_interface=args.get("proposed_interface", ""),
-                    priority=args.get("priority", "medium"),
-                    run_id=run_id,
-                )
-            elif tool_name == "get_dungeon_topology":
-                return self.tools.get_dungeon_topology(depth=args.get("depth", 1))
-            elif tool_name == "get_hazard_map":
-                return self.tools.get_hazard_map(depth=args.get("depth", 1))
-            elif tool_name == "get_floor_stash_report":
-                return self.tools.get_floor_stash_report()
-            elif tool_name == "get_death_autopsy_trace":
-                return self.tools.get_death_autopsy_trace(
-                    episode_id=args.get("episode_id", ""),
-                    limit=args.get("limit", 30),
-                )
-            elif tool_name == "get_macro_requests":
-                return self.tools.get_macro_requests()
-            return f"Unknown tool '{tool_name}'."
-        except Exception as e:
-            return f"Tool execution error for '{tool_name}': {e}"
-
-    def _call_mock(
-        self,
-        current_policy: str,
-        trigger_reason: str,
-        run_id: str,
-        session_id: str,
-    ) -> str:
-        """Deterministic mock provider with token tracking and tool simulation."""
-        # Simulate tool execution for testing
-        tools_called = ["query_duckdb", "query_wiki"]
-        self._execute_tool("get_duckdb_schema", {})
-        self._execute_tool("query_wiki", {"query": "Excalibur"})
-
-        log_token_usage(
-            run_id=run_id,
-            session_id=session_id,
-            provider="mock",
-            model="mock-author-v2",
-            prompt_tokens=260,
-            completion_tokens=140,
-            trigger_reason=trigger_reason,
-            tools_called=tools_called,
-            db_path=self.db_path,
-        )
-
-        return """```python
-class Agent:
-    def __init__(self):
-        self.last_prayer_turn = -1000
-
-    def run(self, obs):
-        while True:
-            # Emergency: self-monitored prayer and healing
-            if obs.hero.hp_frac < 0.20 and (obs.hero.turn - self.last_prayer_turn >= 350):
-                self.last_prayer_turn = obs.hero.turn
-                obs = yield pray()
-                continue
-            elif obs.hero.hp_frac < 0.35 and obs.inventory.has_healing:
-                obs = yield quaff_healing()
-                continue
-            elif obs.hero.hunger_state >= HUNGRY and obs.inventory.has_food:
-                obs = yield eat_carried_food()
-                continue
-
-            # Tactical combat & retreat
-            if obs.combat.adjacent_hostile:
-                if obs.combat.closest_hostile_name == "floating eye":
-                    obs = yield step_away_from_hostile()
-                elif obs.hero.hp_frac < 0.35 and obs.combat.can_retreat:
-                    obs = yield step_to_chokepoint()
-                else:
-                    obs = yield melee_attack_hostile()
-                continue
-
-            # Environment & Navigation
-            if obs.spatial.standing_on_stairs_down:
-                obs = yield descend()
-            elif obs.dungeon.adjacent_closed_door:
-                if obs.dungeon.door_is_locked:
-                    obs = yield kick_closed_door()
-                else:
-                    obs = yield open_door()
-            elif obs.spatial.stairs_down_known and not obs.spatial.has_unvisited_frontier:
-                obs = yield step_to_stairs_down()
-            elif obs.spatial.has_unvisited_frontier:
-                obs = yield step_to_frontier()
-            elif obs.spatial.has_unsearched_dead_end:
-                obs = yield search()
-            else:
-                obs = yield wait()
-```"""
-
-    def _call_gemini(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        run_id: str,
-        session_id: str,
-        trigger_reason: str,
-    ) -> str:
-        from google import genai
-
-        client = genai.Client(api_key=self.api_key)
-        model_name = self.model or "gemini-2.5-flash"
-
-        # Provide python functions to Gemini for automatic tool execution
-        tool_callables = [
-            self.tools.query_duckdb,
-            self.tools.get_duckdb_schema,
-            self.tools.get_death_taxonomy,
-            self.tools.get_floor_pacing_stats,
-            self.tools.get_action_distribution,
-            self.tools.query_wiki,
-            self.tools.query_invariants,
-            self.tools.get_dungeon_topology,
-            self.tools.get_hazard_map,
-            self.tools.get_floor_stash_report,
-            self.tools.get_death_autopsy_trace,
-        ]
-
-        # Use chats for automatic multi-turn tool calling
-        chat = client.chats.create(
-            model=model_name,
-            config={
-                "system_instruction": system_prompt,
-                "temperature": 0.2,
-                "tools": tool_callables,
-            },
-        )
-        response = chat.send_message(user_prompt)
-
-        prompt_tokens = 0
-        completion_tokens = 0
-        if hasattr(response, "usage_metadata") and response.usage_metadata:
-            prompt_tokens = (
-                getattr(response.usage_metadata, "prompt_token_count", 0) or 0
-            )
-            completion_tokens = (
-                getattr(response.usage_metadata, "candidates_token_count", 0) or 0
-            )
-
-        log_token_usage(
-            run_id=run_id,
-            session_id=session_id,
-            provider="gemini",
-            model=model_name,
-            prompt_tokens=prompt_tokens or 350,
-            completion_tokens=completion_tokens or 200,
-            trigger_reason=trigger_reason,
-            db_path=self.db_path,
-        )
-
-        return response.text or ""
-
-    def _call_openai_compatible(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        run_id: str,
-        session_id: str,
-        trigger_reason: str,
-    ) -> str:
-        if not self.api_key:
-            raise ValueError(
-                f"Missing API key for provider '{self.provider}'. "
-                f"Please pass --api-key or set {self.provider.upper()}_API_KEY in your environment or .env file."
-            )
-
-        url = (self.base_url or "https://openrouter.ai/api/v1").rstrip(
-            "/"
-        ) + "/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.api_key.strip()}",
-            "HTTP-Referer": "https://github.com/saejin-moon/lox",
-            "X-Title": "LOX Policy Synthesis",
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
         }
-        model_name = self.model or "z-ai/glm-5.3:floor"
-        if self.provider == "openrouter" and self.routing == "floor" and not model_name.endswith(":floor"):
-            model_name = f"{model_name}:floor"
+        with httpx.Client(timeout=180.0) as client:
+            resp = client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200 and "reasoning" in payload:
+                # Retry without reasoning field if endpoint does not support it
+                payload.pop("reasoning", None)
+                resp = client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]
+
+    def _synthesize_mock(
+        self,
+        mode: str,
+        current_policy: str,
+    ) -> SynthesisProposal:
+        """Deterministic mock synthesizer for automated tests (`provider='mock'`)."""
+        self.tools.current_policy_code = current_policy
+        # Exercise tools so tool pipeline is verified in tests
+        self._execute_tool_call(1, "query_db", {"sql": "SELECT COUNT(*) AS n FROM expert_runs"})
+        self._execute_tool_call(1, "query_wiki", {"query": "Excalibur", "top_k": 1})
+
+        if mode == "FULL_WRITE" or not current_policy.strip():
+            code = """class Policy:
+    def __init__(self):
+        self.visited = set()
+
+    def explore_step(self, state):
+        self.visited.add((state.y, state.x))
+        if state.char_at(state.y, state.x) == '>':
+            return Action.DOWN
+        stairs = np.argwhere(state.chars == ord('>'))
+        passable = (
+            (state.chars == ord('.'))
+            | (state.chars == ord('#'))
+            | (state.chars == ord('>'))
+            | (state.chars == ord('<'))
+            | (state.chars == ord('+'))
+        )
+        if len(stairs) > 0:
+            dy, dx = state.path_step(passable, (int(stairs[0][0]), int(stairs[0][1])))
+            if (dy, dx) != (0, 0):
+                if state.char_at(state.y + dy, state.x + dx) == '+':
+                    return seq(Action.OPEN, DIR_DELTAS[(dy, dx)])
+                return DIR_DELTAS[(dy, dx)]
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            ny, nx = state.y + dy, state.x + dx
+            if 0 <= ny < 21 and 0 <= nx < 79 and passable[ny, nx] and (ny, nx) not in self.visited:
+                if state.char_at(ny, nx) == '+':
+                    return seq(Action.OPEN, DIR_DELTAS[(dy, dx)])
+                return DIR_DELTAS[(dy, dx)]
+        return Action.SEARCH
+
+    def handle_combat(self, state):
+        hp_thresh = self.param("retreat_hp", 0.25, 0.1, 0.6)
+        mons = [m for m in state.visible_monsters() if not m.is_pet and not m.is_peaceful]
+        for m in mons:
+            if abs(m.y - state.y) <= 1 and abs(m.x - state.x) <= 1:
+                return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
+        return self.explore_step(state)
+
+    def run(self, state):
+        while True:
+            mons = [m for m in state.visible_monsters() if not m.is_pet and not m.is_peaceful]
+            if any(abs(m.y - state.y) <= 1 and abs(m.x - state.x) <= 1 for m in mons):
+                act = self.handle_combat(state)
+            else:
+                act = self.explore_step(state)
+            state = yield act
+"""
+            hyp = {
+                "mode": "FULL_WRITE",
+                "target_functions": ["run", "explore_step", "handle_combat"],
+                "observation_from_db": "Initial baseline synthesis from expert_runs and wiki.",
+                "mechanism": "Builds modular Policy with explore_step and handle_combat.",
+            }
+            return SynthesisProposal(
+                mode="FULL_WRITE",
+                hypothesis=hyp,
+                raw_code_patch=code,
+                full_policy_code=code,
+                full_macros_code=self.tools.macro_lib.load_code(),
+                target_functions=["run", "explore_step", "handle_combat"],
+                tool_calls_made=2,
+            )
+
+        if mode == "MACRO_WRITE":
+            macro_code = '''def build_walkable_mask(state):
+    """Returns a boolean (21, 79) mask of standard walkable floor, corridor, stair, and door tiles."""
+    return (
+        (state.chars == ord('.'))
+        | (state.chars == ord('#'))
+        | (state.chars == ord('>'))
+        | (state.chars == ord('<'))
+        | (state.chars == ord('+'))
+        | (state.chars == ord('_'))
+        | (state.chars == ord('{'))
+    )
+'''
+            merged_macros, names = self.tools.macro_lib.merge_macros(macro_code)
+            hyp = {
+                "mode": "MACRO_WRITE",
+                "target_functions": names,
+                "observation_from_db": "Extracted reusable walkable mask builder into macros.py.",
+                "mechanism": "Adds build_walkable_mask(state) to macros.py.",
+            }
+            return SynthesisProposal(
+                mode="MACRO_WRITE",
+                hypothesis=hyp,
+                raw_code_patch=macro_code,
+                full_policy_code=current_policy,
+                full_macros_code=merged_macros,
+                target_functions=names,
+                tool_calls_made=2,
+            )
+
+        # FUNC_MOD_ADD mock
+        patch = """def handle_combat(self, state):
+    hp_thresh = self.param("retreat_hp", 0.30, 0.1, 0.6)
+    if state.hp / max(1, state.max_hp) < hp_thresh and state.turn > 10:
+        for item in state.inventory:
+            if "healing" in item.name.lower() and item.char == "!":
+                return seq(Action.QUAFF, item.letter)
+    mons = [m for m in state.visible_monsters() if not m.is_pet and not m.is_peaceful]
+    for m in mons:
+        if abs(m.y - state.y) <= 1 and abs(m.x - state.x) <= 1:
+            return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
+    return self.explore_step(state)
+"""
+        spliced, changed = splice_functions_into_policy(current_policy, patch)
+        hyp = {
+            "mode": "FUNC_MOD_ADD",
+            "target_functions": changed,
+            "observation_from_db": "Outlier good runs survived melee by quaffing healing potions at low HP.",
+            "mechanism": "Adds healing potion quaff check to handle_combat.",
+        }
+        return SynthesisProposal(
+            mode="FUNC_MOD_ADD",
+            hypothesis=hyp,
+            raw_code_patch=patch,
+            full_policy_code=spliced,
+            full_macros_code=self.tools.macro_lib.load_code(),
+            target_functions=changed,
+            tool_calls_made=2,
+        )
+
+    def synthesize(
+        self,
+        mode: str,
+        generation: int,
+        current_policy: str,
+        batch_digest: str = "",
+        recent_experiments: str = "",
+        max_tool_turns: int | None = None,
+    ) -> SynthesisProposal:
+        """
+        Runs a fresh, stateless multi-turn tool-calling session for `generation` and `mode`.
+        Includes a compiler-in-the-loop validation gate (up to 2 repair turns) so models
+        like Gemma 4 31B self-correct any syntax or attribute errors before returning.
+        """
+        if self.provider == "mock":
+            return self._synthesize_mock(mode=mode, current_policy=current_policy)
+
+        self.tools.current_policy_code = current_policy
+        if max_tool_turns is None:
+            max_tool_turns = 12 if mode == "FULL_WRITE" else 6
+
+        sys_prompt = build_system_prompt(self.db_path)
+        user_prompt = build_user_prompt(
+            mode=mode,
+            generation=generation,
+            current_policy=current_policy,
+            macros_docs=self.tools.macro_lib.format_docs(),
+            batch_digest=batch_digest,
+            recent_experiments=recent_experiments,
+        )
 
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        tools_invoked = []
-        reasoning_chunks: list[str] = []
+        total_tool_calls = 0
+        final_content = ""
 
-        with httpx.Client(timeout=240.0) as client:
-            use_tools = True
-            max_tool_turns = self.max_tool_turns  # Budget ceiling (default 5 turns)
-            for turn in range(max_tool_turns):
-                payload: dict[str, Any] = {
-                    "model": model_name,
-                    "messages": messages,
-                    "temperature": 0.2,
-                    "max_tokens": self.max_tokens,
-                }
-                if self.provider == "openrouter":
-                    payload["reasoning"] = {
-                        "effort": self.reasoning_effort,
-                        "exclude": False,
+        for turn_idx in range(1, max_tool_turns + 2):
+            allow_tools = turn_idx <= max_tool_turns
+            msg = self._call_llm_api(messages, allow_tools=allow_tools)
+            messages.append(msg)
+
+            tool_calls = msg.get("tool_calls") or []
+            if not tool_calls:
+                final_content = msg.get("content") or ""
+                break
+
+            for tc in tool_calls:
+                total_tool_calls += 1
+                fn_Spec = tc.get("function") or {}
+                t_name = fn_Spec.get("name", "")
+                raw_args = fn_Spec.get("arguments", "{}")
+                try:
+                    t_args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+                except Exception:
+                    t_args = {}
+                tool_out = self._execute_tool_call(turn_idx, t_name, t_args)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", f"call_{total_tool_calls}"),
+                        "name": t_name,
+                        "content": tool_out,
                     }
-                    if self.routing == "floor":
-                        payload["provider"] = {"sort": "price"}
-                    elif self.routing in ("price", "throughput"):
-                        payload["provider"] = {"sort": self.routing}
-                if use_tools:
-                    payload["tools"] = OPENAI_TOOL_SPECS
-                    payload["tool_choice"] = "auto"
-
-                print(
-                    f"[Author Agent] LLM Turn {turn + 1}/{max_tool_turns} requesting ({model_name}, tools={use_tools})...",
-                    flush=True,
                 )
-                max_retries = 6
-                resp = None
-                for attempt in range(max_retries):
-                    t_attempt_start = time.time()
-                    stop_heartbeat = threading.Event()
 
-                    def _heartbeat():
-                        while not stop_heartbeat.wait(timeout=15.0):
-                            elapsed = int(time.time() - t_attempt_start)
-                            print(
-                                f"[Author Agent] LLM generating response & reasoning tokens (elapsed: {elapsed}s)...",
-                                flush=True,
-                            )
-
-                    hb_thread = threading.Thread(target=_heartbeat, daemon=True)
-                    hb_thread.start()
-                    try:
-                        resp = client.post(url, headers=headers, json=payload)
-                    except (
-                        httpx.RemoteProtocolError,
-                        httpx.NetworkError,
-                        httpx.TimeoutException,
-                    ) as exc:
-                        stop_heartbeat.set()
-                        hb_thread.join(timeout=0.5)
-                        if attempt < max_retries - 1:
-                            backoff = (2**attempt) + random.uniform(1.0, 3.0)
-                            print(
-                                f"[Author Agent] Request failed ({type(exc).__name__}), retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})...",
-                                flush=True,
-                            )
-                            time.sleep(backoff)
-                            continue
-                        raise RuntimeError(
-                            f"OpenRouter network error after {max_retries} attempts: {exc}"
-                        ) from exc
-                    finally:
-                        stop_heartbeat.set()
-                        hb_thread.join(timeout=0.5)
-
-                    duration = time.time() - t_attempt_start
-                    status = getattr(resp, "status_code", 200)
-                    print(
-                        f"[Author Agent] OpenRouter responded in {duration:.1f}s (status={status}).",
-                        flush=True,
-                    )
-                    if (
-                        status in (429, 500, 502, 503, 504)
-                        and attempt < max_retries - 1
-                    ):
-                        backoff = (2**attempt) + random.uniform(1.0, 3.0)
-                        print(
-                            f"[Author Agent] HTTP {status} received, retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})...",
-                            flush=True,
-                        )
-                        time.sleep(backoff)
-                        continue
-                    break
-
-                if resp is None:
-                    raise RuntimeError("No response received from OpenRouter API")
-
-                if resp.is_error:
-                    err_msg = resp.text
-                    try:
-                        err_json = resp.json()
-                        if "error" in err_json:
-                            err_info = err_json["error"]
-                            if isinstance(err_info, dict):
-                                err_msg = err_info.get("message", err_msg)
-                            else:
-                                err_msg = str(err_info)
-                    except Exception:
-                        pass
-
-                    # If model doesn't support tools, fallback to no-tools
-                    if (
-                        use_tools
-                        and resp.status_code == 400
-                        and (
-                            "tool" in err_msg.lower()
-                            or "not supported" in err_msg.lower()
-                        )
-                    ):
-                        use_tools = False
-                        continue
-
-                    # If endpoint rejects reasoning parameter, remove it
-                    if (
-                        "reasoning" in payload
-                        and resp.status_code == 400
-                        and "reasoning" in err_msg.lower()
-                    ):
-                        payload.pop("reasoning", None)
-                        continue
-
-                    # If endpoint complains max_tokens is too large, reduce ceiling
-                    if (
-                        resp.status_code == 400
-                        and "max_tokens" in err_msg.lower()
-                    ):
-                        payload["max_tokens"] = max(4096, payload["max_tokens"] // 2)
-                        continue
-
-                    raise RuntimeError(
-                        f"OpenRouter API error ({resp.status_code}): {err_msg}"
-                    )
-
-                data = resp.json()
-
-                usage = data.get("usage", {})
-                total_prompt_tokens += usage.get("prompt_tokens", 0)
-                total_completion_tokens += usage.get("completion_tokens", 0)
-
-                choice = data["choices"][0]
-                msg = choice["message"]
-                messages.append(msg)
-
-                r_text = msg.get("reasoning") or msg.get("reasoning_content") or ""
-                if r_text:
-                    reasoning_chunks.append(f"### Turn {turn + 1} Reasoning:\n{r_text.strip()}\n")
-
-                # Check if tool was called
-                tool_calls = msg.get("tool_calls")
-                if tool_calls:
-                    for tc in tool_calls:
-                        fn_name = tc["function"]["name"]
-                        try:
-                            fn_args = json.loads(tc["function"].get("arguments", "{}"))
-                        except Exception:
-                            fn_args = {}
-                        tools_invoked.append(fn_name)
-                        reasoning_chunks.append(f"*(Invoked tool: `{fn_name}({json.dumps(fn_args)})`)*\n")
-                        print(f"[Author Agent] Executing tool: {fn_name}({fn_args})")
-                        result_text = self._execute_tool(fn_name, fn_args)
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "content": result_text,
-                            }
-                        )
-                else:
-                    # Model provided text/code without requesting more tools
-                    print(
-                        f"[Author Agent] LLM completed synthesis (reasoning={len(msg.get('reasoning') or '')} chars, content={len(msg.get('content') or '')} chars)."
-                    )
-                    break
+        # Compiler-in-the-loop verification & self-repair (up to 2 attempts)
+        is_macro_mode = mode == "MACRO_WRITE"
+        for repair_idx in range(3):
+            hyp, code_patch = self.extract_yaml_and_python(final_content)
+            if not code_patch:
+                diag = "No ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
+                status = "MISSING_CODE"
             else:
-                # If tool budget ceiling was reached without dynamic exit, prompt for final code synthesis
+                diag, status = self.tools.dry_run_policy(
+                    code=code_patch, is_macro=is_macro_mode, seed=42, max_turns=50
+                )
+
+            if status.startswith("PASSED") or status.startswith("VALID"):
+                if is_macro_mode:
+                    merged_macros, macro_names = self.tools.macro_lib.merge_macros(code_patch)
+                    targets = hyp.get("target_functions") or macro_names
+                    if isinstance(targets, str):
+                        targets = [targets]
+                    return SynthesisProposal(
+                        mode=mode,
+                        hypothesis=hyp,
+                        raw_code_patch=code_patch,
+                        full_policy_code=current_policy,
+                        full_macros_code=merged_macros,
+                        target_functions=list(targets),
+                        tool_calls_made=total_tool_calls,
+                    )
+                else:
+                    if mode == "FULL_WRITE" or not current_policy.strip():
+                        spliced_policy = code_patch
+                        changed_fns = hyp.get("target_functions") or ["run"]
+                    else:
+                        spliced_policy, changed_fns = splice_functions_into_policy(
+                            current_policy, code_patch
+                        )
+                    if isinstance(changed_fns, str):
+                        changed_fns = [changed_fns]
+                    return SynthesisProposal(
+                        mode=mode,
+                        hypothesis=hyp,
+                        raw_code_patch=code_patch,
+                        full_policy_code=spliced_policy,
+                        full_macros_code=self.tools.macro_lib.load_code(),
+                        target_functions=list(changed_fns),
+                        tool_calls_made=total_tool_calls,
+                    )
+
+            if repair_idx < 2:
+                ui.warn(f"Sandbox compiler gate caught {status}; requesting in-turn repair ({repair_idx + 1}/2)...")
                 messages.append(
                     {
                         "role": "user",
                         "content": (
-                            "You have concluded your empirical tool investigation. "
-                            "Based on all telemetry, incident logs, and knowledge retrieved above, "
-                            "synthesize your complete revised policy program now in a single ```python ... ``` block."
+                            f"Your submitted Python code failed the sandbox dry-run check:\n\n{diag}\n\n"
+                            "Please fix the error and output the corrected ```yaml ... ``` and ```python ... ``` blocks."
                         ),
                     }
                 )
-                payload = {
-                    "model": model_name,
-                    "messages": messages,
-                    "temperature": 0.2,
-                    "max_tokens": self.max_tokens,
-                }
-                if self.provider == "openrouter":
-                    payload["reasoning"] = {
-                        "effort": self.reasoning_effort,
-                        "exclude": False,
-                    }
-                    if self.routing == "floor":
-                        payload["provider"] = {"sort": "price"}
-                    elif self.routing in ("price", "throughput"):
-                        payload["provider"] = {"sort": self.routing}
-                resp = client.post(url, headers=headers, json=payload)
-                if not resp.is_error:
-                    data = resp.json()
-                    usage = data.get("usage", {})
-                    total_prompt_tokens += usage.get("prompt_tokens", 0)
-                    total_completion_tokens += usage.get("completion_tokens", 0)
-                    choice = data["choices"][0]
-                    msg = choice["message"]
-                    messages.append(msg)
-                    wrap_r = msg.get("reasoning") or msg.get("reasoning_content") or ""
-                    if wrap_r:
-                        reasoning_chunks.append(f"### Final Wrap-Up Turn Reasoning:\n{wrap_r.strip()}\n")
+                repair_msg = self._call_llm_api(messages, allow_tools=False)
+                messages.append(repair_msg)
+                final_content = repair_msg.get("content") or ""
 
-        self.last_reasoning_trace = "\n\n".join(reasoning_chunks)
-        if self.last_reasoning_trace:
-            try:
-                os.makedirs("data/thinking", exist_ok=True)
-                with open("data/thinking/latest_thinking.md", "w") as f:
-                    f.write(f"# Synthesis Thinking Trace ({model_name})\n\n" + self.last_reasoning_trace + "\n")
-            except Exception:
-                pass
-
-        log_token_usage(
-            run_id=run_id,
-            session_id=session_id,
-            provider="openrouter",
-            model=model_name,
-            prompt_tokens=total_prompt_tokens,
-            completion_tokens=total_completion_tokens,
-            trigger_reason=trigger_reason,
-            tools_called=tools_invoked,
-            db_path=self.db_path,
-        )
-
-        # Store context messages for potential repair turns
-        self._last_messages = messages
-        self._last_model_name = model_name
-
-        final_content = ""
-        for m in reversed(messages):
-            if m.get("role") == "assistant":
-                text = m.get("content") or m.get("reasoning") or ""
-                if text:
-                    final_content = text
-                    break
-        return str(final_content)
-
-    def _repair_code(
-        self,
-        candidate_code: str,
-        compile_err: str,
-        run_id: str,
-        session_id: str,
-        trigger_reason: str,
-    ) -> str:
-        """Prompts the LLM to fix syntax or vocabulary violations with AST feedback."""
-        repair_user_msg = (
-            f"The candidate policy program failed AST validation and compilation with error:\n"
-            f"{compile_err}\n\n"
-            f"Candidate Code:\n```python\n{candidate_code.strip()}\n```\n\n"
-            "Please fix all syntax, attribute, and vocabulary violations to adhere strictly to the Approved Vocabulary and grammar rules. "
-            "Do NOT dump the entire class Agent—output ONLY the specific method definition(s) you are fixing or adding in a single ```python ... ``` block."
-        )
-
-        if self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):
-            url = (self.base_url or "https://openrouter.ai/api/v1").rstrip(
-                "/"
-            ) + "/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {self.api_key.strip()}",
-                "HTTP-Referer": "https://github.com/saejin-moon/lox",
-                "X-Title": "LOX Policy Synthesis",
-            }
-            repair_messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert Python AST policy repair assistant for NetHack. "
-                        "Fix the specific invariant regression, syntax error, or compilation failure reported. "
-                        "Output ONLY the corrected Python method definition(s) inside a ```python ... ``` block."
-                    ),
-                },
-                {"role": "user", "content": repair_user_msg},
-            ]
-            model_name = getattr(
-                self, "_last_model_name", self.model or "z-ai/glm-5.3:floor"
-            )
-            if self.provider == "openrouter" and self.routing == "floor" and not model_name.endswith(":floor"):
-                model_name = f"{model_name}:floor"
-
-            print(
-                f"[Author Agent] Requesting LLM code repair ({model_name})...",
-                flush=True,
-            )
-            t_repair_start = time.time()
-            stop_hb = threading.Event()
-
-            def _hb_repair():
-                while not stop_hb.wait(timeout=15.0):
-                    el = int(time.time() - t_repair_start)
-                    print(
-                        f"[Author Agent] LLM generating code repair (elapsed: {el}s)...",
-                        flush=True,
-                    )
-
-            hb_t = threading.Thread(target=_hb_repair, daemon=True)
-            hb_t.start()
-            try:
-                with httpx.Client(timeout=120.0) as client:
-                    payload = {
-                        "model": model_name,
-                        "messages": repair_messages,
-                        "temperature": 0.1,
-                        "max_tokens": min(self.max_tokens, 8192),
-                    }
-                    if self.provider == "openrouter":
-                        payload["reasoning"] = {
-                            "effort": "low",
-                            "exclude": False,
-                        }
-                        if self.routing == "floor":
-                            payload["provider"] = {"sort": "price"}
-                        elif self.routing in ("price", "throughput"):
-                            payload["provider"] = {"sort": self.routing}
-                    resp = client.post(url, headers=headers, json=payload)
-                    stop_hb.set()
-                    hb_t.join(timeout=0.5)
-
-                    dur = time.time() - t_repair_start
-                    status = getattr(resp, "status_code", 200)
-                    print(
-                        f"[Author Agent] Repair response received in {dur:.1f}s (status={status}).",
-                        flush=True,
-                    )
-                    if not resp.is_error:
-                        data = resp.json()
-                        usage = data.get("usage", {})
-                        log_token_usage(
-                            run_id=run_id,
-                            session_id=session_id,
-                            provider="openrouter",
-                            model=model_name,
-                            prompt_tokens=usage.get("prompt_tokens", 0),
-                            completion_tokens=usage.get("completion_tokens", 0),
-                            trigger_reason=f"repair: {trigger_reason}",
-                            db_path=self.db_path,
-                        )
-                        choice = data["choices"][0]
-                        msg = choice["message"]
-                        return str(msg.get("content") or msg.get("reasoning") or "")
-            except Exception as exc:
-                stop_hb.set()
-                hb_t.join(timeout=0.5)
-                print(f"[Warning] Policy repair LLM call failed: {exc}")
-            finally:
-                stop_hb.set()
-                hb_t.join(timeout=0.5)
-        return candidate_code
-
-    def extract_code(self, response_text: str) -> str:
-        """Robustly extracts Python policy code block (classes or generators) from markdown."""
-        if not response_text:
-            return ""
-
-        def _clean(c: str) -> str:
-            if not c:
-                return ""
-            c = c.replace("\t", "    ")
-            return "\n".join(l.rstrip() for l in c.splitlines()).strip()
-
-        # 1. Search all code blocks (support ``` or ```` fences)
-        blocks = re.findall(r"```+(?:python)?\s*\n(.*?)```+", response_text, re.DOTALL)
-        candidate_blocks = []
-        for block in blocks:
-            if "class " in block or "def " in block:
-                cleaned = _clean(block)
-                if cleaned:
-                    candidate_blocks.append(cleaned)
-
-        if candidate_blocks:
-            # If any block contains a full class Agent definition, prefer the last one
-            class_blocks = [b for b in candidate_blocks if "class " in b]
-            if class_blocks:
-                return class_blocks[-1]
-            # Otherwise, combine all replacement method blocks so multiple methods aren't lost
-            return "\n\n".join(candidate_blocks)
-
-        # 2. Unclosed python code block containing policy code
-        match_unclosed = re.search(
-            r"```+(?:python)?\s*\n(.*?)(?:```+|$)", response_text, re.DOTALL
-        )
-        if match_unclosed:
-            code = match_unclosed.group(1).strip()
-            if "class " in code or "def " in code:
-                return _clean(re.sub(r"```+$", "", code))
-
-        # 3. No backticks: find from first 'class ' or 'def '
-        match_class = re.search(r"(class \w+.*)", response_text, re.DOTALL)
-        if match_class:
-            return _clean(match_class.group(1))
-
-        match_def = re.search(r"(def \w+\(.*)", response_text, re.DOTALL)
-        if match_def:
-            return _clean(match_def.group(1))
-
-        return ""
-
-    def extract_hypothesis(self, response_text: str) -> dict[str, Any] | None:
-        """Extracts structured scientific hypothesis from response text."""
-        if not response_text:
-            return None
-        import yaml
-
-        # 1. Search for ```yaml ... ``` or ```json ... ``` blocks with hypothesis
-        blocks = re.findall(
-            r"```(?:ya?ml|json)?\s*\n(.*?)```", response_text, re.DOTALL
-        )
-        for block in blocks:
-            if "hypothesis" in block:
-                try:
-                    data = yaml.safe_load(block)
-                    if isinstance(data, dict):
-                        return data.get("hypothesis", data)
-                except Exception:
-                    pass
-
-        # 2. Search unclosed or raw block
-        match = re.search(
-            r"(?:^|\n)(hypothesis:\s*\n(?:[ \t]+[^\n]+\n?)+)", response_text
-        )
-        if match:
-            try:
-                data = yaml.safe_load(match.group(1))
-                if isinstance(data, dict):
-                    return data.get("hypothesis", data)
-            except Exception:
-                pass
-
-    def compile_empirical_dossier(
-        self,
-        batch_summary: Any = None,
-        top_k_deep: int = 3,
-    ) -> str:
-        """
-        Synthesizes the Pareto Hybrid Dossier on Turn 0:
-        1. The Trustworthy Triad:
-           - Factor 1: Macro Archetype Distribution Table (Top 5 causes)
-           - Factor 2: Orthogonal Systemic Bottlenecks & Strategic Recommendations
-           - Factor 3: Ground-Truth Empirical Telemetry Context (Killers, Depth, Flight Traces)
-        2. Deep Mechanics Dossier for the Top 2-3 Dominant Causes:
-           - Automatic Wiki Mechanics retrieval
-           - Ground-truth Canonical Invariants retrieval
-        """
-        lines = []
-        top_archetypes: list[str] = []
-
-        if batch_summary is not None:
-            if hasattr(batch_summary, "format_trustworthy_triad_report"):
-                lines.append(batch_summary.format_trustworthy_triad_report())
-                if hasattr(batch_summary, "archetype_counts") and batch_summary.archetype_counts:
-                    sorted_archs = sorted(
-                        batch_summary.archetype_counts.items(),
-                        key=lambda x: x[1],
-                        reverse=True,
-                    )
-                    top_archetypes = [a[0] for a in sorted_archs[:top_k_deep]]
-            elif isinstance(batch_summary, dict):
-                import yaml
-                lines.append("## THE TRUSTWORTHY TRIAD: EMPIRICAL BATCH AUTOPSY REPORT\n")
-                lines.append(yaml.dump(batch_summary, sort_keys=False))
-                rc = batch_summary.get("root_causes", {})
-                if isinstance(rc, dict):
-                    sorted_rc = sorted(
-                        rc.items(),
-                        key=lambda x: x[1].get("count", 0) if isinstance(x[1], dict) else x[1],
-                        reverse=True,
-                    )
-                    top_archetypes = [a[0] for a in sorted_rc[:top_k_deep]]
-
-        # Deep Mechanics Dossier for Top Dominant Archetypes
-        if top_archetypes:
-            lines.append("\n## DEEP MECHANICS & INVARIANTS DOSSIER (TOP DOMINANT CAUSES)")
-            archetype_to_wiki = {
-                "ARMOR_DEFICIT": "Armor class",
-                "STALL_SECRET_DOOR": "Secret door",
-                "STARVATION_FAINTING": "Hunger",
-                "COMBAT_FAST_PREDATOR": "Speed",
-                "COMBAT_TACTICAL_SWARM": "Elbereth",
-                "PASSIVE_HAZARD_PARALYSIS": "Floating eye",
-                "INSTADEATH_POISON": "Poison resistance",
-                "PETRIFICATION": "Cockatrice",
-                "TRAP_FATALITY": "Traps",
-                "DROWNING_OR_LAVA": "Water",
-                "ENCUMBRANCE_IMMOBILITY": "Encumbrance",
-                "PEACEFUL_NPC_PROVOCATION": "Peaceful monster",
-            }
-            for arch in top_archetypes:
-                wiki_topic = archetype_to_wiki.get(arch, arch.lower().replace("_", " "))
-                lines.append(f"\n### Deep Mechanics for `{arch}`:")
-                try:
-                    wiki_res = self.tools.query_wiki(wiki_topic, top_k=1)
-                    if wiki_res and "No NetHack wiki" not in wiki_res:
-                        lines.append(wiki_res)
-                except Exception:
-                    pass
-                try:
-                    inv_res = self.tools.query_invariants(query=arch, top_k=2)
-                    if inv_res and "No matching invariants" not in inv_res:
-                        lines.append(inv_res)
-                except Exception:
-                    pass
-
-        return "\n".join(lines).strip()
-
-    def synthesize_policy(
-        self,
-        current_policy: str,
-        trigger_reason: str,
-        status_report: str = "",
-        run_id: str = "synth_run",
-        action_handlers: dict | None = None,
-        max_repairs: int = 2,
-        causal_summary: Any = "",
-        batch_summary: Any = None,
-    ) -> tuple[str, Any, str | None]:
-        """
-        Runs one authoring session with tool calling, AST compilation, and self-repair retries.
-        Returns (new_code, compiled_executable_or_None, error_message_or_None).
-        """
-        session_id = f"sess_{uuid.uuid4().hex[:8]}"
-        self._current_run_id = run_id
-        self.last_hypothesis = None
-
-        # Pre-compile Turn 0 Pareto Hybrid Dossier if batch summary is available
-        if batch_summary is not None:
-            dossier_text = self.compile_empirical_dossier(batch_summary=batch_summary)
-            if dossier_text:
-                status_report = f"{dossier_text}\n\n{status_report}".strip()
-        elif causal_summary:
-            dossier_text = self.compile_empirical_dossier(batch_summary=causal_summary)
-            if dossier_text:
-                status_report = f"{dossier_text}\n\n{status_report}".strip()
-
-        recent_experiments_str = ""
-        if os.path.exists(self.db_path):
-            try:
-                from lox.telemetry.consolidator import safe_duckdb_connect
-                con = safe_duckdb_connect(self.db_path, read_only=True)
-                tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
-                if "meta_experiments" in tables:
-                    rows = con.execute("""
-                        SELECT generation, targeted_skill, causal_finding, paired_seed_delta, outcome_validated
-                        FROM meta_experiments
-                        ORDER BY generation DESC
-                        LIMIT 5
-                    """).fetchall()
-                    if rows:
-                        items = []
-                        for r in rows:
-                            gen_num, skill, finding, delta, val = r
-                            status = "VALIDATED" if val else "FALSIFIED"
-                            delta_str = f"{delta:+.2f}" if delta is not None else "N/A"
-                            items.append(
-                                f"- Gen {gen_num} [{status}]: skill='{skill}', delta={delta_str}, finding='{finding}'"
-                            )
-                        recent_experiments_str = "\n".join(items)
-                con.close()
-            except Exception:
-                pass
-
-        system_prompt = build_system_prompt()
-        user_prompt = build_user_prompt(
-            current_policy,
-            trigger_reason,
-            status_report,
-            causal_summary=causal_summary,
-            recent_experiments=recent_experiments_str,
-        )
-
-        if self.provider == "gemini":
-            raw_response = self._call_gemini(
-                system_prompt, user_prompt, run_id, session_id, trigger_reason
-            )
-        elif self.provider in ("openrouter", "vllm", "llama_cpp", "openai"):
-            raw_response = self._call_openai_compatible(
-                system_prompt, user_prompt, run_id, session_id, trigger_reason
-            )
-        else:
-            raw_response = self._call_mock(
-                current_policy, trigger_reason, run_id, session_id
-            )
-
-        # Compilation and Self-Repair Loop
-        self.last_hypothesis = self.extract_hypothesis(raw_response)
-        extracted = self.extract_code(raw_response)
-        candidate_code = (
-            self.splice_policy_methods(current_policy, extracted)
-            if (current_policy and extracted)
-            else extracted
-        )
-        last_error = None
-
-        for attempt in range(max_repairs + 1):
-            is_valid_structure = (
-                "class " in candidate_code
-                and ("def " in candidate_code or "run" in candidate_code)
-            ) or (
-                "def " in candidate_code
-                and (
-                    "yield" in candidate_code
-                    or "plan" in candidate_code
-                    or "return" in candidate_code
-                )
-            )
-            if is_valid_structure:
-                try:
-                    tree = compile_policy(
-                        candidate_code, action_handlers=action_handlers
-                    )
-                    # Multi-scenario dry-run validation: execute test steps across scenarios with timeout shield
-                    from lox.core.types import (
-                        CombatView,
-                        FloorCorpse,
-                        HungerState,
-                        SpatialView,
-                    )
-
-                    test_scenarios = [
-                        (
-                            "normal",
-                            Observation(
-                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                                glyphs=np.zeros((21, 79), dtype=np.int16),
-                                hero=HeroState(
-                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
-                                ),
-                            ),
-                        ),
-                        (
-                            "hungry_unsafe_corpse",
-                            Observation(
-                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                                glyphs=np.zeros((21, 79), dtype=np.int16),
-                                hero=HeroState(
-                                    y=10,
-                                    x=10,
-                                    hp=16,
-                                    max_hp=16,
-                                    depth=1,
-                                    turn=750,
-                                    hunger_state=HungerState.HUNGRY,
-                                ),
-                                combat=CombatView(
-                                    floor_corpse_adjacent=True,
-                                    corpse_is_safe=False,
-                                    corpse_is_deadly=True,
-                                    corpse_is_fresh=False,
-                                ),
-                                dungeon=DungeonView(
-                                    floor_corpse_adjacent=True,
-                                    corpse_is_safe=False,
-                                    corpse_is_deadly=True,
-                                    corpse_is_fresh=False,
-                                ),
-                                corpses=[
-                                    FloorCorpse(
-                                        name="kobold corpse",
-                                        y=11,
-                                        x=11,
-                                        drop_turn=10,
-                                        age_turns=100,
-                                        is_poisonous=True,
-                                        is_deadly=True,
-                                        is_fresh=False,
-                                    )
-                                ],
-                            ),
-                        ),
-                        (
-                            "floating_eye_combat",
-                            Observation(
-                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                                glyphs=np.zeros((21, 79), dtype=np.int16),
-                                hero=HeroState(
-                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
-                                ),
-                                combat=CombatView(
-                                    hostile_count_fov=1,
-                                    adjacent_hostile=True,
-                                    adjacent_floating_eye=True,
-                                    closest_hostile_name="floating eye",
-                                    floating_eye_in_fov=True,
-                                ),
-                            ),
-                        ),
-                        (
-                            "combat",
-                            Observation(
-                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                                glyphs=np.zeros((21, 79), dtype=np.int16),
-                                hero=HeroState(
-                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
-                                ),
-                                combat=CombatView(
-                                    hostile_count_fov=1, adjacent_hostile=True
-                                ),
-                            ),
-                        ),
-                        (
-                            "combat_distant",
-                            Observation(
-                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                                glyphs=np.zeros((21, 79), dtype=np.int16),
-                                hero=HeroState(
-                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
-                                ),
-                                combat=CombatView(
-                                    hostile_count_fov=1,
-                                    adjacent_hostile=False,
-                                    closest_hostile_dist=3.0,
-                                    closest_hostile_name="jackal",
-                                    has_active_hostile=False,
-                                ),
-                            ),
-                        ),
-                        (
-                            "dead_end",
-                            Observation(
-                                chars=np.full((21, 79), ord("."), dtype=np.uint8),
-                                glyphs=np.zeros((21, 79), dtype=np.int16),
-                                hero=HeroState(
-                                    y=10, x=10, hp=16, max_hp=16, depth=1, turn=10
-                                ),
-                                spatial=SpatialView(has_unsearched_dead_end=True),
-                            ),
-                        ),
-                    ]
-
-                    def _step_with_timeout(runner, s_obs, timeout=1.0):
-                        if (
-                            threading.current_thread() is threading.main_thread()
-                            and hasattr(signal, "SIGALRM")
-                        ):
-
-                            def _alarm_handler(signum, frame):
-                                raise TimeoutError("Step execution timed out")
-
-                            old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-                            signal.setitimer(signal.ITIMER_REAL, timeout)
-                            try:
-                                return runner.send(s_obs)
-                            finally:
-                                signal.setitimer(signal.ITIMER_REAL, 0)
-                                signal.signal(signal.SIGALRM, old_handler)
-                        else:
-                            import multiprocessing as mp
-
-                            mp_ctx = (
-                                mp.get_context("fork")
-                                if hasattr(mp, "get_context")
-                                and "fork" in mp.get_all_start_methods()
-                                else mp
-                            )
-                            q = mp_ctx.Queue()
-
-                            def _sub_worker():
-                                try:
-                                    res = runner.send(s_obs)
-                                    q.put(("OK", res))
-                                except Exception as exc:
-                                    q.put(("ERR", exc))
-
-                            p = mp_ctx.Process(target=_sub_worker)
-                            p.start()
-                            p.join(timeout=timeout)
-                            if p.is_alive():
-                                p.kill()
-                                p.join()
-                                raise TimeoutError("Step execution timed out")
-                            if not q.empty():
-                                status, val = q.get()
-                                if status == "OK":
-                                    return val
-                                raise val
-                            raise TimeoutError("Step execution timed out")
-
-                    for s_name, s_obs in test_scenarios:
-                        runner = tree.create_runner(s_obs)
-                        for step_i in range(3):
-                            try:
-                                act = _step_with_timeout(runner, s_obs, timeout=1.0)
-                            except TimeoutError:
-                                raise ValueError(
-                                    f"Policy entered an infinite loop without yielding under {s_name} scenario (step {step_i + 1}). "
-                                    f"Ensure all generator subroutines yield an action (e.g. obs = yield wait()) on all execution paths."
-                                )
-                            if not isinstance(act, Action):
-                                raise ValueError(
-                                    f"Policy runner produced non-Action under {s_name} state: {act}"
-                                )
-                            if (
-                                s_name == "hungry_unsafe_corpse"
-                                and act.name == "eat_floor_corpse"
-                            ):
-                                raise ValueError(
-                                    "Invariant regression: Policy attempted to eat unsafe/poisonous corpse! Check corpse.is_safe first."
-                                )
-                            if (
-                                s_name == "floating_eye_combat"
-                                and act.name == "melee_attack_hostile"
-                            ):
-                                raise ValueError(
-                                    "Invariant regression: Policy attempted melee attack against floating eye! Gaze will paralyze hero."
-                                )
-                    return candidate_code, tree, None
-                except Exception as e:
-                    last_error = f"Policy compilation/validation failed: {e}"
-            else:
-                last_error = "Policy compilation failed: Extracted response does not contain valid policy code structure ('class Agent:' or 'def' missing)."
-
-            # If compilation failed and repair attempts remain, ask the model to self-correct
-            if attempt < max_repairs and self.provider in (
-                "openrouter",
-                "vllm",
-                "llama_cpp",
-                "openai",
-            ):
-                print(
-                    f"[Author Agent] Compilation issue detected ({last_error}). Triggering self-repair turn {attempt + 1}/{max_repairs}..."
-                )
-                repaired_response = self._repair_code(
-                    candidate_code=candidate_code,
-                    compile_err=last_error,
-                    run_id=run_id,
-                    session_id=session_id,
-                    trigger_reason=trigger_reason,
-                )
-                repaired_extracted = self.extract_code(repaired_response)
-                candidate_code = (
-                    self.splice_policy_methods(candidate_code, repaired_extracted)
-                    if (candidate_code and repaired_extracted)
-                    else repaired_extracted
-                )
-
-        return candidate_code, None, last_error
+        raise RuntimeError(f"Author Agent failed to produce valid compiling code after repair attempts. Last error: {diag}")

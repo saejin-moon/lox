@@ -20,7 +20,5 @@ htmlcov/
 
 # Telemetry data & ephemeral databases (consolidated locally)
 data/*
-!data/latest_policy.py
-!data/modular_starter_policy.py
 logs/
 *.log

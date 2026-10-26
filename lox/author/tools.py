@@ -1,85 +1,75 @@
 """
-LOX DuckDB Analytical Tooling and Knowledge Retrieval for LLM Policy Authoring.
-Provides safe analytical functions (DuckDB SQL, death taxonomy, pacing stats),
-offline NetHack 3.6.6 Wiki retrieval (BM25 search), and a macro request queue
-for human post-run implementation.
+Minimal, High-Signal Tool Suite for the Author Agent:
+1. `query_db(sql)`: Read-only SQL over all DuckDB tables (`runs`, `ticks`, `batches`, `function_stats`, `experiments`, `expert_runs`, `expert_ticks`)
+2. `query_wiki(query, top_k)`: Offline NetHack 3.6.6 Wiki BM25 search
+3. `query_policy_docs(topic)`: Policy language specification, `GameState`/`Action` docs, and current `macros.py` signatures & source
+4. `dry_run_policy(code, is_macro, seed, max_turns)`: Compiles and runs candidate code in a 20ms live NetHack sandbox to catch any syntax/runtime/loop bugs before submission.
 """
 
 from __future__ import annotations
 
 import os
 import re
+from typing import Any
 
-from lox.author.requests import queue_macro_request
-from lox.author.wiki import WikiEngine
-from lox.telemetry.consolidator import safe_duckdb_connect
+from lox.author.prompts import POLICY_LANG_DOCS
+from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
+from lox.db.schema import DEFAULT_DB_PATH, connect_db
+from lox.env.harness import NetHackHarness
+from lox.lang.compiler import compile_policy_and_macros
+from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
+from lox.lang.validator import splice_functions_into_policy
 
 
-def _format_table(cursor) -> str:
-    """Formats DuckDB cursor results into clean, token-efficient YAML."""
-    if not cursor.description:
-        return "status: ok"
-    headers = [desc[0] for desc in cursor.description]
-    rows = cursor.fetchall()
+def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
+    if not cur.description:
+        return "status: ok", 0
+    headers = [d[0] for d in cur.description]
+    rows = cur.fetchall()[:max_rows]
     if not rows:
-        return "results: []"
-    items = []
+        return "results: []", 0
+    lines = ["results:"]
     for r in rows:
-        fields = []
-        for h, val in zip(headers, r):
-            if val is None:
-                fields.append(f"{h}: null")
-            elif isinstance(val, (int, float, bool)):
-                fields.append(f"{h}: {val}")
+        parts = []
+        for h, v in zip(headers, r):
+            if v is None:
+                parts.append(f"{h}: null")
+            elif isinstance(v, (int, float, bool)):
+                parts.append(f"{h}: {v}")
+            elif isinstance(v, (bytes, bytearray)):
+                parts.append(f'{h}: "<{len(v)} bytes>"')
             else:
-                s_val = str(val).replace('"', '\\"')
-                fields.append(f'{h}: "{s_val}"')
-        items.append("  - {" + ", ".join(fields) + "}")
-    return "```yaml\nresults:\n" + "\n".join(items) + "\n```"
+                s = str(v)
+                if len(s) > 400:
+                    s = s[:397] + "..."
+                s_esc = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                parts.append(f'{h}: "{s_esc}"')
+        lines.append("  - {" + ", ".join(parts) + "}")
+    return "```yaml\n" + "\n".join(lines) + "\n```", len(rows)
 
 
-class DuckDBToolRegistry:
-    """Registry of analytical tools, wiki retrieval, and macro requests for the Author Agent."""
+class AuthorToolRegistry:
+    """Executes tool calls from the Author Agent."""
 
     def __init__(
-        self, db_path: str = "data/lox.duckdb", wiki_db_path: str = "data/wiki_index.db"
+        self,
+        db_path: str = DEFAULT_DB_PATH,
+        wiki_db_path: str = DEFAULT_WIKI_DB,
+        macros_path: str = DEFAULT_MACROS_PATH,
     ):
         self.db_path = db_path
         self.wiki = WikiEngine(db_path=wiki_db_path)
+        self.macro_lib = MacroLibrary(path=macros_path)
+        self.current_policy_code: str = ""
 
-    def get_duckdb_schema(self) -> str:
-        """
-        Returns the database tables, column names, types, and current row counts.
-        """
+    def query_db(self, sql: str) -> tuple[str, str]:
+        """Executes a read-only SQL query against DuckDB."""
         if not os.path.exists(self.db_path):
-            return "DuckDB database not found. No telemetry has been consolidated yet."
+            return "Database not found.", "0 rows"
 
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        tables = con.execute("SHOW TABLES").fetchall()
-        if not tables:
-            con.close()
-            return "DuckDB database is empty (no tables found)."
-
-        lines = ["### DuckDB Telemetry Schema:"]
-        for (tname,) in tables:
-            count = con.execute(f"SELECT COUNT(*) FROM {tname}").fetchone()[0]
-            cols = con.execute(f"DESCRIBE {tname}").fetchall()
-            col_desc = ", ".join(f"{c[0]} ({c[1]})" for c in cols)
-            lines.append(f"- **`{tname}`** ({count} rows): {col_desc}")
-        con.close()
-        return "\n".join(lines)
-
-    def query_duckdb(self, sql: str) -> str:
-        """
-        Executes a read-only SQL query against the DuckDB database and returns markdown results.
-        Mutative statements (INSERT, UPDATE, DELETE, DROP, ALTER) are strictly rejected.
-        """
-        if not os.path.exists(self.db_path):
-            return "DuckDB database does not exist yet."
-
-        clean_sql = sql.strip().rstrip(";")
-        low = clean_sql.lower()
-        disallowed = [
+        clean = sql.strip().rstrip(";")
+        low = clean.lower()
+        for word in (
             "insert",
             "update",
             "delete",
@@ -88,394 +78,124 @@ class DuckDBToolRegistry:
             "truncate",
             "create",
             "replace",
-            "execute",
-        ]
-        for word in disallowed:
+            "attach",
+            "copy",
+        ):
             if re.search(rf"\b{word}\b", low):
-                return f"Error: Mutative statement '{word.upper()}' is forbidden. Only SELECT queries are permitted."
+                return f"Error: Mutative keyword '{word.upper()}' is forbidden. Use SELECT only.", "error"
 
-        con = safe_duckdb_connect(self.db_path, read_only=True)
+        if "limit" not in low:
+            clean += " LIMIT 30"
+
+        con = connect_db(self.db_path, read_only=True)
         try:
-            if "limit" not in low:
-                clean_sql += " LIMIT 50"
-            cur = con.execute(clean_sql)
-            res = _format_table(cur)
+            cur = con.execute(clean)
+            text, count = _format_cursor_yaml(cur)
+            return text, f"{count} rows"
+        except Exception as exc:
+            return f"SQL Error: {exc}", "sql_error"
+        finally:
             con.close()
-            return res
-        except Exception as e:
-            con.close()
-            return f"SQL Execution Error: {e}"
 
-    def get_death_taxonomy(self, window: int = 20) -> str:
-        """
-        Summarizes the top death reasons, frequencies, average depth, and average turns survived.
-        """
-        if not os.path.exists(self.db_path):
-            return "No database found."
+    def query_wiki(self, query: str, top_k: int = 3) -> tuple[str, str]:
+        """Searches the offline NetHack 3.6.6 Wiki."""
+        k = max(1, min(6, int(top_k or 3)))
+        hits = self.wiki.search_wiki(query, top_k=k)
+        return self.wiki.query(query, top_k=k), f"{len(hits)} articles"
 
-        try:
-            window_int = int(window)
-        except Exception:
-            window_int = 20
-
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        query = f"""
-            SELECT death_reason, COUNT(*) as fatalities, ROUND(AVG(depth), 2) as avg_depth, ROUND(AVG(turns), 1) as avg_turns
-            FROM episodes
-            GROUP BY death_reason
-            ORDER BY fatalities DESC
-            LIMIT {max(1, window_int)}
-        """
-        try:
-            cur = con.execute(query)
-            res = _format_table(cur)
-            con.close()
-            return "### Top Fatalities Taxonomy:\n" + res
-        except Exception as e:
-            con.close()
-            return f"Error querying death taxonomy: {e}"
-
-    def query_root_causes(self, run_id: str = "", window: int = 10) -> str:
-        """
-        Summarizes the distribution of ground-truth root causes from the episodes table.
-        Shows counts, percentage share, average depth reached, and average turns survived per archetype.
-        """
-        if not os.path.exists(self.db_path):
-            return "No database found."
-
-        try:
-            window_int = int(window)
-        except Exception:
-            window_int = 10
-
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        try:
-            cols = [c[0] for c in con.execute("DESCRIBE episodes").fetchall()]
-            if "root_cause" not in cols:
-                con.close()
-                return "Column 'root_cause' not found in episodes table. Run consolidation with diagnostic schema."
-
-            where = f"WHERE run_id = '{run_id}'" if run_id else ""
-            query = f"""
-                SELECT
-                    COALESCE(root_cause, 'UNCLASSIFIED') as root_cause,
-                    COUNT(*) as occurrences,
-                    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) as pct,
-                    ROUND(AVG(depth), 2) as avg_depth,
-                    ROUND(AVG(turns), 1) as avg_turns
-                FROM episodes
-                {where}
-                GROUP BY root_cause
-                ORDER BY occurrences DESC
-                LIMIT {max(1, window_int)}
-            """
-            cur = con.execute(query)
-            res = _format_table(cur)
-            con.close()
-            return "### Empirical Root Cause Attribution Breakdown:\n" + res
-        except Exception as e:
-            con.close()
-            return f"Error querying root causes: {e}"
-
-    def get_floor_pacing_stats(self, depth: int = 1) -> str:
-        """
-        Returns floor pacing statistics for a given dungeon depth: turn count distribution and survival rates.
-        """
-        if not os.path.exists(self.db_path):
-            return "No database found."
-
-        try:
-            depth_int = int(depth)
-        except Exception:
-            depth_int = 1
-
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        query = f"""
-            SELECT
-                COUNT(*) as total_episodes,
-                ROUND(AVG(turns), 1) as avg_total_turns,
-                MAX(turns) as max_turns,
-                SUM(CASE WHEN depth > {depth_int} THEN 1 ELSE 0 END) as descended_past_floor,
-                ROUND(AVG(score), 1) as avg_score
-            FROM episodes
-            WHERE max_depth >= {depth_int}
-        """
-        try:
-            cur = con.execute(query)
-            res = _format_table(cur)
-            con.close()
-            return f"### Floor Pacing Stats (Depth >= {depth_int}):\n" + res
-        except Exception as e:
-            con.close()
-            return f"Error querying pacing stats: {e}"
-
-    def get_action_distribution(self, run_id: str = "") -> str:
-        """
-        Returns action distribution and percentage of turns spent searching vs moving vs attacking.
-        """
-        if not os.path.exists(self.db_path):
-            return "No database found."
-
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        where = f"WHERE run_id = '{run_id}'" if run_id else ""
-        query = f"""
-            SELECT
-                action,
-                COUNT(*) as count,
-                ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) as pct
-            FROM ticks
-            {where}
-            GROUP BY action
-            ORDER BY count DESC
-        """
-        try:
-            cur = con.execute(query)
-            res = _format_table(cur)
-            con.close()
-            return "### Action Distribution:\n" + res
-        except Exception as e:
-            con.close()
-            return f"Error querying action distribution: {e}"
-
-    def query_wiki(self, query: str, top_k: int = 2) -> str:
-        """
-        Performs sub-5ms BM25 full-text search across the offline NetHack 3.6.6 encyclopedia.
-        Use to research monster traits, corpses conveying intrinsics, item properties, or dungeon mechanics.
-        """
-        try:
-            top_k_int = int(top_k)
-        except Exception:
-            top_k_int = 2
-        return self.wiki.query(query, top_k=top_k_int)
-
-    def query_invariants(self, query: str, category: str = "", top_k: int = 3) -> str:
-        """
-        Queries the canonical LOX Empirical Invariant Knowledge Base.
-        Returns high-density rules, anti-patterns, and verified code patterns for tactical topics
-        (e.g., 'hunger prayer', 'floating eye', 'gas spore', 'closed door', 'dead end', 'elbereth', 'mines').
-        """
-        from lox.knowledge import REGISTRY
-
-        cat_arg = category.strip() if category else None
-        try:
-            top_k_int = int(top_k)
-        except Exception:
-            top_k_int = 3
-
-        invs = REGISTRY.search(query, category=cat_arg, top_k=top_k_int)
-        if not invs:
-            return f"No invariants found matching '{query}' (category: {category or 'all'})."
-        return REGISTRY.format_llm_reference(invs)
-
-    def request_macro(
-        self,
-        macro_name: str,
-        rationale: str,
-        proposed_interface: str = "",
-        priority: str = "medium",
-        run_id: str = "synth_session",
-    ) -> str:
-        """
-        Queues an unimplemented action or macro request for human developers to build post-run.
-        Returns confirmation message.
-        """
-        res = queue_macro_request(
-            macro_name=macro_name,
-            rationale=rationale,
-            proposed_interface=proposed_interface,
-            priority=priority,
-            run_id=run_id,
-            db_path=self.db_path,
+    def query_policy_docs(self, topic: str = "all") -> tuple[str, str]:
+        """Returns policy language specs and registered macro definitions/docstrings."""
+        macros_code = self.macro_lib.load_code()
+        macros_section = (
+            f"\n### Current `macros.py` Source:\n```python\n{macros_code}\n```"
+            if macros_code
+            else "\n### Current `macros.py`: (Empty - no custom macros defined yet)"
         )
-        return res["message"]
+        t = (topic or "all").lower()
+        if "macro" in t:
+            return self.macro_lib.format_docs() + macros_section, "macros docs"
+        return POLICY_LANG_DOCS + "\n" + self.macro_lib.format_docs() + macros_section, "full docs"
 
-    def get_macro_requests(self) -> str:
+    def dry_run_policy(
+        self,
+        code: str,
+        is_macro: bool = False,
+        seed: int = 42,
+        max_turns: int = 60,
+    ) -> tuple[str, str]:
         """
-        Returns all registered macro requests and their implementation status from data/macro_requests.md.
+        Compiles and executes candidate `code` in a live NetHack sandbox for `max_turns` steps
+        to verify syntax, sandbox rules, attribute access, and action yielding.
         """
-        path = "data/macro_requests.md"
-        if not os.path.exists(path):
-            return "No macro requests have been submitted yet."
+        macros_code = self.macro_lib.load_code()
+        policy_code = self.current_policy_code
+
         try:
-            with open(path, "r") as f:
-                content = f.read().strip()
+            if is_macro:
+                # Test compiling the candidate macro code merged with existing macros
+                from lox.lang.validator import validate_python_code
+                validate_python_code(code, filename="macros_candidate.py")
+                merged_macros = (macros_code + "\n\n" + code).strip() if macros_code else code
+                if policy_code.strip():
+                    compiled = compile_policy_and_macros(policy_code, merged_macros)
+                else:
+                    return (
+                        "Macro syntax and AST validation PASSED. (No active policy yet to run steps).",
+                        "VALID (macro)",
+                    )
+            else:
+                if policy_code.strip():
+                    spliced_policy, changed_fns = splice_functions_into_policy(policy_code, code)
+                else:
+                    spliced_policy = code
+                    changed_fns = ["run"]
+                compiled = compile_policy_and_macros(spliced_policy, macros_code)
+        except Exception as exc:
+            return f"Compilation / Validation Error:\n{type(exc).__name__}: {exc}", "COMPILE_ERROR"
+
+        harness = NetHackHarness(max_steps=max(10, min(200, int(max_turns))))
+        try:
+            runner = compiled.create_runner()
+            state = harness.reset(seed=int(seed))
+            actions_taken: list[str] = []
+            for _ in range(max(10, min(200, int(max_turns)))):
+                raw_act, active_fn = runner.next_action(state)
+                state, done, info = harness.step(raw_act)
+                actions_taken.append(f"{active_fn}:{info['action_name']}")
+                if done:
+                    break
+            fn_summary = ", ".join(f"{k}:{v}" for k, v in runner.tracer.fn_calls.items())
+            sample_acts = " -> ".join(actions_taken[:10])
             return (
-                f"### Macro Requests Backlog:\n{content}"
-                if content
-                else "Macro requests queue is empty."
+                f"Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
+                f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"
+                f"- Functions Called: {{{fn_summary}}}\n"
+                f"- First 10 Actions: {sample_acts}",
+                f"PASSED ({harness.step_count} steps)",
             )
-        except Exception as e:
-            return f"Error reading macro requests: {e}"
-
-    def get_dungeon_topology(self, depth: int = 1) -> str:
-        """
-        Renders a visual 21x79 ASCII map of visited tiles for a given dungeon level
-        showing corridors (#), rooms (.), doors (+), stairs (> <), fountains ({), and traps (^).
-        """
-        if not os.path.exists(self.db_path):
-            return "No database found."
-        try:
-            depth_int = int(depth)
-        except Exception:
-            depth_int = 1
-
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        try:
-            rows = con.execute(f"""
-                SELECT DISTINCT y, x, tile_type
-                FROM ticks
-                WHERE depth = {depth_int} AND y >= 0 AND y < 21 AND x >= 0 AND x < 79
-            """).fetchall()
-            con.close()
-        except Exception as e:
-            con.close()
-            return f"Error retrieving dungeon topology: {e}"
-
-        if not rows:
-            return f"No visited tiles found for depth {depth_int}."
-
-        char_map = {
-            "room": ".",
-            "corridor": "#",
-            "doorway": "+",
-            "fountain": "{",
-            "altar": "_",
-            "trap": "^",
-            "stairs_down": ">",
-            "stairs_up": "<",
-        }
-        grid = [[" " for _ in range(79)] for _ in range(21)]
-        for y, x, ttype in rows:
-            grid[y][x] = char_map.get(ttype, ".")
-
-        lines = [
-            f"### Dungeon Topology for Depth {depth_int} (Visited Footprint):",
-            "```",
-        ]
-        for row in grid:
-            lines.append("".join(row).rstrip())
-        lines.append("```")
-        return "\n".join(lines)
-
-    def get_hazard_map(self, depth: int = 1) -> str:
-        """
-        Returns coordinates and details of discovered traps, sleeping hostiles, and floating eyes.
-        """
-        if not os.path.exists(self.db_path):
-            return "No database found."
-        try:
-            depth_int = int(depth)
-        except Exception:
-            depth_int = 1
-
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        try:
-            cur = con.execute(f"""
-                SELECT y, x, tile_type, closest_hostile_name, COUNT(*) as occurrences
-                FROM ticks
-                WHERE depth = {depth_int} AND (tile_type = 'trap' OR closest_hostile_name IN ('floating eye', 'soldier ant', 'mimic'))
-                GROUP BY y, x, tile_type, closest_hostile_name
-                ORDER BY occurrences DESC
-                LIMIT 20
-            """)
-            res = _format_table(cur)
-            con.close()
-            return f"### Hazard Map (Depth {depth_int}):\n" + res
-        except Exception as e:
-            con.close()
-            return f"Error retrieving hazard map: {e}"
-
-    def get_floor_stash_report(self) -> str:
-        """
-        Returns list of fountains, altars, and items discovered across all explored dungeon levels.
-        """
-        if not os.path.exists(self.db_path):
-            return "No database found."
-
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        try:
-            cur = con.execute("""
-                SELECT depth, tile_type, COUNT(DISTINCT (y || ',' || x)) as distinct_features
-                FROM ticks
-                WHERE tile_type IN ('fountain', 'altar', 'doorway')
-                GROUP BY depth, tile_type
-                ORDER BY depth ASC, tile_type ASC
-            """)
-            res = _format_table(cur)
-            con.close()
-            return "### Dungeon Stash & Features Report:\n" + res
-        except Exception as e:
-            con.close()
-            return f"Error querying floor stash report: {e}"
-
-    def get_death_autopsy_trace(self, episode_id: str = "", limit: int = 30) -> str:
-        """
-        Returns granular tick-by-tick flight trace of the final ticks of an episode in chronological order.
-        """
-        if not os.path.exists(self.db_path):
-            return "No database found."
-
-        try:
-            limit_int = min(max(int(limit), 5), 100)
-        except Exception:
-            limit_int = 30
-
-        con = safe_duckdb_connect(self.db_path, read_only=True)
-        try:
-            cols = [c[0] for c in con.execute("DESCRIBE ticks").fetchall()]
-            wanted = [
-                "turn",
-                "depth",
-                "hp",
-                "max_hp",
-                "ac",
-                "hunger",
-                "tile_type",
-                "action",
-                "active_subroutine",
-                "closest_hostile_name",
-                "closest_hostile_dist",
-                "message",
-            ]
-            selected_cols = [c for c in wanted if c in cols]
-            cols_sql = ", ".join(selected_cols)
-
-            where = (
-                f"WHERE episode_id = '{episode_id}'"
-                if episode_id
-                else "WHERE episode_id = (SELECT episode_id FROM episodes ORDER BY rowid DESC LIMIT 1)"
-            )
-            cur = con.execute(f"""
-                WITH recent_ticks AS (
-                    SELECT {cols_sql}
-                    FROM ticks
-                    {where}
-                    ORDER BY turn DESC
-                    LIMIT {limit_int}
-                )
-                SELECT * FROM recent_ticks ORDER BY turn ASC
-            """)
-            res = _format_table(cur)
-            con.close()
-            return f"### Final {limit_int} Ticks Autopsy Trace (Chronological Order):\n" + res
-        except Exception as e:
-            con.close()
-            return f"Error querying autopsy trace: {e}"
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc(limit=4)
+            return f"Runtime Error during Dry-Run on seed {seed}:\n{type(exc).__name__}: {exc}\n{tb}", "RUNTIME_ERROR"
+        finally:
+            harness.close()
 
 
-# Tool Schema for OpenAI / OpenRouter function calling
-OPENAI_TOOL_SPECS = [
+OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "query_duckdb",
-            "description": "Execute a read-only SQL query against data/lox.duckdb (tables: episodes, ticks, events).",
+            "name": "query_db",
+            "description": (
+                "Execute a read-only SELECT SQL query on the DuckDB database "
+                "(tables: runs, ticks, batches, function_stats, experiments, expert_runs, expert_ticks)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sql": {
                         "type": "string",
-                        "description": "SQL query to execute, e.g. 'SELECT death_reason, count(*) FROM episodes GROUP BY 1 ORDER BY 2 DESC LIMIT 10'",
+                        "description": "Read-only SQL SELECT query.",
                     }
                 },
                 "required": ["sql"],
@@ -485,97 +205,19 @@ OPENAI_TOOL_SPECS = [
     {
         "type": "function",
         "function": {
-            "name": "get_duckdb_schema",
-            "description": "View tables, columns, and data types in data/lox.duckdb.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_death_taxonomy",
-            "description": "Get summary table of top death causes, frequencies, and avg depth.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "window": {
-                        "type": "integer",
-                        "description": "Maximum number of distinct causes to return (default 20).",
-                    }
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_root_causes",
-            "description": "Query empirical root cause attribution breakdown across 9 canonical failure archetypes from episodes table.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "run_id": {
-                        "type": "string",
-                        "description": "Optional run_id to filter episodes by. If omitted, aggregates across all recent episodes.",
-                    },
-                    "window": {
-                        "type": "integer",
-                        "description": "Maximum number of archetypes to return (default 10).",
-                    },
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_action_distribution",
-            "description": "Get action frequencies and percentage distribution across ticks.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "run_id": {
-                        "type": "string",
-                        "description": "Optional run_id to filter actions by. If omitted, aggregates across all runs.",
-                    }
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_floor_pacing_stats",
-            "description": "Get pacing statistics for a given dungeon floor.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "depth": {
-                        "type": "integer",
-                        "description": "Dungeon depth (default 1).",
-                    }
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "query_wiki",
-            "description": "Search the offline NetHack 3.6.6 knowledge base (monsters, items, intrinsics, rituals).",
+            "description": "Search the offline NetHack 3.6.6 Wiki for monster stats, items, corpses, intrinsics, or branch mechanics.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search term, e.g. 'floating eye', 'poison resistance corpse', 'Excalibur'",
+                        "description": "Search topic or entity name (e.g., 'floating eye', 'Excalibur', 'hungry', 'altar').",
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": "Number of articles to return (default 2).",
+                        "description": "Number of wiki articles to return (1-5).",
+                        "default": 3,
                     },
                 },
                 "required": ["query"],
@@ -585,78 +227,15 @@ OPENAI_TOOL_SPECS = [
     {
         "type": "function",
         "function": {
-            "name": "query_invariants",
-            "description": "Query the LOX Empirical Invariant Knowledge Base for ground-truth rules, anti-patterns, and verified code snippets (topics: 'prayer', 'hunger', 'floating eye', 'gas spore', 'door', 'dead end', 'elbereth', 'mines').",
+            "name": "query_policy_docs",
+            "description": "Retrieve Policy Language documentation, GameState fields, Action names, and all macros currently in macros.py.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
+                    "topic": {
                         "type": "string",
-                        "description": "Topic or symptom to search, e.g. 'fainting hunger', 'gas spore explosion', 'passive hazard', 'closed door navigation'",
-                    },
-                    "category": {
-                        "type": "string",
-                        "enum": [
-                            "combat",
-                            "navigation",
-                            "nutrition",
-                            "equipment",
-                            "dialog_harness",
-                            "architecture",
-                            "",
-                        ],
-                        "description": "Optional category filter.",
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Number of invariants to retrieve (default 3).",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "request_macro",
-            "description": "Queue an unimplemented macro or primitive for human developers to build post-run.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "macro_name": {
-                        "type": "string",
-                        "description": "Identifier name for the desired macro or primitive.",
-                    },
-                    "rationale": {
-                        "type": "string",
-                        "description": "Why this capability is needed to progress or survive.",
-                    },
-                    "proposed_interface": {
-                        "type": "string",
-                        "description": "Optional Python signature or pseudo-code.",
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["critical", "high", "medium", "low"],
-                        "description": "Priority level.",
-                    },
-                },
-                "required": ["macro_name", "rationale"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_dungeon_topology",
-            "description": "Renders visual 21x79 ASCII map of visited tiles for a given dungeon level showing rooms (.), corridors (#), doors (+), and stairs (> <).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "depth": {
-                        "type": "integer",
-                        "description": "Dungeon depth (default 1).",
+                        "description": "'all', 'macros', 'state', or 'actions'.",
+                        "default": "all",
                     }
                 },
             },
@@ -665,58 +244,32 @@ OPENAI_TOOL_SPECS = [
     {
         "type": "function",
         "function": {
-            "name": "get_hazard_map",
-            "description": "Returns coordinates and occurrences of traps, floating eyes, and dangerous monsters on that level.",
+            "name": "dry_run_policy",
+            "description": "Compile and test candidate Python policy or macro code for 60 steps in a live NetHack sandbox to catch any syntax or runtime errors.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "depth": {
-                        "type": "integer",
-                        "description": "Dungeon depth (default 1).",
-                    }
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_floor_stash_report",
-            "description": "Returns summary of altars, fountains, and features discovered across all explored dungeon levels.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_death_autopsy_trace",
-            "description": "Returns granular tick-by-tick flight trace of the final ticks leading up to fatal termination in chronological order.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "episode_id": {
+                    "code": {
                         "type": "string",
-                        "description": "Optional episode ID. If omitted, returns trace of the most recent death.",
+                        "description": "Python code (class Policy, method definitions, or macro functions) to validate and dry-run.",
                     },
-                    "limit": {
+                    "is_macro": {
+                        "type": "boolean",
+                        "description": "Set to true if testing macro functions for macros.py; false if testing Policy code.",
+                        "default": False,
+                    },
+                    "seed": {
                         "type": "integer",
-                        "description": "Number of final ticks to retrieve (default 30, max 100).",
+                        "description": "NetHack seed to test on.",
+                        "default": 42,
+                    },
+                    "max_turns": {
+                        "type": "integer",
+                        "description": "Number of steps to simulate (10-200).",
+                        "default": 60,
                     },
                 },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_macro_requests",
-            "description": "Returns all registered macro requests and their implementation status from the backlog.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
+                "required": ["code"],
             },
         },
     },

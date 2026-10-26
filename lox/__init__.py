@@ -1,5 +1,3 @@
-"""
-LOX: Neuro-Symbolic Policy Synthesis Engine.
-"""
+"""LOX: Clean-Slate Empirical Policy Synthesis Engine ("Hard Code Nothing")."""
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
