@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 import yaml
+from dotenv import load_dotenv
 
 from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.tools import OPENAI_TOOL_SPECS, AuthorToolRegistry
@@ -22,6 +23,8 @@ from lox.db.schema import DEFAULT_DB_PATH
 from lox.lang.macros import DEFAULT_MACROS_PATH
 from lox.lang.validator import splice_functions_into_policy
 from lox.ui.console import ui
+
+load_dotenv()
 
 
 @dataclass(slots=True)
