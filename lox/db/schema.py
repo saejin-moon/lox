@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+
 import duckdb
 
 DEFAULT_DB_PATH = "data/lox.duckdb"

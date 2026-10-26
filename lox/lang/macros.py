@@ -7,8 +7,8 @@ functions and generator subroutines across generations without hardcoding them i
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 from lox.lang.validator import validate_python_code
 
@@ -54,7 +54,9 @@ class MacroLibrary:
         current_code = self.load_code()
         if not current_code:
             names = [
-                n.name for n in new_tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+                n.name
+                for n in new_tree.body
+                if isinstance(n, (ast.FunctionDef, ast.ClassDef))
             ]
             merged = ast.unparse(new_tree)
             self.save_code(merged)
@@ -108,7 +110,8 @@ class MacroLibrary:
                 sig = f"def {node.name}({args_str}){ret_str}"
                 doc = ast.get_docstring(node) or "No docstring provided."
                 is_gen = any(
-                    isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in ast.walk(node)
+                    isinstance(sub, (ast.Yield, ast.YieldFrom))
+                    for sub in ast.walk(node)
                 )
                 specs.append(
                     MacroSpec(
@@ -127,6 +130,12 @@ class MacroLibrary:
             return "No custom macros have been defined in `macros.py` yet."
         lines = ["### Registered Macros (`macros.py`):"]
         for s in specs:
-            kind = "[Generator Macro: call via `state = yield from " + s.name + "(state, ...)`]" if s.is_generator else "[Helper Function: call via `" + s.name + "(...)`]"
+            kind = (
+                "[Generator Macro: call via `state = yield from "
+                + s.name
+                + "(state, ...)`]"
+                if s.is_generator
+                else "[Helper Function: call via `" + s.name + "(...)`]"
+            )
             lines.append(f"- `{s.signature}` {kind}\n  {s.docstring}")
         return "\n".join(lines)

@@ -9,8 +9,8 @@ Schedules the 4 policy modification modes (`FULL_WRITE`, `FUNC_MOD_ADD`, `PARAM_
 
 from __future__ import annotations
 
-from collections import deque
 import math
+from collections import deque
 
 
 class ModeScheduler:
@@ -54,7 +54,9 @@ class ModeScheduler:
         self._gens_since_macro += 1
 
         # Periodic Macro Synthesis so the Author builds up `macros.py` early and regularly
-        if (generation > 0 and generation % self.macro_every == 0) or self._gens_since_macro >= self.macro_every:
+        if (
+            generation > 0 and generation % self.macro_every == 0
+        ) or self._gens_since_macro >= self.macro_every:
             self._gens_since_macro = 0
             self.counts["MACRO_WRITE"] += 1
             return "MACRO_WRITE"
@@ -83,7 +85,9 @@ class ModeScheduler:
                 q_m = max(self.history[m]) if self.history[m] else 0.1
                 norm_q = q_m / (max_credit + 1e-6) if max_credit > 0 else 0.5
                 n_m = self.counts[m]
-                ucb = norm_q + 0.6 * math.sqrt(2.0 * math.log(total_pulls + 1.0) / (n_m + 1.0))
+                ucb = norm_q + 0.6 * math.sqrt(
+                    2.0 * math.log(total_pulls + 1.0) / (n_m + 1.0)
+                )
                 if ucb > best_ucb:
                     best_ucb = ucb
                     best_m = m

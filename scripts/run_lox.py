@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LOX v3.0 — High-Throughput Empirical Policy Synthesis Engine CLI.
+LOX — High-Throughput Empirical Policy Synthesis Engine CLI ("Hard Code Nothing").
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from lox.lang.macros import DEFAULT_MACROS_PATH
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="LOX v3.0 — High-Throughput Empirical Policy Synthesis Engine"
+        description="LOX — High-Throughput Empirical Policy Synthesis Engine ('Hard Code Nothing')"
     )
     parser.add_argument(
         "--provider",

@@ -7,7 +7,6 @@ and scannable generation/hypothesis summary tables without spamming stdout.
 from __future__ import annotations
 
 import sys
-import time
 from typing import Any
 
 
@@ -26,9 +25,7 @@ class ConsoleUI:
 
     def __init__(self, enabled: bool = True, use_color: bool | None = None):
         self.enabled = enabled
-        self.use_color = (
-            sys.stdout.isatty() if use_color is None else use_color
-        )
+        self.use_color = sys.stdout.isatty() if use_color is None else use_color
         self._in_progress_line = False
 
     def _c(self, color: str, text: str) -> str:
@@ -55,8 +52,12 @@ class ConsoleUI:
         self._clear_progress()
         line = "─" * 74
         print(self._c(self.CYAN, f"┌{line}┐"))
-        title = "LOX v3.0  │  Autonomous Policy Synthesis Engine ('Hard Code Nothing')"
-        print(self._c(self.CYAN, "│ ") + self._c(self.BOLD, f"{title:<72}") + self._c(self.CYAN, " │"))
+        title = "LOX  │  Autonomous Policy Synthesis Engine ('Hard Code Nothing')"
+        print(
+            self._c(self.CYAN, "│ ")
+            + self._c(self.BOLD, f"{title:<72}")
+            + self._c(self.CYAN, " │")
+        )
         meta = f"Model: {model} ({provider})  │  Role: {role}  │  Workers: {workers}  │  DB: {db_path}"
         print(self._c(self.CYAN, "│ ") + f"{meta[:72]:<72}" + self._c(self.CYAN, " │"))
         print(self._c(self.CYAN, f"└{line}┘"))
@@ -72,7 +73,11 @@ class ConsoleUI:
             return
         self._clear_progress()
         fn_str = f" │ Targets: {', '.join(target_fns)}" if target_fns else ""
-        eps_str = f"{target_episodes:,} eps" if target_episodes > 0 else "0 eps (instant commit)"
+        eps_str = (
+            f"{target_episodes:,} eps"
+            if target_episodes > 0
+            else "0 eps (instant commit)"
+        )
         hdr = f"═══ Gen {gen:03d} │ Mode: {mode} │ Budget: {eps_str}{fn_str} "
         pad = max(0, 76 - len(hdr))
         print("\n" + self._c(self.BOLD + self.BLUE, hdr + "═" * pad))
@@ -105,10 +110,18 @@ class ConsoleUI:
         if not self.enabled or not hypothesis:
             return
         self._clear_progress()
-        targets = hypothesis.get("target_functions") or hypothesis.get("targeted_skill") or "policy"
+        targets = (
+            hypothesis.get("target_functions")
+            or hypothesis.get("targeted_skill")
+            or "policy"
+        )
         if isinstance(targets, list):
             targets = ", ".join(str(t) for t in targets)
-        obs = str(hypothesis.get("observation_from_db") or hypothesis.get("causal_finding") or "N/A")
+        obs = str(
+            hypothesis.get("observation_from_db")
+            or hypothesis.get("causal_finding")
+            or "N/A"
+        )
         mech = str(hypothesis.get("mechanism") or "N/A")
         if len(obs) > 90:
             obs = obs[:87] + "..."

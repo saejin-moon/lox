@@ -64,7 +64,9 @@ class Policy:
             else:
                 state = yield from macro_safe_search(state)
 """
-    compiled = compile_policy_and_macros(policy_code=policy_code, macros_code=macros_code)
+    compiled = compile_policy_and_macros(
+        policy_code=policy_code, macros_code=macros_code
+    )
     harness = NetHackHarness(max_steps=30)
     try:
         st = harness.reset(seed=77)
@@ -114,8 +116,12 @@ def test_compact_console_ui_rendering(capsys):
         workers=8,
         role="val-hum-law-fem",
     )
-    console.gen_header(gen=1, mode="FUNC_MOD_ADD", target_episodes=1000, target_fns=["combat"])
-    console.tool_call(1, "query_db", "SELECT * FROM runs WHERE is_outlier_good = TRUE", "5 rows", 12.4)
+    console.gen_header(
+        gen=1, mode="FUNC_MOD_ADD", target_episodes=1000, target_fns=["combat"]
+    )
+    console.tool_call(
+        1, "query_db", "SELECT * FROM runs WHERE is_outlier_good = TRUE", "5 rows", 12.4
+    )
     console.hypothesis_box(
         {
             "mode": "FUNC_MOD_ADD",
@@ -159,7 +165,8 @@ def test_compact_console_ui_rendering(capsys):
         },
     )
     captured = capsys.readouterr().out
-    assert "LOX v3.0" in captured
+    assert "LOX" in captured
+    assert "Hard Code Nothing" in captured
     assert "FUNC_MOD_ADD" in captured
     assert "[T1]" in captured
     assert "PROMOTED" in captured

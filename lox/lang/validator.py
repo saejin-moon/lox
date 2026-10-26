@@ -195,7 +195,9 @@ def splice_functions_into_policy(
         # Base has no class; just merge top-level functions
         changed: list[str] = []
         existing_map = {
-            n.name: i for i, n in enumerate(base_tree.body) if isinstance(n, ast.FunctionDef)
+            n.name: i
+            for i, n in enumerate(base_tree.body)
+            if isinstance(n, ast.FunctionDef)
         }
         for name, fn_node in {**patch_top_funcs, **patch_methods}.items():
             changed.append(name)
@@ -238,7 +240,9 @@ def splice_functions_into_policy(
 
     # Merge any top-level helper functions
     existing_top = {
-        n.name: i for i, n in enumerate(base_tree.body) if isinstance(n, ast.FunctionDef)
+        n.name: i
+        for i, n in enumerate(base_tree.body)
+        if isinstance(n, ast.FunctionDef)
     }
     for name, fn_node in patch_top_funcs.items():
         if name not in changed_names:
@@ -250,6 +254,8 @@ def splice_functions_into_policy(
 
     # If all methods matched identically, still report the method names present in patch_methods
     if not changed_names and patch_methods:
-        changed_names = [k for k in patch_methods.keys() if k != "__init__"] or list(patch_methods.keys())
+        changed_names = [k for k in patch_methods.keys() if k != "__init__"] or list(
+            patch_methods.keys()
+        )
 
     return ast.unparse(base_tree), changed_names

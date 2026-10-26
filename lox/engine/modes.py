@@ -145,10 +145,16 @@ def run_spsa_param_tuning(
     rng = np.random.default_rng(seed)
 
     # Normalize initial defaults to [0, 1]^p
-    mins = np.array([float(registered_params[k]["min_val"]) for k in param_names], dtype=np.float64)
-    maxs = np.array([float(registered_params[k]["max_val"]) for k in param_names], dtype=np.float64)
+    mins = np.array(
+        [float(registered_params[k]["min_val"]) for k in param_names], dtype=np.float64
+    )
+    maxs = np.array(
+        [float(registered_params[k]["max_val"]) for k in param_names], dtype=np.float64
+    )
     spans = np.maximum(1e-6, maxs - mins)
-    defaults = np.array([float(registered_params[k]["default"]) for k in param_names], dtype=np.float64)
+    defaults = np.array(
+        [float(registered_params[k]["default"]) for k in param_names], dtype=np.float64
+    )
     is_ints = [bool(registered_params[k].get("is_int", False)) for k in param_names]
 
     theta = np.clip((defaults - mins) / spans, 0.0, 1.0)
@@ -165,7 +171,11 @@ def run_spsa_param_tuning(
                 out[k] = round(float(raw[i]), 4)
         return out
 
-    base_seeds = [int(r["seed"]) for r in baseline_runs] if baseline_runs else list(range(10000, 10200))
+    base_seeds = (
+        [int(r["seed"]) for r in baseline_runs]
+        if baseline_runs
+        else list(range(10000, 10200))
+    )
 
     # Spall SPSA standard gain schedule
     c0 = 0.12
@@ -183,7 +193,11 @@ def run_spsa_param_tuning(
         theta_minus = np.clip(theta - ck * delta_vec, 0.0, 1.0)
 
         # Common Random Numbers: evaluate theta_plus and theta_minus on the exact same mini-batch of seeds
-        mb_seeds = list(rng.choice(base_seeds, size=min(minibatch_size, len(base_seeds)), replace=False))
+        mb_seeds = list(
+            rng.choice(
+                base_seeds, size=min(minibatch_size, len(base_seeds)), replace=False
+            )
+        )
 
         res_plus = pool.evaluate_batch(
             batch_id=f"{batch_id}_spsa_{k}p",
@@ -206,8 +220,16 @@ def run_spsa_param_tuning(
             show_progress=False,
         )
 
-        j_plus = float(np.mean([progression_metric(r) for r in res_plus["runs"]])) if res_plus["runs"] else 0.0
-        j_minus = float(np.mean([progression_metric(r) for r in res_minus["runs"]])) if res_minus["runs"] else 0.0
+        j_plus = (
+            float(np.mean([progression_metric(r) for r in res_plus["runs"]]))
+            if res_plus["runs"]
+            else 0.0
+        )
+        j_minus = (
+            float(np.mean([progression_metric(r) for r in res_minus["runs"]]))
+            if res_minus["runs"]
+            else 0.0
+        )
 
         if j_plus > best_score:
             best_score = j_plus

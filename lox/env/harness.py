@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from nle import nethack as nh
 import numpy as np
+from nle import nethack as nh
 
 from lox.env.actions import normalize_action_to_bytes
-from lox.env.state import GameState, bfs_distance_grid, astar_next_step
+from lox.env.state import GameState, astar_next_step, bfs_distance_grid
 
 # Pre-warm Numba JIT kernels once at module import
 _DUMMY_MASK = np.ones((4, 4), dtype=np.bool_)
@@ -58,11 +58,7 @@ class NetHackHarness:
         self.role = role
         self.max_steps = max_steps
         self.auto_dismiss_more = auto_dismiss_more
-        self.options = (
-            options
-            if options is not None
-            else nh.NETHACKOPTIONS
-        )
+        self.options = options if options is not None else nh.NETHACKOPTIONS
         self._obs_keys = list(LEAN_OBSERVATION_KEYS)
         self._idx_map = {k: i for i, k in enumerate(self._obs_keys)}
         self._prog_state_idx = self._idx_map["program_state"]
@@ -89,7 +85,9 @@ class NetHackHarness:
     def steps_taken(self) -> int:
         return self.step_count
 
-    def _tuple_to_dict(self, obs_tuple: tuple[np.ndarray, ...]) -> dict[str, np.ndarray]:
+    def _tuple_to_dict(
+        self, obs_tuple: tuple[np.ndarray, ...]
+    ) -> dict[str, np.ndarray]:
         return {k: obs_tuple[i] for k, i in self._idx_map.items()}
 
     def _in_moveloop(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
@@ -127,7 +125,9 @@ class NetHackHarness:
     def reset(self, seed: int = 42) -> GameState:
         """Resets the C NetHack engine with deterministic seed `(seed, seed, reseed=False, seed)`."""
         self.current_seed = int(seed)
-        self.nh.set_initial_seeds(self.current_seed, self.current_seed, False, self.current_seed)
+        self.nh.set_initial_seeds(
+            self.current_seed, self.current_seed, False, self.current_seed
+        )
         self.action_bytes.clear()
         self.step_count = 0
         self.done = False
@@ -151,7 +151,10 @@ class NetHackHarness:
         """
         if self.done:
             return (
-                GameState(self._tuple_to_dict(self._last_raw_tuple), step_count=self.step_count),
+                GameState(
+                    self._tuple_to_dict(self._last_raw_tuple),
+                    step_count=self.step_count,
+                ),
                 True,
                 {"action_name": "DONE", "is_ascended": False},
             )
@@ -164,7 +167,12 @@ class NetHackHarness:
         for idx, b in enumerate(bytes_seq):
             self.action_bytes.append(b)
             obs_tuple, done = self.nh.step(b)
-            raw_m = bytes(obs_tuple[self._msg_idx]).split(b"\x00", 1)[0].decode("latin1", errors="ignore").strip()
+            raw_m = (
+                bytes(obs_tuple[self._msg_idx])
+                .split(b"\x00", 1)[0]
+                .decode("latin1", errors="ignore")
+                .strip()
+            )
             if raw_m and (not messages or messages[-1] != raw_m):
                 messages.append(raw_m)
             if done:
@@ -172,7 +180,12 @@ class NetHackHarness:
 
         if not done and not self._in_moveloop(obs_tuple):
             obs_tuple, done = self._settle_prompts(obs_tuple, done)
-            raw_m = bytes(obs_tuple[self._msg_idx]).split(b"\x00", 1)[0].decode("latin1", errors="ignore").strip()
+            raw_m = (
+                bytes(obs_tuple[self._msg_idx])
+                .split(b"\x00", 1)[0]
+                .decode("latin1", errors="ignore")
+                .strip()
+            )
             if raw_m and (not messages or messages[-1] != raw_m):
                 messages.append(raw_m)
 
@@ -215,15 +228,21 @@ class NetHackHarness:
         Replays `recorded_bytes` directly in C at ~275,000 steps/sec (~14ms per 4,000 turns)
         to reconstruct the exact deterministic `GameState` at any point in a run.
         """
-        buf = bytes(recorded_bytes if recorded_bytes is not None else (action_bytes or b""))
+        buf = bytes(
+            recorded_bytes if recorded_bytes is not None else (action_bytes or b"")
+        )
         self.current_seed = int(seed)
-        self.nh.set_initial_seeds(self.current_seed, self.current_seed, False, self.current_seed)
+        self.nh.set_initial_seeds(
+            self.current_seed, self.current_seed, False, self.current_seed
+        )
         self.action_bytes.clear()
         self.step_count = 0
         self.done = False
 
         obs_tuple = self.nh.reset(None, options=None)
-        limit = len(buf) if stop_at_byte_idx is None else min(len(buf), stop_at_byte_idx)
+        limit = (
+            len(buf) if stop_at_byte_idx is None else min(len(buf), stop_at_byte_idx)
+        )
         for i in range(limit):
             b = int(buf[i])
             self.action_bytes.append(b)

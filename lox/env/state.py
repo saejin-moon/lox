@@ -8,11 +8,10 @@ with zero per-tick computation when not queried.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
-from nle import nethack as nh
 import numba
 import numpy as np
+from nle import nethack as nh
 
 # Pre-build 1-to-1 C symbol table lookup caches from NLE's native C structs
 # (Zero hardcoded game heuristics: purely mirrors NLE's C permonst & objclass arrays in Python for O(1) access)
@@ -189,7 +188,9 @@ for _g in range(_MAX_GLYPH):
 
 # Generic Numba-accelerated grid math utilities (pure algorithms, zero game rules)
 @numba.njit(cache=True)
-def bfs_distance_grid(passable: np.ndarray, sy: int, sx: int, allow_diagonal: bool = True) -> np.ndarray:
+def bfs_distance_grid(
+    passable: np.ndarray, sy: int, sx: int, allow_diagonal: bool = True
+) -> np.ndarray:
     """
     Computes shortest-path step distances from (sy, sx) across any boolean `passable` (21, 79) mask.
     Unreachable tiles have distance -1.
@@ -445,7 +446,15 @@ class GameState:
 
     @property
     def hunger_name(self) -> str:
-        names = ("Satiated", "Not Hungry", "Hungry", "Weak", "Fainting", "Fainted", "Starved")
+        names = (
+            "Satiated",
+            "Not Hungry",
+            "Hungry",
+            "Weak",
+            "Fainting",
+            "Fainted",
+            "Starved",
+        )
         h = self.hunger_state
         return names[h] if 0 <= h < len(names) else f"Hunger({h})"
 
@@ -460,7 +469,14 @@ class GameState:
 
     @property
     def encumbrance_name(self) -> str:
-        names = ("Unencumbered", "Burdened", "Stressed", "Strained", "Overtaxed", "Overloaded")
+        names = (
+            "Unencumbered",
+            "Burdened",
+            "Stressed",
+            "Strained",
+            "Overtaxed",
+            "Overloaded",
+        )
         c = self.carrying_capacity
         return names[c] if 0 <= c < len(names) else f"Encumbrance({c})"
 
@@ -553,7 +569,12 @@ class GameState:
                 if let_b == 0:
                     continue
                 letter = chr(int(let_b))
-                desc = bytes(str_arr).split(b"\x00", 1)[0].decode("latin1", errors="ignore").strip()
+                desc = (
+                    bytes(str_arr)
+                    .split(b"\x00", 1)[0]
+                    .decode("latin1", errors="ignore")
+                    .strip()
+                )
                 g = int(g_val)
                 oc = int(oclass_b)
                 ch = chr(oc) if 32 <= oc <= 126 else "?"
@@ -694,16 +715,26 @@ class GameState:
         lines = []
         for r in range(21):
             row_bytes = self.chars[r]
-            line = "".join(chr(int(b)) if 32 <= int(b) <= 126 else " " for b in row_bytes)
+            line = "".join(
+                chr(int(b)) if 32 <= int(b) <= 126 else " " for b in row_bytes
+            )
             lines.append(line.rstrip() or " ")
         return "\n".join(lines)
 
     def bfs_distances(
-        self, passable_mask: np.ndarray, start: tuple[int, int] | None = None, allow_diagonal: bool = True
+        self,
+        passable_mask: np.ndarray,
+        start: tuple[int, int] | None = None,
+        allow_diagonal: bool = True,
     ) -> np.ndarray:
         """Runs Numba-accelerated BFS distance calculation from `start` (defaults to `(self.y, self.x)`)."""
         sy, sx = start if start is not None else (self.y, self.x)
-        return bfs_distance_grid(np.asarray(passable_mask, dtype=np.bool_), int(sy), int(sx), bool(allow_diagonal))
+        return bfs_distance_grid(
+            np.asarray(passable_mask, dtype=np.bool_),
+            int(sy),
+            int(sx),
+            bool(allow_diagonal),
+        )
 
     def path_step(
         self,

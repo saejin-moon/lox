@@ -9,9 +9,9 @@ Persistent Multi-Core NLE Worker Pool & Conditional Function-Trigger Evaluator.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import multiprocessing as mp
 import time
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -39,7 +39,11 @@ def _init_worker(role: str, max_steps: int) -> None:
 
 def _get_worker_harness(role: str, max_steps: int) -> NetHackHarness:
     global _WORKER_HARNESS, _WORKER_ROLE, _WORKER_MAX_STEPS
-    if _WORKER_HARNESS is None or _WORKER_ROLE != role or _WORKER_MAX_STEPS != max_steps:
+    if (
+        _WORKER_HARNESS is None
+        or _WORKER_ROLE != role
+        or _WORKER_MAX_STEPS != max_steps
+    ):
         if _WORKER_HARNESS is not None:
             _WORKER_HARNESS.close()
         _WORKER_ROLE = role
@@ -167,7 +171,12 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 end_reason = "ascended"
             elif info.get("truncated"):
                 end_reason = "max_steps"
-            elif last_hp <= 0 or "die" in msg.lower() or "killed" in msg.lower() or "starv" in msg.lower():
+            elif (
+                last_hp <= 0
+                or "die" in msg.lower()
+                or "killed" in msg.lower()
+                or "starv" in msg.lower()
+            ):
                 end_reason = msg.split(".")[0][:60] if msg else "died"
             else:
                 end_reason = msg.split(".")[0][:60] if msg else "ended"
@@ -352,11 +361,17 @@ class PersistentEvalPool:
 
         t0 = time.perf_counter()
         pool = self._ensure_pool()
-        chunk_size = min(max(self.workers * 4, 16), max(16, target_episodes - len(triggered_runs)))
+        chunk_size = min(
+            max(self.workers * 4, 16), max(16, target_episodes - len(triggered_runs))
+        )
 
         while len(triggered_runs) < target_episodes and raw_done < max_raw_episodes:
             needed = target_episodes - len(triggered_runs)
-            batch_len = min(max(needed, self.workers * 2) if target_fns else needed, chunk_size, max_raw_episodes - raw_done)
+            batch_len = min(
+                max(needed, self.workers * 2) if target_fns else needed,
+                chunk_size,
+                max_raw_episodes - raw_done,
+            )
             if batch_len <= 0:
                 break
 
@@ -428,7 +443,11 @@ class PersistentEvalPool:
                 )
 
             # Unreachable function circuit breaker: if >= unreachable_abort_after raw episodes ran and 0 triggered
-            if target_fns and raw_done >= min(unreachable_abort_after, max_raw_episodes) and len(triggered_runs) == 0:
+            if (
+                target_fns
+                and raw_done >= min(unreachable_abort_after, max_raw_episodes)
+                and len(triggered_runs) == 0
+            ):
                 unreachable_abort = True
                 break
 

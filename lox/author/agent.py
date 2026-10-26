@@ -6,11 +6,11 @@ Gemini, OpenAI-compatible endpoints, and deterministic Mock mode for testing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -80,7 +80,9 @@ class AuthorAgent:
         text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL).strip()
 
         yaml_dict: dict[str, Any] = {}
-        yaml_blocks = re.findall(r"```(?:yaml|yml)\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        yaml_blocks = re.findall(
+            r"```(?:yaml|yml)\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+        )
         for yb in yaml_blocks:
             try:
                 parsed = yaml.safe_load(yb)
@@ -90,7 +92,9 @@ class AuthorAgent:
             except Exception:
                 continue
 
-        py_blocks = re.findall(r"```python\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        py_blocks = re.findall(
+            r"```python\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+        )
         if not py_blocks:
             py_blocks = re.findall(r"```\s*\n(.*?)```", text, flags=re.DOTALL)
             py_blocks = [b for b in py_blocks if "def " in b or "class " in b]
@@ -139,7 +143,10 @@ class AuthorAgent:
         if self.provider == "openrouter":
             url = self.base_url or "https://openrouter.ai/api/v1/chat/completions"
         elif self.provider == "gemini":
-            url = self.base_url or "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            url = (
+                self.base_url
+                or "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            )
         else:
             url = self.base_url or "https://api.openai.com/v1/chat/completions"
 
@@ -185,7 +192,9 @@ class AuthorAgent:
         """Deterministic mock synthesizer for automated tests (`provider='mock'`)."""
         self.tools.current_policy_code = current_policy
         # Exercise tools so tool pipeline is verified in tests
-        self._execute_tool_call(1, "query_db", {"sql": "SELECT COUNT(*) AS n FROM expert_runs"})
+        self._execute_tool_call(
+            1, "query_db", {"sql": "SELECT COUNT(*) AS n FROM expert_runs"}
+        )
         self._execute_tool_call(1, "query_wiki", {"query": "Excalibur", "top_k": 1})
 
         if mode == "FULL_WRITE" or not current_policy.strip():
@@ -367,7 +376,11 @@ class AuthorAgent:
                 t_name = fn_Spec.get("name", "")
                 raw_args = fn_Spec.get("arguments", "{}")
                 try:
-                    t_args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+                    t_args = (
+                        json.loads(raw_args)
+                        if isinstance(raw_args, str)
+                        else dict(raw_args)
+                    )
                 except Exception:
                     t_args = {}
                 tool_out = self._execute_tool_call(turn_idx, t_name, t_args)
@@ -394,7 +407,9 @@ class AuthorAgent:
 
             if status.startswith("PASSED") or status.startswith("VALID"):
                 if is_macro_mode:
-                    merged_macros, macro_names = self.tools.macro_lib.merge_macros(code_patch)
+                    merged_macros, macro_names = self.tools.macro_lib.merge_macros(
+                        code_patch
+                    )
                     targets = hyp.get("target_functions") or macro_names
                     if isinstance(targets, str):
                         targets = [targets]
@@ -428,7 +443,9 @@ class AuthorAgent:
                     )
 
             if repair_idx < 2:
-                ui.warn(f"Sandbox compiler gate caught {status}; requesting in-turn repair ({repair_idx + 1}/2)...")
+                ui.warn(
+                    f"Sandbox compiler gate caught {status}; requesting in-turn repair ({repair_idx + 1}/2)..."
+                )
                 messages.append(
                     {
                         "role": "user",
@@ -442,4 +459,6 @@ class AuthorAgent:
                 messages.append(repair_msg)
                 final_content = repair_msg.get("content") or ""
 
-        raise RuntimeError(f"Author Agent failed to produce valid compiling code after repair attempts. Last error: {diag}")
+        raise RuntimeError(
+            f"Author Agent failed to produce valid compiling code after repair attempts. Last error: {diag}"
+        )

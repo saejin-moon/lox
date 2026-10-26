@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from lox.db.schema import connect_db
 from lox.engine.hypothesis import (
-    compute_confidence_sequence,
     evaluate_paired_hypothesis,
     should_stop_early_for_futility,
 )
@@ -79,7 +78,14 @@ class Policy:
 def test_parameter_free_hypothesis_testing_and_early_stopping():
     # Clear improvement on paired seeds
     base_runs = [
-        {"seed": i, "max_depth": 2, "final_ac": 5, "xp_level": 2, "score": 100, "turns": 200}
+        {
+            "seed": i,
+            "max_depth": 2,
+            "final_ac": 5,
+            "xp_level": 2,
+            "score": 100,
+            "turns": 200,
+        }
         for i in range(1, 31)
     ]
     cand_runs_good = [
@@ -102,14 +108,24 @@ def test_parameter_free_hypothesis_testing_and_early_stopping():
 
     # Regression on paired seeds should be rejected and trigger early futility stop
     cand_runs_bad = [
-        {"seed": i, "max_depth": 1, "final_ac": 8, "xp_level": 1, "score": 20, "turns": 50}
+        {
+            "seed": i,
+            "max_depth": 1,
+            "final_ac": 8,
+            "xp_level": 1,
+            "score": 20,
+            "turns": 50,
+        }
         for i in range(1, 31)
     ]
     verdict_bad = evaluate_paired_hypothesis(cand_runs_bad, base_runs)
     assert verdict_bad["passed"] is False
     assert verdict_bad["ci_upper"] < 0.0
     base_by_seed = {r["seed"]: r for r in base_runs}
-    assert should_stop_early_for_futility(cand_runs_bad, base_by_seed, min_pairs=20) is True
+    assert (
+        should_stop_early_for_futility(cand_runs_bad, base_by_seed, min_pairs=20)
+        is True
+    )
 
 
 def test_spsa_param_tuning_and_ast_baking():
@@ -163,10 +179,18 @@ class Policy:
 
 def test_mode_scheduler_and_end_to_end_mock_campaign(tmp_path):
     sched = ModeScheduler(param_tune_every=3, macro_every=5)
-    assert sched.select_mode(0, has_policy=False, has_tunable_params=False) == "FULL_WRITE"
-    assert sched.select_mode(1, has_policy=True, has_tunable_params=True) == "FUNC_MOD_ADD"
-    assert sched.select_mode(3, has_policy=True, has_tunable_params=True) == "PARAM_TUNE"
-    assert sched.select_mode(5, has_policy=True, has_tunable_params=True) == "MACRO_WRITE"
+    assert (
+        sched.select_mode(0, has_policy=False, has_tunable_params=False) == "FULL_WRITE"
+    )
+    assert (
+        sched.select_mode(1, has_policy=True, has_tunable_params=True) == "FUNC_MOD_ADD"
+    )
+    assert (
+        sched.select_mode(3, has_policy=True, has_tunable_params=True) == "PARAM_TUNE"
+    )
+    assert (
+        sched.select_mode(5, has_policy=True, has_tunable_params=True) == "MACRO_WRITE"
+    )
 
     # End-to-end 3-generation mock campaign (`FULL_WRITE` -> `FUNC_MOD_ADD` -> `MACRO_WRITE`)
     db_path = str(tmp_path / "campaign.duckdb")

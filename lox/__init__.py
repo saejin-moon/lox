@@ -1,3 +1,1 @@
-"""LOX: Clean-Slate Empirical Policy Synthesis Engine ("Hard Code Nothing")."""
-
-__version__ = "3.0.0"
+"""LOX: Autonomous Empirical Policy Synthesis Engine ("Hard Code Nothing")."""

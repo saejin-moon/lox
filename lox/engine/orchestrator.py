@@ -63,8 +63,12 @@ class CampaignOrchestrator:
         self.param_tune_episodes = param_tune_episodes
         self.early_stopping = early_stopping
 
-        os.makedirs(os.path.dirname(os.path.abspath(self.policy_path)) or ".", exist_ok=True)
-        os.makedirs(os.path.dirname(os.path.abspath(self.macros_path)) or ".", exist_ok=True)
+        os.makedirs(
+            os.path.dirname(os.path.abspath(self.policy_path)) or ".", exist_ok=True
+        )
+        os.makedirs(
+            os.path.dirname(os.path.abspath(self.macros_path)) or ".", exist_ok=True
+        )
         con = init_db(self.db_path)
         con.close()
 
@@ -142,8 +146,12 @@ class CampaignOrchestrator:
         )
 
         # Ensure expert_runs table is populated for the Author Agent to query
-        exp_info = ingest_expert_runs_into_duckdb(self.db_path, max_ascensions=30, fetch_dumplogs=5)
-        ui.info(f"Expert NetHack corpus ready in DuckDB (`expert_runs`: {exp_info['expert_runs']} runs).")
+        exp_info = ingest_expert_runs_into_duckdb(
+            self.db_path, max_ascensions=30, fetch_dumplogs=5
+        )
+        ui.info(
+            f"Expert NetHack corpus ready in DuckDB (`expert_runs`: {exp_info['expert_runs']} runs)."
+        )
 
         current_policy = self.load_active_policy()
         current_policy_id = "pol_gen000" if current_policy else "none"
@@ -159,7 +167,9 @@ class CampaignOrchestrator:
                 mode = self.scheduler.select_mode(
                     generation=gen,
                     has_policy=bool(current_policy),
-                    has_tunable_params=bool(registered_params or "param(" in current_policy),
+                    has_tunable_params=bool(
+                        registered_params or "param(" in current_policy
+                    ),
                     forced_mode=forced_mode,
                 )
                 batch_id = f"{campaign_id}_g{gen:03d}"
@@ -230,7 +240,9 @@ class CampaignOrchestrator:
                             current_policy_id = cand_id
                             self.save_active_policy(current_policy)
                             baseline_runs = val_batch["runs"]
-                            last_batch_digest = build_batch_contrast_digest(val_batch, baseline_runs, fn_stats)
+                            last_batch_digest = build_batch_contrast_digest(
+                                val_batch, baseline_runs, fn_stats
+                            )
                             self.db_logger.save_policy(
                                 policy_id=cand_id,
                                 generation=gen,
@@ -251,9 +263,17 @@ class CampaignOrchestrator:
                 if mode == "MACRO_WRITE":
                     ui.gen_header(gen=gen, mode="MACRO_WRITE", target_episodes=0)
                 elif mode == "FULL_WRITE":
-                    ui.gen_header(gen=gen, mode="FULL_WRITE", target_episodes=self.full_write_episodes)
+                    ui.gen_header(
+                        gen=gen,
+                        mode="FULL_WRITE",
+                        target_episodes=self.full_write_episodes,
+                    )
                 else:
-                    ui.gen_header(gen=gen, mode="FUNC_MOD_ADD", target_episodes=self.func_mod_episodes_per_fn)
+                    ui.gen_header(
+                        gen=gen,
+                        mode="FUNC_MOD_ADD",
+                        target_episodes=self.func_mod_episodes_per_fn,
+                    )
 
                 proposal = self.author.synthesize(
                     mode=mode,
@@ -305,21 +325,36 @@ class CampaignOrchestrator:
                 )
 
                 # Prioritize seeds from baseline_runs so paired comparison is 1-to-1 on identical seeds
-                priority_seeds = [int(r["seed"]) for r in baseline_runs] if baseline_runs else None
+                priority_seeds = (
+                    [int(r["seed"]) for r in baseline_runs] if baseline_runs else None
+                )
                 base_by_seed = {int(r["seed"]): r for r in baseline_runs}
 
                 early_stop_cb = None
-                if self.early_stopping and proposal.mode == "FUNC_MOD_ADD" and base_by_seed:
-                    early_stop_cb = lambda cand_runs: should_stop_early_for_futility(
-                        cand_runs, base_by_seed, min_pairs=min(60, max(20, target_eps // 4))
-                    )
+                if (
+                    self.early_stopping
+                    and proposal.mode == "FUNC_MOD_ADD"
+                    and base_by_seed
+                ):
+                    min_p = min(60, max(20, target_eps // 4))
+
+                    def _check_futility(
+                        cand_runs: list[dict[str, Any]], _b=base_by_seed, _mp=min_p
+                    ) -> bool:
+                        return should_stop_early_for_futility(
+                            cand_runs, _b, min_pairs=_mp
+                        )
+
+                    early_stop_cb = _check_futility
 
                 eval_res = self.pool.evaluate_batch(
                     batch_id=batch_id,
                     policy_code=proposal.full_policy_code,
                     macros_code=proposal.full_macros_code,
                     target_episodes=target_eps,
-                    target_functions=target_fns if proposal.mode == "FUNC_MOD_ADD" else None,
+                    target_functions=target_fns
+                    if proposal.mode == "FUNC_MOD_ADD"
+                    else None,
                     priority_seeds=priority_seeds,
                     seed_start=seed_base + gen * 10000,
                     record_ticks=True,
@@ -345,9 +380,14 @@ class CampaignOrchestrator:
                         "reason": "Initial FULL_WRITE baseline established",
                     }
                 else:
-                    verdict = evaluate_paired_hypothesis(eval_res["runs"], baseline_runs)
+                    verdict = evaluate_paired_hypothesis(
+                        eval_res["runs"], baseline_runs
+                    )
                     if eval_res.get("early_stopped"):
-                        verdict["reason"] = f"Early Futility Stop ({len(eval_res['runs'])} eps): " + verdict["reason"]
+                        verdict["reason"] = (
+                            f"Early Futility Stop ({len(eval_res['runs'])} eps): "
+                            + verdict["reason"]
+                        )
                     elif eval_res.get("unreachable_abort"):
                         verdict["passed"] = False
                         verdict["reason"] = (
@@ -400,12 +440,18 @@ class CampaignOrchestrator:
                     current_policy_id = cand_id
                     self.save_active_policy(current_policy)
                     baseline_runs = eval_res["runs"]
-                    last_batch_digest = build_batch_contrast_digest(eval_res, baseline_runs, fn_stats)
+                    last_batch_digest = build_batch_contrast_digest(
+                        eval_res, baseline_runs, fn_stats
+                    )
                 elif not last_batch_digest and eval_res["runs"]:
-                    last_batch_digest = build_batch_contrast_digest(eval_res, eval_res["runs"], fn_stats)
+                    last_batch_digest = build_batch_contrast_digest(
+                        eval_res, eval_res["runs"], fn_stats
+                    )
 
                 if eval_res["avg_depth"] >= target_depth and verdict["passed"]:
-                    ui.info(f"Campaign Target Depth ({target_depth:.1f}) achieved! Avg Depth: {eval_res['avg_depth']:.2f}")
+                    ui.info(
+                        f"Campaign Target Depth ({target_depth:.1f}) achieved! Avg Depth: {eval_res['avg_depth']:.2f}"
+                    )
                     break
 
             return {

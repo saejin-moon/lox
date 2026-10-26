@@ -1,8 +1,8 @@
-# LOX v3.0 — Autonomous Empirical Policy Synthesis Engine
+# LOX — Autonomous Empirical Policy Synthesis Engine
 
 > **Architectural Motto:** *"Hard Code Nothing."*
 
-**LOX v3.0** is an autonomous, high-throughput neuro-symbolic program synthesis engine that discovers, tests, attributes, and refines executable Python control policies and reusable macro libraries for complex, long-horizon environments—starting with the **NetHack Learning Environment (NLE)**—from first principles.
+**LOX** is an autonomous, high-throughput neuro-symbolic program synthesis engine that discovers, tests, attributes, and refines executable Python control policies and reusable macro libraries for complex, long-horizon environments—starting with the **NetHack Learning Environment (NLE)**—from first principles.
 
 Unlike traditional Deep Reinforcement Learning (which trains opaque neural weights over billions of frames) or online LLM agents (which query a slow, expensive language model at every environment step), **LOX puts the LLM in the outer scientific loop and compiled Python in the inner execution loop**:
 - **Inner Loop (CPU)**: Compiled Python 3.11+ generator policies execute directly against NLE's C engine at **50,000–96,000+ steps/sec** across worker cores (`0` LLM tokens per step).
@@ -28,7 +28,7 @@ Unlike traditional Deep Reinforcement Learning (which trains opaque neural weigh
 
 Earlier generations of LLM-guided game agents rely heavily on human-engineered wrappers: hardcoded monster threat tiers, pre-written corpse safety tables, hidden auto-explore loops, or fixed finite-state machines. While those crutches produce quick early-game demos, they impose a strict glass ceiling when the agent encounters mechanics the human architect forgot to hardcode.
 
-**LOX v3.0 enforces a strict separation between the Architect (the harness) and the Author (the policy agent):**
+**LOX enforces a strict separation between the Architect (the harness) and the Author (the policy agent):**
 
 1. **Zero Hardcoded Strategy in the Harness ([`lox/env/`](lox/env/))**:
    - The harness contains **zero** game heuristics, **zero** monster/corpse/item lists, and **zero** hidden macro adapters.
@@ -82,7 +82,7 @@ Earlier generations of LLM-guided game agents rely heavily on human-engineered w
 
 ## 3. Theoretical & Research Foundations
 
-LOX v3.0 synthesizes insights from eight distinct research traditions across reinforcement learning, program synthesis, software fault localization, distributed systems observability, and sequential statistics:
+LOX synthesizes insights from eight distinct research traditions across reinforcement learning, program synthesis, software fault localization, distributed systems observability, and sequential statistics:
 
 ### 3.1 Evolutionary Program Synthesis & Library Learning
 - **FunSearch** *(Romera-Paredes et al., Nature 2024)* & **AlphaEvolve** *(Novikov et al., 2025)* demonstrated that pairing an LLM code generator with a fast, automated programmatic evaluator can discover novel algorithms when evolving executable functions rather than raw solutions. LOX extends this paradigm from static combinatorial scoring functions to **stateful, multi-thousand-turn closed-loop control policies**.
@@ -215,14 +215,34 @@ tests/
 
 ## 8. Quickstart & CLI Usage
 
-### 1. Run the Automated Verification Suite
+### 1. Lint & Run the Automated Verification Suite
 ```bash
-.venv/bin/pytest -v
+uv run ruff check --fix .
+uv run ruff format .
+uv run pytest -v
 ```
 
-### 2. Initialize DuckDB & Populate Expert Runs
+### 2. Initialize DuckDB & Add Expert NetHack Runs
+All expert runs and trajectories are compiled into `expert_runs` and `expert_ticks` inside `data/lox.duckdb`. You can add more expert runs at any time using `scripts/download_experts.py`:
+
 ```bash
-.venv/bin/python scripts/download_experts.py --max-ascensions 50
+# Default: Ingest built-in verified human ascensions + NAO xlogfile + NLE reference traces
+uv run python scripts/download_experts.py --max-ascensions 50
+
+# Option A: Add local NetHack .txt dumplog files or an entire directory of dumplogs
+uv run python scripts/download_experts.py --dumplog path/to/game.nh366.txt
+uv run python scripts/download_experts.py --dumplog path/to/dumplogs_folder/
+
+# Option B: Add local .ttyrec or .ttyrec.bz2 recordings (e.g. from NLD-AA / NLD-NAO)
+uv run python scripts/download_experts.py --ttyrec path/to/ascension.ttyrec.bz2
+uv run python scripts/download_experts.py --ttyrec path/to/nld_aa_folder/
+
+# Option C: Add direct URLs to online NAO dumplogs
+uv run python scripts/download_experts.py \
+  --url https://alt.org/nethack/dumplog/e/eidolos/1590102000.nh363.txt
+
+# Option D: Force a larger online NAO xlogfile harvest
+uv run python scripts/download_experts.py --max-ascensions 200 --fetch-dumplogs 50 --force
 ```
 
 ### 3. Launch a Synthesis Campaign
@@ -230,7 +250,7 @@ tests/
 export OPENROUTER_API_KEY="your-api-key"
 
 # Run with Gemma 4 31B (or DeepSeek R1 / GLM-5 / Qwen / Claude)
-.venv/bin/python scripts/run_lox.py \
+uv run python scripts/run_lox.py \
   --provider openrouter \
   --model google/gemma-4-31b-it \
   --workers 16 \

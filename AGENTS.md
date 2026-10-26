@@ -1,6 +1,6 @@
-# LOX v3.0 Operational Guide (`AGENTS.md`)
+# LOX Operational Guide (`AGENTS.md`)
 
-Welcome to **LOX v3.0**, an autonomous, high-throughput empirical policy synthesis engine for NetHack built under the architectural motto: **"Hard Code Nothing."**
+Welcome to **LOX**, an autonomous, high-throughput empirical policy synthesis engine for NetHack built under the architectural motto: **"Hard Code Nothing."**
 
 ---
 
@@ -76,19 +76,25 @@ tests/
 
 ---
 
-## 3. Running Commands & Tests
+## 3. Running Commands, Linting & Tests
 
-Always use the project's virtual environment (`/home/moose/git/lox/.venv/bin/python` and `/home/moose/git/lox/.venv/bin/pytest`):
+Always use `uv` and `ruff` for package management, linting, formatting, and test execution:
 
 ```bash
-# 1. Run the automated test suite
-.venv/bin/pytest -v
+# 1. Lint and format with ruff
+uv run ruff check --fix .
+uv run ruff format .
 
-# 2. Populate or refresh the expert runs table in DuckDB
-.venv/bin/python scripts/download_experts.py
+# 2. Run the automated test suite
+uv run pytest -v
 
-# 3. Launch a synthesis campaign (e.g. with Gemma 4 31B or GLM-5 via OpenRouter)
-.venv/bin/python scripts/run_lox.py \
+# 3. Populate or add more expert runs into DuckDB
+uv run python scripts/download_experts.py --max-ascensions 50
+# Add local .txt dumplogs, .ttyrec/.ttyrec.bz2 files (e.g. NLD-AA), or direct URLs:
+uv run python scripts/download_experts.py --dumplog path/to/dumplogs/ --ttyrec path/to/ttyrecs/
+
+# 4. Launch a synthesis campaign (e.g. with Gemma 4 31B or GLM-5 via OpenRouter)
+uv run python scripts/run_lox.py \
   --provider openrouter \
   --model google/gemma-4-31b-it \
   --workers 16 \

@@ -129,15 +129,25 @@ class BatchDatabaseLogger:
 
                 # Smart Tail-Based Tick Sampling:
                 # Always keep ALL outlier good runs + sample of normal/median/failed runs up to max_tick_runs_per_batch
-                selected_for_ticks = [r for r in runs if r.get("is_outlier_good") and r.get("ticks")]
-                remaining_quota = max(0, self.max_tick_runs_per_batch - len(selected_for_ticks))
+                selected_for_ticks = [
+                    r for r in runs if r.get("is_outlier_good") and r.get("ticks")
+                ]
+                remaining_quota = max(
+                    0, self.max_tick_runs_per_batch - len(selected_for_ticks)
+                )
                 if remaining_quota > 0:
-                    others = [r for r in runs if not r.get("is_outlier_good") and r.get("ticks")]
+                    others = [
+                        r
+                        for r in runs
+                        if not r.get("is_outlier_good") and r.get("ticks")
+                    ]
                     if len(others) <= remaining_quota:
                         selected_for_ticks.extend(others)
                     else:
                         step_stride = max(1, len(others) // remaining_quota)
-                        selected_for_ticks.extend(others[::step_stride][:remaining_quota])
+                        selected_for_ticks.extend(
+                            others[::step_stride][:remaining_quota]
+                        )
 
                 tick_rows = []
                 for r in selected_for_ticks:
@@ -268,7 +278,11 @@ class BatchDatabaseLogger:
                     mode,
                     json.dumps(target_functions),
                     yaml.safe_dump(hypothesis, sort_keys=False),
-                    str(hypothesis.get("observation_from_db") or hypothesis.get("causal_finding") or ""),
+                    str(
+                        hypothesis.get("observation_from_db")
+                        or hypothesis.get("causal_finding")
+                        or ""
+                    ),
                     str(hypothesis.get("mechanism") or ""),
                     bool(verdict.get("passed", False)),
                     float(verdict.get("mean_delta", 0.0)),

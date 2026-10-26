@@ -89,13 +89,19 @@ class Policy:
 
 def test_sandbox_blocks_unsafe_constructs():
     with pytest.raises(PolicyValidationError, match="forbidden in policy sandbox"):
-        validate_python_code("import os\nclass Policy:\n    def run(self, state):\n        yield Action.WAIT")
+        validate_python_code(
+            "import os\nclass Policy:\n    def run(self, state):\n        yield Action.WAIT"
+        )
 
     with pytest.raises(PolicyValidationError, match="forbidden in policy sandbox"):
-        validate_python_code("class Policy:\n    def run(self, state):\n        eval('1+1')\n        yield Action.WAIT")
+        validate_python_code(
+            "class Policy:\n    def run(self, state):\n        eval('1+1')\n        yield Action.WAIT"
+        )
 
     with pytest.raises(PolicyValidationError, match="forbidden in policy sandbox"):
-        validate_python_code("class Policy:\n    def run(self, state):\n        x = ().__class__.__base__\n        yield Action.WAIT")
+        validate_python_code(
+            "class Policy:\n    def run(self, state):\n        x = ().__class__.__base__\n        yield Action.WAIT"
+        )
 
 
 def test_infinite_zero_yield_loop_watchdog():

@@ -123,7 +123,9 @@ def should_stop_early_for_futility(
     for r in candidate_runs:
         s = int(r["seed"])
         if s in baseline_by_seed:
-            paired_deltas.append(progression_metric(r) - progression_metric(baseline_by_seed[s]))
+            paired_deltas.append(
+                progression_metric(r) - progression_metric(baseline_by_seed[s])
+            )
 
     if len(paired_deltas) < min_pairs:
         return False
@@ -169,7 +171,9 @@ def evaluate_paired_hypothesis(
     for r in candidate_runs:
         s = int(r["seed"])
         if s in base_by_seed:
-            paired_deltas.append(progression_metric(r) - progression_metric(base_by_seed[s]))
+            paired_deltas.append(
+                progression_metric(r) - progression_metric(base_by_seed[s])
+            )
 
     if len(paired_deltas) >= 5:
         deltas = np.asarray(paired_deltas, dtype=np.float64)
@@ -194,7 +198,9 @@ def evaluate_paired_hypothesis(
     if wins <= losses:
         reasons.append(f"Wins ({wins}) <= Losses ({losses})")
     if ci_low <= 0.0 and p_val >= alpha:
-        reasons.append(f"Not statistically significant (95% CS lower={ci_low:+.3f}, Wilcoxon p={p_val:.4f} >= {alpha})")
+        reasons.append(
+            f"Not statistically significant (95% CS lower={ci_low:+.3f}, Wilcoxon p={p_val:.4f} >= {alpha})"
+        )
 
     passed = len(reasons) == 0
     reason_str = (

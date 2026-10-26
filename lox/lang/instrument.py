@@ -102,8 +102,16 @@ class ExecutionTracer:
     ) -> float | int:
         is_int = isinstance(default, int) and not isinstance(default, bool)
         f_def = float(default)
-        f_min = float(min_val) if min_val is not None else (f_def * 0.25 if f_def > 0 else f_def - 10.0)
-        f_max = float(max_val) if max_val is not None else (f_def * 2.5 if f_def > 0 else f_def + 10.0)
+        f_min = (
+            float(min_val)
+            if min_val is not None
+            else (f_def * 0.25 if f_def > 0 else f_def - 10.0)
+        )
+        f_max = (
+            float(max_val)
+            if max_val is not None
+            else (f_def * 2.5 if f_def > 0 else f_def + 10.0)
+        )
         if f_min > f_max:
             f_min, f_max = f_max, f_min
 
@@ -118,7 +126,9 @@ class ExecutionTracer:
                 value=float(int(round(val)) if is_int else val),
             )
         else:
-            self.registered_params[name].value = float(int(round(val)) if is_int else val)
+            self.registered_params[name].value = float(
+                int(round(val)) if is_int else val
+            )
 
         if is_int:
             return int(round(val))

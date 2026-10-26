@@ -82,7 +82,10 @@ class AuthorToolRegistry:
             "copy",
         ):
             if re.search(rf"\b{word}\b", low):
-                return f"Error: Mutative keyword '{word.upper()}' is forbidden. Use SELECT only.", "error"
+                return (
+                    f"Error: Mutative keyword '{word.upper()}' is forbidden. Use SELECT only.",
+                    "error",
+                )
 
         if "limit" not in low:
             clean += " LIMIT 30"
@@ -114,7 +117,10 @@ class AuthorToolRegistry:
         t = (topic or "all").lower()
         if "macro" in t:
             return self.macro_lib.format_docs() + macros_section, "macros docs"
-        return POLICY_LANG_DOCS + "\n" + self.macro_lib.format_docs() + macros_section, "full docs"
+        return (
+            POLICY_LANG_DOCS + "\n" + self.macro_lib.format_docs() + macros_section,
+            "full docs",
+        )
 
     def dry_run_policy(
         self,
@@ -134,8 +140,11 @@ class AuthorToolRegistry:
             if is_macro:
                 # Test compiling the candidate macro code merged with existing macros
                 from lox.lang.validator import validate_python_code
+
                 validate_python_code(code, filename="macros_candidate.py")
-                merged_macros = (macros_code + "\n\n" + code).strip() if macros_code else code
+                merged_macros = (
+                    (macros_code + "\n\n" + code).strip() if macros_code else code
+                )
                 if policy_code.strip():
                     compiled = compile_policy_and_macros(policy_code, merged_macros)
                 else:
@@ -145,13 +154,15 @@ class AuthorToolRegistry:
                     )
             else:
                 if policy_code.strip():
-                    spliced_policy, changed_fns = splice_functions_into_policy(policy_code, code)
+                    spliced_policy, _ = splice_functions_into_policy(policy_code, code)
                 else:
                     spliced_policy = code
-                    changed_fns = ["run"]
                 compiled = compile_policy_and_macros(spliced_policy, macros_code)
         except Exception as exc:
-            return f"Compilation / Validation Error:\n{type(exc).__name__}: {exc}", "COMPILE_ERROR"
+            return (
+                f"Compilation / Validation Error:\n{type(exc).__name__}: {exc}",
+                "COMPILE_ERROR",
+            )
 
         harness = NetHackHarness(max_steps=max(10, min(200, int(max_turns))))
         try:
@@ -164,7 +175,9 @@ class AuthorToolRegistry:
                 actions_taken.append(f"{active_fn}:{info['action_name']}")
                 if done:
                     break
-            fn_summary = ", ".join(f"{k}:{v}" for k, v in runner.tracer.fn_calls.items())
+            fn_summary = ", ".join(
+                f"{k}:{v}" for k, v in runner.tracer.fn_calls.items()
+            )
             sample_acts = " -> ".join(actions_taken[:10])
             return (
                 f"Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
@@ -175,8 +188,12 @@ class AuthorToolRegistry:
             )
         except Exception as exc:
             import traceback
+
             tb = traceback.format_exc(limit=4)
-            return f"Runtime Error during Dry-Run on seed {seed}:\n{type(exc).__name__}: {exc}\n{tb}", "RUNTIME_ERROR"
+            return (
+                f"Runtime Error during Dry-Run on seed {seed}:\n{type(exc).__name__}: {exc}\n{tb}",
+                "RUNTIME_ERROR",
+            )
         finally:
             harness.close()
 

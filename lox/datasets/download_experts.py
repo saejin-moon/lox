@@ -19,7 +19,6 @@ import numpy as np
 
 from lox.db.schema import DEFAULT_DB_PATH, init_db
 from lox.db.summarizer import summarize_episode_ticks
-from lox.env.actions import ACTION_BY_CHAR
 
 NAO_XLOGFILE_URL = "https://alt.org/nethack/xlogfile.nh363"
 NAO_DUMPLOG_BASE = "https://alt.org/nethack/dumplog"
@@ -378,7 +377,12 @@ def parse_dumplog_to_expert_run(
         elif low.startswith("your inventory"):
             current_sec = "inventory"
             continue
-        elif "you were" in low or "you are" in low or low.startswith("intrinsics") or "resistant" in low:
+        elif (
+            "you were" in low
+            or "you are" in low
+            or low.startswith("intrinsics")
+            or "resistant" in low
+        ):
             if len(s) < 90:
                 sections["intrinsics"].append(s)
         elif low.startswith("fighting skills") or low.startswith("weapon skills"):
@@ -394,10 +398,26 @@ def parse_dumplog_to_expert_run(
         if current_sec and s:
             sections[current_sec].append(s)
 
-    inv_preview = "; ".join(sections["inventory"][:20]) if sections["inventory"] else "Standard ascension kit"
-    intr_preview = ", ".join(sections["intrinsics"][:15]) if sections["intrinsics"] else "Full resistances, reflection, magic res"
-    skills_preview = ", ".join(sections["skills"][:8]) if sections["skills"] else "Expert main weapon"
-    game_log = "\n".join(sections["messages"][-50:]) if sections["messages"] else f"Final outcome: {death_reason} at Dlvl {depth} (Max {max_depth}) after {turns} turns."
+    inv_preview = (
+        "; ".join(sections["inventory"][:20])
+        if sections["inventory"]
+        else "Standard ascension kit"
+    )
+    intr_preview = (
+        ", ".join(sections["intrinsics"][:15])
+        if sections["intrinsics"]
+        else "Full resistances, reflection, magic res"
+    )
+    skills_preview = (
+        ", ".join(sections["skills"][:8])
+        if sections["skills"]
+        else "Expert main weapon"
+    )
+    game_log = (
+        "\n".join(sections["messages"][-50:])
+        if sections["messages"]
+        else f"Final outcome: {death_reason} at Dlvl {depth} (Max {max_depth}) after {turns} turns."
+    )
 
     summary_digest = "\n".join(
         [
@@ -457,10 +477,6 @@ def parse_ttyrec_to_expert_run(
     ticks: list[dict[str, Any]] = []
 
     try:
-        from nle.dataset import TtyrecDataset
-        import tempfile
-        import shutil
-
         # Use NLE's C++ Ttyrec converter if a db exists or parse ttyrec frames directly
         raise ImportError("Use direct fast frame parser for standalone file")
     except Exception:
@@ -493,9 +509,15 @@ def parse_ttyrec_to_expert_run(
             xp_m = _XP_RE.search(full_str)
             t_m = _TURN_RE.search(full_str)
 
-            depth = int(d_m.group(1)) if (d_m and d_m.group(1)) else (ticks[-1]["depth"] if ticks else 1)
+            depth = (
+                int(d_m.group(1))
+                if (d_m and d_m.group(1))
+                else (ticks[-1]["depth"] if ticks else 1)
+            )
             hp = int(hp_m.group(1)) if hp_m else (ticks[-1]["hp"] if ticks else 16)
-            max_hp = int(hp_m.group(2)) if hp_m else (ticks[-1]["max_hp"] if ticks else 16)
+            max_hp = (
+                int(hp_m.group(2)) if hp_m else (ticks[-1]["max_hp"] if ticks else 16)
+            )
             ac = int(ac_m.group(1)) if ac_m else (ticks[-1]["ac"] if ticks else 10)
             xl = int(xp_m.group(1)) if xp_m else (ticks[-1]["xp_level"] if ticks else 1)
             turn = int(t_m.group(1)) if t_m else step_idx
@@ -560,20 +582,96 @@ def ingest_expert_runs_into_duckdb(
     max_ascensions: int = 50,
     fetch_dumplogs: int = 15,
     timeout_sec: float = 20.0,
+    dumplog_paths: list[str] | None = None,
+    ttyrec_paths: list[str] | None = None,
+    urls: list[str] | None = None,
+    force: bool = False,
 ) -> dict[str, int]:
     """
-    Downloads verified human ascensions from `archive.alt.org` (xlogfile + dumplogs)
+    Downloads verified human ascensions from `archive.alt.org` (xlogfile + dumplogs),
+    or ingests local `.txt` dumplogs, `.ttyrec`/`.ttyrec.bz2` files, or direct URLs,
     and populates `expert_runs` and `expert_ticks` in DuckDB so the Author Agent can
     query them via `query_db(sql)`.
     """
     con = init_db(db_path)
     existing = con.execute("SELECT COUNT(*) FROM expert_runs").fetchone()[0]
-    if existing >= max_ascensions:
+    has_custom = bool(dumplog_paths or ttyrec_paths or urls)
+    if existing >= max_ascensions and not force and not has_custom:
         con.close()
         return {"expert_runs": existing, "newly_added": 0}
 
     expert_rows: list[dict[str, Any]] = []
     tick_rows: list[dict[str, Any]] = []
+
+    # 0a. Ingest any user-provided local dumplog files or directories
+    for p in dumplog_paths or []:
+        files = (
+            [os.path.join(p, fn) for fn in sorted(os.listdir(p)) if fn.endswith(".txt")]
+            if os.path.isdir(p)
+            else ([p] if os.path.isfile(p) else [])
+        )
+        for fp in files:
+            with open(fp, "r", encoding="latin1", errors="ignore") as f:
+                txt = f.read()
+            base = os.path.splitext(os.path.basename(fp))[0]
+            expert_rows.append(
+                parse_dumplog_to_expert_run(
+                    run_id=f"custom_dump_{base}",
+                    meta={
+                        "name": base,
+                        "role": "Val",
+                        "maxlvl": 48,
+                        "death": "ascended",
+                    },
+                    dumplog_text=txt,
+                    source="custom_dumplog",
+                )
+            )
+
+    # 0b. Ingest any user-provided local .ttyrec / .ttyrec.bz2 files or directories
+    for p in ttyrec_paths or []:
+        files = (
+            [
+                os.path.join(p, fn)
+                for fn in sorted(os.listdir(p))
+                if fn.endswith((".ttyrec", ".ttyrec.bz2"))
+            ]
+            if os.path.isdir(p)
+            else ([p] if os.path.isfile(p) else [])
+        )
+        for fp in files:
+            base = os.path.basename(fp).split(".")[0]
+            r_row, t_rows = parse_ttyrec_to_expert_run(
+                run_id=f"ttyrec_{base}",
+                ttyrec_path=fp,
+                source="custom_ttyrec",
+            )
+            expert_rows.append(r_row)
+            tick_rows.extend(t_rows)
+
+    # 0c. Ingest any user-provided direct dumplog URLs
+    if urls:
+        with httpx.Client(timeout=timeout_sec, follow_redirects=True) as client:
+            for u in urls:
+                try:
+                    r = client.get(u)
+                    if r.status_code == 200 and r.text:
+                        slug = u.rstrip("/").split("/")[-1].split(".")[0]
+                        expert_rows.append(
+                            parse_dumplog_to_expert_run(
+                                run_id=f"url_dump_{slug}",
+                                meta={
+                                    "name": slug,
+                                    "role": "Val",
+                                    "maxlvl": 48,
+                                    "death": "ascended",
+                                },
+                                dumplog_text=r.text,
+                                source="url_dumplog",
+                            )
+                        )
+                except Exception:
+                    continue
 
     # 1. Always ingest verified human ascension dumplogs
     for meta, dump_txt in VERIFIED_HUMAN_ASCENSIONS:
@@ -593,7 +691,9 @@ def ingest_expert_runs_into_duckdb(
             resp = client.get(NAO_XLOGFILE_URL)
             if resp.status_code == 200 and resp.content:
                 if NAO_XLOGFILE_URL.endswith(".xz"):
-                    raw_text = lzma.decompress(resp.content).decode("latin1", errors="ignore")
+                    raw_text = lzma.decompress(resp.content).decode(
+                        "latin1", errors="ignore"
+                    )
                 else:
                     raw_text = resp.content.decode("latin1", errors="ignore")
                 ascended_metas: list[dict[str, str]] = []
@@ -651,14 +751,21 @@ def ingest_expert_runs_into_duckdb(
             for step_i in range(1, 151):
                 # Simple reference trajectory exercising real NLE actions (search, open, move, descend, fight)
                 chosen_act = Action.SEARCH
-                mons = [m for m in st.visible_monsters() if not m.is_pet and not m.is_peaceful]
+                mons = [
+                    m
+                    for m in st.visible_monsters()
+                    if not m.is_pet and not m.is_peaceful
+                ]
                 adj_mon = next(
                     (m for m in mons if abs(m.y - st.y) <= 1 and abs(m.x - st.x) <= 1),
                     None,
                 )
                 if adj_mon is not None:
                     from lox.env.actions import DIR_DELTAS
-                    chosen_act = DIR_DELTAS.get((adj_mon.y - st.y, adj_mon.x - st.x), Action.WAIT)
+
+                    chosen_act = DIR_DELTAS.get(
+                        (adj_mon.y - st.y, adj_mon.x - st.x), Action.WAIT
+                    )
                 elif st.char_at(st.y, st.x) == ">":
                     chosen_act = Action.DOWN
                 else:
@@ -695,6 +802,7 @@ def ingest_expert_runs_into_duckdb(
                     if (dy, dx) != (0, 0):
                         ny, nx = st.y + dy, st.x + dx
                         from lox.env.actions import DIR_DELTAS, seq
+
                         dir_act = DIR_DELTAS[(dy, dx)]
                         if st.char_at(ny, nx) == "+":
                             chosen_act = seq(Action.OPEN, dir_act)

@@ -6,16 +6,14 @@ Supports single atomic actions, raw ASCII bytes/characters, and multi-key sequen
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import enum
+from dataclasses import dataclass
 from typing import Any
 
 from nle.nethack.actions import (
-    C,
     Command,
     CompassDirection,
     CompassDirectionLonger,
-    M,
     MiscAction,
     MiscDirection,
     TextCharacters,
@@ -26,14 +24,14 @@ class Action(enum.IntEnum):
     """Complete 1-to-1 enumeration of NLE native actions (byte values sent to NetHack C engine)."""
 
     # Compass Directions (vi-keys)
-    N = CompassDirection.N.value          # ord('k')
-    E = CompassDirection.E.value          # ord('l')
-    S = CompassDirection.S.value          # ord('j')
-    W = CompassDirection.W.value          # ord('h')
-    NE = CompassDirection.NE.value        # ord('u')
-    SE = CompassDirection.SE.value        # ord('n')
-    SW = CompassDirection.SW.value        # ord('b')
-    NW = CompassDirection.NW.value        # ord('y')
+    N = CompassDirection.N.value  # ord('k')
+    E = CompassDirection.E.value  # ord('l')
+    S = CompassDirection.S.value  # ord('j')
+    W = CompassDirection.W.value  # ord('h')
+    NE = CompassDirection.NE.value  # ord('u')
+    SE = CompassDirection.SE.value  # ord('n')
+    SW = CompassDirection.SW.value  # ord('b')
+    NW = CompassDirection.NW.value  # ord('y')
 
     # Full-word Compass Aliases
     NORTH = CompassDirection.N.value
@@ -56,98 +54,98 @@ class Action(enum.IntEnum):
     RUN_NW = CompassDirectionLonger.NW.value
 
     # Vertical & Misc Directions
-    UP = MiscDirection.UP.value           # ord('<')
-    DOWN = MiscDirection.DOWN.value       # ord('>')
-    ASCEND = MiscDirection.UP.value       # Alias for UP
-    DESCEND = MiscDirection.DOWN.value    # Alias for DOWN
-    WAIT = MiscDirection.WAIT.value       # ord('.')
-    MORE = MiscAction.MORE.value          # ord('\r')
+    UP = MiscDirection.UP.value  # ord('<')
+    DOWN = MiscDirection.DOWN.value  # ord('>')
+    ASCEND = MiscDirection.UP.value  # Alias for UP
+    DESCEND = MiscDirection.DOWN.value  # Alias for DOWN
+    WAIT = MiscDirection.WAIT.value  # ord('.')
+    MORE = MiscAction.MORE.value  # ord('\r')
 
     # All Native NLE Commands
-    EXTCMD = Command.EXTCMD.value         # ord('#')
-    EXTLIST = Command.EXTLIST.value       # M('?')
-    ADJUST = Command.ADJUST.value         # M('a')
-    ANNOTATE = Command.ANNOTATE.value     # M('A')
-    APPLY = Command.APPLY.value           # ord('a')
-    ATTRIBUTES = Command.ATTRIBUTES.value # C('x')
-    AUTOPICKUP = Command.AUTOPICKUP.value # ord('@')
-    CALL = Command.CALL.value             # ord('C')
-    CAST = Command.CAST.value             # ord('Z')
-    CHAT = Command.CHAT.value             # M('c')
-    CLOSE = Command.CLOSE.value           # ord('c')
-    CONDUCT = Command.CONDUCT.value       # M('C')
-    DIP = Command.DIP.value               # M('d')
-    DROP = Command.DROP.value             # ord('d')
-    DROPTYPE = Command.DROPTYPE.value     # ord('D')
-    EAT = Command.EAT.value               # ord('e')
-    ENGRAVE = Command.ENGRAVE.value       # ord('E')
-    ENHANCE = Command.ENHANCE.value       # M('e')
-    ESC = Command.ESC.value               # C('[') == 27
-    FIGHT = Command.FIGHT.value           # ord('F')
-    FIRE = Command.FIRE.value             # ord('f')
-    FORCE = Command.FORCE.value           # M('f')
-    GLANCE = Command.GLANCE.value         # ord(';')
-    HISTORY = Command.HISTORY.value       # ord('V')
-    INVENTORY = Command.INVENTORY.value   # ord('i')
-    INVENTTYPE = Command.INVENTTYPE.value # ord('I')
-    INVOKE = Command.INVOKE.value         # M('i')
-    JUMP = Command.JUMP.value             # M('j')
-    KICK = Command.KICK.value             # C('d') == 4
-    KNOWN = Command.KNOWN.value           # ord('\\')
-    KNOWNCLASS = Command.KNOWNCLASS.value # ord('`')
-    LOOK = Command.LOOK.value             # ord(':')
-    LOOT = Command.LOOT.value             # M('l')
-    MONSTER = Command.MONSTER.value       # M('m')
-    MOVE = Command.MOVE.value             # ord('m')
-    MOVEFAR = Command.MOVEFAR.value       # ord('M')
-    OFFER = Command.OFFER.value           # M('o')
-    OPEN = Command.OPEN.value             # ord('o')
-    OPTIONS = Command.OPTIONS.value       # ord('O')
-    OVERVIEW = Command.OVERVIEW.value     # C('o')
-    PAY = Command.PAY.value               # ord('p')
-    PICKUP = Command.PICKUP.value         # ord(',')
-    PRAY = Command.PRAY.value             # M('p')
-    PUTON = Command.PUTON.value           # ord('P')
-    QUAFF = Command.QUAFF.value           # ord('q')
-    QUIT = Command.QUIT.value             # M('q')
-    QUIVER = Command.QUIVER.value         # ord('Q')
-    READ = Command.READ.value             # ord('r')
-    REDRAW = Command.REDRAW.value         # C('r')
-    REMOVE = Command.REMOVE.value         # ord('R')
-    RIDE = Command.RIDE.value             # M('R')
-    RUB = Command.RUB.value               # M('r')
-    RUSH = Command.RUSH.value             # ord('g')
-    RUSH2 = Command.RUSH2.value           # ord('G')
-    SAVE = Command.SAVE.value             # ord('S')
-    SEARCH = Command.SEARCH.value         # ord('s')
-    SEEALL = Command.SEEALL.value         # ord('*')
-    SEEAMULET = Command.SEEAMULET.value   # ord('"')
-    SEEARMOR = Command.SEEARMOR.value     # ord('[')
-    SEEGOLD = Command.SEEGOLD.value       # ord('$')
-    SEERINGS = Command.SEERINGS.value     # ord('=')
-    SEESPELLS = Command.SEESPELLS.value   # ord('+')
-    SEETOOLS = Command.SEETOOLS.value     # ord('(')
-    SEETRAP = Command.SEETRAP.value       # ord('^')
-    SEEWEAPON = Command.SEEWEAPON.value   # ord(')')
-    SIT = Command.SIT.value               # M('s')
-    SWAP = Command.SWAP.value             # ord('x')
-    TAKEOFF = Command.TAKEOFF.value       # ord('T')
-    TAKEOFFALL = Command.TAKEOFFALL.value # ord('A')
-    TELEPORT = Command.TELEPORT.value     # C('t')
-    THROW = Command.THROW.value           # ord('t')
-    TIP = Command.TIP.value               # M('T')
-    TRAVEL = Command.TRAVEL.value         # ord('_')
-    TURN = Command.TURN.value             # M('t')
-    TWOWEAPON = Command.TWOWEAPON.value   # ord('X')
-    UNTRAP = Command.UNTRAP.value         # M('u')
-    VERSION = Command.VERSION.value       # M('v')
+    EXTCMD = Command.EXTCMD.value  # ord('#')
+    EXTLIST = Command.EXTLIST.value  # M('?')
+    ADJUST = Command.ADJUST.value  # M('a')
+    ANNOTATE = Command.ANNOTATE.value  # M('A')
+    APPLY = Command.APPLY.value  # ord('a')
+    ATTRIBUTES = Command.ATTRIBUTES.value  # C('x')
+    AUTOPICKUP = Command.AUTOPICKUP.value  # ord('@')
+    CALL = Command.CALL.value  # ord('C')
+    CAST = Command.CAST.value  # ord('Z')
+    CHAT = Command.CHAT.value  # M('c')
+    CLOSE = Command.CLOSE.value  # ord('c')
+    CONDUCT = Command.CONDUCT.value  # M('C')
+    DIP = Command.DIP.value  # M('d')
+    DROP = Command.DROP.value  # ord('d')
+    DROPTYPE = Command.DROPTYPE.value  # ord('D')
+    EAT = Command.EAT.value  # ord('e')
+    ENGRAVE = Command.ENGRAVE.value  # ord('E')
+    ENHANCE = Command.ENHANCE.value  # M('e')
+    ESC = Command.ESC.value  # C('[') == 27
+    FIGHT = Command.FIGHT.value  # ord('F')
+    FIRE = Command.FIRE.value  # ord('f')
+    FORCE = Command.FORCE.value  # M('f')
+    GLANCE = Command.GLANCE.value  # ord(';')
+    HISTORY = Command.HISTORY.value  # ord('V')
+    INVENTORY = Command.INVENTORY.value  # ord('i')
+    INVENTTYPE = Command.INVENTTYPE.value  # ord('I')
+    INVOKE = Command.INVOKE.value  # M('i')
+    JUMP = Command.JUMP.value  # M('j')
+    KICK = Command.KICK.value  # C('d') == 4
+    KNOWN = Command.KNOWN.value  # ord('\\')
+    KNOWNCLASS = Command.KNOWNCLASS.value  # ord('`')
+    LOOK = Command.LOOK.value  # ord(':')
+    LOOT = Command.LOOT.value  # M('l')
+    MONSTER = Command.MONSTER.value  # M('m')
+    MOVE = Command.MOVE.value  # ord('m')
+    MOVEFAR = Command.MOVEFAR.value  # ord('M')
+    OFFER = Command.OFFER.value  # M('o')
+    OPEN = Command.OPEN.value  # ord('o')
+    OPTIONS = Command.OPTIONS.value  # ord('O')
+    OVERVIEW = Command.OVERVIEW.value  # C('o')
+    PAY = Command.PAY.value  # ord('p')
+    PICKUP = Command.PICKUP.value  # ord(',')
+    PRAY = Command.PRAY.value  # M('p')
+    PUTON = Command.PUTON.value  # ord('P')
+    QUAFF = Command.QUAFF.value  # ord('q')
+    QUIT = Command.QUIT.value  # M('q')
+    QUIVER = Command.QUIVER.value  # ord('Q')
+    READ = Command.READ.value  # ord('r')
+    REDRAW = Command.REDRAW.value  # C('r')
+    REMOVE = Command.REMOVE.value  # ord('R')
+    RIDE = Command.RIDE.value  # M('R')
+    RUB = Command.RUB.value  # M('r')
+    RUSH = Command.RUSH.value  # ord('g')
+    RUSH2 = Command.RUSH2.value  # ord('G')
+    SAVE = Command.SAVE.value  # ord('S')
+    SEARCH = Command.SEARCH.value  # ord('s')
+    SEEALL = Command.SEEALL.value  # ord('*')
+    SEEAMULET = Command.SEEAMULET.value  # ord('"')
+    SEEARMOR = Command.SEEARMOR.value  # ord('[')
+    SEEGOLD = Command.SEEGOLD.value  # ord('$')
+    SEERINGS = Command.SEERINGS.value  # ord('=')
+    SEESPELLS = Command.SEESPELLS.value  # ord('+')
+    SEETOOLS = Command.SEETOOLS.value  # ord('(')
+    SEETRAP = Command.SEETRAP.value  # ord('^')
+    SEEWEAPON = Command.SEEWEAPON.value  # ord(')')
+    SIT = Command.SIT.value  # M('s')
+    SWAP = Command.SWAP.value  # ord('x')
+    TAKEOFF = Command.TAKEOFF.value  # ord('T')
+    TAKEOFFALL = Command.TAKEOFFALL.value  # ord('A')
+    TELEPORT = Command.TELEPORT.value  # C('t')
+    THROW = Command.THROW.value  # ord('t')
+    TIP = Command.TIP.value  # M('T')
+    TRAVEL = Command.TRAVEL.value  # ord('_')
+    TURN = Command.TURN.value  # M('t')
+    TWOWEAPON = Command.TWOWEAPON.value  # ord('X')
+    UNTRAP = Command.UNTRAP.value  # M('u')
+    VERSION = Command.VERSION.value  # M('v')
     VERSIONSHORT = Command.VERSIONSHORT.value
-    WEAR = Command.WEAR.value             # ord('W')
-    WHATDOES = Command.WHATDOES.value     # ord('&')
-    WHATIS = Command.WHATIS.value         # ord('/')
-    WIELD = Command.WIELD.value           # ord('w')
-    WIPE = Command.WIPE.value             # M('w')
-    ZAP = Command.ZAP.value               # ord('z')
+    WEAR = Command.WEAR.value  # ord('W')
+    WHATDOES = Command.WHATDOES.value  # ord('&')
+    WHATIS = Command.WHATIS.value  # ord('/')
+    WIELD = Command.WIELD.value  # ord('w')
+    WIPE = Command.WIPE.value  # M('w')
+    ZAP = Command.ZAP.value  # ord('z')
 
     # Text / Prompt Characters
     PLUS = TextCharacters.PLUS.value
@@ -211,7 +209,10 @@ class ActionSequence:
     def name(self) -> str:
         if self.label:
             return self.label
-        parts = [ACTION_BY_CHAR.get(b, chr(b) if 32 <= b <= 126 else f"\\x{b:02x}") for b in self.bytes_seq]
+        parts = [
+            ACTION_BY_CHAR.get(b, chr(b) if 32 <= b <= 126 else f"\\x{b:02x}")
+            for b in self.bytes_seq
+        ]
         return "seq(" + ",".join(parts) + ")"
 
 
@@ -250,7 +251,11 @@ def seq(*steps: str | int | Action | RawAction, label: str = "") -> ActionSequen
             else:
                 for ch in item:
                     out.append(ord(ch) & 0xFF)
-        elif isinstance(item, (tuple, list)) and len(item) == 2 and all(isinstance(x, int) for x in item):
+        elif (
+            isinstance(item, (tuple, list))
+            and len(item) == 2
+            and all(isinstance(x, int) for x in item)
+        ):
             # Support (dy, dx) direction delta tuple
             act = DIR_DELTAS.get((int(item[0]), int(item[1])), Action.WAIT)
             out.append(int(act.value))
@@ -259,7 +264,7 @@ def seq(*steps: str | int | Action | RawAction, label: str = "") -> ActionSequen
     return ActionSequence(tuple(out), label=label)
 
 
-def normalize_action_to_bytes( yielded: Any ) -> tuple[tuple[int, ...], str]:
+def normalize_action_to_bytes(yielded: Any) -> tuple[tuple[int, ...], str]:
     """
     Normalizes any policy yield value into a tuple of raw NetHack byte(s) and a human-readable action name.
     Supports:

@@ -54,7 +54,6 @@ from lox.lang.instrument import (
 )
 from lox.lang.validator import PolicyValidationError, validate_python_code
 
-
 SAFE_BUILTINS: dict[str, Any] = {
     "abs": abs,
     "all": all,
@@ -301,14 +300,20 @@ class CompiledPolicy:
         # Parse, validate, and instrument both ASTs once
         if macros_code and macros_code.strip():
             macro_tree = validate_python_code(macros_code, filename="macros.py")
-            macro_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(macro_tree)
+            macro_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(
+                macro_tree
+            )
             ast.fix_missing_locations(macro_tree)
-            self._macro_code_obj = compile(macro_tree, filename="macros.py", mode="exec")
+            self._macro_code_obj = compile(
+                macro_tree, filename="macros.py", mode="exec"
+            )
         else:
             self._macro_code_obj = None
 
         policy_tree = validate_python_code(policy_code, filename="policy.py")
-        policy_tree = PolicyInstrumentTransformer(is_macro_module=False).visit(policy_tree)
+        policy_tree = PolicyInstrumentTransformer(is_macro_module=False).visit(
+            policy_tree
+        )
         ast.fix_missing_locations(policy_tree)
         self._policy_code_obj = compile(policy_tree, filename="policy.py", mode="exec")
 
@@ -348,7 +353,11 @@ class CompiledPolicy:
                 if (
                     isinstance(val, type)
                     and val.__module__ == "lox_policy"
-                    and (hasattr(val, "run") or hasattr(val, "step") or hasattr(val, "act"))
+                    and (
+                        hasattr(val, "run")
+                        or hasattr(val, "step")
+                        or hasattr(val, "act")
+                    )
                 ):
                     policy_cls = val
                     break
@@ -357,7 +366,11 @@ class CompiledPolicy:
             # Attach `self.param(...)` onto `policy_cls` BEFORE calling `__init__()`
             if not hasattr(policy_cls, "param"):
                 try:
-                    setattr(policy_cls, "param", lambda self, *a, **kw: tracer.get_param(*a, **kw))
+                    setattr(
+                        policy_cls,
+                        "param",
+                        lambda self, *a, **kw: tracer.get_param(*a, **kw),
+                    )
                 except Exception:
                     pass
             instance = policy_cls()

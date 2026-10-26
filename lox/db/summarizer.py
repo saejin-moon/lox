@@ -9,9 +9,9 @@ Domain-Agnostic Run Summarizer, Outlier Detector & Statistical Contrast Engine (
 
 from __future__ import annotations
 
-from collections import Counter
 import json
 import math
+from collections import Counter
 from typing import Any
 
 import numpy as np
@@ -28,7 +28,11 @@ def summarize_episode_ticks(
     - `milestones` (dict): Structured milestone stats (depths reached, min/max HP, best AC, max XP level)
     """
     if not ticks:
-        return "Empty run (0 ticks).", "", {"depths_visited": [1], "best_ac": 10, "max_xl": 1}
+        return (
+            "Empty run (0 ticks).",
+            "",
+            {"depths_visited": [1], "best_ac": 10, "max_xl": 1},
+        )
 
     # 1. Milestones & deduplicated game log
     depths_seen: list[int] = []
@@ -124,7 +128,9 @@ def summarize_episode_ticks(
             f"fn={seg['fn']} | {hp_str} | tiles={uniq_tiles} | acts=({top_acts})]"
         )
     if len(segments) > 14:
-        rle_lines.insert(6, f"  ... ({len(segments) - 14} intermediate phase segments) ...")
+        rle_lines.insert(
+            6, f"  ... ({len(segments) - 14} intermediate phase segments) ..."
+        )
 
     # 3. Part B: Critical Inflection Windows (sharpest HP/Depth/Score shifts) + Final Termination Window
     inflection_lines: list[str] = []
@@ -149,7 +155,11 @@ def summarize_episode_ticks(
         t_end = sub[-1].get("turn", 0)
         d0, d1 = sub[0].get("depth", 1), sub[-1].get("depth", 1)
         hp0, hp1 = sub[0].get("hp", 0), sub[-1].get("hp", 0)
-        msgs = [str(s.get("message", "")).strip() for s in sub if str(s.get("message", "")).strip()]
+        msgs = [
+            str(s.get("message", "")).strip()
+            for s in sub
+            if str(s.get("message", "")).strip()
+        ]
         msg_str = " / ".join(dict.fromkeys(msgs))[:120] or "no msg"
         fns = "/".join(dict.fromkeys(str(s.get("active_function", "")) for s in sub))
         inflection_lines.append(
@@ -159,7 +169,7 @@ def summarize_episode_ticks(
     # Final 8 ticks before end
     tail = ticks[-min(8, n) :]
     tail_str = " -> ".join(
-        f"T{s.get('turn',0)}({s.get('active_function','')}:{s.get('action_name','')} HP={s.get('hp',0)} '{str(s.get('message',''))[:35]}')"
+        f"T{s.get('turn', 0)}({s.get('active_function', '')}:{s.get('action_name', '')} HP={s.get('hp', 0)} '{str(s.get('message', ''))[:35]}')"
         for s in tail
     )
 
@@ -175,9 +185,9 @@ def summarize_episode_ticks(
 
     t_last = ticks[-1]
     overview = (
-        f"Depth={t_last.get('depth',1)} (Max={max(depths_seen) if depths_seen else 1}) | "
-        f"Turns={t_last.get('turn',0)} (Steps={n}) | "
-        f"HP={t_last.get('hp',0)}/{t_last.get('max_hp',0)} | AC={best_ac} | XL={max_xl}"
+        f"Depth={t_last.get('depth', 1)} (Max={max(depths_seen) if depths_seen else 1}) | "
+        f"Turns={t_last.get('turn', 0)} (Steps={n}) | "
+        f"HP={t_last.get('hp', 0)}/{t_last.get('max_hp', 0)} | AC={best_ac} | XL={max_xl}"
     )
     stall_line = f"Stalls: {'; '.join(stalls[:3])}" if stalls else "Stalls: None"
 
@@ -285,9 +295,7 @@ def compute_function_stats(
         return []
 
     good_runs = [r for r in runs if r.get("is_outlier_good")]
-    bad_runs = [r for r in runs if not r.get("is_outlier_good")]
     n_good = len(good_runs)
-    n_bad = len(bad_runs)
 
     all_fns: set[str] = set()
     parsed_trig: list[dict[str, int]] = []
@@ -312,7 +320,7 @@ def compute_function_stats(
         deaths_while_active = 0
 
         e_good = 0  # outlier good runs where fn executed
-        e_bad = 0   # non-outlier runs where fn executed
+        e_bad = 0  # non-outlier runs where fn executed
 
         for idx, r in enumerate(runs):
             c = int(parsed_trig[idx].get(fn, 0))
@@ -327,7 +335,9 @@ def compute_function_stats(
                 else:
                     e_bad += 1
                 last_fn = r.get("last_active_function")
-                if (last_fn == fn or (last_fn is None and not r.get("is_outlier_good"))) and r.get("end_reason") != "ascended":
+                if (
+                    last_fn == fn or (last_fn is None and not r.get("is_outlier_good"))
+                ) and r.get("end_reason") != "ascended":
                     deaths_while_active += 1
 
         trig_rate = eps_trig / float(total_runs)
@@ -339,7 +349,11 @@ def compute_function_stats(
         ochiai_good = e_good / denom_good if n_good > 0 and eps_trig > 0 else 0.0
 
         # Liblit failure importance (dies while active vs overall active rate)
-        liblit_fail = death_rate * math.log(deaths_while_active + 1.0) / math.log(total_runs + 1.0)
+        liblit_fail = (
+            death_rate
+            * math.log(deaths_while_active + 1.0)
+            / math.log(total_runs + 1.0)
+        )
 
         stats_rows.append(
             {
@@ -377,8 +391,12 @@ def build_batch_contrast_digest(
     outliers = [r for r in runs if r.get("is_outlier_good")]
     normals = [r for r in runs if not r.get("is_outlier_good")]
 
-    out_d = float(np.mean([r.get("max_depth", 1) for r in outliers])) if outliers else 0.0
-    norm_d = float(np.mean([r.get("max_depth", 1) for r in normals])) if normals else 0.0
+    out_d = (
+        float(np.mean([r.get("max_depth", 1) for r in outliers])) if outliers else 0.0
+    )
+    norm_d = (
+        float(np.mean([r.get("max_depth", 1) for r in normals])) if normals else 0.0
+    )
     out_s = float(np.mean([r.get("score", 0) for r in outliers])) if outliers else 0.0
     norm_s = float(np.mean([r.get("score", 0) for r in normals])) if normals else 0.0
     out_t = float(np.mean([r.get("turns", 0) for r in outliers])) if outliers else 0.0
@@ -395,24 +413,34 @@ def build_batch_contrast_digest(
 
     if fn_stats:
         lines.append("\n### Function Execution & Correlation Table (`function_stats`):")
-        lines.append("| Function | Trigger Rate | Total Turns | Avg Depth | Death Rate Active | Good-Run Ochiai | Fail Score |")
+        lines.append(
+            "| Function | Trigger Rate | Total Turns | Avg Depth | Death Rate Active | Good-Run Ochiai | Fail Score |"
+        )
         lines.append("| :--- | ---: | ---: | ---: | ---: | ---: | ---: |")
-        for fs in sorted(fn_stats, key=lambda x: x["ochiai_good_run_score"], reverse=True)[:12]:
+        for fs in sorted(
+            fn_stats, key=lambda x: x["ochiai_good_run_score"], reverse=True
+        )[:12]:
             lines.append(
-                f"| `{fs['function_name']}` | {fs['trigger_rate']*100:.1f}% | {fs['total_turns_active']:,} | "
-                f"{fs['avg_depth_when_triggered']:.2f} | {fs['death_rate_while_active']*100:.1f}% | "
+                f"| `{fs['function_name']}` | {fs['trigger_rate'] * 100:.1f}% | {fs['total_turns_active']:,} | "
+                f"{fs['avg_depth_when_triggered']:.2f} | {fs['death_rate_while_active'] * 100:.1f}% | "
                 f"**{fs['ochiai_good_run_score']:.3f}** | {fs['liblit_failure_score']:.3f} |"
             )
 
     # Top death reasons
     end_counts = Counter(str(r.get("end_reason", "ended")) for r in runs)
-    top_ends = ", ".join(f"{k}: {v} ({v*100.0/len(runs):.1f}%)" for k, v in end_counts.most_common(5))
+    top_ends = ", ".join(
+        f"{k}: {v} ({v * 100.0 / len(runs):.1f}%)" for k, v in end_counts.most_common(5)
+    )
     lines.append(f"\n- **Termination Breakdown**: {top_ends}")
 
     # Sample top 2 Outlier Good Run summaries right in the digest
     if outliers:
-        top_outliers = sorted(outliers, key=lambda x: x.get("outlier_z_score", 0.0), reverse=True)[:2]
-        lines.append("\n### Sample Statistical Outlier Good Runs (`is_outlier_good = TRUE`):")
+        top_outliers = sorted(
+            outliers, key=lambda x: x.get("outlier_z_score", 0.0), reverse=True
+        )[:2]
+        lines.append(
+            "\n### Sample Statistical Outlier Good Runs (`is_outlier_good = TRUE`):"
+        )
         for r in top_outliers:
             lines.append(
                 f"#### Outlier Run `{r['run_id']}` (Seed={r['seed']}, Z={r['outlier_z_score']:+.2f}, Pctl={r['batch_percentile']:.1f}%):\n"

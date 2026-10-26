@@ -9,7 +9,7 @@ from __future__ import annotations
 from lox.author.tools import AuthorToolRegistry
 from lox.datasets.download_experts import ingest_expert_runs_into_duckdb
 from lox.db.logger import BatchDatabaseLogger
-from lox.db.schema import connect_db, init_db
+from lox.db.schema import init_db
 from lox.db.summarizer import (
     compute_function_stats,
     mark_outlier_good_runs,
@@ -227,10 +227,14 @@ def test_duckdb_logger_and_author_tools(tmp_path):
     tools = AuthorToolRegistry(db_path=db_file, macros_path=macros_file)
 
     # 1. query_db on runs (outlier good runs) and expert_runs
-    out_good, _ = tools.query_db("SELECT run_id, max_depth, is_outlier_good FROM runs WHERE is_outlier_good = TRUE")
+    out_good, _ = tools.query_db(
+        "SELECT run_id, max_depth, is_outlier_good FROM runs WHERE is_outlier_good = TRUE"
+    )
     assert "b1_s10" in out_good
 
-    out_exp, _ = tools.query_db("SELECT player, role, max_depth, end_reason FROM expert_runs LIMIT 5")
+    out_exp, _ = tools.query_db(
+        "SELECT player, role, max_depth, end_reason FROM expert_runs LIMIT 5"
+    )
     assert "eidolos" in out_exp or "reference_explorer" in out_exp
 
     # Read-only guardrail blocks DROP/DELETE

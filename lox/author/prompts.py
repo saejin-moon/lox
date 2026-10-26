@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from lox.db.schema import get_schema_markdown
 
-
 POLICY_LANG_DOCS = """### Policy Language & 1-to-1 Harness Reference
 
 #### 1. Execution Model (`class Policy` and `macros.py`)

@@ -1,7 +1,7 @@
 [project]
 name = "lox"
-version = "2.0.0"
-description = "LOX: Autonomous Empirical Policy Synthesis Engine"
+version = "0.1.0"
+description = "LOX: Autonomous Empirical Policy Synthesis Engine ('Hard Code Nothing')"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -29,6 +29,7 @@ package = false
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "ruff>=0.8.0",
 ]
 
 [tool.pytest.ini_options]
@@ -53,6 +54,6 @@ select = ["E", "F", "W", "I"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/run_synthesis.py" = ["E402"]
+"scripts/*.py" = ["E402"]
 
 

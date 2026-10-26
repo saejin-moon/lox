@@ -6,9 +6,17 @@ Numba BFS/A* pathfinding, deterministic replay_bytes, and stepping throughput.
 from __future__ import annotations
 
 import time
+
 import numpy as np
 
-from lox.env.actions import ACTION_BY_CHAR, DIR_DELTAS, Action, key, normalize_action_to_bytes, seq
+from lox.env.actions import (
+    ACTION_BY_CHAR,
+    DIR_DELTAS,
+    Action,
+    key,
+    normalize_action_to_bytes,
+    seq,
+)
 from lox.env.harness import NetHackHarness
 
 
@@ -89,7 +97,14 @@ def test_deterministic_replay_bytes_and_throughput():
     harness = NetHackHarness(max_steps=500)
     try:
         st = harness.reset(seed=12345)
-        actions = [Action.SEARCH, Action.WAIT, Action.EAST, Action.WEST, Action.SOUTH, Action.NORTH]
+        actions = [
+            Action.SEARCH,
+            Action.WAIT,
+            Action.EAST,
+            Action.WEST,
+            Action.SOUTH,
+            Action.NORTH,
+        ]
         t0 = time.perf_counter()
         n_steps = 200
         for i in range(n_steps):
