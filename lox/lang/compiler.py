@@ -291,7 +291,7 @@ class CompiledPolicy:
         self,
         policy_code: str,
         macros_code: str = "",
-        max_loop_ticks: int = 5000,
+        max_loop_ticks: int = 250000,
     ):
         self.policy_code = policy_code
         self.macros_code = macros_code
@@ -389,7 +389,7 @@ class CompiledPolicy:
 def compile_policy_and_macros(
     policy_code: str,
     macros_code: str = "",
-    max_loop_ticks: int = 5000,
+    max_loop_ticks: int = 250000,
 ) -> CompiledPolicy:
     """Validates and compiles `policy_code` and `macros_code` into a reusable `CompiledPolicy`."""
     return CompiledPolicy(

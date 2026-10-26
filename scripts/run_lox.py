@@ -124,6 +124,12 @@ def main() -> None:
         action="store_true",
         help="Disable sequential futility early stopping",
     )
+    parser.add_argument(
+        "--max-repairs",
+        type=int,
+        default=5,
+        help="Max in-turn sandbox repair attempts per generation (default: 5)",
+    )
     args = parser.parse_args()
 
     orchestrator = CampaignOrchestrator(
@@ -142,6 +148,7 @@ def main() -> None:
         param_tune_every=args.param_tune_every,
         macro_every=args.macro_every,
         early_stopping=not args.no_early_stop,
+        max_repair_turns=args.max_repairs,
     )
     orchestrator.run_campaign(
         max_generations=args.generations,

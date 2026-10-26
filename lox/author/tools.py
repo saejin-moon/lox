@@ -61,6 +61,7 @@ class AuthorToolRegistry:
         self.wiki = WikiEngine(db_path=wiki_db_path)
         self.macro_lib = MacroLibrary(path=macros_path)
         self.current_policy_code: str = ""
+        self.last_passed_code: str = ""
 
     def query_db(self, sql: str) -> tuple[str, str]:
         """Executes a read-only SQL query against DuckDB."""
@@ -148,6 +149,7 @@ class AuthorToolRegistry:
                 if policy_code.strip():
                     compiled = compile_policy_and_macros(policy_code, merged_macros)
                 else:
+                    self.last_passed_code = code
                     return (
                         "Macro syntax and AST validation PASSED. (No active policy yet to run steps).",
                         "VALID (macro)",
@@ -179,6 +181,7 @@ class AuthorToolRegistry:
                 f"{k}:{v}" for k, v in runner.tracer.fn_calls.items()
             )
             sample_acts = " -> ".join(actions_taken[:10])
+            self.last_passed_code = code
             return (
                 f"Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
                 f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"

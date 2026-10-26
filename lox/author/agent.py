@@ -59,6 +59,7 @@ class AuthorAgent:
         max_tokens: int = 16384,
         reasoning_effort: str = "medium",
         routing: str = "floor",
+        max_repair_turns: int = 5,
     ):
         self.provider = provider.lower()
         self.model = model
@@ -75,6 +76,7 @@ class AuthorAgent:
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self.routing = routing
+        self.max_repair_turns = max_repair_turns
         self.tools = AuthorToolRegistry(db_path=db_path, macros_path=macros_path)
 
     @staticmethod
@@ -342,6 +344,7 @@ class AuthorAgent:
             return self._synthesize_mock(mode=mode, current_policy=current_policy)
 
         self.tools.current_policy_code = current_policy
+        self.tools.last_passed_code = ""
         if max_tool_turns is None:
             max_tool_turns = 12 if mode == "FULL_WRITE" else 6
 
@@ -396,10 +399,22 @@ class AuthorAgent:
                     }
                 )
 
-        # Compiler-in-the-loop verification & self-repair (up to 2 attempts)
+        # Compiler-in-the-loop verification & sliding-window self-repair
         is_macro_mode = mode == "MACRO_WRITE"
-        for repair_idx in range(3):
+        base_msg_count = len(messages)
+        latest_hyp: dict[str, Any] = {}
+
+        for repair_idx in range(self.max_repair_turns + 1):
             hyp, code_patch = self.extract_yaml_and_python(final_content)
+            if hyp:
+                latest_hyp = hyp
+            elif latest_hyp:
+                hyp = latest_hyp
+
+            # If the model omitted the code block in its final summary after already passing dry_run_policy in a tool call, use that verified code!
+            if not code_patch and self.tools.last_passed_code:
+                code_patch = self.tools.last_passed_code
+
             if not code_patch:
                 diag = "No ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
                 status = "MISSING_CODE"
@@ -445,23 +460,91 @@ class AuthorAgent:
                         tool_calls_made=total_tool_calls,
                     )
 
-            if repair_idx < 2:
+            if repair_idx < self.max_repair_turns:
                 ui.warn(
-                    f"Sandbox compiler gate caught {status}; requesting in-turn repair ({repair_idx + 1}/2)..."
+                    f"Sandbox compiler gate caught {status}; requesting in-turn repair ({repair_idx + 1}/{self.max_repair_turns})..."
                 )
-                messages.append(
+                # Sliding-window repair context: keep only the latest attempt + traceback so failed attempts don't poison context
+                messages = messages[:base_msg_count] + [
                     {
                         "role": "user",
                         "content": (
                             f"Your submitted Python code failed the sandbox dry-run check:\n\n{diag}\n\n"
-                            "Please fix the error and output the corrected ```yaml ... ``` and ```python ... ``` blocks."
+                            "Please fix the error and output the corrected ```yaml ... ``` and ```python ... ``` blocks directly in your response."
                         ),
                     }
-                )
-                repair_msg = self._call_llm_api(messages, allow_tools=False)
+                ]
+                repair_msg = self._call_llm_api(messages, allow_tools=True)
                 messages.append(repair_msg)
-                final_content = repair_msg.get("content") or ""
+                r_tools = repair_msg.get("tool_calls") or []
+                if r_tools:
+                    for tc in r_tools:
+                        total_tool_calls += 1
+                        fn_spec = tc.get("function") or {}
+                        t_name = fn_spec.get("name", "")
+                        raw_args = fn_spec.get("arguments", "{}")
+                        try:
+                            t_args = (
+                                json.loads(raw_args)
+                                if isinstance(raw_args, str)
+                                else dict(raw_args)
+                            )
+                        except Exception:
+                            t_args = {}
+                        tool_out = self._execute_tool_call(
+                            max_tool_turns + repair_idx + 1, t_name, t_args
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.get(
+                                    "id", f"call_{total_tool_calls}"
+                                ),
+                                "name": t_name,
+                                "content": tool_out,
+                            }
+                        )
+                        if t_name == "dry_run_policy" and t_args.get("code"):
+                            final_content = f"```python\n{t_args['code']}\n```"
+                else:
+                    final_content = repair_msg.get("content") or ""
+
+        # Final fallback: if the model already passed dry_run_policy during the tool phase, use that verified code!
+        if self.tools.last_passed_code:
+            ui.info("Using verified code from earlier passing dry_run_policy call.")
+            code_patch = self.tools.last_passed_code
+            if is_macro_mode:
+                merged_macros, macro_names = self.tools.macro_lib.merge_macros(
+                    code_patch
+                )
+                return SynthesisProposal(
+                    mode=mode,
+                    hypothesis=latest_hyp,
+                    raw_code_patch=code_patch,
+                    full_policy_code=current_policy,
+                    full_macros_code=merged_macros,
+                    target_functions=list(macro_names),
+                    tool_calls_made=total_tool_calls,
+                )
+            if mode == "FULL_WRITE" or not current_policy.strip():
+                spliced_policy = code_patch
+                changed_fns = latest_hyp.get("target_functions") or ["run"]
+            else:
+                spliced_policy, changed_fns = splice_functions_into_policy(
+                    current_policy, code_patch
+                )
+            if isinstance(changed_fns, str):
+                changed_fns = [changed_fns]
+            return SynthesisProposal(
+                mode=mode,
+                hypothesis=latest_hyp,
+                raw_code_patch=code_patch,
+                full_policy_code=spliced_policy,
+                full_macros_code=self.tools.macro_lib.load_code(),
+                target_functions=list(changed_fns),
+                tool_calls_made=total_tool_calls,
+            )
 
         raise RuntimeError(
-            f"Author Agent failed to produce valid compiling code after repair attempts. Last error: {diag}"
+            f"Author Agent failed to produce valid compiling code after {self.max_repair_turns} repair attempts. Last error: {diag}"
         )

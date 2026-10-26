@@ -49,6 +49,7 @@ class CampaignOrchestrator:
         param_tune_every: int = 3,
         macro_every: int = 5,
         early_stopping: bool = True,
+        max_repair_turns: int = 5,
     ):
         self.provider = provider
         self.model = model
@@ -80,6 +81,7 @@ class CampaignOrchestrator:
             api_key=api_key,
             db_path=db_path,
             macros_path=macros_path,
+            max_repair_turns=max_repair_turns,
         )
         self.scheduler = ModeScheduler(
             param_tune_every=param_tune_every,
@@ -275,13 +277,19 @@ class CampaignOrchestrator:
                         target_episodes=self.func_mod_episodes_per_fn,
                     )
 
-                proposal = self.author.synthesize(
-                    mode=mode,
-                    generation=gen,
-                    current_policy=current_policy,
-                    batch_digest=last_batch_digest,
-                    recent_experiments=recent_exps,
-                )
+                try:
+                    proposal = self.author.synthesize(
+                        mode=mode,
+                        generation=gen,
+                        current_policy=current_policy,
+                        batch_digest=last_batch_digest,
+                        recent_experiments=recent_exps,
+                    )
+                except Exception as synth_err:
+                    ui.warn(
+                        f"Gen {gen:03d} synthesis failed after all repair turns ({synth_err}). Retrying next generation with fresh context."
+                    )
+                    continue
                 ui.hypothesis_box(proposal.hypothesis)
 
                 # --- MODE 2: MACRO_WRITE (Skip Rollout & Advance Immediately) ---

@@ -53,7 +53,7 @@ class ExecutionTracer:
 
     def __init__(
         self,
-        max_loop_ticks: int = 5000,
+        max_loop_ticks: int = 250000,
         param_overrides: dict[str, float] | None = None,
     ):
         self.max_loop_ticks: int = max_loop_ticks
