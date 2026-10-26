@@ -139,6 +139,14 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
 
         if record_ticks:
             raw_key = int(harness.action_bytes[-1]) if harness.action_bytes else 0
+            vis_mons = ""
+            if done or step_idx % 5 == 0 or last_hp < state.hp:
+                mons = next_state.visible_monsters()
+                if mons:
+                    vis_mons = ", ".join(
+                        f"{m.char}({m.info.name if m.info else '?'}@{m.y},{m.x})"
+                        for m in mons[:4]
+                    )
             ticks.append(
                 {
                     "turn": last_turn,
@@ -150,6 +158,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                     "energy": next_state.energy,
                     "ac": last_ac,
                     "xp_level": last_xl,
+                    "score": last_score,
                     "hunger_state": next_state.hunger_state,
                     "condition_mask": next_state.condition_mask,
                     "y": next_state.y,
@@ -158,7 +167,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                     "raw_key": raw_key,
                     "active_function": active_fn,
                     "message": next_state.message,
-                    "visible_monsters": "",
+                    "visible_monsters": vis_mons,
                     "inventory_summary": "",
                 }
             )

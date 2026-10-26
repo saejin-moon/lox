@@ -17,25 +17,30 @@ POLICY_LANG_DOCS = """### Policy Language & 1-to-1 Harness Reference
 #### 1. Execution Model (`class Policy` and `macros.py`)
 - Your policy is a standard Python 3.11+ class named `class Policy:`.
 - A fresh `Policy()` instance is created at the start of every episode.
-- You may write `Policy` using **either** a generator loop or a step method:
-  1. **Generator Style (Recommended for multi-turn state machines & subroutines)**:
-     ```python
-     class Policy:
-         def __init__(self):
-             self.visited = set()
+- **Recommended Architecture (Dispatcher + Action-Returning Specialist Methods)**:
+  ```python
+  class Policy:
+      def __init__(self):
+          self.visited = set()
+          flee_hp = self.param("flee_hp", 0.30, 0.10, 0.70)
+          self.flee_hp = flee_hp
 
-         def run(self, state: GameState):
-             while True:
-                 # Subroutines that yield actions are called via `state = yield from self.sub_fn(state)`
-                 state = yield from self.decide_and_act(state)
-     ```
-     *Important Generator Rule*: Every `while` loop must `yield` at least one action per iteration (returning or continuing without yielding will trigger the 5,000-tick infinite loop guard). Generator subroutines called via `state = yield from self.foo(state)` must `return state` at the end.
-  2. **Step Style**:
-     ```python
-     class Policy:
-         def step(self, state: GameState):
-             return Action.SEARCH
-     ```
+      def run(self, state: GameState):
+          while True:
+              self.visited.add((state.y, state.x))
+              act = (
+                  self.handle_emergency(state)
+                  or self.handle_combat(state)
+                  or self.handle_nutrition(state)
+                  or self.explore(state)
+              )
+              state = yield (act if act is not None else Action.SEARCH)
+  ```
+  - You can also write `def step(self, state: GameState) -> Action:` directly, or use generator subroutines via `state = yield from self.sub_gen(state)`.
+  - **3 Strict Generator Rules**:
+    1. In a generator (`def run` containing `yield`), ALWAYS receive the next state via `state = yield act` (never `return act` inside a generator—in Python `return val` inside a generator raises `StopIteration`!).
+    2. If a helper method is a normal function that returns an `Action` or `None`, call it as `act = self.helper(state)` and then `state = yield act`.
+    3. If a helper method is itself a generator (contains `yield`), call it via `state = yield from self.sub_gen(state)` and end `sub_gen` with `return state`. Never write `yield self.sub_gen(state)` without `from`!
 - **Supported Python**: Full Python 3.11+ syntax (`if/elif/else`, `for`, `while`, `try/except`, list/dict/set comprehensions, `@dataclass`, helper classes, recursion, `match/case`, lambdas). Pre-loaded in globals: `math`, `collections` (`deque`, `defaultdict`, `Counter`), `heapq`, `itertools`, `functools`, `re`, `enum`, `dataclasses`, `numpy` (`np`), `random`, `copy`, `bisect`.
 - **Tunable Parameters (`self.param`)**:
   Declare numeric thresholds/weights via `self.param("name", default, min_val, max_val)` (e.g. `self.param("heal_hp_ratio", 0.35, 0.10, 0.80)`). During `PARAM_TUNE` generations, the engine optimizes all registered parameters automatically via SPSA!
@@ -94,12 +99,25 @@ Every turn, `state` exposes 100% of NetHack's observation arrays and C symbol ta
 - **Inventory (`state.inventory -> list[InventoryItem]`)**:
   Each `item` has: `item.letter` (`'a'..'z'`), `item.name` (full description string, e.g. `'a +1 long sword (weapon in hand)'`, `'2 food rations'`), `item.glyph` (`int`), `item.oclass` (`int`), `item.char` (`str`: `')'` weapon, `'['` armor, `'%'` food, `'!'` potion, `'?'` scroll, `'/'` wand, `'='` ring, `'\"'` amulet, `'('` tool, `'$'` gold), `item.quantity` (`int`).
 - **Visible Monsters (`state.visible_monsters() -> list[VisibleMonster]`)**:
-  Each `m` has: `m.y`, `m.x`, `m.glyph`, `m.char`, `m.color`, `m.is_pet` (`bool`), `m.is_peaceful` (`bool`), and `m.info` (`MonsterInfo` directly from NLE's C `permonst` table: `m.info.name`, `m.info.symbol`, `m.info.level`, `m.info.speed`, `m.info.ac`, `m.info.mr`, `m.info.difficulty`, `m.info.nutrition`, `m.info.weight`, `m.info.resistances_mask`, `m.info.conveys_mask`).
+  Each `m` has: `m.y`, `m.x`, `m.glyph`, `m.char`, `m.color`, `m.is_pet` (`bool`), `m.is_peaceful` (`bool`), and `m.info` (`MonsterInfo` directly from NLE's C `permonst` table: `m.info.name`, `m.info.symbol`, `m.info.level`, `m.info.speed`, `m.info.ac`, `m.info.mr`, `m.info.difficulty`, `m.info.nutrition`, `m.info.weight`, `m.info.resistances_mask`, `m.info.conveys_mask`, `m.info.attacks` tuple of `(aatyp, adtyp, damn, damd)` where `aatyp == 0` indicates passive gaze/paralysis/reflection attacks like floating eyes!).
 - **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`)**:
-  Each `o` has: `o.y`, `o.x`, `o.glyph`, `o.char`, `o.color`, `o.is_corpse` (`bool`), `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`), `o.info` (`ObjectInfo | None`).
-- **Fast Numba Pathfinding Helpers (Operate on any boolean `(21, 79)` mask you construct)**:
+  Each `o` has: `o.y`, `o.x`, `o.glyph`, `o.char`, `o.color`, `o.is_corpse` (`bool`), `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`, with `o.corpse_monster.name`, `o.corpse_monster.nutrition`, etc.), `o.info` (`ObjectInfo | None`). *(Note: `VisibleObject` on the ground does NOT have `.name`; use `o.char`, `o.is_corpse`, and `o.corpse_monster`. Once picked up into `state.inventory`, `item.name` gives the full string.)*
+- **Fast Vectorized NumPy & Numba Pathfinding Helpers (Always prefer vectorized NumPy over nested 21x79 Python loops)**:
   - `state.bfs_distances(passable_mask, start=(y, x), allow_diagonal=True) -> int32[21, 79]`: Shortest path step distances from `start` (`-1` if unreachable).
   - `state.path_step(passable_mask, target=(ty, tx), start=(y, x), allow_diagonal=True) -> (dy, dx)`: Returns the first step delta `(dy, dx)` along the shortest path from `start` to `target` (`(0, 0)` if unreachable).
+  - **Example Vectorized Navigation Idiom**:
+    ```python
+    passable = np.isin(state.chars, [ord('.'), ord('#'), ord('>'), ord('<'), ord('+'), ord('_'), ord('{'), ord('$'), ord('%'), ord(')'), ord('['), ord('!'), ord('?'), ord('/')])
+    for m in state.visible_monsters():
+        if m.is_pet or m.is_peaceful:
+            passable[m.y, m.x] = False
+    # Step toward stairs '>' if visible:
+    stairs = np.argwhere(state.chars == ord('>'))
+    if len(stairs) > 0:
+        dy, dx = state.path_step(passable, (int(stairs[0, 0]), int(stairs[0, 1])))
+        if (dy, dx) != (0, 0):
+            return seq(Action.OPEN, DIR_DELTAS[(dy, dx)]) if state.char_at(state.y + dy, state.x + dx) == '+' else DIR_DELTAS[(dy, dx)]
+    ```
 """
 
 
@@ -194,10 +212,10 @@ Your task in `MACRO_WRITE` mode:
 
 ### Instructions for `FUNC_MOD_ADD`:
 1. **Investigate First**: Use `query_db(sql)` to inspect `runs WHERE is_outlier_good = TRUE` (to see what went right in statistical outlier runs and steer the policy toward those behaviors) vs normal/failed runs, and check `expert_runs` or `query_wiki` as needed.
-2. **Conditional Episode Evaluation**:
+2. **Conditional Episode Evaluation & CRITICAL WIRING RULE FOR NEW METHODS**:
    - For every function you add or modify, the harness will evaluate **1,000 episodes that actually trigger that function**.
    - Any episode that does NOT call your modified/added function is immediately discarded and excluded from stats!
-   - Therefore, make sure any new function you add is actually wired into its caller (e.g., called from `run` or `step` or a dispatcher method) and has a reachable entry condition!
+   - **CRITICAL**: The AST splicer replaces existing methods in-place and appends new methods to `class Policy`. If you define a **brand-new method** (e.g. `def pray_when_weak(self, state):`), you **MUST ALSO include the updated caller method** (e.g. `def run(self, state):` or `def handle_emergency(self, state):`) in your Python block so that your new method is actually called! Keep `target_functions` in your YAML focused on the specific new/modified specialist method(s).
 3. **Verify Before Submitting**: Run `dry_run_policy(code=...)` on your modified method(s) to confirm zero syntax or runtime errors.
 4. **Output Format (Do NOT guess numerical improvement deltas)**:
    - First, output a `yaml` hypothesis block with qualitative causal logic:

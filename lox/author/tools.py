@@ -8,8 +8,10 @@ Minimal, High-Signal Tool Suite for the Author Agent:
 
 from __future__ import annotations
 
+import ast
 import os
 import re
+from collections import Counter
 from typing import Any
 
 from lox.author.prompts import POLICY_LANG_DOCS
@@ -40,8 +42,8 @@ def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
                 parts.append(f'{h}: "<{len(v)} bytes>"')
             else:
                 s = str(v)
-                if len(s) > 400:
-                    s = s[:397] + "..."
+                if len(s) > 700:
+                    s = s[:340] + " ... " + s[-340:]
                 s_esc = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
                 parts.append(f'{h}: "{s_esc}"')
         lines.append("  - {" + ", ".join(parts) + "}")
@@ -70,6 +72,8 @@ class AuthorToolRegistry:
 
         clean = sql.strip().rstrip(";")
         low = clean.lower()
+        # Strip single-quoted string literals before checking mutative SQL keywords
+        low_no_literals = re.sub(r"'[^']*'", "''", low)
         for word in (
             "insert",
             "update",
@@ -78,17 +82,21 @@ class AuthorToolRegistry:
             "alter",
             "truncate",
             "create",
-            "replace",
             "attach",
             "copy",
         ):
-            if re.search(rf"\b{word}\b", low):
+            if re.search(rf"\b{word}\b", low_no_literals):
                 return (
                     f"Error: Mutative keyword '{word.upper()}' is forbidden. Use SELECT only.",
                     "error",
                 )
+        if re.search(r"\breplace\b(?!\s*\()", low_no_literals):
+            return (
+                "Error: Mutative keyword 'REPLACE' is forbidden. Use SELECT only.",
+                "error",
+            )
 
-        if "limit" not in low:
+        if "limit" not in low_no_literals:
             clean += " LIMIT 30"
 
         con = connect_db(self.db_path, read_only=True)
@@ -156,7 +164,32 @@ class AuthorToolRegistry:
                     )
             else:
                 if policy_code.strip():
-                    spliced_policy, _ = splice_functions_into_policy(policy_code, code)
+                    spliced_policy, changed_fns = splice_functions_into_policy(
+                        policy_code, code
+                    )
+                    # Static reachability check: ensure any non-root method in changed_fns is referenced in spliced_policy
+                    spliced_tree = ast.parse(spliced_policy)
+                    called_attrs: set[str] = set()
+                    for node in ast.walk(spliced_tree):
+                        if isinstance(node, ast.Call):
+                            if isinstance(node.func, ast.Attribute):
+                                called_attrs.add(node.func.attr)
+                            elif isinstance(node.func, ast.Name):
+                                called_attrs.add(node.func.id)
+                    unreferenced = [
+                        fn
+                        for fn in changed_fns
+                        if fn not in ("run", "step", "act", "__init__")
+                        and fn not in called_attrs
+                    ]
+                    if unreferenced:
+                        return (
+                            f"Unreachable Function Error: Method(s) {unreferenced} were spliced into `class Policy`, "
+                            f"but are NEVER called by `run` or any other method in `policy.py`! "
+                            f"Please include the updated caller method (e.g. `def run(self, state):` or dispatcher) "
+                            f"in your code block so {unreferenced} is actually wired in and called.",
+                            "UNREACHABLE_ERROR",
+                        )
                 else:
                     spliced_policy = code
                 compiled = compile_policy_and_macros(spliced_policy, macros_code)
@@ -171,22 +204,44 @@ class AuthorToolRegistry:
             runner = compiled.create_runner()
             state = harness.reset(seed=int(seed))
             actions_taken: list[str] = []
+            raw_act_names: list[str] = []
+            unique_positions: set[tuple[int, int]] = {(state.y, state.x)}
             for _ in range(max(10, min(200, int(max_turns)))):
                 raw_act, active_fn = runner.next_action(state)
                 state, done, info = harness.step(raw_act)
-                actions_taken.append(f"{active_fn}:{info['action_name']}")
+                unique_positions.add((state.y, state.x))
+                act_name = info["action_name"]
+                raw_act_names.append(act_name)
+                actions_taken.append(f"{active_fn}:{act_name}")
                 if done:
                     break
             fn_summary = ", ".join(
                 f"{k}:{v}" for k, v in runner.tracer.fn_calls.items()
             )
+            act_counts = ", ".join(
+                f"{k}:{v}" for k, v in Counter(raw_act_names).most_common(6)
+            )
+            params_summary = (
+                ", ".join(
+                    f"{k}={v.value}" for k, v in runner.tracer.registered_params.items()
+                )
+                or "none"
+            )
             sample_acts = " -> ".join(actions_taken[:10])
+            warn_line = ""
+            if len(unique_positions) == 1 and harness.step_count >= 15:
+                warn_line = (
+                    "\n- WARNING: Hero stayed on 1 tile ((y,x) did not change) across all steps! "
+                    "Verify your passable mask and movement logic."
+                )
             self.last_passed_code = code
             return (
                 f"Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
-                f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"
+                f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), UniqueTiles={len(unique_positions)}, HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"
                 f"- Functions Called: {{{fn_summary}}}\n"
-                f"- First 10 Actions: {sample_acts}",
+                f"- Action Breakdown: {{{act_counts}}}\n"
+                f"- Registered Params: {{{params_summary}}}\n"
+                f"- First 10 Actions: {sample_acts}{warn_line}",
                 f"PASSED ({harness.step_count} steps)",
             )
         except Exception as exc:

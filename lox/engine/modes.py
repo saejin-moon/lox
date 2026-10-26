@@ -159,7 +159,7 @@ def run_spsa_param_tuning(
 
     theta = np.clip((defaults - mins) / spans, 0.0, 1.0)
     best_theta = theta.copy()
-    best_score = -1e9
+    best_gain = 0.0
 
     def _denorm(vec: np.ndarray) -> dict[str, float | int]:
         out: dict[str, float | int] = {}
@@ -171,6 +171,7 @@ def run_spsa_param_tuning(
                 out[k] = round(float(raw[i]), 4)
         return out
 
+    base_by_seed = {int(r["seed"]): progression_metric(r) for r in baseline_runs}
     base_seeds = (
         [int(r["seed"]) for r in baseline_runs]
         if baseline_runs
@@ -193,10 +194,16 @@ def run_spsa_param_tuning(
         theta_minus = np.clip(theta - ck * delta_vec, 0.0, 1.0)
 
         # Common Random Numbers: evaluate theta_plus and theta_minus on the exact same mini-batch of seeds
-        mb_seeds = list(
-            rng.choice(
+        mb_seeds = [
+            int(s)
+            for s in rng.choice(
                 base_seeds, size=min(minibatch_size, len(base_seeds)), replace=False
             )
+        ]
+        j_base_mb = (
+            float(np.mean([base_by_seed[s] for s in mb_seeds if s in base_by_seed]))
+            if base_by_seed
+            else 0.0
         )
 
         res_plus = pool.evaluate_batch(
@@ -231,24 +238,32 @@ def run_spsa_param_tuning(
             else 0.0
         )
 
-        if j_plus > best_score:
-            best_score = j_plus
+        gain_plus = j_plus - j_base_mb
+        gain_minus = j_minus - j_base_mb
+
+        if gain_plus > best_gain:
+            best_gain = gain_plus
             best_theta = theta_plus.copy()
-        if j_minus > best_score:
-            best_score = j_minus
+        if gain_minus > best_gain:
+            best_gain = gain_minus
             best_theta = theta_minus.copy()
 
         grad = ((j_plus - j_minus) / (2.0 * ck)) * (1.0 / delta_vec)
         theta = np.clip(theta + ak * grad, 0.0, 1.0)
 
-    cand_params = _denorm(best_theta if best_score > -1e8 else theta)
+    cand_params = _denorm(best_theta if best_gain > 0.0 else theta)
     new_policy_code = bake_params_into_policy_ast(policy_code, cand_params)
+    new_macros_code = (
+        bake_params_into_policy_ast(macros_code, cand_params)
+        if macros_code.strip()
+        else macros_code
+    )
 
     val_seeds = base_seeds[: min(validation_episodes, len(base_seeds))]
     val_result = pool.evaluate_batch(
         batch_id=batch_id,
         policy_code=new_policy_code,
-        macros_code=macros_code,
+        macros_code=new_macros_code,
         target_episodes=len(val_seeds) if val_seeds else validation_episodes,
         priority_seeds=val_seeds,
         param_overrides=cand_params,
@@ -261,6 +276,7 @@ def run_spsa_param_tuning(
         "tuned": True,
         "optimized_params": cand_params,
         "new_policy_code": new_policy_code,
+        "new_macros_code": new_macros_code,
         "val_result": val_result,
         "verdict": verdict,
     }

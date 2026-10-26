@@ -220,7 +220,7 @@ def key(ch: str | int | Action) -> RawAction:
     """Constructs a 1-to-1 single-keystroke action from a character, Action enum, or byte int."""
     if isinstance(ch, Action):
         return RawAction(int(ch.value), ch.name)
-    if isinstance(ch, int):
+    if isinstance(ch, int) and not isinstance(ch, bool):
         return RawAction(ch & 0xFF, ACTION_BY_CHAR.get(ch & 0xFF, f"KEY_{ch & 0xFF}"))
     if isinstance(ch, str):
         if len(ch) == 1:
@@ -235,18 +235,25 @@ def key(ch: str | int | Action) -> RawAction:
 def seq(*steps: str | int | Action | RawAction, label: str = "") -> ActionSequence:
     """
     Constructs a multi-keystroke sequence (e.g. `seq(Action.EAT, 'f')` or `seq(Action.ENGRAVE, '-', 'Elbereth\\r')`).
-    Strings longer than 1 character (that are not Action enum names) are expanded character-by-character.
+    Strings longer than 1 character (that are not uppercase Action enum names) are expanded character-by-character.
     """
     out: list[int] = []
+    extcmd_byte = int(Action.EXTCMD.value)
     for item in steps:
         if isinstance(item, Action):
             out.append(int(item.value))
         elif isinstance(item, RawAction):
             out.append(item.byte_val)
-        elif isinstance(item, int):
+        elif isinstance(item, int) and not isinstance(item, bool):
             out.append(item & 0xFF)
         elif isinstance(item, str):
-            if len(item) > 1 and item in ACTION_BY_NAME:
+            after_extcmd = bool(out and out[-1] == extcmd_byte)
+            if (
+                not after_extcmd
+                and len(item) > 1
+                and item.isupper()
+                and item in ACTION_BY_NAME
+            ):
                 out.append(ACTION_BY_NAME[item])
             else:
                 for ch in item:
@@ -254,7 +261,9 @@ def seq(*steps: str | int | Action | RawAction, label: str = "") -> ActionSequen
         elif (
             isinstance(item, (tuple, list))
             and len(item) == 2
-            and all(isinstance(x, int) for x in item)
+            and all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) for x in item
+            )
         ):
             # Support (dy, dx) direction delta tuple
             act = DIR_DELTAS.get((int(item[0]), int(item[1])), Action.WAIT)
@@ -275,7 +284,7 @@ def normalize_action_to_bytes(yielded: Any) -> tuple[tuple[int, ...], str]:
     - `str` (either an Action name like `'SEARCH'`, a single char `'k'`, or a multi-char string `'ef'`)
     - `list` / `tuple` of keystrokes
     """
-    if yielded is None:
+    if yielded is None or isinstance(yielded, bool):
         return (int(Action.WAIT.value),), "WAIT"
     if isinstance(yielded, Action):
         return (int(yielded.value),), yielded.name
@@ -300,7 +309,9 @@ def normalize_action_to_bytes(yielded: Any) -> tuple[tuple[int, ...], str]:
         s = seq(yielded)
         return s.bytes_seq, s.name
     if isinstance(yielded, (tuple, list)):
-        if len(yielded) == 2 and all(isinstance(x, (int, float)) for x in yielded):
+        if len(yielded) == 2 and all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) for x in yielded
+        ):
             dy, dx = int(yielded[0]), int(yielded[1])
             if (-1 <= dy <= 1) and (-1 <= dx <= 1):
                 act = DIR_DELTAS.get((dy, dx), Action.WAIT)

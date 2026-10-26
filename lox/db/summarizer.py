@@ -225,11 +225,12 @@ def mark_outlier_good_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if n == 0:
         return runs
 
-    # Composite progression index: prioritizes max_depth, then xp_level, then score, then turns survived
+    # Composite progression index: prioritizes max_depth, then xp_level, then AC improvement, then score, then turns survived
     scores = np.array(
         [
             float(r.get("max_depth", 1)) * 100.0
             + float(r.get("xp_level", 1)) * 15.0
+            + max(0.0, 10.0 - float(r.get("final_ac", 10))) * 4.0
             + float(r.get("score", 0)) * 0.05
             + min(float(r.get("turns", 0)), 2000.0) * 0.005
             for r in runs

@@ -166,3 +166,50 @@ def macro_engrave_elbereth(state):
     docs = lib.describe_macros()
     assert "macro_engrave_elbereth(state)" in docs
     assert "Engraves Elbereth" in docs
+
+
+def test_call_stack_attribution_and_caller_splice_filtering():
+    # 1. Verify that when specialist `handle_combat` calls leaf helper `get_passable_mask`,
+    # the turn is attributed to `handle_combat` rather than getting stuck on `get_passable_mask`.
+    code = """
+class Policy:
+    def get_passable_mask(self, state):
+        return state.chars == ord('.')
+
+    def handle_combat(self, state):
+        _ = self.get_passable_mask(state)
+        return Action.SEARCH
+
+    def run(self, state):
+        while True:
+            act = self.handle_combat(state)
+            state = yield act
+"""
+    compiled = compile_policy_and_macros(code)
+    harness = NetHackHarness(max_steps=10)
+    try:
+        st = harness.reset(seed=55)
+        runner = compiled.create_runner()
+        act, active_fn = runner.next_action(st)
+        assert active_fn == "handle_combat"
+        assert runner.tracer.fn_turns.get("handle_combat", 0) == 1
+        assert runner.tracer.fn_turns.get("get_passable_mask", 0) == 0
+    finally:
+        harness.close()
+
+    # 2. Verify that when a patch modifies `run` alongside a new specialist `pray_when_weak`,
+    # `splice_functions_into_policy` filters out root entrypoint `run` from `changed_names`.
+    patch_with_caller = """
+def pray_when_weak(self, state):
+    return Action.PRAY
+
+def run(self, state):
+    while True:
+        if state.hunger_state >= 3:
+            act = self.pray_when_weak(state)
+        else:
+            act = self.handle_combat(state)
+        state = yield act
+"""
+    _, changed_fns = splice_functions_into_policy(code, patch_with_caller)
+    assert changed_fns == ["pray_when_weak"]

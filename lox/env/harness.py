@@ -96,8 +96,19 @@ class NetHackHarness:
     def _is_game_over(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
         return bool(obs_tuple[self._prog_state_idx][0] == 1)
 
+    def _extract_raw_message(self, obs_tuple: tuple[np.ndarray, ...]) -> str:
+        return (
+            bytes(obs_tuple[self._msg_idx])
+            .split(b"\x00", 1)[0]
+            .decode("latin1", errors="ignore")
+            .strip()
+        )
+
     def _settle_prompts(
-        self, obs_tuple: tuple[np.ndarray, ...], done: bool
+        self,
+        obs_tuple: tuple[np.ndarray, ...],
+        done: bool,
+        messages: list[str] | None = None,
     ) -> tuple[tuple[np.ndarray, ...], bool]:
         """
         Matches standard NLE prompt completion when NetHack pauses outside `in_moveloop`
@@ -120,6 +131,10 @@ class NetHackHarness:
                 b = ASCII_SPACE
             self.action_bytes.append(b)
             obs_tuple, done = self.nh.step(b)
+            if messages is not None:
+                raw_m = self._extract_raw_message(obs_tuple)
+                if raw_m and (not messages or messages[-1] != raw_m):
+                    messages.append(raw_m)
         return obs_tuple, done
 
     def reset(self, seed: int = 42) -> GameState:
@@ -165,27 +180,19 @@ class NetHackHarness:
         messages: list[str] = []
 
         for idx, b in enumerate(bytes_seq):
+            if idx > 0 and self._in_moveloop(obs_tuple):
+                break
             self.action_bytes.append(b)
             obs_tuple, done = self.nh.step(b)
-            raw_m = (
-                bytes(obs_tuple[self._msg_idx])
-                .split(b"\x00", 1)[0]
-                .decode("latin1", errors="ignore")
-                .strip()
-            )
+            raw_m = self._extract_raw_message(obs_tuple)
             if raw_m and (not messages or messages[-1] != raw_m):
                 messages.append(raw_m)
             if done:
                 break
 
         if not done and not self._in_moveloop(obs_tuple):
-            obs_tuple, done = self._settle_prompts(obs_tuple, done)
-            raw_m = (
-                bytes(obs_tuple[self._msg_idx])
-                .split(b"\x00", 1)[0]
-                .decode("latin1", errors="ignore")
-                .strip()
-            )
+            obs_tuple, done = self._settle_prompts(obs_tuple, done, messages=messages)
+            raw_m = self._extract_raw_message(obs_tuple)
             if raw_m and (not messages or messages[-1] != raw_m):
                 messages.append(raw_m)
 
@@ -197,7 +204,7 @@ class NetHackHarness:
         self.done = bool(done)
         self._last_raw_tuple = obs_tuple
         state = GameState(self._tuple_to_dict(obs_tuple), step_count=self.step_count)
-        if len(messages) > 1:
+        if messages:
             state._message_cache = " | ".join(messages)
 
         is_ascended = False

@@ -19,12 +19,17 @@ def progression_metric(run: dict[str, Any]) -> float:
     """
     Continuous composite progression metric for a run:
     Primary: `max_depth` (weight 1.0 per floor)
-    Secondary tie-breakers: `xp_level` (0.05 per XL) + `score` (0.0002 per point, capped)
+    Secondary survivability & progression signals:
+    - `xp_level` (0.12 per XL above 1)
+    - `final_ac` (0.04 per AC point below 10, rewarding armor/protection)
+    - `score` (0.06 * log1p(score), uncapped logarithmic progression)
     """
     d = float(run.get("max_depth", run.get("depth", 1)))
-    xl = min(float(run.get("xp_level", 1)), 30.0) * 0.05
-    sc = min(float(run.get("score", 0)), 5000.0) * 0.0001
-    return d + xl + sc
+    xl = max(0.0, min(float(run.get("xp_level", 1)), 30.0) - 1.0) * 0.12
+    ac_val = float(run.get("final_ac", 10))
+    ac_bonus = max(0.0, 10.0 - ac_val) * 0.04
+    sc = math.log1p(max(0.0, float(run.get("score", 0)))) * 0.06
+    return d + xl + ac_bonus + sc
 
 
 def compute_confidence_sequence(

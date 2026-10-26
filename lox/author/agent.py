@@ -365,15 +365,22 @@ class AuthorAgent:
 
         total_tool_calls = 0
         final_content = ""
+        latest_hyp: dict[str, Any] = {}
 
         for turn_idx in range(1, max_tool_turns + 2):
             allow_tools = turn_idx <= max_tool_turns
             msg = self._call_llm_api(messages, allow_tools=allow_tools)
             messages.append(msg)
 
+            msg_text = msg.get("content") or ""
+            if msg_text:
+                inter_hyp, _ = self.extract_yaml_and_python(msg_text)
+                if inter_hyp:
+                    latest_hyp = inter_hyp
+
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
-                final_content = msg.get("content") or ""
+                final_content = msg_text
                 break
 
             for tc in tool_calls:
@@ -402,7 +409,6 @@ class AuthorAgent:
         # Compiler-in-the-loop verification & sliding-window self-repair
         is_macro_mode = mode == "MACRO_WRITE"
         base_msg_count = len(messages)
-        latest_hyp: dict[str, Any] = {}
 
         for repair_idx in range(self.max_repair_turns + 1):
             hyp, code_patch = self.extract_yaml_and_python(final_content)
@@ -476,8 +482,14 @@ class AuthorAgent:
                 ]
                 repair_msg = self._call_llm_api(messages, allow_tools=True)
                 messages.append(repair_msg)
+                r_text = repair_msg.get("content") or ""
+                if r_text:
+                    r_hyp, _ = self.extract_yaml_and_python(r_text)
+                    if r_hyp:
+                        latest_hyp = r_hyp
                 r_tools = repair_msg.get("tool_calls") or []
                 if r_tools:
+                    updated_via_dry_run = False
                     for tc in r_tools:
                         total_tool_calls += 1
                         fn_spec = tc.get("function") or {}
@@ -506,8 +518,13 @@ class AuthorAgent:
                         )
                         if t_name == "dry_run_policy" and t_args.get("code"):
                             final_content = f"```python\n{t_args['code']}\n```"
+                            updated_via_dry_run = True
+                    if not updated_via_dry_run:
+                        follow_msg = self._call_llm_api(messages, allow_tools=False)
+                        messages.append(follow_msg)
+                        final_content = follow_msg.get("content") or ""
                 else:
-                    final_content = repair_msg.get("content") or ""
+                    final_content = r_text
 
         # Final fallback: if the model already passed dry_run_policy during the tool phase, use that verified code!
         if self.tools.last_passed_code:

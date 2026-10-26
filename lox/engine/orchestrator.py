@@ -157,14 +157,62 @@ class CampaignOrchestrator:
 
         current_policy = self.load_active_policy()
         current_policy_id = "pol_gen000" if current_policy else "none"
+        baseline_by_seed: dict[int, dict[str, Any]] = {}
         baseline_runs: list[dict[str, Any]] = []
         registered_params: dict[str, dict[str, Any]] = {}
         last_batch_digest = ""
 
         campaign_id = datetime.datetime.now().strftime("c%Y%m%d_%H%M%S")
-        start_gen = 0 if not current_policy else 1
+        start_gen = 0 if (not current_policy or forced_mode == "FULL_WRITE") else 1
 
         try:
+            # If warm-starting from an existing policy.py on disk, evaluate a baseline batch first
+            if current_policy and start_gen == 1 and not baseline_runs:
+                warm_batch_id = f"{campaign_id}_g000_warm"
+                ui.info(
+                    f"Evaluating existing `{self.policy_path}` on {self.func_mod_episodes_per_fn} seeds to establish baseline..."
+                )
+                warm_res = self.pool.evaluate_batch(
+                    batch_id=warm_batch_id,
+                    policy_code=current_policy,
+                    macros_code=self.macro_lib.load_code(),
+                    target_episodes=self.func_mod_episodes_per_fn,
+                    seed_start=seed_base,
+                    record_ticks=True,
+                    show_progress=True,
+                )
+                if warm_res.get("registered_params"):
+                    registered_params.update(warm_res["registered_params"])
+                for r in warm_res["runs"]:
+                    baseline_by_seed[int(r["seed"])] = r
+                baseline_runs = list(baseline_by_seed.values())
+                warm_verdict = {
+                    "passed": True,
+                    "mean_delta": warm_res["avg_depth"],
+                    "ci_lower": warm_res["avg_depth"],
+                    "ci_upper": warm_res["avg_depth"],
+                    "wilcoxon_p": 0.0,
+                    "wins": warm_res["episodes_recorded"],
+                    "losses": 0,
+                    "ties": 0,
+                    "reason": "Warm-start baseline established from existing policy.py",
+                }
+                warm_fn_stats = self.db_logger.save_batch(
+                    batch_id=warm_batch_id,
+                    generation=0,
+                    mode="FULL_WRITE",
+                    parent_policy_id="none",
+                    candidate_policy_id=current_policy_id,
+                    target_functions=[],
+                    runs=warm_res["runs"],
+                    episodes_discarded=0,
+                    batch_metrics=warm_res,
+                    verdict=warm_verdict,
+                )
+                last_batch_digest = build_batch_contrast_digest(
+                    warm_res, baseline_runs, warm_fn_stats
+                )
+
             for gen in range(start_gen, start_gen + max_generations):
                 mode = self.scheduler.select_mode(
                     generation=gen,
@@ -223,6 +271,11 @@ class CampaignOrchestrator:
                             verdict=verdict,
                         )
                         ui.batch_summary(val_batch, verdict)
+                        self.scheduler.record_outcome(
+                            "PARAM_TUNE",
+                            verdict.get("mean_delta", 0.0),
+                            val_batch.get("wall_sec", 1.0),
+                        )
                         self.db_logger.save_experiment(
                             experiment_id=f"exp_{batch_id}",
                             generation=gen,
@@ -241,9 +294,19 @@ class CampaignOrchestrator:
                             current_policy = spsa_res["new_policy_code"]
                             current_policy_id = cand_id
                             self.save_active_policy(current_policy)
-                            baseline_runs = val_batch["runs"]
+                            if spsa_res.get("new_macros_code"):
+                                self.macro_lib.save_code(spsa_res["new_macros_code"])
+                            for pk, pval in spsa_res["optimized_params"].items():
+                                if pk in registered_params:
+                                    if isinstance(registered_params[pk], dict):
+                                        registered_params[pk]["default"] = float(pval)
+                                    else:
+                                        registered_params[pk].default = float(pval)
+                            for r in val_batch["runs"]:
+                                baseline_by_seed[int(r["seed"])] = r
+                            baseline_runs = list(baseline_by_seed.values())
                             last_batch_digest = build_batch_contrast_digest(
-                                val_batch, baseline_runs, fn_stats
+                                val_batch, val_batch["runs"], fn_stats
                             )
                             self.db_logger.save_policy(
                                 policy_id=cand_id,
@@ -298,6 +361,7 @@ class CampaignOrchestrator:
                         f"Committed macro(s) {proposal.target_functions} to `{self.macros_path}`. "
                         "Skipping rollout and starting next generation."
                     )
+                    self.scheduler.record_outcome("MACRO_WRITE", 0.05, 1.0)
                     self.db_logger.save_experiment(
                         experiment_id=f"exp_{batch_id}",
                         generation=gen,
@@ -320,10 +384,16 @@ class CampaignOrchestrator:
                     continue
 
                 # --- MODE 1 (`FULL_WRITE`) & MODE 3 (`FUNC_MOD_ADD`) ---
+                raw_targets = [
+                    f for f in proposal.target_functions if f and f != "__init__"
+                ]
+                non_root_targets = [
+                    f for f in raw_targets if f not in ("run", "step", "act")
+                ]
                 target_fns = (
                     []
                     if proposal.mode == "FULL_WRITE"
-                    else [f for f in proposal.target_functions if f and f != "__init__"]
+                    else (non_root_targets or raw_targets)
                 )
                 num_funcs = max(1, len(target_fns))
                 target_eps = (
@@ -336,18 +406,19 @@ class CampaignOrchestrator:
                 priority_seeds = (
                     [int(r["seed"]) for r in baseline_runs] if baseline_runs else None
                 )
-                base_by_seed = {int(r["seed"]): r for r in baseline_runs}
 
                 early_stop_cb = None
                 if (
                     self.early_stopping
                     and proposal.mode == "FUNC_MOD_ADD"
-                    and base_by_seed
+                    and baseline_by_seed
                 ):
                     min_p = min(60, max(20, target_eps // 4))
 
                     def _check_futility(
-                        cand_runs: list[dict[str, Any]], _b=base_by_seed, _mp=min_p
+                        cand_runs: list[dict[str, Any]],
+                        _b=baseline_by_seed,
+                        _mp=min_p,
                     ) -> bool:
                         return should_stop_early_for_futility(
                             cand_runs, _b, min_pairs=_mp
@@ -388,6 +459,32 @@ class CampaignOrchestrator:
                         "reason": "Initial FULL_WRITE baseline established",
                     }
                 else:
+                    # Backfill any triggered seeds not yet in `baseline_by_seed` so 100% of triggered episodes
+                    # are paired 1-to-1 by exact seed against `current_policy` (zero survivorship bias!)
+                    missing_seeds = [
+                        int(r["seed"])
+                        for r in eval_res["runs"]
+                        if int(r["seed"]) not in baseline_by_seed
+                    ]
+                    if (
+                        missing_seeds
+                        and current_policy
+                        and not eval_res.get("early_stopped")
+                        and not eval_res.get("unreachable_abort")
+                    ):
+                        backfill_res = self.pool.evaluate_batch(
+                            batch_id=f"{batch_id}_base_backfill",
+                            policy_code=current_policy,
+                            macros_code=self.macro_lib.load_code(),
+                            target_episodes=len(missing_seeds),
+                            priority_seeds=missing_seeds,
+                            record_ticks=False,
+                            show_progress=False,
+                        )
+                        for br in backfill_res["runs"]:
+                            baseline_by_seed[int(br["seed"])] = br
+                        baseline_runs = list(baseline_by_seed.values())
+
                     verdict = evaluate_paired_hypothesis(
                         eval_res["runs"], baseline_runs
                     )
@@ -447,18 +544,30 @@ class CampaignOrchestrator:
                     current_policy = proposal.full_policy_code
                     current_policy_id = cand_id
                     self.save_active_policy(current_policy)
-                    baseline_runs = eval_res["runs"]
+                    if proposal.mode == "FULL_WRITE":
+                        baseline_by_seed = {int(r["seed"]): r for r in eval_res["runs"]}
+                    else:
+                        for r in eval_res["runs"]:
+                            baseline_by_seed[int(r["seed"])] = r
+                    baseline_runs = list(baseline_by_seed.values())
                     last_batch_digest = build_batch_contrast_digest(
-                        eval_res, baseline_runs, fn_stats
+                        eval_res, eval_res["runs"], fn_stats
                     )
                 elif not last_batch_digest and eval_res["runs"]:
                     last_batch_digest = build_batch_contrast_digest(
                         eval_res, eval_res["runs"], fn_stats
                     )
 
-                if eval_res["avg_depth"] >= target_depth and verdict["passed"]:
+                uncond_avg_depth = (
+                    float(
+                        sum(r["max_depth"] for r in baseline_runs) / len(baseline_runs)
+                    )
+                    if baseline_runs
+                    else eval_res["avg_depth"]
+                )
+                if uncond_avg_depth >= target_depth and verdict["passed"]:
                     ui.info(
-                        f"Campaign Target Depth ({target_depth:.1f}) achieved! Avg Depth: {eval_res['avg_depth']:.2f}"
+                        f"Campaign Target Depth ({target_depth:.1f}) achieved! Avg Depth: {uncond_avg_depth:.2f}"
                     )
                     break
 

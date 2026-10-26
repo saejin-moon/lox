@@ -64,9 +64,21 @@ class MacroLibrary:
 
         base_tree = validate_python_code(current_code, filename=self.path)
         existing_idx: dict[str, int] = {}
+        existing_assign_idx: dict[str, int] = {}
+        existing_imports: set[str] = set()
         for idx, node in enumerate(base_tree.body):
             if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
                 existing_idx[node.name] = idx
+            elif (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+            ):
+                existing_assign_idx[node.targets[0].id] = idx
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                existing_assign_idx[node.target.id] = idx
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                existing_imports.add(ast.unparse(node).strip())
 
         updated_names: list[str] = []
         for node in new_tree.body:
@@ -77,8 +89,33 @@ class MacroLibrary:
                 else:
                     existing_idx[node.name] = len(base_tree.body)
                     base_tree.body.append(node)
-            elif isinstance(node, ast.Assign):
-                base_tree.body.append(node)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                imp_src = ast.unparse(node).strip()
+                if imp_src not in existing_imports:
+                    existing_imports.add(imp_src)
+                    base_tree.body.insert(0, node)
+                    existing_idx = {k: v + 1 for k, v in existing_idx.items()}
+                    existing_assign_idx = {
+                        k: v + 1 for k, v in existing_assign_idx.items()
+                    }
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                var_name = None
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                ):
+                    var_name = node.targets[0].id
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                    node.target, ast.Name
+                ):
+                    var_name = node.target.id
+                if var_name and var_name in existing_assign_idx:
+                    base_tree.body[existing_assign_idx[var_name]] = node
+                else:
+                    if var_name:
+                        existing_assign_idx[var_name] = len(base_tree.body)
+                    base_tree.body.append(node)
 
         merged = ast.unparse(base_tree)
         self.save_code(merged)

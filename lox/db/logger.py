@@ -188,6 +188,9 @@ class BatchDatabaseLogger:
                     )
 
             if fn_stats:
+                con.execute(
+                    "DELETE FROM function_stats WHERE batch_id = ?", (batch_id,)
+                )
                 fn_rows = [
                     (
                         fs["batch_id"],

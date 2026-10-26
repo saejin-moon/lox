@@ -37,6 +37,8 @@ class ModeScheduler:
         }
         self._func_mods_since_tune = 0
         self._gens_since_macro = 0
+        self._last_tune_gen = 0
+        self._last_macro_gen = 0
 
     def select_mode(
         self,
@@ -55,18 +57,26 @@ class ModeScheduler:
 
         # Periodic Macro Synthesis so the Author builds up `macros.py` early and regularly
         if (
-            generation > 0 and generation % self.macro_every == 0
+            generation > 0
+            and generation % self.macro_every == 0
+            and (generation - self._last_macro_gen) >= self.macro_every
         ) or self._gens_since_macro >= self.macro_every:
             self._gens_since_macro = 0
+            self._last_macro_gen = generation
             self.counts["MACRO_WRITE"] += 1
             return "MACRO_WRITE"
 
         # Periodic Parameter Finetuning every `param_tune_every` function modifications
         if has_tunable_params and (
-            (generation > 0 and generation % self.param_tune_every == 0)
+            (
+                generation > 0
+                and generation % self.param_tune_every == 0
+                and (generation - self._last_tune_gen) >= self.param_tune_every
+            )
             or self._func_mods_since_tune >= self.param_tune_every
         ):
             self._func_mods_since_tune = 0
+            self._last_tune_gen = generation
             self.counts["PARAM_TUNE"] += 1
             return "PARAM_TUNE"
 

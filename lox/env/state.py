@@ -39,6 +39,7 @@ class MonsterInfo:
     flags1: int
     flags2: int
     flags3: int
+    attacks: tuple[tuple[int, int, int, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +122,12 @@ def _make_mon_info(mid: int) -> MonsterInfo | None:
     try:
         pm = nh.permonst(mid)
         mlet = chr(pm.mlet) if 32 <= pm.mlet <= 126 else "?"
+        mattk_raw = getattr(pm, "mattk", ())
+        attacks = tuple(
+            (int(a.aatyp), int(a.adtyp), int(a.damn), int(a.damd))
+            for a in mattk_raw
+            if int(getattr(a, "aatyp", 0)) != 0 or int(getattr(a, "adtyp", 0)) != 0
+        )
         return MonsterInfo(
             mon_id=mid,
             name=pm.mname,
@@ -139,6 +146,7 @@ def _make_mon_info(mid: int) -> MonsterInfo | None:
             flags1=int(pm.mflags1),
             flags2=int(pm.mflags2),
             flags3=int(pm.mflags3),
+            attacks=attacks,
         )
     except Exception:
         return None
@@ -654,11 +662,8 @@ class GameState:
             g_grid = np.clip(self.glyphs, 0, _MAX_GLYPH - 1)
             mon_mask = _IS_MONSTER_LUT[g_grid]
             ys, xs = np.nonzero(mon_mask)
-            hy, hx = self.y, self.x
             for y_val, x_val in zip(ys, xs):
                 yi, xi = int(y_val), int(x_val)
-                if exclude_self and yi == hy and xi == hx:
-                    continue
                 g = int(self.glyphs[yi, xi])
                 c = int(self.chars[yi, xi])
                 ch = chr(c) if 32 <= c <= 126 else "?"
@@ -679,7 +684,10 @@ class GameState:
                     )
                 )
             self._monsters_cache = mons
-        return self._monsters_cache
+        if exclude_self:
+            hy, hx = self.y, self.x
+            return [m for m in self._monsters_cache if not (m.y == hy and m.x == hx)]
+        return list(self._monsters_cache)
 
     def visible_objects(self) -> list[VisibleObject]:
         """Returns all objects and corpses currently visible on the 21x79 screen."""

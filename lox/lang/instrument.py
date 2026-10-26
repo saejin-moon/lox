@@ -43,6 +43,7 @@ class ExecutionTracer:
     __slots__ = (
         "max_loop_ticks",
         "loop_ticks",
+        "total_turns",
         "fn_calls",
         "fn_turns",
         "call_stack",
@@ -51,6 +52,8 @@ class ExecutionTracer:
         "param_overrides",
     )
 
+    _ROOT_FNS = frozenset({"run", "step", "act", "root"})
+
     def __init__(
         self,
         max_loop_ticks: int = 250000,
@@ -58,9 +61,10 @@ class ExecutionTracer:
     ):
         self.max_loop_ticks: int = max_loop_ticks
         self.loop_ticks: int = 0
+        self.total_turns: int = 0
         self.fn_calls: dict[str, int] = {}
         self.fn_turns: dict[str, int] = {}
-        self.call_stack: list[str] = []
+        self.call_stack: list[tuple[str, int]] = []
         self.active_fn: str = "root"
         self.registered_params: dict[str, TunableParam] = {}
         self.param_overrides: dict[str, float] = (
@@ -69,6 +73,7 @@ class ExecutionTracer:
 
     def reset_for_episode(self) -> None:
         self.loop_ticks = 0
+        self.total_turns = 0
         self.fn_calls.clear()
         self.fn_turns.clear()
         self.call_stack.clear()
@@ -76,13 +81,36 @@ class ExecutionTracer:
 
     def enter_fn(self, fn_name: str) -> None:
         self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+        self.call_stack.append((fn_name, self.total_turns))
         self.active_fn = fn_name
+
+    def exit_fn(self, fn_name: str) -> None:
+        turns_at_enter = self.total_turns
+        if self.call_stack:
+            top_fn, turns_at_enter = self.call_stack.pop()
+            if top_fn != fn_name:
+                # Re-sync if stack was unwound out of order
+                while self.call_stack and self.call_stack[-1][0] != fn_name:
+                    _, turns_at_enter = self.call_stack.pop()
+                if self.call_stack and self.call_stack[-1][0] == fn_name:
+                    _, turns_at_enter = self.call_stack.pop()
+
+        if not self.call_stack:
+            return
+
+        caller_fn = self.call_stack[-1][0]
+        yielded_inside = self.total_turns > turns_at_enter
+        if caller_fn not in self._ROOT_FNS or yielded_inside:
+            self.active_fn = caller_fn
 
     def record_turn_yield(self) -> str:
         """Called by the runner each time the policy yields an action to the harness."""
         self.loop_ticks = 0
+        self.total_turns += 1
         fn = self.active_fn
         self.fn_turns[fn] = self.fn_turns.get(fn, 0) + 1
+        if self.call_stack:
+            self.active_fn = self.call_stack[-1][0]
         return fn
 
     def tick_loop(self) -> None:
@@ -173,6 +201,19 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
             )
         )
 
+    def _make_exit_stmt(self, fn_name: str) -> ast.stmt:
+        return ast.Expr(
+            value=ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
+                    attr="exit_fn",
+                    ctx=ast.Load(),
+                ),
+                args=[ast.Constant(value=fn_name)],
+                keywords=[],
+            )
+        )
+
     def _make_tick_stmt(self) -> ast.stmt:
         return ast.Expr(
             value=ast.Call(
@@ -194,6 +235,7 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
 
         if fn_name != "__init__":
             enter_stmt = self._make_enter_stmt(fn_name)
+            exit_stmt = self._make_exit_stmt(fn_name)
             # Keep docstring at index 0 if present
             if (
                 node.body
@@ -201,9 +243,24 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                 and isinstance(node.body[0].value, ast.Constant)
                 and isinstance(node.body[0].value.value, str)
             ):
-                node.body.insert(1, enter_stmt)
+                doc_stmt = node.body[0]
+                rest_body = node.body[1:] or [ast.Pass()]
+                try_stmt = ast.Try(
+                    body=rest_body,
+                    handlers=[],
+                    orelse=[],
+                    finalbody=[exit_stmt],
+                )
+                node.body = [doc_stmt, enter_stmt, try_stmt]
             else:
-                node.body.insert(0, enter_stmt)
+                rest_body = node.body or [ast.Pass()]
+                try_stmt = ast.Try(
+                    body=rest_body,
+                    handlers=[],
+                    orelse=[],
+                    finalbody=[exit_stmt],
+                )
+                node.body = [enter_stmt, try_stmt]
         return node
 
     def visit_While(self, node: ast.While) -> ast.While:

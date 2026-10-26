@@ -276,9 +276,28 @@ class PolicyRunner:
             else:
                 act = self.instance(state)
         except StopIteration:
-            act = Action.WAIT
+            if self._mode == "run":
+                try:
+                    res = self.instance.run(state)
+                    if inspect.isgenerator(res):
+                        self._gen = res
+                        act = next(self._gen)
+                    else:
+                        self._mode = "run_direct"
+                        act = res
+                except StopIteration:
+                    act = Action.WAIT
+            else:
+                act = Action.WAIT
         except PolicyLoopError:
             raise
+
+        if inspect.isgenerator(act):
+            raise RuntimeError(
+                "Policy yielded a generator object directly instead of an Action. "
+                "When calling a generator subroutine, use `state = yield from self.sub_method(state)` "
+                "(not `yield self.sub_method(state)`)."
+            )
 
         active_fn = self.tracer.record_turn_yield()
         return act, active_fn
