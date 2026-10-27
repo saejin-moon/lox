@@ -13,6 +13,7 @@ from typing import Any
 
 from lox.db.schema import DEFAULT_DB_PATH, init_db
 from lox.db.summarizer import compute_function_stats, mark_outlier_good_runs
+from lox.ui.console import ui
 
 
 class BatchDatabaseLogger:
@@ -86,6 +87,7 @@ class BatchDatabaseLogger:
             )
 
             if runs:
+                ui.status(f"Saving {len(runs):,} episode runs & telemetry to DuckDB...")
                 run_rows = [
                     (
                         r["run_id"],

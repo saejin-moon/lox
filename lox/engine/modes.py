@@ -16,6 +16,7 @@ import numpy as np
 
 from lox.engine.hypothesis import evaluate_paired_hypothesis, progression_metric
 from lox.runner.pool import PersistentEvalPool
+from lox.ui.console import ui
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +187,9 @@ def run_spsa_param_tuning(
     gamma_exp = 0.101
 
     for k in range(iterations):
+        ui.status(
+            f"CRN-SPSA tuning parameters iterate {k + 1}/{iterations} (evaluating mini-batches on Common Random Numbers)..."
+        )
         ck = c0 / ((k + 1.0) ** gamma_exp)
         ak = a0 / ((k + 1.0 + A) ** alpha_exp)
         delta_vec = rng.choice([-1.0, 1.0], size=p_dim)

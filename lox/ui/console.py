@@ -216,6 +216,16 @@ class ConsoleUI:
                 f"W/L/T: {wins}/{losses}/{ties} (p={p_val:.4f}) │ {self._c(self.DIM, reason)}"
             )
 
+    def status(self, msg: str) -> None:
+        """Prints a temporary status line in place (cleared on next log)."""
+        if not self.enabled:
+            return
+        if self._in_progress_line:
+            sys.stdout.write("\r\033[K")
+        sys.stdout.write(f"\r  {self._c(self.DIM, '…')} {self._c(self.DIM, msg)}")
+        sys.stdout.flush()
+        self._in_progress_line = True
+
     def info(self, msg: str) -> None:
         if not self.enabled:
             return

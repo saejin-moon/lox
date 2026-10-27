@@ -369,6 +369,9 @@ class AuthorAgent:
 
         for turn_idx in range(1, max_tool_turns + 2):
             allow_tools = turn_idx <= max_tool_turns
+            ui.status(
+                f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
+            )
             msg = self._call_llm_api(messages, allow_tools=allow_tools)
             messages.append(msg)
 
