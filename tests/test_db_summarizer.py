@@ -261,3 +261,83 @@ class Policy:
     )
     assert "PASSED" in dry_status
     assert "Dry-Run PASSED" in dry_res
+
+
+def test_save_batch_throughput_150_runs(tmp_path):
+    """Verifies that persisting 150 runs with full telemetry completes in under 1 second."""
+    import time
+
+    db_file = str(tmp_path / "bench_lox.duckdb")
+    logger = BatchDatabaseLogger(db_path=db_file, max_tick_runs_per_batch=25)
+
+    sample_ticks = [
+        {
+            "run_id": f"run_{r}",
+            "turn": t,
+            "step_idx": t,
+            "depth": 1,
+            "dungeon_num": 0,
+            "hp": 16,
+            "max_hp": 16,
+            "ac": 10,
+            "xp_level": 1,
+            "hunger_state": 1,
+            "condition_mask": 0,
+            "y": 10,
+            "x": 10,
+            "action_name": "WAIT",
+            "raw_key": ord("."),
+            "active_function": "explore",
+            "message": "",
+            "visible_monsters": "",
+            "inventory_summary": "",
+        }
+        for r in range(25)
+        for t in range(1, 200)
+    ]
+
+    runs = [
+        {
+            "run_id": f"run_{i}",
+            "seed": i,
+            "role": "val-hum-law-fem",
+            "depth": 3 if i == 0 else 1,
+            "max_depth": 3 if i == 0 else 1,
+            "score": 500 if i == 0 else 20,
+            "turns": 200,
+            "steps": 200,
+            "xp_level": 1,
+            "final_hp": 16,
+            "max_hp": 16,
+            "final_ac": 10,
+            "gold": 0,
+            "end_reason": "died",
+            "death_message": "killed by a jackal",
+            "summary_digest": "Phase Timeline: explore (100%)",
+            "game_log": "T1: started\nT200: died",
+            "milestones": {},
+            "triggered_functions": {"explore": 200},
+            "last_active_function": "explore",
+            "action_bytes": b"....",
+            "wall_ms": 15.0,
+            "ticks": sample_ticks if i < 25 else [],
+        }
+        for i in range(150)
+    ]
+
+    t0 = time.perf_counter()
+    logger.save_batch(
+        batch_id="bench_batch",
+        generation=0,
+        mode="FULL_WRITE",
+        parent_policy_id="none",
+        candidate_policy_id="bench_pol",
+        target_functions=["explore"],
+        runs=runs,
+        episodes_discarded=0,
+        batch_metrics={"avg_depth": 1.0, "max_depth": 3, "avg_score": 25.0},
+    )
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0, (
+        f"save_batch took {elapsed:.2f}s for 150 runs (expected < 1.0s)"
+    )

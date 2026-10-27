@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 import numpy as np
+import pyarrow as pa
 
 from lox.db.schema import DEFAULT_DB_PATH, init_db
 from lox.db.summarizer import summarize_episode_ticks
@@ -867,69 +868,66 @@ def ingest_expert_runs_into_duckdb(
     finally:
         harness.close()
 
-    if expert_rows:
-        con.executemany(
-            """
-            INSERT OR REPLACE INTO expert_runs VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    try:
+        con.execute("BEGIN TRANSACTION")
+        if expert_rows:
+            exp_cols = {
+                "run_id": [str(r["run_id"]) for r in expert_rows],
+                "source": [str(r["source"]) for r in expert_rows],
+                "player": [str(r["player"]) for r in expert_rows],
+                "role": [str(r["role"]) for r in expert_rows],
+                "depth": [int(r["depth"]) for r in expert_rows],
+                "max_depth": [int(r["max_depth"]) for r in expert_rows],
+                "score": [int(r["score"]) for r in expert_rows],
+                "turns": [int(r["turns"]) for r in expert_rows],
+                "xp_level": [int(r["xp_level"]) for r in expert_rows],
+                "final_hp": [int(r["final_hp"]) for r in expert_rows],
+                "max_hp": [int(r["max_hp"]) for r in expert_rows],
+                "final_ac": [int(r["final_ac"]) for r in expert_rows],
+                "gold": [int(r["gold"]) for r in expert_rows],
+                "end_reason": [str(r["end_reason"]) for r in expert_rows],
+                "death_message": [str(r["death_message"]) for r in expert_rows],
+                "summary_digest": [str(r["summary_digest"]) for r in expert_rows],
+                "game_log": [str(r["game_log"]) for r in expert_rows],
+                "milestones_json": [str(r["milestones_json"]) for r in expert_rows],
+                "dumplog_text": [str(r["dumplog_text"]) for r in expert_rows],
+            }
+            exp_tbl = pa.Table.from_pydict(exp_cols)
+            con.register("_temp_expert_runs", exp_tbl)
+            con.execute(
+                "INSERT OR REPLACE INTO expert_runs SELECT * FROM _temp_expert_runs"
             )
-            """,
-            [
-                (
-                    r["run_id"],
-                    r["source"],
-                    r["player"],
-                    r["role"],
-                    int(r["depth"]),
-                    int(r["max_depth"]),
-                    int(r["score"]),
-                    int(r["turns"]),
-                    int(r["xp_level"]),
-                    int(r["final_hp"]),
-                    int(r["max_hp"]),
-                    int(r["final_ac"]),
-                    int(r["gold"]),
-                    r["end_reason"],
-                    r["death_message"],
-                    r["summary_digest"],
-                    r["game_log"],
-                    r["milestones_json"],
-                    r["dumplog_text"],
-                )
-                for r in expert_rows
-            ],
-        )
+            con.unregister("_temp_expert_runs")
 
-    if tick_rows:
-        con.execute("DELETE FROM expert_ticks WHERE run_id LIKE 'nle_ref_trace_%'")
-        con.executemany(
-            """
-            INSERT INTO expert_ticks VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-            """,
-            [
-                (
-                    t["run_id"],
-                    int(t["turn"]),
-                    int(t["step_idx"]),
-                    int(t["depth"]),
-                    int(t["dungeon_num"]),
-                    int(t["hp"]),
-                    int(t["max_hp"]),
-                    int(t["ac"]),
-                    int(t["xp_level"]),
-                    int(t["hunger_state"]),
-                    int(t["y"]),
-                    int(t["x"]),
-                    t["action_name"],
-                    int(t["raw_key"]),
-                    t["message"],
-                    t["screen_ascii"],
-                )
-                for t in tick_rows
-            ],
-        )
+        if tick_rows:
+            con.execute("DELETE FROM expert_ticks WHERE run_id LIKE 'nle_ref_trace_%'")
+            tick_cols = {
+                "run_id": [str(t["run_id"]) for t in tick_rows],
+                "turn": [int(t["turn"]) for t in tick_rows],
+                "step_idx": [int(t["step_idx"]) for t in tick_rows],
+                "depth": [int(t["depth"]) for t in tick_rows],
+                "dungeon_num": [int(t["dungeon_num"]) for t in tick_rows],
+                "hp": [int(t["hp"]) for t in tick_rows],
+                "max_hp": [int(t["max_hp"]) for t in tick_rows],
+                "ac": [int(t["ac"]) for t in tick_rows],
+                "xp_level": [int(t["xp_level"]) for t in tick_rows],
+                "hunger_state": [int(t["hunger_state"]) for t in tick_rows],
+                "y": [int(t["y"]) for t in tick_rows],
+                "x": [int(t["x"]) for t in tick_rows],
+                "action_name": [str(t["action_name"]) for t in tick_rows],
+                "raw_key": [int(t["raw_key"]) for t in tick_rows],
+                "message": [str(t["message"]) for t in tick_rows],
+                "screen_ascii": [str(t["screen_ascii"]) for t in tick_rows],
+            }
+            tick_tbl = pa.Table.from_pydict(tick_cols)
+            con.register("_temp_expert_ticks", tick_tbl)
+            con.execute("INSERT INTO expert_ticks SELECT * FROM _temp_expert_ticks")
+            con.unregister("_temp_expert_ticks")
+
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
 
     total_now = con.execute("SELECT COUNT(*) FROM expert_runs").fetchone()[0]
     con.close()
