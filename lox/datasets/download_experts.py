@@ -23,6 +23,8 @@ from lox.db.summarizer import summarize_episode_ticks
 
 NAO_XLOGFILE_URL = "https://alt.org/nethack/xlogfile.nh363"
 NAO_DUMPLOG_BASE = "https://alt.org/nethack/dumplog"
+HARDFOUGHT_XLOGFILE_URL = "https://www.hardfought.org/xlogfiles/nethack36/xlogfile"
+HARDFOUGHT_DUMPLOG_BASE = "https://www.hardfought.org/userdata"
 
 # Verified NAO Human Ascension & Deep-Dive Records (NetHack 3.6.x)
 # Guarantees rich human ascension reference runs in `expert_runs` even in offline/airgapped environments
@@ -686,51 +688,49 @@ def ingest_expert_runs_into_duckdb(
             )
         )
 
-    # 2. Attempt online NAO xlogfile + dumplog fetch if reachable
+    # 2. Ingest online Hardfought NetHack 3.6 ascensions & detailed dumplogs
     try:
         with httpx.Client(timeout=timeout_sec, follow_redirects=True) as client:
-            resp = client.get(NAO_XLOGFILE_URL)
-            if resp.status_code == 200 and resp.content:
-                if NAO_XLOGFILE_URL.endswith(".xz"):
-                    raw_text = lzma.decompress(resp.content).decode(
-                        "latin1", errors="ignore"
-                    )
-                else:
-                    raw_text = resp.content.decode("latin1", errors="ignore")
-                ascended_metas: list[dict[str, str]] = []
-                for line in raw_text.splitlines():
+            # Query last 6MB of the Hardfought NetHack 3.6 xlogfile
+            headers = {"Range": "bytes=10000000-16500000"}
+            resp = client.get(HARDFOUGHT_XLOGFILE_URL, headers=headers)
+            if resp.status_code in (200, 206) and resp.content:
+                raw_text = resp.content.decode("latin1", errors="ignore")
+                valk_asc: list[dict[str, str]] = []
+                other_asc: list[dict[str, str]] = []
+                for line in reversed(raw_text.splitlines()):
                     if "death=ascended" in line:
                         m = parse_xlogfile_line(line)
                         if m.get("death") == "ascended":
-                            ascended_metas.append(m)
-                            if len(ascended_metas) >= max_ascensions:
+                            if m.get("role") == "Val":
+                                valk_asc.append(m)
+                            else:
+                                other_asc.append(m)
+                            if len(valk_asc) + len(other_asc) >= max_ascensions * 2:
                                 break
 
-                for idx, m in enumerate(ascended_metas):
+                # Prioritize Valkyrie ascensions first, followed by other classes
+                selected_metas = (valk_asc + other_asc)[:max_ascensions]
+                for idx, m in enumerate(selected_metas):
                     player = m.get("name", "player")
                     starttime = m.get("starttime", str(idx))
-                    run_id = f"nao_asc_{player}_{starttime}"
+                    run_id = f"hdf_asc_{player}_{starttime}"
                     dumplog_txt = ""
                     if idx < fetch_dumplogs and player and starttime.isdigit():
                         prefix = player[0]
-                        for url in (
-                            f"{NAO_DUMPLOG_BASE}/{prefix}/{player}/{starttime}.nh363.txt",
-                            f"{NAO_DUMPLOG_BASE}/{prefix}/{player}/{starttime}.nh361.txt",
-                            f"{NAO_DUMPLOG_BASE}/{player}/{starttime}.nh361.txt",
-                        ):
-                            try:
-                                d_resp = client.get(url, timeout=3.0)
-                                if d_resp.status_code == 200 and len(d_resp.text) > 200:
-                                    dumplog_txt = d_resp.text
-                                    break
-                            except Exception:
-                                continue
+                        dumplog_url = f"{HARDFOUGHT_DUMPLOG_BASE}/{prefix}/{player}/nethack/dumplog/{starttime}.nh.txt"
+                        try:
+                            d_resp = client.get(dumplog_url, timeout=5.0)
+                            if d_resp.status_code == 200 and len(d_resp.text) > 200:
+                                dumplog_txt = d_resp.text
+                        except Exception:
+                            pass
 
                     row = parse_dumplog_to_expert_run(
                         run_id=run_id,
                         meta=m,
                         dumplog_text=dumplog_txt,
-                        source="nao_human",
+                        source="hardfought_human",
                     )
                     expert_rows.append(row)
     except Exception:

@@ -78,6 +78,93 @@ STRATEGY_ARTICLES = [
 - **Acquire Magic Resistance**: Cloak of magic resistance or gray dragon scale mail (protects against touch of death and destroy armor).
 - **Acquire Speed**: Speed boots or wand of speed.""",
     ),
+    (
+        "Strategy: Tactical Combat, Kiting, and Monster Threats",
+        """# NetHack 3.6 Tactical Combat, Kiting, and High-Threat Monster Guide
+
+## 1. Golden Rules of Tactical Combat
+- **Chokepoint Advantage**: Never fight in open rooms when outnumbered. Step back into a doorway or corridor ('#') so monsters can only approach and attack one at a time.
+- **HP Threshold Rule**: Retreat when HP drops below 50%. If HP < 30%, disengage immediately, seek upstairs or corridors, or engrave Elbereth.
+- **Kiting Tough Enemies**: If an enemy is faster than you or hits hard, attack once and step backward toward visited territory to let your pet attack or force the enemy into a chokepoint.
+
+## 2. High-Threat Monsters & Countermeasures
+- **Floating Eyes ('e')**:
+  - DANGER: Attacking a floating eye in melee paralyzes you for up to 50 turns while adjacent monsters finish you off.
+  - RULE: NEVER attack 'e' in melee unless blindfolded. Kill it from range: throw daggers (`seq(Action.THROW, slot, dir)`), fire arrows, or zap wands.
+- **Gas Spores ('e')**:
+  - DANGER: Explodes on death in melee, dealing massive fire/explosion damage (often one-shotting early characters).
+  - RULE: Disengage and kill with ranged weapons or let your pet handle it.
+- **Soldier Ants ('a')**:
+  - DANGER: Speed 18 (faster than player) with high-damage poisonous stings.
+  - RULE: Flee to corridors, engrave Elbereth, or use poison resistance.
+- **Cockatrice / Chickatrice ('c')**:
+  - DANGER: Touching or hitting without gloves causes fatal stoning within 5 turns.
+  - RULE: Never eat cockatrice corpses. Kill with ranged attacks or while wearing leather gloves.
+- **Rust Monsters ('R')**:
+  - DANGER: Hits corrode iron weapons and armor, degrading AC permanently.
+  - RULE: Use non-metallic weapons (clubs, spears, artifact Excalibur which is rustproof) or throw daggers.
+
+## 3. The Power of Elbereth in NetHack 3.6
+- **Dust-Engraving**: Engraving 'Elbereth' in the dust with your fingers (`seq(Action.ENGRAVE, '-', 'Elbereth\\r')`) takes 1 turn.
+- **Effect**: Most non-human monsters cannot attack the player while standing on the word Elbereth. Use it as an emergency lifesaver when cornered.""",
+    ),
+    (
+        "Strategy: Nutrition, Safe Corpses, and Altars",
+        """# NetHack 3.6 Nutrition, Corpse Consumption, and Divine Altar Guide
+
+## 1. Hunger States & Nutrition Management
+- **Hunger Levels**:
+  - 0 = Satiated (do not eat)
+  - 1 = Not Hungry (normal state)
+  - 2 = Hungry (look for food or corpses)
+  - 3 = Weak (eat immediately!)
+  - 4 = Fainting / Fainted (starvation imminent)
+- **Starting Food**: Valkyries start with food rations ('%'). Rations provide 800 nutrition points and never rot. Save them for emergencies when corpses are unavailable.
+
+## 2. Corpse Consumption Rules
+- **Eat Fresh Meat**: Eating fresh corpses dropped by slain monsters preserves rations. Always eat corpses immediately after killing (`seq(Action.EAT, 'y')`).
+- **Safe Early Corpses**:
+  - Newts, lichens, sewer rats, jackals, sewer rats, foxes, hobbits, dwarves.
+- **Deadly Corpses (NEVER EAT)**:
+  - **Kobolds ('k')**: Poisonous! Only safe if you have poison resistance.
+  - **Chickatrice / Cockatrice ('c')**: Causes instant fatal stoning (petrification).
+  - **Tainted / Rotten Corpses**: Corpses left on the ground for more than ~50 turns become tainted. Eating tainted food causes fatal food poisoning.
+
+## 3. Altars & Divine Protection
+- **Identifying Altars ('_')**:
+  - Co-aligned altars (Lawful for Valkyrie) accept sacrifices.
+  - `#offer` fresh corpses on co-aligned altars to gain divine favor, heal HP, and unlock divine gifts (artifacts like Mjollnir).
+- **Minetown Temple Priest**:
+  - Minetown features an aligned temple. Donate gold (400 * XP level) to the priest to receive permanent divine protection (AC reduction of 2 to 4 points!).""",
+    ),
+    (
+        "Strategy: Item Identification, Beatitude, and Inventory Management",
+        """# NetHack 3.6 Item Identification, Beatitude, and Kit Management
+
+## 1. Beatitude: Cursed, Uncursed, and Blessed
+- **Beatitude Rule**:
+  - NEVER wear or wield unknown items without testing beatitude first!
+  - Cursed armor or weapons weld to your body and cannot be removed without a scroll of remove curse.
+  - Cursed rings can impart negative stats (e.g. ring of teleportation, ring of polymorph).
+- **Pet Testing**:
+  - Drop unknown items on the floor. Pets refuse to step on cursed items, or step on them with a reluctant message ("Your dog hesitates"). If your pet freely steps over an item, it is uncursed or blessed.
+- **Altars**:
+  - Dropping an item on an altar immediately identifies its beatitude: flashes purple/black (blessed), pale/no flash (uncursed), or red/brown (cursed).
+
+## 2. Valkyrie Starting Gear & Inventory Discipline
+- **Starting Setup**:
+  - Slot `a`: +1 long sword
+  - Slot `b`: +1 dagger
+  - Slot `c`: +0 small shield
+  - Slot `d`: food ration
+- **Turn 1 Optimization**:
+  - Equip small shield: `seq(Action.WEAR, 'c')` (AC drops from 10 to 9 or 8).
+  - Wield long sword: `seq(Action.WIELD, 'a')`.
+- **Identifying Potions and Scrolls**:
+  - Clear potions are always water. Dipping water into an altar blesses it (holy water).
+  - Potions of extra/full healing increase max HP when quaffed at full health.
+  - Scrolls of enchant weapon / armor improve equipment pluses (+1 to +5).""",
+    ),
 ]
 
 REDIRECTS = [
@@ -89,6 +176,18 @@ REDIRECTS = [
     ("stairs", "Strategy: Dungeon Exploration, Doors, and Stairs"),
     ("valkyrie", "Strategy: Valkyrie Ascension Playbook"),
     ("excalibur", "Strategy: Valkyrie Ascension Playbook"),
+    ("combat", "Strategy: Tactical Combat, Kiting, and Monster Threats"),
+    ("kiting", "Strategy: Tactical Combat, Kiting, and Monster Threats"),
+    ("monsters", "Strategy: Tactical Combat, Kiting, and Monster Threats"),
+    ("floating eye", "Strategy: Tactical Combat, Kiting, and Monster Threats"),
+    ("food", "Strategy: Nutrition, Safe Corpses, and Altars"),
+    ("corpses", "Strategy: Nutrition, Safe Corpses, and Altars"),
+    ("altars", "Strategy: Nutrition, Safe Corpses, and Altars"),
+    ("hunger", "Strategy: Nutrition, Safe Corpses, and Altars"),
+    ("inventory", "Strategy: Item Identification, Beatitude, and Inventory Management"),
+    ("beatitude", "Strategy: Item Identification, Beatitude, and Inventory Management"),
+    ("cursed", "Strategy: Item Identification, Beatitude, and Inventory Management"),
+    ("armor", "Strategy: Item Identification, Beatitude, and Inventory Management"),
 ]
 
 
