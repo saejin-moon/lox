@@ -165,6 +165,132 @@ STRATEGY_ARTICLES = [
   - Potions of extra/full healing increase max HP when quaffed at full health.
   - Scrolls of enchant weapon / armor improve equipment pluses (+1 to +5).""",
     ),
+    (
+        "Strategy: The Castle, Drawbridge Breaching, and Wand of Wishing",
+        """# NetHack 3.6 The Castle, Drawbridge Breaching, and Wishing Guide
+
+## 1. Finding & Breaching The Castle (Dlvl 25-29)
+- **Castle Layout**: Surrounded by a deep water moat with a central closed drawbridge. The courtyard is filled with dragons, giants, liches, and soldier swarms.
+- **Breaching the Drawbridge**:
+  - NEVER stand directly adjacent to the closed drawbridge when destroying it (the blast or collapse kills you!). Stand 2-3 tiles back.
+  - Destroying options:
+    - Zap wand of striking (`seq(Action.ZAP, slot, dir)`).
+    - Cast force bolt.
+    - Play the pass-tune on any musical instrument (uncursed bugle, horn, flute, harp) via `#apply`.
+  - Alternatively: freeze the moat with a cold wand / cone of cold, or use levitation / flying boots to cross without opening the drawbridge.
+
+## 2. Defensive Courtyard Clear
+- **Chokepoint Advantage**: Retreat outside the breach into a corridor or doorway. Let dragons and giants come to you one at a time.
+- **Scroll of Scare Monster / Elbereth**: Stand behind an engraved Elbereth or on an uncursed scroll of scare monster so monsters flee rather than melee you.
+
+## 3. The Wand of Wishing (The Ultimate Power Spike)
+- **Location**: Located in a closed chest in the back-right barracks tower of the Castle.
+- **Charges**: Generated with (0:3) charges.
+- **Recharging Rule**:
+  - Always recharge the wand ONCE with a blessed scroll of charging (`seq(Action.READ, slot)` -> select wand).
+  - This restores the wand to (1:3), granting 3 additional wishes! Never recharge a wand twice (it will explode).
+- **Ascension Wishing Priority List**:
+  1. `blessed scroll of charging` (if you have none in inventory, to recharge the wand).
+  2. `blessed greased +2 gray dragon scale mail` (grants permanent Magic Resistance).
+  3. `blessed fireproof +2 cloak of displacement` (causes attacks to miss by targeting ghost image).
+  4. `blessed +2 pair of speed boots` (very fast speed intrinsic).
+  5. `blessed +2 pair of gauntlets of power` (sets Strength to 25; allows Valkyrie to throw Mjollnir as a returning lightning boomerang!).
+  6. `blessed magic marker` (write scrolls of enchant armor, enchant weapon, genocide, gold detection, and magic mapping).
+  7. `blessed amulet of life saving` (worn around neck: revives you with full HP if you die).""",
+    ),
+    (
+        "Strategy: Gehennom Navigation, Demon Lords, and The Vibrating Square",
+        """# NetHack 3.6 Gehennom Mazes, Demon Lords, and The Vibrating Square Guide
+
+## 1. Surviving Gehennom (Dlvl 30-50)
+- **Mandatory Intrinsics**:
+  - **Fire Resistance**: Gehennom is filled with lava and fire traps.
+  - **Magic Resistance**: Essential against spellcasting demon lords and arch-liches.
+  - **Reflection**: Bounces dragon breath and death rays.
+  - **Poison Resistance**: Many demons inflict deadly poison.
+- **Ring of Conflict**: Wearing a ring of conflict (`seq(Action.PUTON, slot)`) causes demon hordes and monsters to attack each other instead of swarming you!
+- **Blessed Genocide (Scroll of Genocide)**:
+  - Read blessed scroll of genocide: eradicate **liches** ('L') to eliminate arch-liches and master liches permanently from the entire game!
+  - Optionally genocide **mind flayers** ('h') to prevent deadly brain-eating stat drains.
+
+## 2. Demon Lords & Boss Encounters
+- **Valley of the Dead (Dlvl 30)**: First level of Gehennom. Full of graveyards; use Excalibur (level drain resistance) to dispatch wights and wraiths safely.
+- **Juiblex**: Demon lord of acid. Never melee without acid resistance. Zap with wand of digging to drop through his floor, or kill from range.
+- **Orcus**: High demon who spawns with a **wand of death**! Reflection and Magic Resistance are 100% mandatory. Kill immediately or steal/zap wand first.
+- **Vlad's Tower (Branch up from Dlvl 36-39)**: 3-level branch. Vlad the Impaler is easy to kill; he drops the essential **Candelabrum of Invocation**.
+- **Wizard's Tower (Dlvl 42-45)**: Enter via magic portal. The Wizard of Yendor drops the essential **Book of the Dead**.
+
+## 3. Locating The Vibrating Square
+- **The Portal to Moloch's Sanctum**: On the deepest regular maze level of Gehennom (usually Dlvl 45-48), one floor tile is the **Vibrating Square**.
+- **The Gold Detection Trick (Instant Location)**:
+  1. Become confused (eat a tripe ration, quaff uncursed potion of booze, or read scroll while confused).
+  2. While `state.is_confused` is True, read an uncursed **scroll of gold detection** (`seq(Action.READ, slot)`).
+  3. Instead of gold, this instantly maps all traps and portals on the floor, marking the Vibrating Square with a '^' on your screen!
+  4. Navigate to the Vibrating Square coordinate and drop an identifying object or engrave on it.""",
+    ),
+    (
+        "Strategy: The Invocation Ritual and Moloch's Sanctum",
+        """# NetHack 3.6 The Invocation Ritual and Moloch's Sanctum Guide
+
+## 1. The Three Invocation Artifacts
+To perform the Invocation Ritual and unlock the stairs to Moloch's Sanctum, you must have all 3 items in your inventory:
+1. **The Bell of Opening**: Awarded upon completing your role's Quest (Dlvl 14-16).
+2. **The Candelabrum of Invocation**: Dropped by Vlad the Impaler in Vlad's Tower.
+3. **The Book of the Dead**: Dropped by the Wizard of Yendor in the Wizard's Tower.
+- **Prep Work**: You must attach **7 lit candles** (beeswax or tallow candles found in Minetown or shops) to the Candelabrum of Invocation before the ritual.
+
+## 2. Performing the Invocation Ritual
+1. Stand directly on the **Vibrating Square** coordinate.
+2. Apply the **Bell of Opening**: `seq(Action.APPLY, bell_letter)`.
+3. Apply the **Candelabrum of Invocation** (with 7 candles lit): `seq(Action.APPLY, candelabrum_letter)`.
+4. Read the **Book of the Dead**: `seq(Action.READ, book_letter)`.
+- **Result**: The floor trembles and a staircase opens down to **Moloch's Sanctum**!
+
+## 3. Moloch's Sanctum & Retrieving The Amulet of Yendor
+- Moloch's Sanctum is an un-mappable graveyard maze surrounding the High Temple of Moloch.
+- Enter the inner sanctum, defeat the High Priest of Moloch, and retrieve the genuine **Amulet of Yendor** ('\"').
+- **The Ascent & The Mysterious Force**:
+  - Once carrying the Amulet of Yendor, you must climb back UP through all 50 levels of the dungeon to Dlvl 1.
+  - The **Mysterious Force**: Every time you climb up stairs, there is a chance you are pushed back down 1-3 levels. Stay calm, turn around, and climb back up.
+  - The Wizard of Yendor will periodically resurrect and harass you until you reach the Elemental Planes.""",
+    ),
+    (
+        "Strategy: The Elemental Planes and The Astral Plane (Ascension)",
+        """# NetHack 3.6 The Elemental Planes and Astral Plane Ascension Guide
+
+## 1. Entering the Elemental Planes
+- Carry the real Amulet of Yendor to **Dungeon Level 1**.
+- Climb the upstairs ('<') while carrying the Amulet to enter the **Elemental Planes**.
+
+## 2. Navigating the Four Elemental Planes
+On each elemental plane, your goal is finding and entering the magic portal ('^') to the next plane:
+- **The Universal Portal Finding Trick**:
+  - Read an uncursed **scroll of gold detection while confused** (`state.is_confused`). This instantly reveals the exact coordinates of the magic portal!
+- **Plane of Earth**:
+  - Surrounded by solid rock. Use a **wand of digging** (`seq(Action.ZAP, slot, dir)`) to dig corridors toward the portal.
+- **Plane of Air**:
+  - Very dangerous! Lightning strikes and high-damage Air Elementals.
+  - Put on **Ring of Conflict** immediately so elementals fight each other.
+  - Levitate or wear speed boots and dash directly into the portal.
+- **Plane of Fire**:
+  - Lava fields everywhere. Fire resistance and levitation/water-walking boots are mandatory.
+- **Plane of Water**:
+  - Air bubbles in an endless sea. Magical breathing (amulet of magical breathing or oilskin sack) prevents drowning. Travel inside air bubbles toward the portal.
+
+## 3. The Astral Plane (The Final Test)
+- **The Layout**: Three corridors leading to three High Altars: **Lawful**, **Neutral**, and **Chaotic**.
+- **The Three Riders of the Apocalypse**:
+  - **Death**: Touch rapidly drains HP. Do not fight in melee! Zap wand of death, throw Mjollnir from range, or teleport monsters away.
+  - **Pestilence**: Touch inflicts deadly illness. Cure immediately with a unicorn horn (`seq(Action.APPLY, slot)`) or full healing potion.
+  - **Famine**: Touch inflicts immediate Weak/Fainting hunger. Quaff potions of full healing or eat rations immediately.
+- **Ascension Execution**:
+  1. Put on **Ring of Conflict** so Angels, Priests, and Riders fight each other.
+  2. Use **wands of teleportation** to beam away blocking hordes and clear a straight path.
+  3. Identify the **co-aligned High Altar** (for Valkyrie: **Lawful High Altar**).
+  4. Step onto the High Altar.
+  5. Execute `#offer` with the Amulet of Yendor (`seq(Action.OFFER, amulet_letter)`).
+  6. **VICTORY**: You ascend to demigod status and win the game!""",
+    ),
 ]
 
 REDIRECTS = [
@@ -188,6 +314,30 @@ REDIRECTS = [
     ("beatitude", "Strategy: Item Identification, Beatitude, and Inventory Management"),
     ("cursed", "Strategy: Item Identification, Beatitude, and Inventory Management"),
     ("armor", "Strategy: Item Identification, Beatitude, and Inventory Management"),
+    ("castle", "Strategy: The Castle, Drawbridge Breaching, and Wand of Wishing"),
+    ("wishing", "Strategy: The Castle, Drawbridge Breaching, and Wand of Wishing"),
+    ("wand of wishing", "Strategy: The Castle, Drawbridge Breaching, and Wand of Wishing"),
+    ("drawbridge", "Strategy: The Castle, Drawbridge Breaching, and Wand of Wishing"),
+    ("gehennom", "Strategy: Gehennom Navigation, Demon Lords, and The Vibrating Square"),
+    ("demon", "Strategy: Gehennom Navigation, Demon Lords, and The Vibrating Square"),
+    ("vibrating square", "Strategy: Gehennom Navigation, Demon Lords, and The Vibrating Square"),
+    ("orcus", "Strategy: Gehennom Navigation, Demon Lords, and The Vibrating Square"),
+    ("juiblex", "Strategy: Gehennom Navigation, Demon Lords, and The Vibrating Square"),
+    ("vlad", "Strategy: Gehennom Navigation, Demon Lords, and The Vibrating Square"),
+    ("invocation", "Strategy: The Invocation Ritual and Moloch's Sanctum"),
+    ("sanctum", "Strategy: The Invocation Ritual and Moloch's Sanctum"),
+    ("book of the dead", "Strategy: The Invocation Ritual and Moloch's Sanctum"),
+    ("bell of opening", "Strategy: The Invocation Ritual and Moloch's Sanctum"),
+    ("candelabrum", "Strategy: The Invocation Ritual and Moloch's Sanctum"),
+    ("amulet of yendor", "Strategy: The Invocation Ritual and Moloch's Sanctum"),
+    ("astral plane", "Strategy: The Elemental Planes and The Astral Plane (Ascension)"),
+    ("elemental planes", "Strategy: The Elemental Planes and The Astral Plane (Ascension)"),
+    ("planes", "Strategy: The Elemental Planes and The Astral Plane (Ascension)"),
+    ("riders", "Strategy: The Elemental Planes and The Astral Plane (Ascension)"),
+    ("death", "Strategy: The Elemental Planes and The Astral Plane (Ascension)"),
+    ("pestilence", "Strategy: The Elemental Planes and The Astral Plane (Ascension)"),
+    ("famine", "Strategy: The Elemental Planes and The Astral Plane (Ascension)"),
+    ("ascension", "Strategy: The Elemental Planes and The Astral Plane (Ascension)"),
 ]
 
 
