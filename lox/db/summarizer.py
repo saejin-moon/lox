@@ -440,6 +440,22 @@ def build_batch_contrast_digest(
     )
     lines.append(f"\n- **Termination Breakdown**: {top_ends}")
 
+    # Detect Level 1 truncation / oscillation bottleneck
+    max_d = int(batch_stats.get("max_depth", 1))
+    max_steps_runs = sum(1 for r in runs if r.get("end_reason") == "max_steps")
+    max_steps_rate = max_steps_runs / float(len(runs)) if runs else 0.0
+
+    if max_d <= 1 or max_steps_rate > 0.4:
+        lines.append(
+            "\n### ⚠️ CRITICAL PROGRESSION BOTTLENECK: STALLED ON DUNGEON LEVEL 1\n"
+            f"- **{max_steps_rate * 100:.1f}% of episodes ({max_steps_runs}/{len(runs)}) are hitting max_steps on Dlvl 1 without finding/descending stairs (`>`)!**\n"
+            "- **Observed Failure Modes from Episode Traces**:\n"
+            "  1. **Cyclic Positional Oscillations (Ping-Pong Loops)**: The hero gets trapped alternating between 2 adjacent tiles (e.g. N, S, N, S) because `handle_exploration` picks a new frontier tile every single step without target persistence, inverting distance ties each turn.\n"
+            "  2. **Stuck Detector Blindness**: `(state.y, state.x) == self.last_pos` only checks 1-tile stalls and resets `self.stuck_count` to 0 on 2-tile ping-pong loops! Use a ring buffer of recent positions (e.g. `(state.y, state.x) in self.pos_history[-6:]`) to detect cyclic loops and take random actions to break out.\n"
+            "  3. **Target Persistence in Exploration**: In `handle_exploration`, store and follow a persistent `self.target_tile`. Only pick a new target when the target is reached, impassable, or after N turns.\n"
+            "  4. **Stair Priority & Descent**: The down stairs (`>`) are the #1 objective to escape Dlvl 1. When `>` is visible, navigate directly to it and execute `Action.DOWN`."
+        )
+
     # Sample top 2 Outlier Good Run summaries right in the digest
     if outliers:
         top_outliers = sorted(
