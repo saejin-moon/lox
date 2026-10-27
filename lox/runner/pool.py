@@ -409,7 +409,9 @@ class PersistentEvalPool:
                     }
                 )
 
-            chunksize = max(1, min(8, len(tasks) // max(1, self.workers * 2)))
+            # Use chunksize=1 so each episode is an independent work-stealing unit,
+            # eliminating tail-chunk serialization where 15 workers sit idle.
+            chunksize = 1
             if pool is not None:
                 results_iter = pool.imap_unordered(
                     run_single_episode, tasks, chunksize=chunksize
@@ -417,6 +419,7 @@ class PersistentEvalPool:
             else:
                 results_iter = (run_single_episode(tk) for tk in tasks)
 
+            last_prog_time = t0
             for res in results_iter:
                 raw_done += 1
                 total_steps += int(res.get("steps", 0))
@@ -429,11 +432,16 @@ class PersistentEvalPool:
                 else:
                     discarded_count += 1
 
+                now = time.perf_counter()
+                is_tail = (target_episodes - len(triggered_runs)) <= self.workers
                 if show_progress and (
-                    raw_done % max(1, self.workers) == 0
+                    is_tail
+                    or raw_done % max(1, min(self.workers, 4)) == 0
                     or len(triggered_runs) >= target_episodes
+                    or (now - last_prog_time) >= 0.5
                 ):
-                    elapsed = max(1e-6, time.perf_counter() - t0)
+                    last_prog_time = now
+                    elapsed = max(1e-6, now - t0)
                     sps = total_steps / elapsed
                     curr_avg_d = (
                         float(np.mean([r["max_depth"] for r in triggered_runs]))
@@ -517,7 +525,7 @@ class PersistentEvalPool:
         if not tasks:
             return []
         pool = self._ensure_pool()
-        chunksize = max(1, min(8, len(tasks) // max(1, self.workers * 2)))
+        chunksize = 1
         if pool is not None:
             results_iter = pool.imap_unordered(
                 run_single_episode, tasks, chunksize=chunksize

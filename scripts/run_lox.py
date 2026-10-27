@@ -158,9 +158,7 @@ def main() -> None:
             forced_mode=args.mode,
         )
     except KeyboardInterrupt:
-        ui.info(
-            "\n[bold yellow]Campaign interrupted by user (Ctrl+C). Exiting cleanly.[/bold yellow]"
-        )
+        ui.warn("Campaign interrupted by user (Ctrl+C). Exiting cleanly.")
     finally:
         orchestrator.close()
 
