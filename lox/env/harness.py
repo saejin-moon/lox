@@ -180,8 +180,6 @@ class NetHackHarness:
         messages: list[str] = []
 
         for idx, b in enumerate(bytes_seq):
-            if idx > 0 and self._in_moveloop(obs_tuple):
-                break
             self.action_bytes.append(b)
             obs_tuple, done = self.nh.step(b)
             raw_m = self._extract_raw_message(obs_tuple)

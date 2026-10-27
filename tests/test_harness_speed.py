@@ -36,6 +36,18 @@ def test_one_to_one_action_mapping():
     assert s.bytes_seq[:2] == (ord("E"), ord("-"))
     assert len(s.bytes_seq) == 2 + len("Elbereth\r")
 
+    # Verify harness.step actually dispatches all keystrokes in a multi-key sequence
+    harness = NetHackHarness(max_steps=50)
+    try:
+        harness.reset(seed=42)
+        st, done, _ = harness.step(seq(Action.OPEN, Action.S))
+        # Both 'o' (111) and 'j' (106) must be present in action_bytes
+        assert ord("o") in harness.action_bytes
+        assert ord("j") in harness.action_bytes
+        assert "In what direction?" in st.message
+    finally:
+        harness.close()
+
     # normalize_action_to_bytes handles Action, str, int, tuple/list, None
     assert normalize_action_to_bytes(Action.WAIT) == ((ord("."),), "WAIT")
     assert normalize_action_to_bytes("s") == ((ord("s"),), "SEARCH")

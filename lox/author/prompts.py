@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from lox.db.schema import get_schema_markdown
 
-POLICY_LANG_DOCS = """### Policy Language & 1-to-1 Harness Reference
+POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
 
 #### 1. Execution Model (`class Policy` and `macros.py`)
 - Your policy is a standard Python 3.11+ class named `class Policy:`.
@@ -118,6 +118,29 @@ Every turn, `state` exposes 100% of NetHack's observation arrays and C symbol ta
         if (dy, dx) != (0, 0):
             return seq(Action.OPEN, DIR_DELTAS[(dy, dx)]) if state.char_at(state.y + dy, state.x + dx) == '+' else DIR_DELTAS[(dy, dx)]
     ```
+
+#### 4. Canonical NetHack Early-Game Tactical Survival & Navigation Guide
+
+1. **Dungeon Level 1 Escape & Stair Priority**:
+   - The primary objective on Dlvl 1 is locating and descending the downstairs (`>`) via `Action.DOWN`. Staying on Dlvl 1 past 300 turns leads to starvation and monster escalation.
+   - Rooms are enclosed by walls (`|`, `-`) and closed doors (`+`). You cannot reach the rest of the dungeon without opening doors!
+   - Step adjacent to closed doors (`+`) and yield `seq(Action.OPEN, dir)`. If locked, kick it open with `seq(Action.KICK, dir)`.
+   - Once stairs (`>`) are visible, navigate directly to them. When standing on `>`: yield `Action.DOWN` (`'>'`) to descend to Dlvl 2.
+
+2. **Robust Frontier Exploration & Target Persistence**:
+   - **Target Persistence Rule**: Store a persistent target: `self.target_tile`. Never recompute `min(frontier, ...)` from scratch every turn! When the hero steps 1 tile toward a target, Manhattan distances to opposing frontier tiles invert, creating an infinite 2-tile ping-pong oscillation (`A <-> B`). Commit to `self.target_tile` until reached, impassable, or after 25 turns!
+   - **Multi-Tile Cycle Detection**: `(state.y, state.x) == self.last_pos` is blind to 2-tile ping-pong loops (resets to 0 every turn). Maintain a position history ring buffer (`self.pos_history = collections.deque(maxlen=8)`). If `(state.y, state.x) in self.pos_history[:-1]`, you are trapped in an oscillation—immediately clear `self.target_tile` and take a random cardinal step to break the attractor.
+   - **Frontier Tiles**: Identify unvisited walkable tiles adjacent to visited tiles (`macros.get_frontier_tiles`).
+
+3. **Early Combat & Tactical Retreat**:
+   - **Never fight while weakened**: Flee to a corridor (`#`) or doorway if HP $< 50\%$ so only 1 monster can attack at a time.
+   - **Floating Eyes (`e`)**: NEVER melee blue `e` (floating eye) without blindfold/reflection—it paralyzes you for 50 turns. Use ranged weapons or throw daggers (`seq(Action.THROW, letter, dir)`).
+
+4. **Nutrition & Inventory**:
+   - Valkyries start with food rations (`%`) and +1 long sword + small shield.
+   - Equip armor on turn 1 (`seq(Action.WEAR, item.letter)`) and wield primary weapon (`seq(Action.WIELD, item.letter)`).
+   - Eat rations when `state.hunger_state >= 3` (Weak).
+   - Eat fresh safe corpses (`macros.get_safe_corpses`) on the ground (`seq(Action.EAT, 'y')`). Never eat kobolds (`k`, poisonous) or chickatrices (`c`, stoning).
 """
 
 
