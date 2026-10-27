@@ -5,8 +5,8 @@
 **LOX** is an autonomous, high-throughput neuro-symbolic program synthesis engine that discovers, tests, attributes, and refines executable Python control policies and reusable macro libraries for complex, long-horizon environments—starting with the **NetHack Learning Environment (NLE)**—from first principles.
 
 Unlike traditional Deep Reinforcement Learning (which trains opaque neural weights over billions of frames) or online LLM agents (which query a slow, expensive language model at every environment step), **LOX puts the LLM in the outer scientific loop and compiled Python in the inner execution loop**:
-- **Inner Loop (CPU)**: Compiled Python 3.11+ generator policies execute directly against NLE's C engine at **50,000–96,000+ steps/sec** across worker cores (`0` LLM tokens per step).
-- **Outer Loop (Stateless Scientist LLM)**: Between batches, a stateless Author Agent queries a multi-table **DuckDB** analytical warehouse (`runs`, `ticks`, `function_stats`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki**, formulates a falsifiable causal hypothesis, dry-runs candidate code in a 20ms compiler-in-the-loop sandbox, and triggers targeted evolutionary experiments.
+- **Inner Loop (CPU)**: Compiled Python 3.11+ generator policies execute directly against NLE's C engine at **50,000–121,000+ steps/sec** across worker cores (`0` LLM tokens per step).
+- **Outer Loop (Stateless Scientist LLM)**: Between batches, a stateless Author Agent queries a multi-table **DuckDB** analytical warehouse (`runs`, `ticks`, `function_stats`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki**, formulates a falsifiable causal hypothesis, tests candidate skills in a fast **5 × 20-episode self-iterative pilot revision loop** with behavioral critics and deterministic prefix replay, and triggers targeted evolutionary rollouts.
 
 ---
 
@@ -48,22 +48,24 @@ Earlier generations of LLM-guided game agents rely heavily on human-engineered w
 │  • 100% Static Cached System Prompt (Policy Language Specs + DuckDB Schema)      │
 │  • Dynamic User Prompt: Mode Instructions + Active Code + Contrastive Digest     │
 │  • Tools: query_db(sql) | query_wiki(q) | query_policy_docs(t) | dry_run_policy  │
+│  • Self-Iterative Pilot Revisions: Up to 5 runs x 20 paired episodes (~0.5s)     │
+│    with Behavioral Critic (2-tile ping-pong & stall detection) + Prefix Replay   │
 └───────────────────────────────────────┬──────────────────────────────────────────┘
-                                        │ Emits Causal YAML Hypothesis + Python Code
+                                        │ Emits Single-Skill YAML Hypothesis + Python Code
                                         ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │                        HYBRID CADENCE / BANDIT SCHEDULER                         │
 │  ┌────────────────┐  ┌────────────────┐  ┌──────────────────┐  ┌──────────────┐  │
 │  │ 1. FULL_WRITE  │  │ 2. MACRO_WRITE │  │ 3. FUNC_MOD_ADD  │  │ 4. PARAM_TUNE│  │
-│  │   10,000 eps   │  │  0 eps (skip)  │  │ 1,000 trig eps/fn│  │  0 LLM tokens│  │
-│  │ (Gen 0 init)   │  │ -> macros.py   │  │ (untrig dropped) │  │  (CRN-SPSA)  │  │
+│  │   10,000 eps   │  │  0 eps (skip)  │  │ 150 trig eps / fn│  │  0 LLM tokens│  │
+│  │ (Gen 0 init)   │  │ -> macros.py   │  │ (single skill)   │  │  (CRN-SPSA)  │  │
 │  └───────┬────────┘  └───────┬────────┘  └────────┬─────────┘  └──────┬───────┘  │
 └──────────┼───────────────────┼────────────────────┼───────────────────┼──────────┘
            │                   │ (Instant Next Gen) │                   │
            ▼                   ▼                    ▼                   ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │                 PERSISTENT MULTI-CORE C++ NLE WORKER POOL                        │
-│  • Direct nle.nethack.Nethack.step(byte) (50k–96k+ steps/sec across workers)     │
+│  • Direct nle.nethack.Nethack.step(byte) (50k–121k+ steps/sec across workers)    │
 │  • Conditional Trigger Filter: discards episodes where target_fn call_count == 0 │
 │  • Unreachable Function Circuit Breaker + Sequential Futility Early Stopping     │
 └───────────────────────────────────────┬──────────────────────────────────────────┘
@@ -125,9 +127,9 @@ LOX synthesizes insights from eight distinct research traditions across reinforc
 
 | Mode | Episode Budget | Trigger / Filter Rule | Purpose |
 | :--- | :--- | :--- | :--- |
-| **`FULL_WRITE`** | `10,000` episodes | All episodes recorded | Synthesizes `class Policy` from scratch on Generation 0 (no starter policy fed). |
+| **`FULL_WRITE`** | `250–10,000` episodes | All episodes recorded | Synthesizes `class Policy` from scratch on Generation 0 (no starter policy fed). |
 | **`MACRO_WRITE`** | `0` episodes *(instant)* | Syntax + AST sandbox check | Synthesizes reusable generator/helper macros into `data/workspace/macros.py` and immediately starts the next generation. |
-| **`FUNC_MOD_ADD`** | `1,000` triggered eps $\times K$ functions | **Must call $\ge 1$ modified function**; untriggered episodes are discarded | Surgically adds or modifies methods on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)). |
+| **`FUNC_MOD_ADD`** | `150` triggered eps / fn | **Must call targeted function**; untriggered episodes are discarded | Surgically adds or modifies a single targeted skill on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)) after up to 5 self-iterative pilot revisions. |
 | **`PARAM_TUNE`** | `0` LLM tokens (`CRN-SPSA`) | Paired seed mini-batches + validation batch | Optimizes all `self.param(name, default, min, max)` constants via CRN-SPSA and bakes winning values into the AST. |
 
 ---
@@ -148,15 +150,18 @@ All experimental telemetry and reference human ascensions live in a single conso
 
 ## 6. Parameter-Free Sequential Hypothesis Testing
 
-The Author Agent never guesses a numerical improvement target. Instead, it emits a structured qualitative causal hypothesis:
+The Author Agent never guesses a numerical improvement target. Instead, it emits a structured qualitative causal hypothesis containing explicit skill invariants:
 
 ```yaml
 mode: FUNC_MOD_ADD
 target_functions:
-  - handle_combat
-  - retreat_to_stairs
-observation_from_db: "In runs WHERE is_outlier_good = TRUE, Ochiai score for retreat_to_stairs is 0.74, whereas 62% of normal deaths occur in handle_combat when HP < 30%."
-mechanism: "Check HP ratio before melee engagement and pathfind toward '<' or '#' corridor tiles when surrounded by >= 2 hostiles."
+  - explore_step
+skill_name: "Persistent Frontier Exploration with Multi-Tile Cycle Breaking"
+precondition: "No adjacent hostile monsters; unvisited walkable tiles exist on the level."
+state_persistence: "self.target_tile (held up to 25 steps) and self.pos_history (deque(maxlen=8))"
+postcondition: "Descends downstairs '>' or reaches an unvisited room via door '+'."
+observation_from_db: "In stalled runs on Dlvl 1, 85% of episodes oscillated between (2,49) and (3,49) because nearest frontier distance inverted every turn."
+mechanism: "Commit to self.target_tile until reached or blocked, and take random escape steps if current (y, x) is in self.pos_history[:-1]."
 ```
 
 Candidate policies are evaluated on paired seeds against the active baseline using three objective statistical gates ([`lox/engine/hypothesis.py`](lox/engine/hypothesis.py)):
@@ -255,8 +260,10 @@ uv run python scripts/run_lox.py \
   --model google/gemma-4-31b-it \
   --workers 16 \
   --generations 50 \
-  --full-write-episodes 10000 \
-  --func-mod-episodes 1000
+  --full-write-episodes 250 \
+  --func-mod-episodes 150 \
+  --pilot-revisions 5 \
+  --pilot-episodes 20
 ```
 
 ---
