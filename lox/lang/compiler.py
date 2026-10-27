@@ -292,7 +292,7 @@ class PolicyRunner:
         except PolicyLoopError:
             raise
 
-        if inspect.isgenerator(act):
+        if isinstance(act, types.GeneratorType):
             raise RuntimeError(
                 "Policy yielded a generator object directly instead of an Action. "
                 "When calling a generator subroutine, use `state = yield from self.sub_method(state)` "
@@ -405,6 +405,7 @@ class CompiledPolicy:
         return PolicyRunner(instance, tracer)
 
 
+@functools.lru_cache(maxsize=64)
 def compile_policy_and_macros(
     policy_code: str,
     macros_code: str = "",

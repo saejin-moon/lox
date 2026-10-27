@@ -115,6 +115,14 @@ _IS_CMAP_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_SWALLOW_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_WARNING_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 
+# Precomputed character lookup table and fast ASCII translation table
+_CHAR_LUT: tuple[str, ...] = tuple(
+    chr(c) if 32 <= c <= 126 else "?" for c in range(256)
+)
+_ASCII_TRANS_TABLE: bytes = bytes(b if 32 <= b <= 126 else 32 for b in range(256))
+_MG_PET: int = int(getattr(nh, "MG_PET", 0))
+_MG_PEACEFUL: int = int(getattr(nh, "MG_PEACEFUL", 0))
+
 
 def _make_mon_info(mid: int) -> MonsterInfo | None:
     if not (0 <= mid < nh.NUMMONS):
@@ -319,8 +327,9 @@ class GameState:
     """
 
     __slots__ = (
-        "raw",
+        "_raw_dict",
         "blstats",
+        "_blstats_list",
         "glyphs",
         "chars",
         "colors",
@@ -335,122 +344,163 @@ class GameState:
         "_message_cache",
         "_inventory_cache",
         "_monsters_cache",
+        "_monsters_no_self_cache",
         "_objects_cache",
     )
 
-    def __init__(self, raw_obs: dict[str, np.ndarray], step_count: int = 0):
-        self.raw = raw_obs
-        self.blstats: np.ndarray = raw_obs["blstats"]
-        self.glyphs: np.ndarray = raw_obs["glyphs"]
-        self.chars: np.ndarray = raw_obs["chars"]
-        self.colors: np.ndarray = raw_obs["colors"]
-        self.specials: np.ndarray = raw_obs["specials"]
-        self.raw_message: np.ndarray = raw_obs["message"]
-        self.inv_glyphs: np.ndarray = raw_obs["inv_glyphs"]
-        self.inv_strs: np.ndarray = raw_obs["inv_strs"]
-        self.inv_letters: np.ndarray = raw_obs["inv_letters"]
-        self.inv_oclasses: np.ndarray = raw_obs["inv_oclasses"]
-        self.program_state: np.ndarray | None = raw_obs.get("program_state")
-        self.step_count: int = step_count
+    def __init__(
+        self,
+        raw_obs: dict[str, np.ndarray] | tuple[np.ndarray, ...],
+        step_count: int = 0,
+    ):
+        if isinstance(raw_obs, (tuple, list)):
+            self._raw_dict = None
+            self.glyphs: np.ndarray = raw_obs[0]
+            self.chars: np.ndarray = raw_obs[1]
+            self.colors: np.ndarray = raw_obs[2]
+            self.specials: np.ndarray = raw_obs[3]
+            self.blstats: np.ndarray = raw_obs[4]
+            self.raw_message: np.ndarray = raw_obs[5]
+            self.inv_glyphs: np.ndarray = raw_obs[6]
+            self.inv_strs: np.ndarray = raw_obs[7]
+            self.inv_letters: np.ndarray = raw_obs[8]
+            self.inv_oclasses: np.ndarray = raw_obs[9]
+            self.program_state: np.ndarray | None = (
+                raw_obs[10] if len(raw_obs) > 10 else None
+            )
+        else:
+            self._raw_dict = raw_obs
+            self.blstats = raw_obs["blstats"]
+            self.glyphs = raw_obs["glyphs"]
+            self.chars = raw_obs["chars"]
+            self.colors = raw_obs["colors"]
+            self.specials = raw_obs["specials"]
+            self.raw_message = raw_obs["message"]
+            self.inv_glyphs = raw_obs["inv_glyphs"]
+            self.inv_strs = raw_obs["inv_strs"]
+            self.inv_letters = raw_obs["inv_letters"]
+            self.inv_oclasses = raw_obs["inv_oclasses"]
+            self.program_state = raw_obs.get("program_state")
 
+        self.step_count: int = step_count
+        self._blstats_list: list[int] = self.blstats.tolist()
         self._message_cache: str | None = None
         self._inventory_cache: list[InventoryItem] | None = None
         self._monsters_cache: list[VisibleMonster] | None = None
+        self._monsters_no_self_cache: list[VisibleMonster] | None = None
         self._objects_cache: list[VisibleObject] | None = None
 
-    # --- 1-to-1 NLE blstats properties (O(1) array indexing) ---
+    @property
+    def raw(self) -> dict[str, np.ndarray]:
+        if self._raw_dict is None:
+            self._raw_dict = {
+                "glyphs": self.glyphs,
+                "chars": self.chars,
+                "colors": self.colors,
+                "specials": self.specials,
+                "blstats": self.blstats,
+                "message": self.raw_message,
+                "inv_glyphs": self.inv_glyphs,
+                "inv_strs": self.inv_strs,
+                "inv_letters": self.inv_letters,
+                "inv_oclasses": self.inv_oclasses,
+                "program_state": self.program_state,
+            }
+        return self._raw_dict
+
+    # --- 1-to-1 NLE blstats properties (O(1) Python list indexing) ---
     @property
     def x(self) -> int:
-        return int(self.blstats[0])
+        return self._blstats_list[0]
 
     @property
     def y(self) -> int:
-        return int(self.blstats[1])
+        return self._blstats_list[1]
 
     @property
     def pos(self) -> tuple[int, int]:
-        return (int(self.blstats[1]), int(self.blstats[0]))
+        return (self._blstats_list[1], self._blstats_list[0])
 
     @property
     def strength_pct(self) -> int:
-        return int(self.blstats[2])
+        return self._blstats_list[2]
 
     @property
     def strength(self) -> int:
-        return int(self.blstats[3])
+        return self._blstats_list[3]
 
     @property
     def dex(self) -> int:
-        return int(self.blstats[4])
+        return self._blstats_list[4]
 
     @property
     def con(self) -> int:
-        return int(self.blstats[5])
+        return self._blstats_list[5]
 
     @property
     def intel(self) -> int:
-        return int(self.blstats[6])
+        return self._blstats_list[6]
 
     @property
     def wis(self) -> int:
-        return int(self.blstats[7])
+        return self._blstats_list[7]
 
     @property
     def cha(self) -> int:
-        return int(self.blstats[8])
+        return self._blstats_list[8]
 
     @property
     def score(self) -> int:
-        return int(self.blstats[9])
+        return self._blstats_list[9]
 
     @property
     def hp(self) -> int:
-        return int(self.blstats[10])
+        return self._blstats_list[10]
 
     @property
     def max_hp(self) -> int:
-        return int(self.blstats[11])
+        return self._blstats_list[11]
 
     @property
     def depth(self) -> int:
-        return int(self.blstats[12])
+        return self._blstats_list[12]
 
     @property
     def gold(self) -> int:
-        return int(self.blstats[13])
+        return self._blstats_list[13]
 
     @property
     def energy(self) -> int:
-        return int(self.blstats[14])
+        return self._blstats_list[14]
 
     @property
     def max_energy(self) -> int:
-        return int(self.blstats[15])
+        return self._blstats_list[15]
 
     @property
     def ac(self) -> int:
-        return int(self.blstats[16])
+        return self._blstats_list[16]
 
     @property
     def monster_level(self) -> int:
-        return int(self.blstats[17])
+        return self._blstats_list[17]
 
     @property
     def xp_level(self) -> int:
-        return int(self.blstats[18])
+        return self._blstats_list[18]
 
     @property
     def xp(self) -> int:
-        return int(self.blstats[19])
+        return self._blstats_list[19]
 
     @property
     def turn(self) -> int:
-        return int(self.blstats[20])
+        return self._blstats_list[20]
 
     @property
     def hunger_state(self) -> int:
         """0=Satiated, 1=Not Hungry, 2=Hungry, 3=Weak, 4=Fainting, 5=Fainted, 6=Starved."""
-        return int(self.blstats[21])
+        return self._blstats_list[21]
 
     @property
     def hunger_name(self) -> str:
@@ -469,7 +519,7 @@ class GameState:
     @property
     def carrying_capacity(self) -> int:
         """0=Unencumbered, 1=Burdened, 2=Stressed, 3=Strained, 4=Overtaxed, 5=Overloaded."""
-        return int(self.blstats[22])
+        return self._blstats_list[22]
 
     @property
     def encumbrance(self) -> int:
@@ -491,20 +541,20 @@ class GameState:
     @property
     def dungeon_num(self) -> int:
         """0=Dungeons of Doom, 1=Gehennom, 2=Gnomish Mines, 3=Quest, 4=Sokoban, 5=Fort Ludios, 6=Vlad's Tower, 7=Elemental Planes."""
-        return int(self.blstats[23])
+        return self._blstats_list[23]
 
     @property
     def level_num(self) -> int:
-        return int(self.blstats[24])
+        return self._blstats_list[24]
 
     @property
     def condition_mask(self) -> int:
-        return int(self.blstats[25]) if len(self.blstats) > 25 else 0
+        return self._blstats_list[25] if len(self._blstats_list) > 25 else 0
 
     @property
     def align(self) -> int:
         """-1=Chaotic, 0=Neutral, 1=Lawful."""
-        return int(self.blstats[26]) if len(self.blstats) > 26 else 0
+        return self._blstats_list[26] if len(self._blstats_list) > 26 else 0
 
     # --- 1-to-1 NLE Condition Bitmask Queries ---
     @property
@@ -563,33 +613,41 @@ class GameState:
     @property
     def message(self) -> str:
         if self._message_cache is None:
-            raw_bytes = bytes(self.raw_message).split(b"\x00", 1)[0]
-            self._message_cache = raw_bytes.decode("latin1", errors="ignore").strip()
+            raw = bytes(self.raw_message)
+            nul = raw.find(b"\x00")
+            self._message_cache = (
+                (raw[:nul] if nul != -1 else raw)
+                .decode("latin1", errors="ignore")
+                .strip()
+            )
         return self._message_cache
 
     @property
     def inventory(self) -> list[InventoryItem]:
         if self._inventory_cache is None:
             items: list[InventoryItem] = []
-            for let_b, str_arr, g_val, oclass_b in zip(
-                self.inv_letters, self.inv_strs, self.inv_glyphs, self.inv_oclasses
-            ):
+            inv_letters = self.inv_letters
+            inv_strs = self.inv_strs
+            inv_glyphs = self.inv_glyphs
+            inv_oclasses = self.inv_oclasses
+            for i in range(len(inv_letters)):
+                let_b = int(inv_letters[i])
                 if let_b == 0:
                     continue
-                letter = chr(int(let_b))
+                letter = chr(let_b)
+                raw = bytes(inv_strs[i])
+                nul = raw.find(b"\x00")
                 desc = (
-                    bytes(str_arr)
-                    .split(b"\x00", 1)[0]
+                    (raw[:nul] if nul != -1 else raw)
                     .decode("latin1", errors="ignore")
                     .strip()
                 )
-                g = int(g_val)
-                oc = int(oclass_b)
-                ch = chr(oc) if 32 <= oc <= 126 else "?"
-                qty = 1
-                first_word = desc.split(" ", 1)[0] if desc else ""
-                if first_word.isdigit():
-                    qty = int(first_word)
+                g = int(inv_glyphs[i])
+                oc = int(inv_oclasses[i])
+                ch = _CHAR_LUT[oc] if oc < 256 else "?"
+                sp = desc.find(" ")
+                first_word = desc[:sp] if sp != -1 else desc
+                qty = int(first_word) if first_word.isdigit() else 1
                 items.append(
                     InventoryItem(
                         letter=letter,
@@ -607,7 +665,7 @@ class GameState:
     def char_at(self, y: int, x: int) -> str:
         if 0 <= y < 21 and 0 <= x < 79:
             c = int(self.chars[y, x])
-            return chr(c) if 32 <= c <= 126 else " "
+            return _CHAR_LUT[c] if c < 256 else "?"
         return " "
 
     def glyph_at(self, y: int, x: int) -> int:
@@ -659,18 +717,22 @@ class GameState:
         """Returns all monsters currently visible on the 21x79 screen."""
         if self._monsters_cache is None:
             mons: list[VisibleMonster] = []
-            g_grid = np.clip(self.glyphs, 0, _MAX_GLYPH - 1)
-            mon_mask = _IS_MONSTER_LUT[g_grid]
+            glyphs = self.glyphs
+            chars = self.chars
+            colors = self.colors
+            specials = self.specials
+            mon_mask = _IS_MONSTER_LUT[glyphs]
             ys, xs = np.nonzero(mon_mask)
-            for y_val, x_val in zip(ys, xs):
-                yi, xi = int(y_val), int(x_val)
-                g = int(self.glyphs[yi, xi])
-                c = int(self.chars[yi, xi])
-                ch = chr(c) if 32 <= c <= 126 else "?"
-                col = int(self.colors[yi, xi])
-                spec = int(self.specials[yi, xi])
-                is_pet = bool(_IS_PET_LUT[g]) or bool(spec & nh.MG_PET)
-                is_peaceful = bool(spec & getattr(nh, "MG_PEACEFUL", 0))
+            for i in range(len(ys)):
+                yi = int(ys[i])
+                xi = int(xs[i])
+                g = int(glyphs[yi, xi])
+                c = int(chars[yi, xi])
+                ch = _CHAR_LUT[c] if c < 256 else "?"
+                col = int(colors[yi, xi])
+                spec = int(specials[yi, xi])
+                is_pet = bool(_IS_PET_LUT[g]) or bool(spec & _MG_PET)
+                is_peaceful = bool(spec & _MG_PEACEFUL)
                 mons.append(
                     VisibleMonster(
                         y=yi,
@@ -685,23 +747,30 @@ class GameState:
                 )
             self._monsters_cache = mons
         if exclude_self:
-            hy, hx = self.y, self.x
-            return [m for m in self._monsters_cache if not (m.y == hy and m.x == hx)]
+            if self._monsters_no_self_cache is None:
+                hy, hx = self.y, self.x
+                self._monsters_no_self_cache = [
+                    m for m in self._monsters_cache if not (m.y == hy and m.x == hx)
+                ]
+            return self._monsters_no_self_cache
         return list(self._monsters_cache)
 
     def visible_objects(self) -> list[VisibleObject]:
         """Returns all objects and corpses currently visible on the 21x79 screen."""
         if self._objects_cache is None:
             objs: list[VisibleObject] = []
-            g_grid = np.clip(self.glyphs, 0, _MAX_GLYPH - 1)
-            obj_mask = _IS_OBJECT_LUT[g_grid]
+            glyphs = self.glyphs
+            chars = self.chars
+            colors = self.colors
+            obj_mask = _IS_OBJECT_LUT[glyphs]
             ys, xs = np.nonzero(obj_mask)
-            for y_val, x_val in zip(ys, xs):
-                yi, xi = int(y_val), int(x_val)
-                g = int(self.glyphs[yi, xi])
-                c = int(self.chars[yi, xi])
-                ch = chr(c) if 32 <= c <= 126 else "?"
-                col = int(self.colors[yi, xi])
+            for i in range(len(ys)):
+                yi = int(ys[i])
+                xi = int(xs[i])
+                g = int(glyphs[yi, xi])
+                c = int(chars[yi, xi])
+                ch = _CHAR_LUT[c] if c < 256 else "?"
+                col = int(colors[yi, xi])
                 is_corpse = bool(_IS_BODY_LUT[g])
                 objs.append(
                     VisibleObject(
@@ -722,11 +791,13 @@ class GameState:
         """Renders the current 21x79 `chars` grid as a 21-line ASCII string."""
         lines = []
         for r in range(21):
-            row_bytes = self.chars[r]
-            line = "".join(
-                chr(int(b)) if 32 <= int(b) <= 126 else " " for b in row_bytes
+            line = (
+                bytes(self.chars[r])
+                .translate(_ASCII_TRANS_TABLE)
+                .decode("latin1")
+                .rstrip()
             )
-            lines.append(line.rstrip() or " ")
+            lines.append(line or " ")
         return "\n".join(lines)
 
     def bfs_distances(
@@ -737,8 +808,13 @@ class GameState:
     ) -> np.ndarray:
         """Runs Numba-accelerated BFS distance calculation from `start` (defaults to `(self.y, self.x)`)."""
         sy, sx = start if start is not None else (self.y, self.x)
+        p = (
+            passable_mask
+            if isinstance(passable_mask, np.ndarray) and passable_mask.dtype == np.bool_
+            else np.asarray(passable_mask, dtype=np.bool_)
+        )
         return bfs_distance_grid(
-            np.asarray(passable_mask, dtype=np.bool_),
+            p,
             int(sy),
             int(sx),
             bool(allow_diagonal),
@@ -753,8 +829,13 @@ class GameState:
     ) -> tuple[int, int]:
         """Returns the next `(dy, dx)` step from `start` toward `target` across `passable_mask`."""
         sy, sx = start if start is not None else (self.y, self.x)
+        p = (
+            passable_mask
+            if isinstance(passable_mask, np.ndarray) and passable_mask.dtype == np.bool_
+            else np.asarray(passable_mask, dtype=np.bool_)
+        )
         return astar_next_step(
-            np.asarray(passable_mask, dtype=np.bool_),
+            p,
             int(sy),
             int(sx),
             int(target[0]),

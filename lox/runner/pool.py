@@ -10,6 +10,7 @@ Persistent Multi-Core NLE Worker Pool & Conditional Function-Trigger Evaluator.
 from __future__ import annotations
 
 import multiprocessing as mp
+import signal
 import time
 from collections.abc import Callable
 from typing import Any
@@ -31,6 +32,8 @@ _WORKER_COMPILED_CACHE: tuple[int, int, CompiledPolicy] | None = None
 
 
 def _init_worker(role: str, max_steps: int) -> None:
+    # Ignore SIGINT in worker processes so Ctrl+C in the terminal is handled cleanly by the main process
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     global _WORKER_HARNESS, _WORKER_ROLE, _WORKER_MAX_STEPS
     _WORKER_ROLE = role
     _WORKER_MAX_STEPS = max_steps
@@ -370,22 +373,18 @@ class PersistentEvalPool:
 
         t0 = time.perf_counter()
         pool = self._ensure_pool()
-        chunk_size = min(
-            max(self.workers * 4, 16), max(16, target_episodes - len(triggered_runs))
-        )
 
         while len(triggered_runs) < target_episodes and raw_done < max_raw_episodes:
             needed = target_episodes - len(triggered_runs)
-            batch_len = min(
-                max(needed, self.workers * 2) if target_fns else needed,
-                chunk_size,
+            batch_capacity = min(
+                max(needed * 2 if target_fns else needed, self.workers * 8),
                 max_raw_episodes - raw_done,
             )
-            if batch_len <= 0:
+            if batch_capacity <= 0:
                 break
 
             tasks: list[dict[str, Any]] = []
-            for _ in range(batch_len):
+            for _ in range(batch_capacity):
                 if seed_queue:
                     s = seed_queue.pop(0)
                 else:
@@ -410,12 +409,15 @@ class PersistentEvalPool:
                     }
                 )
 
+            chunksize = max(1, min(8, len(tasks) // max(1, self.workers * 2)))
             if pool is not None:
-                results = pool.map(run_single_episode, tasks)
+                results_iter = pool.imap_unordered(
+                    run_single_episode, tasks, chunksize=chunksize
+                )
             else:
-                results = [run_single_episode(tk) for tk in tasks]
+                results_iter = (run_single_episode(tk) for tk in tasks)
 
-            for res in results:
+            for res in results_iter:
                 raw_done += 1
                 total_steps += int(res.get("steps", 0))
                 if res.get("registered_params") and not registered_params:
@@ -427,43 +429,56 @@ class PersistentEvalPool:
                 else:
                     discarded_count += 1
 
-            elapsed = max(1e-6, time.perf_counter() - t0)
-            sps = total_steps / elapsed
-            curr_avg_d = (
-                float(np.mean([r["max_depth"] for r in triggered_runs]))
-                if triggered_runs
-                else 0.0
-            )
-            curr_max_d = (
-                int(max(r["max_depth"] for r in triggered_runs))
-                if triggered_runs
-                else 0
-            )
+                if show_progress and (
+                    raw_done % max(1, self.workers) == 0
+                    or len(triggered_runs) >= target_episodes
+                ):
+                    elapsed = max(1e-6, time.perf_counter() - t0)
+                    sps = total_steps / elapsed
+                    curr_avg_d = (
+                        float(np.mean([r["max_depth"] for r in triggered_runs]))
+                        if triggered_runs
+                        else 0.0
+                    )
+                    curr_max_d = (
+                        int(max(r["max_depth"] for r in triggered_runs))
+                        if triggered_runs
+                        else 0
+                    )
+                    ui.progress(
+                        triggered_done=len(triggered_runs),
+                        triggered_target=target_episodes,
+                        raw_done=raw_done,
+                        steps_per_sec=sps,
+                        avg_depth=curr_avg_d,
+                        max_depth=curr_max_d,
+                        outliers=0,
+                    )
 
-            if show_progress:
-                ui.progress(
-                    triggered_done=len(triggered_runs),
-                    triggered_target=target_episodes,
-                    raw_done=raw_done,
-                    steps_per_sec=sps,
-                    avg_depth=curr_avg_d,
-                    max_depth=curr_max_d,
-                    outliers=0,
-                )
-
-            # Unreachable function circuit breaker: if >= unreachable_abort_after raw episodes ran and 0 triggered
-            if (
-                target_fns
-                and raw_done >= min(unreachable_abort_after, max_raw_episodes)
-                and len(triggered_runs) == 0
-            ):
-                unreachable_abort = True
-                break
-
-            if early_stop_fn is not None and len(triggered_runs) >= 50:
-                if early_stop_fn(triggered_runs):
-                    early_stopped = True
+                # Check termination conditions immediately as episodes finish
+                if len(triggered_runs) >= target_episodes:
                     break
+
+                # Unreachable function circuit breaker: if >= unreachable_abort_after raw episodes ran and 0 triggered
+                if (
+                    target_fns
+                    and raw_done >= min(unreachable_abort_after, max_raw_episodes)
+                    and len(triggered_runs) == 0
+                ):
+                    unreachable_abort = True
+                    break
+
+                if early_stop_fn is not None and len(triggered_runs) >= 50:
+                    if early_stop_fn(triggered_runs):
+                        early_stopped = True
+                        break
+
+            if (
+                len(triggered_runs) >= target_episodes
+                or unreachable_abort
+                or early_stopped
+            ):
+                break
 
         wall_sec = time.perf_counter() - t0
         sps = total_steps / max(1e-6, wall_sec)
@@ -489,6 +504,27 @@ class PersistentEvalPool:
             "unreachable_abort": unreachable_abort,
             "registered_params": registered_params,
         }
+
+    def evaluate_tasks(
+        self,
+        tasks: list[dict[str, Any]],
+        show_progress: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Executes an explicit list of tasks concurrently across persistent workers.
+        Useful for paired SPSA evaluations (theta+ and theta-) to maximize worker saturation.
+        """
+        if not tasks:
+            return []
+        pool = self._ensure_pool()
+        chunksize = max(1, min(8, len(tasks) // max(1, self.workers * 2)))
+        if pool is not None:
+            results_iter = pool.imap_unordered(
+                run_single_episode, tasks, chunksize=chunksize
+            )
+        else:
+            results_iter = (run_single_episode(tk) for tk in tasks)
+        return list(results_iter)
 
     def close(self) -> None:
         if self._pool is not None:

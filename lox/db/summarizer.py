@@ -83,12 +83,12 @@ def summarize_episode_ticks(
     # 2. Part A: Run-Length Encoded (RLE) Phase Timeline by (depth, active_function)
     segments: list[dict[str, Any]] = []
     for t in ticks:
-        d = int(t.get("depth", 1))
-        fn = str(t.get("active_function", "root"))
-        act = str(t.get("action_name", "WAIT"))
-        hp = int(t.get("hp", 0))
-        turn = int(t.get("turn", 0))
-        pos = (int(t.get("y", 0)), int(t.get("x", 0)))
+        d = t["depth"]
+        fn = t["active_function"]
+        act = t["action_name"]
+        hp = t["hp"]
+        turn = t["turn"]
+        pos = (t["y"], t["x"])
 
         if not segments or segments[-1]["depth"] != d or segments[-1]["fn"] != fn:
             segments.append(
@@ -100,7 +100,7 @@ def summarize_episode_ticks(
                     "steps": 1,
                     "start_hp": hp,
                     "end_hp": hp,
-                    "actions": Counter({act: 1}),
+                    "actions": {act: 1},
                     "positions": {pos},
                 }
             )
@@ -109,14 +109,18 @@ def summarize_episode_ticks(
             seg["end_turn"] = turn
             seg["steps"] += 1
             seg["end_hp"] = hp
-            seg["actions"][act] += 1
+            acts = seg["actions"]
+            acts[act] = acts.get(act, 0) + 1
             seg["positions"].add(pos)
 
     # Collapse consecutive micro-segments if there are too many
     rle_lines: list[str] = []
     display_segs = segments if len(segments) <= 14 else (segments[:6] + segments[-8:])
     for seg in display_segs:
-        top_acts = ", ".join(f"{k}:{v}" for k, v in seg["actions"].most_common(3))
+        top_acts_list = sorted(
+            seg["actions"].items(), key=lambda kv: kv[1], reverse=True
+        )[:3]
+        top_acts = ", ".join(f"{k}:{v}" for k, v in top_acts_list)
         hp_str = (
             f"HP:{seg['start_hp']}->{seg['end_hp']}"
             if seg["start_hp"] != seg["end_hp"]
@@ -177,7 +181,9 @@ def summarize_episode_ticks(
     stalls: list[str] = []
     for seg in segments:
         if seg["steps"] >= 40 and len(seg["positions"]) <= 3:
-            top_a = seg["actions"].most_common(2)
+            top_a = sorted(seg["actions"].items(), key=lambda kv: kv[1], reverse=True)[
+                :2
+            ]
             stalls.append(
                 f"fn={seg['fn']} on Dlvl {seg['depth']} (T{seg['start_turn']}..{seg['end_turn']}, "
                 f"{seg['steps']} steps on {len(seg['positions'])} tiles: {top_a})"

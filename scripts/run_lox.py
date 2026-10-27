@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lox.db.schema import DEFAULT_DB_PATH
 from lox.engine.orchestrator import DEFAULT_POLICY_PATH, CampaignOrchestrator
 from lox.lang.macros import DEFAULT_MACROS_PATH
+from lox.ui.console import ui
 
 
 def main() -> None:
@@ -150,11 +151,18 @@ def main() -> None:
         early_stopping=not args.no_early_stop,
         max_repair_turns=args.max_repairs,
     )
-    orchestrator.run_campaign(
-        max_generations=args.generations,
-        target_depth=args.target_depth,
-        forced_mode=args.mode,
-    )
+    try:
+        orchestrator.run_campaign(
+            max_generations=args.generations,
+            target_depth=args.target_depth,
+            forced_mode=args.mode,
+        )
+    except KeyboardInterrupt:
+        ui.info(
+            "\n[bold yellow]Campaign interrupted by user (Ctrl+C). Exiting cleanly.[/bold yellow]"
+        )
+    finally:
+        orchestrator.close()
 
 
 if __name__ == "__main__":

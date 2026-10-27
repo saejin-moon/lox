@@ -197,7 +197,7 @@ def run_spsa_param_tuning(
         theta_plus = np.clip(theta + ck * delta_vec, 0.0, 1.0)
         theta_minus = np.clip(theta - ck * delta_vec, 0.0, 1.0)
 
-        # Common Random Numbers: evaluate theta_plus and theta_minus on the exact same mini-batch of seeds
+        # Common Random Numbers: evaluate theta_plus and theta_minus on the exact same mini-batch of seeds concurrently
         mb_seeds = [
             int(s)
             for s in rng.choice(
@@ -210,35 +210,49 @@ def run_spsa_param_tuning(
             else 0.0
         )
 
-        res_plus = pool.evaluate_batch(
-            batch_id=f"{batch_id}_spsa_{k}p",
-            policy_code=policy_code,
-            macros_code=macros_code,
-            target_episodes=len(mb_seeds),
-            priority_seeds=mb_seeds,
-            param_overrides=_denorm(theta_plus),
-            record_ticks=False,
-            show_progress=False,
-        )
-        res_minus = pool.evaluate_batch(
-            batch_id=f"{batch_id}_spsa_{k}m",
-            policy_code=policy_code,
-            macros_code=macros_code,
-            target_episodes=len(mb_seeds),
-            priority_seeds=mb_seeds,
-            param_overrides=_denorm(theta_minus),
-            record_ticks=False,
-            show_progress=False,
-        )
+        p_overrides = _denorm(theta_plus)
+        m_overrides = _denorm(theta_minus)
+        p_tasks = [
+            {
+                "seed": s,
+                "run_id": f"{batch_id}_spsa_{k}p_r{idx:05d}",
+                "role": pool.role,
+                "max_steps": pool.max_steps,
+                "policy_code": policy_code,
+                "macros_code": macros_code,
+                "target_functions": [],
+                "param_overrides": p_overrides,
+                "record_ticks": False,
+            }
+            for idx, s in enumerate(mb_seeds, 1)
+        ]
+        m_tasks = [
+            {
+                "seed": s,
+                "run_id": f"{batch_id}_spsa_{k}m_r{idx:05d}",
+                "role": pool.role,
+                "max_steps": pool.max_steps,
+                "policy_code": policy_code,
+                "macros_code": macros_code,
+                "target_functions": [],
+                "param_overrides": m_overrides,
+                "record_ticks": False,
+            }
+            for idx, s in enumerate(mb_seeds, 1)
+        ]
+
+        all_results = pool.evaluate_tasks(p_tasks + m_tasks)
+        plus_runs = [r for r in all_results if f"_spsa_{k}p_" in r.get("run_id", "")]
+        minus_runs = [r for r in all_results if f"_spsa_{k}m_" in r.get("run_id", "")]
 
         j_plus = (
-            float(np.mean([progression_metric(r) for r in res_plus["runs"]]))
-            if res_plus["runs"]
+            float(np.mean([progression_metric(r) for r in plus_runs]))
+            if plus_runs
             else 0.0
         )
         j_minus = (
-            float(np.mean([progression_metric(r) for r in res_minus["runs"]]))
-            if res_minus["runs"]
+            float(np.mean([progression_metric(r) for r in minus_runs]))
+            if minus_runs
             else 0.0
         )
 

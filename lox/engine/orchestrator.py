@@ -132,6 +132,11 @@ class CampaignOrchestrator:
         finally:
             con.close()
 
+    def close(self) -> None:
+        """Terminates and closes the persistent worker pool cleanly."""
+        if hasattr(self, "pool") and self.pool is not None:
+            self.pool.close()
+
     def run_campaign(
         self,
         max_generations: int = 50,

@@ -157,7 +157,7 @@ class NetHackHarness:
                 break
 
         self._last_raw_tuple = obs_tuple
-        return GameState(self._tuple_to_dict(obs_tuple), step_count=0)
+        return GameState(obs_tuple, step_count=0)
 
     def step(self, policy_action: Any) -> tuple[GameState, bool, dict[str, Any]]:
         """
@@ -167,7 +167,7 @@ class NetHackHarness:
         if self.done:
             return (
                 GameState(
-                    self._tuple_to_dict(self._last_raw_tuple),
+                    self._last_raw_tuple,
                     step_count=self.step_count,
                 ),
                 True,
@@ -203,9 +203,8 @@ class NetHackHarness:
 
         self.done = bool(done)
         self._last_raw_tuple = obs_tuple
-        state = GameState(self._tuple_to_dict(obs_tuple), step_count=self.step_count)
-        if messages:
-            state._message_cache = " | ".join(messages)
+        state = GameState(obs_tuple, step_count=self.step_count)
+        state._message_cache = " | ".join(messages) if messages else ""
 
         is_ascended = False
         if self.done:
@@ -258,7 +257,7 @@ class NetHackHarness:
                 break
 
         self._last_raw_tuple = obs_tuple
-        return GameState(self._tuple_to_dict(obs_tuple), step_count=limit)
+        return GameState(obs_tuple, step_count=limit)
 
     def close(self) -> None:
         try:
