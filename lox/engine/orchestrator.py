@@ -8,6 +8,7 @@ and the Stateless Author Agent.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 from typing import Any
 
@@ -163,11 +164,93 @@ class CampaignOrchestrator:
         last_batch_digest = ""
 
         campaign_id = datetime.datetime.now().strftime("c%Y%m%d_%H%M%S")
-        start_gen = 0 if (not current_policy or forced_mode == "FULL_WRITE") else 1
+        start_gen = 0
+        if current_policy and forced_mode != "FULL_WRITE":
+            start_gen = 1
+            # Check DuckDB to see if prior generations were completed, and load baseline state
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                max_gen_row = con.execute(
+                    "SELECT MAX(generation) FROM batches"
+                ).fetchone()
+                last_db_gen = (
+                    max_gen_row[0]
+                    if (max_gen_row and max_gen_row[0] is not None)
+                    else None
+                )
+                if last_db_gen is not None:
+                    start_gen = int(last_db_gen) + 1
+
+                    # Load the most recent promoted policy's baseline runs from DuckDB
+                    prom_row = con.execute(
+                        """
+                        SELECT p.candidate_policy_id, p.params_json, b.batch_id
+                        FROM policies p
+                        JOIN batches b ON b.candidate_policy_id = p.candidate_policy_id
+                        WHERE p.is_promoted = TRUE
+                        ORDER BY p.generation DESC LIMIT 1
+                        """
+                    ).fetchone()
+                    if prom_row:
+                        prom_pol_id, prom_params_json, prom_batch_id = prom_row
+                        current_policy_id = prom_pol_id
+                        if prom_params_json:
+                            try:
+                                registered_params.update(json.loads(prom_params_json))
+                            except Exception:
+                                pass
+
+                        run_cur = con.execute(
+                            """
+                            SELECT run_id, seed, depth, max_depth, score, turns, xp_level,
+                                   final_hp, max_hp, final_ac, gold, end_reason,
+                                   is_outlier_good, outlier_z_score, batch_percentile,
+                                   summary_digest, game_log, triggered_functions, last_active_function
+                            FROM runs WHERE batch_id = ?
+                            """,
+                            (prom_batch_id,),
+                        )
+                        run_cols = [d[0] for d in run_cur.description]
+                        for r_tup in run_cur.fetchall():
+                            r_dict = dict(zip(run_cols, r_tup))
+                            baseline_by_seed[int(r_dict["seed"])] = r_dict
+                        baseline_runs = list(baseline_by_seed.values())
+
+                        fs_cur = con.execute(
+                            """
+                            SELECT batch_id, generation, function_name, episodes_triggered,
+                                   trigger_rate, total_calls, total_turns_active,
+                                   avg_depth_when_triggered, death_rate_while_active,
+                                   ochiai_good_run_score, liblit_failure_score
+                            FROM function_stats WHERE batch_id = ?
+                            """,
+                            (prom_batch_id,),
+                        )
+                        fs_cols = [d[0] for d in fs_cur.description]
+                        fn_stats = [dict(zip(fs_cols, t)) for t in fs_cur.fetchall()]
+
+                        b_cur = con.execute(
+                            "SELECT * FROM batches WHERE batch_id = ?",
+                            (prom_batch_id,),
+                        )
+                        b_cols = [d[0] for d in b_cur.description]
+                        b_row = b_cur.fetchone()
+                        batch_stats = dict(zip(b_cols, b_row)) if b_row else {}
+
+                        last_batch_digest = build_batch_contrast_digest(
+                            batch_stats, baseline_runs, fn_stats
+                        )
+                        ui.info(
+                            f"Resuming campaign at Generation {start_gen:03d} (loaded {len(baseline_runs)} baseline runs from promoted batch `{prom_batch_id}`)."
+                        )
+            except Exception:
+                pass
+            finally:
+                con.close()
 
         try:
-            # If warm-starting from an existing policy.py on disk, evaluate a baseline batch first
-            if current_policy and start_gen == 1 and not baseline_runs:
+            # If warm-starting from an existing policy.py without prior DB runs, evaluate a baseline batch first
+            if current_policy and start_gen >= 1 and not baseline_runs:
                 warm_batch_id = f"{campaign_id}_g000_warm"
                 ui.info(
                     f"Evaluating existing `{self.policy_path}` on {self.func_mod_episodes_per_fn} seeds to establish baseline..."
