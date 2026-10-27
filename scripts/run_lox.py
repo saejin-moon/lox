@@ -68,8 +68,8 @@ def main() -> None:
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=25000,
-        help="Max steps per episode (default: 25000)",
+        default=2500,
+        help="Max steps per episode (default: 2500)",
     )
     parser.add_argument(
         "--generations",
@@ -86,14 +86,14 @@ def main() -> None:
     parser.add_argument(
         "--full-write-episodes",
         type=int,
-        default=10000,
-        help="Episodes for FULL_WRITE mode (default: 10000)",
+        default=250,
+        help="Episodes for FULL_WRITE mode (default: 250)",
     )
     parser.add_argument(
         "--func-mod-episodes",
         type=int,
-        default=1000,
-        help="Triggered episodes per modified/added function in FUNC_MOD_ADD mode (default: 1000)",
+        default=150,
+        help="Triggered episodes per modified/added function in FUNC_MOD_ADD mode (default: 150)",
     )
     parser.add_argument(
         "--param-tune-episodes",

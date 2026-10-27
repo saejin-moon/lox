@@ -26,7 +26,7 @@ from lox.ui.console import ui
 # Process-local persistent state inside worker processes
 _WORKER_HARNESS: NetHackHarness | None = None
 _WORKER_ROLE: str = "val-hum-law-fem"
-_WORKER_MAX_STEPS: int = 25000
+_WORKER_MAX_STEPS: int = 2500
 _WORKER_COMPILED_CACHE: tuple[int, int, CompiledPolicy] | None = None
 
 
