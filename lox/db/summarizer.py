@@ -466,8 +466,23 @@ def build_batch_contrast_digest(
         )
         for r in top_outliers:
             lines.append(
-                f"#### Outlier Run `{r['run_id']}` (Seed={r['seed']}, Z={r['outlier_z_score']:+.2f}, Pctl={r['batch_percentile']:.1f}%):\n"
+                f"#### Outlier Run `{r['run_id']}` (Seed={r['seed']}, Steps={r.get('steps', 0)}, Z={r['outlier_z_score']:+.2f}, Pctl={r['batch_percentile']:.1f}%):\n"
                 f"```text\n{r.get('summary_digest', '')}\n```"
+            )
+
+    # Sample stalled/normal runs for replay & diagnosis
+    if normals:
+        stalled_samples = [r for r in normals if r.get("max_depth", 1) <= 1][
+            :2
+        ] or normals[:2]
+        lines.append(
+            "\n### Sample Stalled Runs (Dlvl 1 Bottleneck for Prefix Replay / Diagnosis):"
+        )
+        for r in stalled_samples:
+            lines.append(
+                f"#### Stalled Run `{r['run_id']}` (Seed={r['seed']}, Steps={r.get('steps', 0)}, End={r.get('end_reason', 'ended')}):\n"
+                f"```text\n{r.get('summary_digest', '')}\n```\n"
+                f'*Replay Hint: `dry_run_policy(code=..., replay_run_id="{r["run_id"]}", replay_steps={max(0, int(r.get("steps", 0)) - 25)})`*'
             )
 
     return "\n".join(lines)

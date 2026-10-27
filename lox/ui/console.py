@@ -97,8 +97,8 @@ class ConsoleUI:
         if len(arg_clean) > 42:
             arg_clean = arg_clean[:39] + "..."
         res_clean = " ".join(result_summary.strip().split())
-        if len(res_clean) > 36:
-            res_clean = res_clean[:33] + "..."
+        if len(res_clean) > 46:
+            res_clean = res_clean[:43] + "..."
         print(
             f"  {self._c(self.DIM, f'[T{turn_idx}]')} "
             f"{self._c(self.CYAN, f'{tool_name:<18}')} "
@@ -117,6 +117,8 @@ class ConsoleUI:
         )
         if isinstance(targets, list):
             targets = ", ".join(str(t) for t in targets)
+        skill_name = hypothesis.get("skill_name")
+        persistence = hypothesis.get("state_persistence")
         obs = str(
             hypothesis.get("observation_from_db")
             or hypothesis.get("causal_finding")
@@ -127,9 +129,20 @@ class ConsoleUI:
             obs = obs[:87] + "..."
         if len(mech) > 90:
             mech = mech[:87] + "..."
+        extra_lines = ""
+        if skill_name:
+            extra_lines += (
+                f"\n             │ {self._c(self.BOLD, 'Skill:  ')} {skill_name}"
+            )
+        if persistence:
+            pers_str = str(persistence)[:80]
+            extra_lines += (
+                f"\n             │ {self._c(self.DIM, 'State:  ')} {pers_str}"
+            )
+
         print(
             f"  {self._c(self.MAGENTA + self.BOLD, 'Hypothesis')} │ "
-            f"{self._c(self.BOLD, 'Target:')} {targets}\n"
+            f"{self._c(self.BOLD, 'Target:')} {targets}{extra_lines}\n"
             f"             │ {self._c(self.DIM, 'Finding:')} {obs}\n"
             f"             │ {self._c(self.DIM, 'Action: ')} {mech}"
         )

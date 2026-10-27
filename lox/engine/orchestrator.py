@@ -51,6 +51,8 @@ class CampaignOrchestrator:
         macro_every: int = 5,
         early_stopping: bool = True,
         max_repair_turns: int = 5,
+        pilot_revisions: int = 5,
+        pilot_episodes: int = 20,
     ):
         self.provider = provider
         self.model = model
@@ -64,6 +66,8 @@ class CampaignOrchestrator:
         self.func_mod_episodes_per_fn = func_mod_episodes_per_fn
         self.param_tune_episodes = param_tune_episodes
         self.early_stopping = early_stopping
+        self.pilot_revisions = pilot_revisions
+        self.pilot_episodes = pilot_episodes
 
         os.makedirs(
             os.path.dirname(os.path.abspath(self.policy_path)) or ".", exist_ok=True
@@ -435,6 +439,10 @@ class CampaignOrchestrator:
                         current_policy=current_policy,
                         batch_digest=last_batch_digest,
                         recent_experiments=recent_exps,
+                        pool=self.pool,
+                        baseline_runs=baseline_runs,
+                        max_pilot_runs=self.pilot_revisions,
+                        pilot_episodes=self.pilot_episodes,
                     )
                 except Exception as synth_err:
                     ui.warn(

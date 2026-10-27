@@ -160,7 +160,10 @@ Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigati
    - Query `expert_runs` and `expert_ticks` to study how successful human ascensions and reference runs progress, what intrinsics/kit they acquire, and how they act.
 2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact monster mechanics, corpse effects, item properties, intrinsics, and dungeon branches.
 3. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py`.
-4. `dry_run_policy(code, is_macro=False, seed=42, max_turns=60)`: Test your proposed Python code in a live 20ms NetHack sandbox before submitting to verify zero syntax/runtime errors and inspect the actions it yields.
+4. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
+   - Tests candidate Python code in a live NetHack sandbox.
+   - **Step 1 (Smoke Check & Behavioral Critic)**: Verifies AST, checks reachability, detects 2-tile ping-pong oscillations and search spam. Optional `replay_run_id` fast-forwards into any recorded mid-game run in ~10ms.
+   - **Step 2 (20-Episode Parallel Pilot Batch)**: Dispatches 20 episodes across persistent workers (up to 5 pilot revisions per generation) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.
 """
 
 
@@ -224,7 +227,7 @@ Your task in `MACRO_WRITE` mode:
 """
 
     # Default: FUNC_MOD_ADD
-    return f"""### Generation {generation} — Mode: `FUNC_MOD_ADD` (Targeted Function Addition / Modification)
+    return f"""### Generation {generation} — Mode: `FUNC_MOD_ADD` (Targeted Single-Skill Addition / Modification)
 {digest_block}{exp_block}
 {macros_docs}
 
@@ -234,19 +237,29 @@ Your task in `MACRO_WRITE` mode:
 ```
 
 ### Instructions for `FUNC_MOD_ADD`:
-1. **Investigate First**: Use `query_db(sql)` to inspect `runs WHERE is_outlier_good = TRUE` (to see what went right in statistical outlier runs and steer the policy toward those behaviors) vs normal/failed runs, and check `expert_runs` or `query_wiki` as needed.
-2. **Conditional Episode Evaluation & CRITICAL WIRING RULE FOR NEW METHODS**:
-   - For every function you add or modify, the harness will evaluate **1,000 episodes that actually trigger that function**.
-   - Any episode that does NOT call your modified/added function is immediately discarded and excluded from stats!
-   - **CRITICAL**: The AST splicer replaces existing methods in-place and appends new methods to `class Policy`. If you define a **brand-new method** (e.g. `def pray_when_weak(self, state):`), you **MUST ALSO include the updated caller method** (e.g. `def run(self, state):` or `def handle_emergency(self, state):`) in your Python block so that your new method is actually called! Keep `target_functions` in your YAML focused on the specific new/modified specialist method(s).
-3. **Verify Before Submitting**: Run `dry_run_policy(code=...)` on your modified method(s) to confirm zero syntax or runtime errors.
-4. **Output Format (Do NOT guess numerical improvement deltas)**:
-   - First, output a `yaml` hypothesis block with qualitative causal logic:
+1. **Focus on 1 Primary Skill**:
+   - Target **1 primary skill** (1 specialist method, plus the caller e.g. `run` if wiring a new method) per generation.
+   - Modifying 1 method costs only 150 triggered episodes and isolates causal attribution; modifying multiple unrelated methods inflates rollout budgets and couples unrelated bugs.
+2. **5 × 20-Episode Self-Iterative Pilot Revision Loop**:
+   - Before submitting your final hypothesis, call `dry_run_policy(code=...)`.
+   - It runs a **20-episode parallel pilot test** against the current baseline on 16 workers in ~0.5s, reporting paired Wins/Losses/Ties and the exact logs of the worst stalled runs.
+   - You have **up to 5 pilot revisions per generation**: inspect the stalled run logs and behavioral critic warnings, revise your code to fix the failure mode, and test again with `dry_run_policy` until you beat the baseline!
+3. **Interruptible State-Machine Skills & Anti-Oscillation Invariants**:
+   - NetHack is an interrupt-driven survival loop: specialist methods (`explore_step`, `handle_combat`, `handle_nutrition`) must return an action or `None` on each tick and rely on persistent attributes on `self` (`self.target_tile`, `self.pos_history = collections.deque(maxlen=8)`) to avoid 2-tile ping-pong oscillations.
+4. **Conditional Triggering & Method Wiring**:
+   - Any episode that does NOT call your modified/added method is immediately discarded.
+   - If adding a new method, also include the caller method (e.g. `run` or dispatcher) in your code block so it is wired in and called.
+5. **Output Format**:
+   - Output a `yaml` hypothesis block detailing your qualitative causal hypothesis and skill spec:
      ```yaml
      mode: FUNC_MOD_ADD
      target_functions: [method_you_modified_or_added]
-     observation_from_db: "What you observed in outlier good runs vs normal runs in the DB"
-     mechanism: "Exact behavioral change introduced by your function modification/addition"
+     skill_name: "Name of the Targeted Skill"
+     precondition: "When this skill activates"
+     state_persistence: "What self.* attributes prevent oscillation and track targets"
+     postcondition: "What marks completion of this skill"
+     observation_from_db: "What you observed in outlier good runs or pilot runs"
+     mechanism: "Exact behavioral change introduced by your skill modification"
      ```
-   - Second, output ONLY the modified and/or newly added method(s) (or `class Policy:` containing them) in a single ```python ... ``` block. They will be surgically spliced into `class Policy` via AST.
+   - Output ONLY the modified and/or newly added method(s) (or `class Policy:` containing them) in a single ```python ... ``` block.
 """

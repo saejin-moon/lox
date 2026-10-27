@@ -11,8 +11,11 @@ from __future__ import annotations
 import ast
 import os
 import re
+import time
 from collections import Counter
 from typing import Any
+
+import numpy as np
 
 from lox.author.prompts import POLICY_LANG_DOCS
 from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
@@ -30,6 +33,7 @@ def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
     rows = cur.fetchall()[:max_rows]
     if not rows:
         return "results: []", 0
+    max_chars = 4500 if len(rows) <= 5 else (1800 if len(rows) <= 15 else 700)
     lines = ["results:"]
     for r in rows:
         parts = []
@@ -42,8 +46,8 @@ def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
                 parts.append(f'{h}: "<{len(v)} bytes>"')
             else:
                 s = str(v)
-                if len(s) > 700:
-                    s = s[:340] + " ... " + s[-340:]
+                if len(s) > max_chars:
+                    s = s[: max_chars // 2] + " ... " + s[-max_chars // 2 :]
                 s_esc = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
                 parts.append(f'{h}: "{s_esc}"')
         lines.append("  - {" + ", ".join(parts) + "}")
@@ -64,6 +68,29 @@ class AuthorToolRegistry:
         self.macro_lib = MacroLibrary(path=macros_path)
         self.current_policy_code: str = ""
         self.last_passed_code: str = ""
+        self.pool: Any = None
+        self.baseline_runs: list[dict[str, Any]] = []
+        self.pilot_runs_used: int = 0
+        self.max_pilot_runs: int = 5
+        self.pilot_episodes: int = 20
+        self.last_pilot_improved: bool = False
+        self.last_pilot_summary: str = ""
+
+    def configure_generation(
+        self,
+        pool: Any = None,
+        baseline_runs: list[dict[str, Any]] | None = None,
+        max_pilot_runs: int = 5,
+        pilot_episodes: int = 20,
+    ) -> None:
+        """Sets worker pool and baseline runs context for pilot evaluations."""
+        self.pool = pool
+        self.baseline_runs = list(baseline_runs or [])
+        self.pilot_runs_used = 0
+        self.max_pilot_runs = max_pilot_runs
+        self.pilot_episodes = pilot_episodes
+        self.last_pilot_improved = False
+        self.last_pilot_summary = ""
 
     def query_db(self, sql: str) -> tuple[str, str]:
         """Executes a read-only SQL query against DuckDB."""
@@ -136,18 +163,21 @@ class AuthorToolRegistry:
         code: str,
         is_macro: bool = False,
         seed: int = 42,
-        max_turns: int = 60,
+        max_turns: int = 150,
+        replay_run_id: str = "",
+        replay_steps: int = 0,
     ) -> tuple[str, str]:
         """
-        Compiles and executes candidate `code` in a live NetHack sandbox for `max_turns` steps
-        to verify syntax, sandbox rules, attribute access, and action yielding.
+        Compiles and tests candidate `code` in a live NetHack sandbox:
+        1. Smoke Check: AST validation, reachability, loop check, and behavioral critic (150 steps).
+        2. Pilot Evaluation: If worker pool is attached, runs 20 paired episodes across workers
+           (up to 5 pilot revisions per generation) to measure real baseline delta and surface failure logs.
         """
         macros_code = self.macro_lib.load_code()
         policy_code = self.current_policy_code
 
         try:
             if is_macro:
-                # Test compiling the candidate macro code merged with existing macros
                 from lox.lang.validator import validate_python_code
 
                 validate_python_code(code, filename="macros_candidate.py")
@@ -192,6 +222,7 @@ class AuthorToolRegistry:
                         )
                 else:
                     spliced_policy = code
+                    changed_fns = ["run"]
                 compiled = compile_policy_and_macros(spliced_policy, macros_code)
         except Exception as exc:
             return (
@@ -199,22 +230,57 @@ class AuthorToolRegistry:
                 "COMPILE_ERROR",
             )
 
+        # Step 1: Single-Episode Smoke Check + Behavioral Critic (with optional prefix replay)
         harness = NetHackHarness(max_steps=max(10, min(200, int(max_turns))))
         try:
             runner = compiled.create_runner()
-            state = harness.reset(seed=int(seed))
             actions_taken: list[str] = []
             raw_act_names: list[str] = []
-            unique_positions: set[tuple[int, int]] = {(state.y, state.x)}
+            unique_positions: set[tuple[int, int]] = set()
+            positions_history: list[tuple[int, int]] = []
+            oscillation_detected = False
+
+            if replay_run_id and os.path.exists(self.db_path):
+                con = connect_db(self.db_path, read_only=True)
+                try:
+                    row = con.execute(
+                        "SELECT seed, action_bytes FROM runs WHERE run_id = ?",
+                        [replay_run_id],
+                    ).fetchone()
+                finally:
+                    con.close()
+                if row:
+                    r_seed, r_bytes = int(row[0]), bytes(row[1] or b"")
+                    state = harness.reset(seed=r_seed)
+                    cut = (
+                        min(len(r_bytes), int(replay_steps))
+                        if int(replay_steps) > 0
+                        else max(0, len(r_bytes) - 25)
+                    )
+                    for b in r_bytes[:cut]:
+                        state, done, _ = harness.step(b)
+                        if done:
+                            break
+                else:
+                    state = harness.reset(seed=int(seed))
+            else:
+                state = harness.reset(seed=int(seed))
+
             for _ in range(max(10, min(200, int(max_turns)))):
                 raw_act, active_fn = runner.next_action(state)
                 state, done, info = harness.step(raw_act)
-                unique_positions.add((state.y, state.x))
+                pos = (state.y, state.x)
+                unique_positions.add(pos)
+                positions_history.append(pos)
+                if len(positions_history) >= 40:
+                    if len(set(positions_history[-40:])) <= 3:
+                        oscillation_detected = True
                 act_name = info["action_name"]
                 raw_act_names.append(act_name)
                 actions_taken.append(f"{active_fn}:{act_name}")
                 if done:
                     break
+
             fn_summary = ", ".join(
                 f"{k}:{v}" for k, v in runner.tracer.fn_calls.items()
             )
@@ -228,12 +294,168 @@ class AuthorToolRegistry:
                 or "none"
             )
             sample_acts = " -> ".join(actions_taken[:10])
-            warn_line = ""
+
+            warn_lines: list[str] = []
             if len(unique_positions) == 1 and harness.step_count >= 15:
-                warn_line = (
-                    "\n- WARNING: Hero stayed on 1 tile ((y,x) did not change) across all steps! "
-                    "Verify your passable mask and movement logic."
+                warn_lines.append(
+                    "- WARNING: Hero stayed on 1 tile ((y,x) did not change) across all steps! Verify movement logic."
                 )
+            if oscillation_detected:
+                warn_lines.append(
+                    "- BEHAVIORAL WARNING: 2-tile or 3-tile ping-pong oscillation detected (visited <= 3 unique tiles over 40 steps). Ensure you use persistent targets and pos_history cycle breaking!"
+                )
+            if len(raw_act_names) >= 20:
+                stall_acts = sum(1 for a in raw_act_names if a in ("SEARCH", "WAIT"))
+                if stall_acts / len(raw_act_names) > 0.5:
+                    warn_lines.append(
+                        f"- BEHAVIORAL WARNING: High action stall rate ({stall_acts}/{len(raw_act_names)} actions were SEARCH or WAIT)."
+                    )
+            warn_block = ("\n" + "\n".join(warn_lines)) if warn_lines else ""
+
+            # Step 2: 20-Episode Parallel Pilot Evaluation (if pool is attached and pilot budget remains)
+            if (
+                not is_macro
+                and self.pool is not None
+                and self.pilot_runs_used < self.max_pilot_runs
+            ):
+                self.pilot_runs_used += 1
+                rev_idx = self.pilot_runs_used
+                max_rev = self.max_pilot_runs
+                target_eps = min(self.pilot_episodes, 30)
+
+                pilot_seeds: list[int] = []
+                if self.baseline_runs:
+                    pilot_seeds = [
+                        int(r["seed"]) for r in self.baseline_runs[:target_eps]
+                    ]
+                else:
+                    pilot_seeds = list(range(int(seed), int(seed) + target_eps))
+
+                base_by_seed = {
+                    int(r["seed"]): r for r in self.baseline_runs if "seed" in r
+                }
+
+                pilot_batch_id = f"pilot_{rev_idx}_{int(time.time())}"
+                target_fns = changed_fns if policy_code.strip() else None
+
+                pilot_res = self.pool.evaluate_batch(
+                    batch_id=pilot_batch_id,
+                    policy_code=spliced_policy,
+                    macros_code=macros_code,
+                    target_episodes=target_eps,
+                    target_functions=target_fns,
+                    priority_seeds=pilot_seeds,
+                    record_ticks=True,
+                    show_progress=False,
+                )
+
+                p_runs = pilot_res.get("runs", [])
+                wins = 0
+                losses = 0
+                ties = 0
+                cand_depths = [float(r["max_depth"]) for r in p_runs]
+                base_depths: list[float] = []
+
+                for r in p_runs:
+                    s = int(r["seed"])
+                    if s in base_by_seed:
+                        br = base_by_seed[s]
+                        b_d = float(br.get("max_depth", 1))
+                        b_s = float(br.get("score", 0))
+                        base_depths.append(b_d)
+                        c_d = float(r.get("max_depth", 1))
+                        c_s = float(r.get("score", 0))
+                        if c_d > b_d or (c_d == b_d and c_s > b_s):
+                            wins += 1
+                        elif c_d < b_d or (c_d == b_d and c_s < b_s):
+                            losses += 1
+                        else:
+                            ties += 1
+
+                c_avg_depth = float(np.mean(cand_depths)) if cand_depths else 0.0
+                b_avg_depth = (
+                    float(np.mean(base_depths))
+                    if base_depths
+                    else (
+                        float(self.baseline_runs[0].get("depth", 1.0))
+                        if self.baseline_runs
+                        else 1.0
+                    )
+                )
+                delta_depth = c_avg_depth - b_avg_depth
+                c_max_depth = int(max(cand_depths)) if cand_depths else 0
+
+                dlvl1_stalls = sum(1 for r in p_runs if r.get("max_depth", 1) <= 1)
+                end_reasons = Counter(r.get("end_reason", "unknown") for r in p_runs)
+                end_reasons_str = ", ".join(
+                    f"{k}: {v}" for k, v in end_reasons.most_common(4)
+                )
+
+                sorted_runs = sorted(
+                    p_runs,
+                    key=lambda x: (
+                        x.get("max_depth", 1),
+                        x.get("score", 0),
+                        -x.get("steps", 0),
+                    ),
+                )
+                worst_runs = sorted_runs[:2]
+                best_run = sorted_runs[-1] if sorted_runs else None
+
+                worst_logs = []
+                for wr in worst_runs:
+                    w_seed = wr.get("seed")
+                    w_d = wr.get("max_depth", 1)
+                    w_steps = wr.get("steps", 0)
+                    w_end = wr.get("end_reason", "unknown")
+                    w_glog = str(wr.get("game_log", ""))
+                    if len(w_glog) > 400:
+                        w_glog = "..." + w_glog[-400:]
+                    worst_logs.append(
+                        f"  - Stalled Run (seed={w_seed}, Dlvl={w_d}, Steps={w_steps}, End={w_end}): {w_glog}"
+                    )
+                worst_logs_str = "\n".join(worst_logs) if worst_logs else "  - None"
+
+                best_log_str = "None"
+                if best_run:
+                    b_seed = best_run.get("seed")
+                    b_d = best_run.get("max_depth", 1)
+                    b_steps = best_run.get("steps", 0)
+                    b_glog = str(best_run.get("game_log", ""))
+                    if len(b_glog) > 400:
+                        b_glog = "..." + b_glog[-400:]
+                    best_log_str = (
+                        f"seed={b_seed}, Dlvl={b_d}, Steps={b_steps} | Log: {b_glog}"
+                    )
+
+                if base_depths:
+                    improved = wins > losses and delta_depth >= 0.0
+                else:
+                    improved = c_avg_depth > 1.0 or c_max_depth > 1
+
+                self.last_pilot_improved = improved
+                summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f}"
+                self.last_pilot_summary = summary_short
+
+                rem = max_rev - rev_idx
+                pilot_diag = (
+                    f"\n\n═══════════════════════════════════════════════════════════════════\n"
+                    f"PILOT BATCH {rev_idx}/{max_rev} REPORT ({len(p_runs)} episodes across workers in {pilot_res.get('wall_sec', 0.0)}s):\n"
+                    f"• Paired vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth})\n"
+                    f"• End Reasons: {{{end_reasons_str}}}\n"
+                    f"• Dlvl 1 Progression: {dlvl1_stalls}/{len(p_runs)} runs stayed on Dlvl 1\n"
+                    f"• Worst / Stalled Pilot Runs:\n{worst_logs_str}\n"
+                    f"• Best Pilot Run: {best_log_str}\n"
+                    f"• Revisions Remaining: {rem} left before final hypothesis submission.\n"
+                    f"{'>>> PILOT VERDICT: IMPROVEMENT DETECTED over baseline.' if improved else '>>> PILOT VERDICT: FLAT OR REGRESSED VS BASELINE. Please inspect the worst run logs above and revise your skill before finalizing!'}\n"
+                    f"═══════════════════════════════════════════════════════════════════"
+                )
+                self.last_passed_code = code
+                return (
+                    f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}{pilot_diag}",
+                    f"PASSED (Pilot {rev_idx}/{max_rev}: {summary_short})",
+                )
+
             self.last_passed_code = code
             return (
                 f"Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
@@ -241,7 +463,7 @@ class AuthorToolRegistry:
                 f"- Functions Called: {{{fn_summary}}}\n"
                 f"- Action Breakdown: {{{act_counts}}}\n"
                 f"- Registered Params: {{{params_summary}}}\n"
-                f"- First 10 Actions: {sample_acts}{warn_line}",
+                f"- First 10 Actions: {sample_acts}{warn_block}",
                 f"PASSED ({harness.step_count} steps)",
             )
         except Exception as exc:
@@ -320,7 +542,12 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "dry_run_policy",
-            "description": "Compile and test candidate Python policy or macro code for 60 steps in a live NetHack sandbox to catch any syntax or runtime errors.",
+            "description": (
+                "Compile and test candidate Python policy or macro code. "
+                "Performs a 150-step smoke check and behavioral critic analysis, plus a 20-episode "
+                "parallel pilot batch on the worker pool (up to 5 pilot revisions per generation) "
+                "to compare against the current baseline and surface concrete failure logs."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -341,7 +568,17 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     "max_turns": {
                         "type": "integer",
                         "description": "Number of steps to simulate (10-200).",
-                        "default": 60,
+                        "default": 150,
+                    },
+                    "replay_run_id": {
+                        "type": "string",
+                        "description": "Optional run_id from DuckDB to fast-forward into that exact mid-game state before executing candidate policy.",
+                        "default": "",
+                    },
+                    "replay_steps": {
+                        "type": "integer",
+                        "description": "Number of initial actions from replay_run_id to fast-forward (0 defaults to 25 steps before run end).",
+                        "default": 0,
                     },
                 },
                 "required": ["code"],

@@ -126,11 +126,20 @@ class AuthorAgent:
             code = str(args.get("code", ""))
             is_macro = bool(args.get("is_macro", False))
             seed = int(args.get("seed", 42))
-            mt = int(args.get("max_turns", 60))
+            mt = int(args.get("max_turns", 150))
+            replay_id = str(args.get("replay_run_id", ""))
+            replay_steps = int(args.get("replay_steps", 0))
             out, summary = self.tools.dry_run_policy(
-                code=code, is_macro=is_macro, seed=seed, max_turns=mt
+                code=code,
+                is_macro=is_macro,
+                seed=seed,
+                max_turns=mt,
+                replay_run_id=replay_id,
+                replay_steps=replay_steps,
             )
             arg_disp = f"{len(code.splitlines())} lines, seed={seed}"
+            if replay_id:
+                arg_disp += f", replay={replay_id[:10]}..."
         else:
             out, summary = f"Unknown tool '{name}'.", "unknown"
             arg_disp = str(args)
@@ -334,19 +343,29 @@ class AuthorAgent:
         batch_digest: str = "",
         recent_experiments: str = "",
         max_tool_turns: int | None = None,
+        pool: Any = None,
+        baseline_runs: list[dict[str, Any]] | None = None,
+        max_pilot_runs: int = 5,
+        pilot_episodes: int = 20,
     ) -> SynthesisProposal:
         """
         Runs a fresh, stateless multi-turn tool-calling session for `generation` and `mode`.
-        Includes a compiler-in-the-loop validation gate (up to 2 repair turns) so models
-        like Gemma 4 31B self-correct any syntax or attribute errors before returning.
+        Supports multi-turn pilot evaluations against `baseline_runs` using `pool` inside
+        `dry_run_policy` (up to `max_pilot_runs` revisions), plus compiler-in-the-loop self-repair.
         """
         if self.provider == "mock":
             return self._synthesize_mock(mode=mode, current_policy=current_policy)
 
         self.tools.current_policy_code = current_policy
         self.tools.last_passed_code = ""
+        self.tools.configure_generation(
+            pool=pool,
+            baseline_runs=baseline_runs,
+            max_pilot_runs=max_pilot_runs,
+            pilot_episodes=pilot_episodes,
+        )
         if max_tool_turns is None:
-            max_tool_turns = 12 if mode == "FULL_WRITE" else 6
+            max_tool_turns = 14 if mode == "FULL_WRITE" else 12
 
         sys_prompt = build_system_prompt(self.db_path)
         user_prompt = build_user_prompt(
@@ -383,6 +402,49 @@ class AuthorAgent:
 
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
+                _, found_code = self.extract_yaml_and_python(msg_text)
+                # Early stop guard: if the model emitted a plan on an early turn without calling tools or testing code
+                if (
+                    not found_code
+                    and not self.tools.last_passed_code
+                    and turn_idx < max_tool_turns
+                    and mode != "MACRO_WRITE"
+                ):
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Please test your candidate code with `dry_run_policy(code=...)` before finalizing. "
+                                "This executes a 20-episode pilot test against the current baseline and reports where your code succeeds or fails."
+                            ),
+                        }
+                    )
+                    continue
+
+                # Iterative pilot revision nudge: if the pilot didn't beat baseline and revisions remain
+                if (
+                    self.tools.pilot_runs_used > 0
+                    and not self.tools.last_pilot_improved
+                    and self.tools.pilot_runs_used < self.tools.max_pilot_runs
+                    and turn_idx < max_tool_turns - 1
+                    and mode == "FUNC_MOD_ADD"
+                ):
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Your latest 20-episode pilot did not beat the baseline ({self.tools.last_pilot_summary}). "
+                                f"You have {self.tools.max_pilot_runs - self.tools.pilot_runs_used} pilot revision(s) remaining. "
+                                "Please inspect the failed run logs and behavioral warnings above, revise your code to fix the stall/failure, "
+                                "and call `dry_run_policy(code=...)` again to verify your fix before submitting your final hypothesis."
+                            ),
+                        }
+                    )
+                    self.tools.last_pilot_improved = (
+                        True  # Avoid infinite nudging if the model repeats
+                    )
+                    continue
+
                 final_content = msg_text
                 break
 

@@ -126,6 +126,18 @@ def main() -> None:
         help="Disable sequential futility early stopping",
     )
     parser.add_argument(
+        "--pilot-revisions",
+        type=int,
+        default=5,
+        help="Max self-iterative pilot revision runs per generation (default: 5)",
+    )
+    parser.add_argument(
+        "--pilot-episodes",
+        type=int,
+        default=20,
+        help="Episodes per parallel pilot batch test (default: 20)",
+    )
+    parser.add_argument(
         "--max-repairs",
         type=int,
         default=5,
@@ -150,6 +162,8 @@ def main() -> None:
         macro_every=args.macro_every,
         early_stopping=not args.no_early_stop,
         max_repair_turns=args.max_repairs,
+        pilot_revisions=args.pilot_revisions,
+        pilot_episodes=args.pilot_episodes,
     )
     try:
         orchestrator.run_campaign(
