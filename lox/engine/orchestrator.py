@@ -491,9 +491,14 @@ class CampaignOrchestrator:
                                         registered_params[pk]["default"] = float(pval)
                                     else:
                                         registered_params[pk].default = float(pval)
-                            for r in val_batch["runs"]:
-                                baseline_by_seed[int(r["seed"])] = r
-                            baseline_runs = list(baseline_by_seed.values())
+                            full_promoted = {
+                                int(r["seed"]): r
+                                for r in val_batch["runs"]
+                                if not r.get("is_shard")
+                            }
+                            if full_promoted:
+                                baseline_by_seed = full_promoted
+                                baseline_runs = list(baseline_by_seed.values())
                             last_batch_digest = build_batch_contrast_digest(
                                 val_batch, val_batch["runs"], fn_stats
                             )
@@ -679,6 +684,10 @@ class CampaignOrchestrator:
                                 max_shards=min(20, max(5, target_eps // 4)),
                                 target_functions=target_fns,
                             )
+                            shard_seeds = {int(sh.seed) for sh in eval_shards}
+                            priority_seeds = [
+                                s for s in priority_seeds if s not in shard_seeds
+                            ]
 
                 # Evaluate baseline policy on exact evaluation shards for apples-to-apples pairing
                 base_shard_runs: list[dict[str, Any]] = []
@@ -940,17 +949,14 @@ class CampaignOrchestrator:
                             f"Bottom-Up Library Learning: Harvested verified macro(s) {harvested} into `{self.macros_path}`."
                         )
 
-                    if proposal.mode == "FULL_WRITE":
-                        baseline_by_seed = {
-                            int(r["seed"]): r
-                            for r in eval_res["runs"]
-                            if not r.get("is_shard")
-                        }
-                    else:
-                        for r in eval_res["runs"]:
-                            if not r.get("is_shard"):
-                                baseline_by_seed[int(r["seed"])] = r
-                    baseline_runs = list(baseline_by_seed.values())
+                    full_promoted = {
+                        int(r["seed"]): r
+                        for r in eval_res["runs"]
+                        if not r.get("is_shard")
+                    }
+                    if full_promoted:
+                        baseline_by_seed = full_promoted
+                        baseline_runs = list(baseline_by_seed.values())
                     last_batch_digest = build_batch_contrast_digest(
                         eval_res, eval_res["runs"], fn_stats
                     )
