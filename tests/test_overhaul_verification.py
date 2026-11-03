@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -595,5 +596,113 @@ def test_pass2_bug4_extract_shards_from_db_and_pilot_logging(tmp_path: Path) -> 
             assert gen_val == 1
         finally:
             con.close()
+    finally:
+        pool.close()
+
+
+def test_pass3_pilot_delta_depth_and_exact_batch_capacity(tmp_path: Path) -> None:
+    """Pass 3: No false negative pilot delta_depth with shards and exact batch dispatch."""
+    db_path = str(tmp_path / "pass3_test.duckdb")
+    pool = PersistentEvalPool(workers=2, max_steps=15)
+    try:
+        tools = AuthorToolRegistry(db_path=db_path)
+
+        # 1. No False Negative in dry_run_policy When Shards Have Lower Depth Than Full Runs
+        # 10 runs are Dlvl 1 failures (with action_bytes = b"k" * 20, max_depth = 1, score = 10)
+        # and 20 runs have max_depth = 2, score = 20
+        baseline_runs = []
+        for i in range(1, 11):
+            baseline_runs.append(
+                {
+                    "run_id": f"base_fail_{i}",
+                    "seed": i,
+                    "max_depth": 1,
+                    "depth": 1,
+                    "score": 10,
+                    "steps": 20,
+                    "turns": 20,
+                    "action_bytes": b"k" * 20,
+                    "end_reason": "killed_by_jackal",
+                    "summary_digest": f"Overview: Dlvl=1 | Steps=20 | Seed={i}",
+                }
+            )
+        for i in range(11, 31):
+            baseline_runs.append(
+                {
+                    "run_id": f"base_norm_{i}",
+                    "seed": i,
+                    "max_depth": 2,
+                    "depth": 2,
+                    "score": 20,
+                    "steps": 40,
+                    "turns": 40,
+                    "action_bytes": b"k" * 40,
+                    "end_reason": "ascended",
+                    "summary_digest": f"Overview: Dlvl=2 | Steps=40 | Seed={i}",
+                }
+            )
+
+        tools.configure_generation(
+            pool=pool,
+            baseline_runs=baseline_runs,
+            max_pilot_runs=3,
+            pilot_episodes=30,
+            generation=1,
+        )
+
+        cand_policy = """class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.WAIT
+"""
+
+        orig_eval = pool.evaluate_batch
+
+        def mock_eval(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            res = orig_eval(*args, **kwargs)
+            # Candidate full runs achieve higher score/progression while shards stay at max_depth=1
+            for r in res.get("runs", []):
+                if not r.get("is_shard"):
+                    r["max_depth"] = 2
+                    r["score"] = 25
+                else:
+                    r["max_depth"] = 1
+                    r["score"] = 10
+            return res
+
+        pool.evaluate_batch = mock_eval
+
+        try:
+            diag, status = tools.dry_run_policy(code=cand_policy, is_macro=False)
+        finally:
+            pool.evaluate_batch = orig_eval
+
+        # Assert tools.last_pilot_improved is True
+        assert tools.last_pilot_improved is True
+        assert "PASSED" in status
+
+        # Assert Δ= in tools.last_pilot_summary is >= 0.0 (not negative!)
+        assert "Δ=" in tools.last_pilot_summary
+        delta_str = tools.last_pilot_summary.split("Δ=")[-1].split()[0]
+        delta_val = float(delta_str)
+        assert delta_val >= 0.0, f"Expected non-negative delta, got {delta_val}"
+
+        # Assert cand_depths / base_depths were paired 1-to-1
+        assert len(tools.last_cand_depths) > 0
+        assert len(tools.last_cand_depths) == len(tools.last_base_depths)
+
+        # 2. Exact Task Dispatch in evaluate_batch When Priority Seeds / Shards Cover target_episodes
+        exact_seeds = list(range(100, 115))
+        res = pool.evaluate_batch(
+            batch_id="test_exact_dispatch",
+            policy_code=cand_policy,
+            target_episodes=10,
+            target_functions=["run"],
+            priority_seeds=exact_seeds,
+        )
+        assert res["raw_episodes_run"] == 10
+        assert len(res["runs"]) == 10
+        run_seeds = [r["seed"] for r in res["runs"]]
+        assert set(run_seeds).issubset(set(exact_seeds))
     finally:
         pool.close()
