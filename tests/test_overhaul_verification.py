@@ -863,9 +863,13 @@ def test_pass5_deep_audit_fixes(tmp_path: Path) -> None:
     code = """
 class Policy:
     def handle_items(self, state):
+        if state.score > 999:
+            return Action.WAIT
         return None
 
     def handle_combat(self, state):
+        if state.score > 999:
+            return Action.WAIT
         return None
 
     def move_towards(self, state):
@@ -1125,3 +1129,122 @@ class Policy:
         assert rows[1][1] == "Doors cannot be entered diagonally"
     finally:
         con.close()
+
+
+def test_pass7_final_preflight_audit_fixes(tmp_path: Path) -> None:
+    """Pass 7: Final Pre-Flight Deep Sweep Verification."""
+    from lox.lang.compiler import compile_policy_and_macros
+    from lox.lang.macros import MacroHarvester, MacroLibrary
+    from lox.runner.pool import run_single_episode
+
+    # 1. Standing on a downstairs tile '>' where chars[y, x] == ord('@')
+    h1 = NetHackHarness(max_steps=20)
+    try:
+        st = h1.reset(seed=42)
+        st.chars[st.y, st.x] = ord("@")
+        st.mem.remembered_chars[st.y, st.x] = ord(">")
+        # Ensure no other '>' on screen so we uniquely test under-hero detection
+        st.chars[st.chars == ord(">")] = ord(".")
+
+        assert st.char_at(st.y, st.x) == ">"
+        assert st.stairs_down_pos == (st.y, st.x)
+        assert st.is_stairs_down(st.y, st.x) is True
+        assert st.terrain_at(st.y, st.x) == "staircase down"
+    finally:
+        h1.close()
+
+    # 2. Void method with early bare return increments fn_calls and does not clobber active_fn
+    void_code = """
+class Policy:
+    def __init__(self):
+        self.count = 0
+
+    def update_memory(self, state):
+        if self.count > 0:
+            return
+        self.count += 1
+        return
+
+    def explore(self, state):
+        return Action.WAIT
+
+    def run(self, state):
+        while True:
+            self.update_memory(state)
+            act = self.explore(state)
+            state = yield act
+"""
+    compiled = compile_policy_and_macros(void_code)
+    h2 = NetHackHarness(max_steps=10)
+    try:
+        st2 = h2.reset(seed=10)
+        runner = compiled.create_runner()
+        act, active_fn = runner.next_action(st2)
+        assert act == Action.WAIT
+        assert active_fn == "explore"
+        assert runner.tracer.fn_calls.get("update_memory", 0) >= 1
+        assert runner.tracer.fn_turns.get("explore", 0) == 1
+    finally:
+        h2.close()
+
+    # 3. Prefix shard executes up to post_replay_max_steps instead of truncating at step 1
+    h3 = NetHackHarness(max_steps=350)
+    try:
+        st3 = h3.reset(seed=99)
+        bytes_list = bytearray()
+        for _ in range(300):
+            st3, done, _ = h3.step(Action.WAIT)
+            bytes_list.append(int(Action.WAIT))
+            if done:
+                break
+    finally:
+        h3.close()
+
+    pol_simple = """
+class Policy:
+    def run(self, state):
+        while True:
+            yield Action.WAIT
+"""
+    task = {
+        "seed": 99,
+        "run_id": "test_shard_300",
+        "role": "val-hum-law-fem",
+        "max_steps": 20,
+        "post_replay_max_steps": 20,
+        "replay_bytes": bytes(bytes_list),
+        "policy_code": pol_simple,
+        "macros_code": "",
+        "target_functions": [],
+        "is_priority_seed": True,
+        "enforce_trigger": False,
+        "record_ticks": False,
+    }
+    shard_res = run_single_episode(task)
+    assert shard_res["triggered"] is True
+    assert shard_res["steps"] > 1, (
+        f"Shard truncated prematurely with steps={shard_res['steps']}"
+    )
+    assert shard_res["steps"] <= 20
+
+    # 4. MacroHarvester does not harvest methods calling unharvested self.<method>,
+    # while harvesting methods accessing self.passable_mask
+    m_lib = MacroLibrary(path=str(tmp_path / "test_macros.py"))
+    candidate_pol = """
+class Policy:
+    def helper_valid(self, state):
+        return self.passable_mask[state.y, state.x]
+
+    def unharvested_stateful(self):
+        return self.custom_state
+
+    def helper_invalid(self, state):
+        return self.unharvested_stateful()
+
+    def run(self, state):
+        while True:
+            yield Action.WAIT
+"""
+    harvested = MacroHarvester.harvest_from_policy(candidate_pol, m_lib)
+    assert "helper_valid" in harvested
+    assert "helper_invalid" not in harvested

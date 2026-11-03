@@ -234,6 +234,7 @@ class MacroHarvester:
                     fs.get("ochiai_good_run_score", 0.0)
                 )
 
+        existing_macro_names = {s.name for s in macro_lib.list_specs()}
         root_names = {"run", "step", "act", "__init__", "explore"}
         harvested_code_snippets: list[str] = []
         harvested_names: list[str] = []
@@ -273,6 +274,10 @@ class MacroHarvester:
                             "locked_doors",
                             "remembered_chars",
                             "is_oscillating",
+                            "passable_mask",
+                            "door_mask",
+                            "searched_counts",
+                            "stair_graph",
                         ):
                             return ast.Attribute(
                                 value=ast.Attribute(
@@ -283,11 +288,10 @@ class MacroHarvester:
                                 attr=node.attr,
                                 ctx=node.ctx,
                             )
-                        elif node.attr in [
-                            m.name
-                            for m in target_cls.body
-                            if isinstance(m, ast.FunctionDef)
-                        ]:
+                        elif (
+                            node.attr in existing_macro_names
+                            or node.attr in harvested_names
+                        ):
                             return ast.Name(id=node.attr, ctx=node.ctx)
                         else:
                             self.invalid = True

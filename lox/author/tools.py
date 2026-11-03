@@ -922,7 +922,16 @@ class AuthorToolRegistry:
                         f"seed={b_seed}, Dlvl={b_d}, Steps={b_steps} | Log: {b_glog}"
                     )
 
-                if base_depths:
+                if self.baseline_runs and not p_runs:
+                    improved = False
+                    raw_run_cnt = pilot_res.get("raw_episodes_run", 0)
+                    summary_short = f"0/{raw_run_cnt} eps triggered {target_fns}"
+                    paired_line = f"• Trigger Check Failed: Target function(s) {target_fns} triggered in 0/{raw_run_cnt} episodes!\n"
+                    verdict_line = (
+                        f">>> PILOT VERDICT: TARGET FUNCTION NEVER TRIGGERED AT RUNTIME ({target_fns}). "
+                        "Loosen its entry condition in `run()` so it triggers on current dungeon levels!"
+                    )
+                elif base_depths:
                     improved = (wins > losses and mean_delta > 0.0) or (
                         delta_depth >= 0.05 and mean_delta >= 0.0
                     )

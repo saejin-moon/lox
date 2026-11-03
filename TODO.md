@@ -307,3 +307,245 @@ To eliminate survivorship bias *without* keeping untriggered ties, an episode on
    - `ModeScheduler` does not lock into `STRUCTURAL_REFACTOR` on `consecutive_failures == 4`.
    - `AuthorToolRegistry.query_policy_docs("policy")` returns `current_policy_code`.
    - `ConsoleUI.hypothesis_box` and `BatchDatabaseLogger.save_experiment` record `binding_constraint` and `verified_c_rule`.
+
+---
+
+# Pass 7: Final Pre-Flight Deep Sweep (5 Critical Runtime & Evolution Fixes)
+
+All items below MUST be implemented and verified via `uv run ruff check .` and `uv run pytest -v`:
+
+## Task 1: Fix Under-Hero Staircase & Feature Occlusion When `@` Covers `>` (`lox/env/state.py`)
+
+**Problem**:
+When the hero stands on a staircase down `'>'` (or staircase up `'<'`, altar `'_'`, fountain `'{'`), NLE's `self.chars[self.y, self.x]` is `ord('@')` (`64`), and `self.glyphs[self.y, self.x]` is the hero's monster glyph. As a result, at the exact moment the hero steps onto the stairs:
+- `state.stairs_down_pos` (`np.argwhere(self.chars == ord(">"))`) returns `None`!
+- `state.is_stairs_down(state.y, state.x)` returns `False`!
+- `state.char_at(state.y, state.x)` returns `'@'` instead of `'>'` (causing policies that check `state.char_at(state.y, state.x) == '>'` or `state.stairs_down_pos == state.pos` to step onto the stairs and then immediately step off them in an infinite ping-pong loop!).
+- Similarly, if a monster or corpse/object covers `'>'` on `self.chars`, `state.stairs_down_pos` returns `None` even when `state.mem.remembered_chars` already recorded `ord('>')` at that coordinate.
+
+**Exact Changes in `lox/env/state.py`**:
+1. In `WorldMemory.update(self, state: GameState, action_name: str = "")` (around lines 630–670):
+   - After setting `floor.remembered_chars[uninit_occupied] = ord(".")`, check if the hero is standing on a terrain feature via `state.is_on_stairs_down` or `state.message`:
+     ```python
+     msg_low = str(state.message).lower() if hasattr(state, "message") else ""
+     if (
+         0 <= sy < floor.remembered_chars.shape[0]
+         and 0 <= sx < floor.remembered_chars.shape[1]
+     ):
+         if getattr(state, "is_on_stairs_down", False) or "staircase down" in msg_low:
+             floor.remembered_chars[sy, sx] = ord(">")
+         elif "staircase up" in msg_low:
+             floor.remembered_chars[sy, sx] = ord("<")
+         elif "there is an altar" in msg_low or "altar of" in msg_low:
+             floor.remembered_chars[sy, sx] = ord("_")
+         elif "there is a fountain" in msg_low:
+             floor.remembered_chars[sy, sx] = ord("{")
+     ```
+2. In `GameState.char_at(self, y: int, x: int) -> str` (lines 1088–1092):
+   - When `(y, x) == (self.y, self.x)` and `int(self.chars[y, x]) == ord("@")`:
+     - If `self.is_on_stairs_down`: return `">"`
+     - If `self.mem is not None` and `0 <= y < self.mem.remembered_chars.shape[0]` and `0 <= x < self.mem.remembered_chars.shape[1]`:
+       `rem_c = int(self.mem.remembered_chars[y, x])`
+       if `rem_c != 0 and rem_c != ord(" ")`: return `_CHAR_LUT[rem_c] if rem_c < 256 else "?"`
+3. In `GameState.terrain_at(self, y: int, x: int) -> str` (lines 1155–1172):
+   - If `y == self.y and x == self.x and self.is_on_stairs_down`: return `"staircase down"`.
+   - If `cmap is None` and `self.mem is not None` and `0 <= y < self.mem.remembered_chars.shape[0]` and `0 <= x < self.mem.remembered_chars.shape[1]`:
+     check `rem_c = int(self.mem.remembered_chars[y, x])`:
+     - `ord(">")` -> `"staircase down"`
+     - `ord("<")` -> `"staircase up"`
+     - `ord("_")` -> `"altar"`
+     - `ord("{")` -> `"fountain"`
+     - `ord("+")` -> `"closed door"`
+     - `ord("#")` -> `"corridor"`
+     - `ord(".")` -> `"floor of a room"`
+4. In `GameState.stairs_down_pos` and `GameState.stairs_up_pos` (lines 1221–1236):
+   - In `stairs_down_pos`:
+     1. Check `stairs = np.argwhere(self.chars == ord(">"))`; if `len(stairs) > 0`: return `(int(stairs[0, 0]), int(stairs[0, 1]))`.
+     2. If `self.is_on_stairs_down`: return `(self.y, self.x)`.
+     3. If `self.mem is not None`: check `rem = np.argwhere(self.mem.remembered_chars == ord(">"))`; if `len(rem) > 0`: return `(int(rem[0, 0]), int(rem[0, 1]))`.
+     4. Return `None`.
+   - In `stairs_up_pos`:
+     1. Check `stairs = np.argwhere(self.chars == ord("<"))`; if `len(stairs) > 0`: return `(int(stairs[0, 0]), int(stairs[0, 1]))`.
+     2. If `self.mem is not None`: check `rem = np.argwhere(self.mem.remembered_chars == ord("<"))`; if `len(rem) > 0`: return `(int(rem[0, 0]), int(rem[0, 1]))`.
+     3. Return `None`.
+5. In `GameState.is_stairs_down`, `is_stairs_up`, `is_altar`, `is_fountain` (lines 1201–1212):
+   - Because `char_at` and `terrain_at` now consult `is_on_stairs_down` and `self.mem.remembered_chars`, also allow `self.mem is not None and 0 <= y < self.mem.remembered_chars.shape[0] and 0 <= x < self.mem.remembered_chars.shape[1] and self.mem.remembered_chars[y, x] == ord(...)` so they remain `True` even when a monster or object stands on that tile.
+
+---
+
+## Task 2: Fix Promoted Policy Reversion When Conditional `eval_res["avg_depth"]` Differs From Unconditional `baseline_runs` (`lox/engine/orchestrator.py`)
+
+**Problem**:
+In `FUNC_MOD_ADD`, `eval_res` evaluates on a conditional, failure-prioritized subset of seeds (`base_triggered_seeds + base_fail_seeds` + 20 failure shards). Even when `verdict["passed"] == True` (statistically significant positive paired delta on those seeds), `eval_res["avg_depth"]` on the failure-heavy subset is often numerically lower than Gen 0's unconditional `self.policy_archive["descent"].avg_depth` (or artificially higher if the target function only triggers on Dlvl 2+).
+When `eval_res["avg_depth"] < self.policy_archive["descent"].avg_depth`:
+1. Line 973 skipped `self.save_active_policy(current_policy)`.
+2. Line 1018 skipped updating `self.policy_archive["descent"]`.
+3. At the top of the next generation (line 407), `current_policy = chosen_entry.policy_code` overwrote `current_policy` back to the old archive entry, silently discarding the promoted generation!
+4. At line 380, `if n_entry.avg_depth < champ_entry.avg_depth - 0.10:` allowed UCB to select a stale niche up to `0.10` depth worse than `"descent"`, reverting intermediate promoted methods.
+
+**Exact Changes in `lox/engine/orchestrator.py`**:
+1. At line 380 (in the MAP-Elites UCB parent selection block):
+   - Change `if n_entry.avg_depth < champ_entry.avg_depth - 0.10:` to `if n_entry.avg_depth < champ_entry.avg_depth or n_entry.policy_id != champ_entry.policy_id and n_entry.avg_depth <= champ_entry.avg_depth:` so no archive niche ever reverts `current_policy` to an older policy with lower or equal `avg_depth` than the latest `"descent"` champion.
+2. In `PARAM_TUNE` promotion (lines 507–585):
+   - Whenever `verdict["passed"]` is `True`, unconditionally call `self.save_active_policy(current_policy)`.
+   - Compute `u_depth`, `u_p90`, `u_max`, `u_ac`, `u_xl` from `baseline_runs` (after `baseline_by_seed.update(full_promoted)`) rather than `val_batch["runs"]`, and unconditionally update `self.policy_archive["descent"]` and `self.policy_archive[chosen_niche]` with `avg_depth = max(u_depth, self.policy_archive["descent"].avg_depth if "descent" in self.policy_archive else 0.0)`.
+3. In `FULL_WRITE` / `FUNC_MOD_ADD` / `STRUCTURAL_REFACTOR` promotion (lines 967–1069):
+   - Whenever `verdict["passed"]` is `True`, unconditionally call `self.save_active_policy(current_policy)`.
+   - After `baseline_by_seed.update(full_promoted)` and `baseline_runs = list(baseline_by_seed.values())`, compute `clean_archive_runs = list(baseline_runs)` and compute `c_depth`, `c_p90`, `c_max`, `c_ac`, `c_xl` from `clean_archive_runs` (falling back to `eval_res["runs"]` only if `clean_archive_runs` is empty):
+     ```python
+     stat_pool = clean_archive_runs if clean_archive_runs else eval_res["runs"]
+     c_depth = (
+         float(np.mean([r.get("max_depth", 1) for r in stat_pool]))
+         if stat_pool
+         else float(eval_res["avg_depth"])
+     )
+     if "descent" in self.policy_archive:
+         c_depth = max(c_depth, self.policy_archive["descent"].avg_depth)
+     c_p90 = (
+         float(np.percentile([r.get("max_depth", 1) for r in stat_pool], 90))
+         if stat_pool
+         else float(eval_res["p90_depth"])
+     )
+     c_max = (
+         int(max([r.get("max_depth", 1) for r in stat_pool]))
+         if stat_pool
+         else int(eval_res["max_depth"])
+     )
+     c_ac = float(np.mean([r.get("final_ac", 10) for r in stat_pool])) if stat_pool else 10.0
+     c_xl = float(np.mean([r.get("xp_level", 1) for r in stat_pool])) if stat_pool else 1.0
+     ```
+   - Unconditionally update `self.policy_archive["descent"]` (and `self.policy_archive[chosen_niche]`) with the newly promoted `current_policy` so a statistically verified promotion is never lost on the next generation.
+4. On campaign resume (around line 297) and warm-start (around line 370), if `baseline_runs` is non-empty and `"descent" not in self.policy_archive`, initialize `self.policy_archive["descent"]` with `current_policy`, `current_policy_id`, `baseline_runs`, and `last_batch_digest`.
+
+---
+
+## Task 3: Fix Prefix Shards Truncating After 1 Step in `run_single_episode` & Avoid Worker Harness Re-creation (`lox/runner/pool.py`, `lox/engine/hypothesis.py`)
+
+**Problem**:
+1. In `lox/runner/pool.py` (`run_single_episode`, lines 112–116):
+   - When `is_shard` is `True`, `harness.replay_bytes(seed=seed, recorded_bytes=replay_bytes)` sets `harness.step_count = step_ctr` (e.g. `300..4000` steps from the prefix), while the shard task's `max_steps` is `200` (`post_replay_max_steps`).
+   - Because `run_single_episode` did not reset `harness.step_count = 0` after `replay_bytes`, on the very first step (`step_idx = 1`) of `harness.step(raw_act)`, `self.step_count >= self.max_steps` (`301 >= 200`) was immediately `True`, truncating every shard with `step_ctr >= 200` after 1 single step!
+2. In `_get_worker_harness` (`lox/runner/pool.py`, lines 48–66):
+   - Checking `or _WORKER_MAX_STEPS != max_steps` closed and recreated the C++ `nh.Nethack` instance every time a worker switched between a 200-step shard and a 5000-step full episode.
+3. In `lox/engine/hypothesis.py` (`progression_metric`, lines 18–53):
+   - On a 200-step pre-death shard (`run.get("is_shard") == True`), if the candidate policy survived the fatal encounter (`final_hp > 0` and `end_reason in ("max_steps", "ascended")`) while the baseline died (`final_hp <= 0`), `progression_metric` gave `0.0` difference when `max_depth`, `xp_level`, `ac`, and `score` were unchanged.
+
+**Exact Changes**:
+1. In `lox/runner/pool.py`:
+   - In `_get_worker_harness` (lines 48–66), only recreate `_WORKER_HARNESS` when `_WORKER_HARNESS is None or _WORKER_ROLE != role or _WORKER_BENCHMARK != benchmark`; otherwise simply set `_WORKER_MAX_STEPS = max_steps` and `_WORKER_HARNESS.max_steps = max_steps`.
+   - In `run_single_episode` (lines 112–116), right after `state = harness.replay_bytes(seed=seed, recorded_bytes=replay_bytes)`:
+     ```python
+     runner.tracer.reset_for_episode()
+     max_steps = int(post_replay_max_steps or 200)
+     harness.step_count = 0
+     harness.max_steps = max_steps
+     harness.done = False
+     ```
+2. In `lox/engine/hypothesis.py` (`progression_metric`, lines 18–53):
+   - Add a shard survival bonus when `run.get("is_shard")` is `True`:
+     ```python
+     shard_survival_bonus = (
+         0.08
+         if (
+             run.get("is_shard")
+             and int(run.get("final_hp", 0)) > 0
+             and str(run.get("end_reason", "")) in ("max_steps", "ascended")
+         )
+         else 0.0
+     )
+     ```
+     and include `+ shard_survival_bonus` in the returned sum.
+
+---
+
+## Task 4: Fix Void Procedures With Early `return` & Data-Helper Return Attribution in `ExecutionTracer` (`lox/lang/instrument.py`)
+
+**Problem**:
+1. In `PolicyInstrumentTransformer.visit_FunctionDef` (`lox/lang/instrument.py`, lines 279–281):
+   - `has_val_ret = (not is_gen) and any(isinstance(sub, ast.Return) for sub in ast.walk(node))` treated void procedures that contain a bare `return` or `return None` (e.g. `def update_memory(self, state): if state.turn == 0: return; self.visited.add(...)`) as value-returning functions (`has_val_ret = True`).
+   - Consequently, `enter_fn` did not increment `fn_calls["update_memory"]`, and `on_return` saw `val is None` (`is_noop = True`) and also did not increment `fn_calls["update_memory"]`, resulting in `0` recorded calls and `Unreachable Function Abort` whenever a void method with an early `return` was modified!
+2. In `ExecutionTracer.on_return` and `ExecutionTracer.exit_fn` (`lox/lang/instrument.py`, lines 83–128):
+   - If a helper returned a numpy mask (`np.ndarray`), `set`, or `dict` directly to `run()`, `on_return` set `self.active_fn = fn_name`.
+   - And if `run()` called `act = self.explore(state)` (setting `self.active_fn = "explore"`) and then called another helper before `yield act` that returned `None`, `exit_fn` ran `elif not yielded_inside and not returned_non_noop: self.active_fn = caller_fn` and overwrote `self.active_fn` back to `"run"`.
+
+**Exact Changes in `lox/lang/instrument.py`**:
+1. In `PolicyInstrumentTransformer.visit_FunctionDef` (lines 279–288):
+   - Compute `has_val_ret` by checking only non-`None` return expressions:
+     ```python
+     has_val_ret = (not is_gen) and any(
+         isinstance(sub, ast.Return)
+         and sub.value is not None
+         and not (isinstance(sub.value, ast.Constant) and sub.value.value is None)
+         for sub in ast.walk(node)
+     )
+     ```
+   - Pass `is_gen` as a third argument to `_make_enter_stmt(fn_name, has_val_ret, is_gen)`.
+2. In `ExecutionTracer`:
+   - `enter_fn(self, fn_name: str, has_value_return: bool = False, is_gen: bool = False) -> None`:
+     ```python
+     self.call_stack.append([fn_name, self.total_turns, False])
+     if not has_value_return:
+         self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+         if is_gen or fn_name in self._ROOT_FNS:
+             self.active_fn = fn_name
+     ```
+   - `on_return(self, fn_name: str, val: Any) -> Any`:
+     ```python
+     is_noop = val is None or (isinstance(val, tuple) and len(val) == 2 and val == (0, 0))
+     if not is_noop:
+         self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+         if self.call_stack:
+             self.call_stack[-1][2] = True
+         if not isinstance(val, (bool, set, dict)) and type(val).__name__ != "ndarray":
+             self.active_fn = fn_name
+     return val
+     ```
+   - `exit_fn(self, fn_name: str) -> None`:
+     After popping `fn_name` from `self.call_stack`:
+     ```python
+     if not self.call_stack:
+         return
+     caller_fn = self.call_stack[-1][0]
+     if caller_fn not in self._ROOT_FNS:
+         self.active_fn = caller_fn
+     ```
+     (Do NOT overwrite `self.active_fn = "run"` when `caller_fn in self._ROOT_FNS`, because `record_turn_yield()` already resets `self.active_fn = "run"` after each yielded turn!).
+
+---
+
+## Task 5: Fix 0-Trigger Pilot Diagnostic (`lox/author/tools.py`) & `MacroHarvester` Attribute Rewriting (`lox/lang/macros.py`)
+
+**Problem**:
+1. In `lox/author/tools.py` (lines 925–950):
+   - On Gen 1+ (`self.baseline_runs` is non-empty), if a pilot batch records `0` triggered episodes (`len(p_runs) == 0`), `base_depths` is empty (`[]`), so `if base_depths:` is `False` and execution falls into the Gen 0 `else:` branch—falsely telling the LLM `Initial Gen 0 Baseline Validation: 0 episodes ... INITIAL POLICY CRASHED. Please fix the runtime error.` instead of reporting that `target_fns` triggered 0 times!
+2. In `lox/lang/macros.py` (`MacroHarvester.harvest_from_policy`, lines 266–295):
+   - `SelfRewriter` rewrote `self.<method>` to `<method>` if `<method>` was any method in `target_cls.body`, even if `<method>` was NOT in `macros.py` and NOT harvested (producing broken macros that raise `NameError` when called).
+   - It also omitted `"passable_mask"`, `"door_mask"`, `"searched_counts"`, and `"stair_graph"` from the `state.mem` attribute rewrite list.
+
+**Exact Changes**:
+1. In `lox/author/tools.py` (lines 925–950):
+   - Add an explicit branch when `self.baseline_runs and not p_runs`:
+     ```python
+     if self.baseline_runs and not p_runs:
+         improved = False
+         raw_run_cnt = pilot_res.get("raw_episodes_run", 0)
+         summary_short = f"0/{raw_run_cnt} eps triggered {target_fns}"
+         paired_line = f"• Trigger Check Failed: Target function(s) {target_fns} triggered in 0/{raw_run_cnt} episodes!\n"
+         verdict_line = (
+             f">>> PILOT VERDICT: TARGET FUNCTION NEVER TRIGGERED AT RUNTIME ({target_fns}). "
+             "Loosen its entry condition in `run()` so it triggers on current dungeon levels!"
+         )
+     elif base_depths:
+         ...
+     ```
+2. In `lox/lang/macros.py` (`MacroHarvester.harvest_from_policy`, lines 237–300):
+   - Track `existing_macro_names = {s.name for s in macro_lib.list_specs()}`.
+   - In `SelfRewriter.visit_Attribute`:
+     - Expand the `state.mem` attribute tuple to `("visited", "visit_count", "pos_history", "locked_doors", "remembered_chars", "is_oscillating", "passable_mask", "door_mask", "searched_counts", "stair_graph")`.
+     - Only rewrite `self.<attr>` to `ast.Name(id=node.attr, ctx=node.ctx)` if `node.attr in existing_macro_names or node.attr in harvested_names` (otherwise set `self.invalid = True`).
+3. Add a unit test `test_pass7_final_preflight_audit_fixes` in `tests/test_overhaul_verification.py` verifying:
+   - Standing on a downstairs tile `'>'` (where `state.chars[state.y, state.x] == ord('@')`) still returns `'>'` for `state.char_at(state.y, state.x)`, `(state.y, state.x)` for `state.stairs_down_pos`, `True` for `state.is_stairs_down(state.y, state.x)`, and `"staircase down"` for `state.terrain_at(state.y, state.x)`.
+   - A void method `def update_memory(self, state):` containing an early bare `return` increments `tracer.fn_calls["update_memory"]` and does not clobber `active_fn`.
+   - A prefix shard in `run_single_episode` with a 300-byte replay prefix and `post_replay_max_steps=20` executes up to 20 post-replay steps instead of truncating at step 1.
+   - `MacroHarvester.harvest_from_policy` does not harvest a method that calls an unharvested stateful `self.<method>`, while harvesting a method that accesses `self.passable_mask`.
+

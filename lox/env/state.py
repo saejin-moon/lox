@@ -636,6 +636,23 @@ class WorldMemory:
             uninit_occupied = non_cmap_floor & (floor.remembered_chars == 0)
             floor.remembered_chars[uninit_occupied] = ord(".")
 
+            msg_low = str(state.message).lower() if hasattr(state, "message") else ""
+            if (
+                0 <= sy < floor.remembered_chars.shape[0]
+                and 0 <= sx < floor.remembered_chars.shape[1]
+            ):
+                if (
+                    getattr(state, "is_on_stairs_down", False)
+                    or "staircase down" in msg_low
+                ):
+                    floor.remembered_chars[sy, sx] = ord(">")
+                elif "staircase up" in msg_low:
+                    floor.remembered_chars[sy, sx] = ord("<")
+                elif "there is an altar" in msg_low or "altar of" in msg_low:
+                    floor.remembered_chars[sy, sx] = ord("_")
+                elif "there is a fountain" in msg_low:
+                    floor.remembered_chars[sy, sx] = ord("{")
+
             # 4. Update remembered_obj_glyphs
             floor.remembered_obj_glyphs[is_cmap] = 0
             obj_mask = _IS_OBJECT_LUT[glyphs]
@@ -1088,6 +1105,17 @@ class GameState:
     def char_at(self, y: int, x: int) -> str:
         if 0 <= y < 21 and 0 <= x < 79:
             c = int(self.chars[y, x])
+            if (y, x) == (self.y, self.x) and c == ord("@"):
+                if getattr(self, "is_on_stairs_down", False):
+                    return ">"
+                if (
+                    self.mem is not None
+                    and 0 <= y < self.mem.remembered_chars.shape[0]
+                    and 0 <= x < self.mem.remembered_chars.shape[1]
+                ):
+                    rem_c = int(self.mem.remembered_chars[y, x])
+                    if rem_c != 0 and rem_c != ord(" "):
+                        return _CHAR_LUT[rem_c] if rem_c < 256 else "?"
             return _CHAR_LUT[c] if c < 256 else "?"
         return " "
 
@@ -1155,10 +1183,36 @@ class GameState:
     def terrain_at(self, y: int, x: int) -> str:
         """Returns the semantic terrain / feature name at (y, x) (e.g. 'closed door', 'open door', 'staircase down', 'altar')."""
         if 0 <= y < 21 and 0 <= x < 79:
+            if (
+                y == self.y
+                and x == self.x
+                and getattr(self, "is_on_stairs_down", False)
+            ):
+                return "staircase down"
             g = int(self.glyphs[y, x])
             cmap = _CMAP_NAME_BY_GLYPH[g]
             if cmap is not None:
                 return cmap
+            if (
+                self.mem is not None
+                and 0 <= y < self.mem.remembered_chars.shape[0]
+                and 0 <= x < self.mem.remembered_chars.shape[1]
+            ):
+                rem_c = int(self.mem.remembered_chars[y, x])
+                if rem_c == ord(">"):
+                    return "staircase down"
+                elif rem_c == ord("<"):
+                    return "staircase up"
+                elif rem_c == ord("_"):
+                    return "altar"
+                elif rem_c == ord("{"):
+                    return "fountain"
+                elif rem_c == ord("+"):
+                    return "closed door"
+                elif rem_c == ord("#"):
+                    return "corridor"
+                elif rem_c == ord("."):
+                    return "floor of a room"
             c = int(self.chars[y, x])
             if c == ord("+"):
                 return "closed door"
@@ -1199,16 +1253,52 @@ class GameState:
         return self.terrain_at(y, x) in ("open door", "doorway")
 
     def is_stairs_down(self, y: int, x: int) -> bool:
-        return self.char_at(y, x) == ">" or "staircase down" in self.terrain_at(y, x)
+        if self.char_at(y, x) == ">" or "staircase down" in self.terrain_at(y, x):
+            return True
+        if (
+            self.mem is not None
+            and 0 <= y < self.mem.remembered_chars.shape[0]
+            and 0 <= x < self.mem.remembered_chars.shape[1]
+            and self.mem.remembered_chars[y, x] == ord(">")
+        ):
+            return True
+        return False
 
     def is_stairs_up(self, y: int, x: int) -> bool:
-        return self.char_at(y, x) == "<" or "staircase up" in self.terrain_at(y, x)
+        if self.char_at(y, x) == "<" or "staircase up" in self.terrain_at(y, x):
+            return True
+        if (
+            self.mem is not None
+            and 0 <= y < self.mem.remembered_chars.shape[0]
+            and 0 <= x < self.mem.remembered_chars.shape[1]
+            and self.mem.remembered_chars[y, x] == ord("<")
+        ):
+            return True
+        return False
 
     def is_altar(self, y: int, x: int) -> bool:
-        return self.char_at(y, x) == "_" or self.terrain_at(y, x) == "altar"
+        if self.char_at(y, x) == "_" or self.terrain_at(y, x) == "altar":
+            return True
+        if (
+            self.mem is not None
+            and 0 <= y < self.mem.remembered_chars.shape[0]
+            and 0 <= x < self.mem.remembered_chars.shape[1]
+            and self.mem.remembered_chars[y, x] == ord("_")
+        ):
+            return True
+        return False
 
     def is_fountain(self, y: int, x: int) -> bool:
-        return self.char_at(y, x) == "{" or self.terrain_at(y, x) == "fountain"
+        if self.char_at(y, x) == "{" or self.terrain_at(y, x) == "fountain":
+            return True
+        if (
+            self.mem is not None
+            and 0 <= y < self.mem.remembered_chars.shape[0]
+            and 0 <= x < self.mem.remembered_chars.shape[1]
+            and self.mem.remembered_chars[y, x] == ord("{")
+        ):
+            return True
+        return False
 
     def is_sink(self, y: int, x: int) -> bool:
         return self.terrain_at(y, x) == "sink"
@@ -1224,6 +1314,12 @@ class GameState:
         stairs = np.argwhere(self.chars == ord(">"))
         if len(stairs) > 0:
             return (int(stairs[0, 0]), int(stairs[0, 1]))
+        if getattr(self, "is_on_stairs_down", False):
+            return (self.y, self.x)
+        if self.mem is not None:
+            rem = np.argwhere(self.mem.remembered_chars == ord(">"))
+            if len(rem) > 0:
+                return (int(rem[0, 0]), int(rem[0, 1]))
         return None
 
     @property
@@ -1232,6 +1328,10 @@ class GameState:
         stairs = np.argwhere(self.chars == ord("<"))
         if len(stairs) > 0:
             return (int(stairs[0, 0]), int(stairs[0, 1]))
+        if self.mem is not None:
+            rem = np.argwhere(self.mem.remembered_chars == ord("<"))
+            if len(rem) > 0:
+                return (int(rem[0, 0]), int(rem[0, 1]))
         return None
 
     # --- Full 24x80 Terminal & Text Queries ---

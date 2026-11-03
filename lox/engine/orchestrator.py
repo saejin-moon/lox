@@ -297,6 +297,34 @@ class CampaignOrchestrator:
                         ui.info(
                             f"Resuming campaign at Generation {start_gen:03d} (loaded {len(baseline_runs)} baseline runs from promoted batch `{prom_batch_id}`)."
                         )
+                        if baseline_runs and "descent" not in self.policy_archive:
+                            d_list = [r.get("max_depth", 1) for r in baseline_runs]
+                            self.policy_archive["descent"] = PolicyArchiveEntry(
+                                policy_id=current_policy_id,
+                                policy_code=current_policy,
+                                niche="descent",
+                                avg_depth=float(np.mean(d_list)) if d_list else 1.0,
+                                p90_depth=float(np.percentile(d_list, 90))
+                                if d_list
+                                else 1.0,
+                                max_depth=int(max(d_list)) if d_list else 1,
+                                avg_ac=float(
+                                    np.mean(
+                                        [r.get("final_ac", 10) for r in baseline_runs]
+                                    )
+                                )
+                                if baseline_runs
+                                else 10.0,
+                                avg_xl=float(
+                                    np.mean(
+                                        [r.get("xp_level", 1) for r in baseline_runs]
+                                    )
+                                )
+                                if baseline_runs
+                                else 1.0,
+                                baseline_runs=list(baseline_runs),
+                                batch_digest=last_batch_digest,
+                            )
             except Exception:
                 pass
             finally:
@@ -368,6 +396,28 @@ class CampaignOrchestrator:
                 last_batch_digest = build_batch_contrast_digest(
                     warm_res, baseline_runs, warm_fn_stats
                 )
+                if baseline_runs and "descent" not in self.policy_archive:
+                    d_list = [r.get("max_depth", 1) for r in baseline_runs]
+                    self.policy_archive["descent"] = PolicyArchiveEntry(
+                        policy_id=current_policy_id,
+                        policy_code=current_policy,
+                        niche="descent",
+                        avg_depth=float(np.mean(d_list)) if d_list else 1.0,
+                        p90_depth=float(np.percentile(d_list, 90)) if d_list else 1.0,
+                        max_depth=int(max(d_list)) if d_list else 1,
+                        avg_ac=float(
+                            np.mean([r.get("final_ac", 10) for r in baseline_runs])
+                        )
+                        if baseline_runs
+                        else 10.0,
+                        avg_xl=float(
+                            np.mean([r.get("xp_level", 1) for r in baseline_runs])
+                        )
+                        if baseline_runs
+                        else 1.0,
+                        baseline_runs=list(baseline_runs),
+                        batch_digest=last_batch_digest,
+                    )
 
             consecutive_failures = 0
             for gen in range(start_gen, start_gen + max_generations):
@@ -377,7 +427,10 @@ class CampaignOrchestrator:
                     if "descent" in self.policy_archive:
                         champ_entry = self.policy_archive["descent"]
                         for n_key, n_entry in list(self.policy_archive.items()):
-                            if n_entry.avg_depth < champ_entry.avg_depth - 0.10:
+                            if n_entry.avg_depth < champ_entry.avg_depth or (
+                                n_entry.policy_id != champ_entry.policy_id
+                                and n_entry.avg_depth <= champ_entry.avg_depth
+                            ):
                                 self.policy_archive[n_key] = PolicyArchiveEntry(
                                     policy_id=champ_entry.policy_id,
                                     policy_code=champ_entry.policy_code,
@@ -507,12 +560,7 @@ class CampaignOrchestrator:
                         if verdict["passed"]:
                             current_policy = spsa_res["new_policy_code"]
                             current_policy_id = cand_id
-                            if (
-                                "descent" not in self.policy_archive
-                                or float(val_batch["avg_depth"])
-                                >= self.policy_archive["descent"].avg_depth
-                            ):
-                                self.save_active_policy(current_policy)
+                            self.save_active_policy(current_policy)
                             if spsa_res.get("new_macros_code"):
                                 self.macro_lib.save_code(spsa_res["new_macros_code"])
                             for pk, pval in spsa_res["optimized_params"].items():
@@ -534,55 +582,81 @@ class CampaignOrchestrator:
                             )
                             # Update policy_archive with tuned parameters so next gen doesn't revert them
                             if self.policy_archive:
+                                d_pool = (
+                                    [r.get("max_depth", 1) for r in baseline_runs]
+                                    if baseline_runs
+                                    else [val_batch.get("avg_depth", 1.0)]
+                                )
+                                u_depth = (
+                                    float(np.mean(d_pool))
+                                    if d_pool
+                                    else float(val_batch["avg_depth"])
+                                )
+                                if "descent" in self.policy_archive:
+                                    u_depth = max(
+                                        u_depth,
+                                        self.policy_archive["descent"].avg_depth,
+                                    )
+                                u_p90 = (
+                                    float(np.percentile(d_pool, 90))
+                                    if d_pool
+                                    else float(val_batch["p90_depth"])
+                                )
+                                u_max = (
+                                    int(max(d_pool))
+                                    if d_pool
+                                    else int(val_batch["max_depth"])
+                                )
+                                u_ac = (
+                                    float(
+                                        np.mean(
+                                            [
+                                                r.get("final_ac", 10)
+                                                for r in baseline_runs
+                                            ]
+                                        )
+                                    )
+                                    if baseline_runs
+                                    else 10.0
+                                )
+                                u_xl = (
+                                    float(
+                                        np.mean(
+                                            [
+                                                r.get("xp_level", 1)
+                                                for r in baseline_runs
+                                            ]
+                                        )
+                                    )
+                                    if baseline_runs
+                                    else 1.0
+                                )
                                 tuned_entry = PolicyArchiveEntry(
                                     policy_id=cand_id,
                                     policy_code=current_policy,
                                     niche=chosen_niche,
-                                    avg_depth=float(val_batch["avg_depth"]),
-                                    p90_depth=float(val_batch["p90_depth"]),
-                                    max_depth=int(val_batch["max_depth"]),
-                                    avg_ac=float(
-                                        np.mean(
-                                            [
-                                                r.get("final_ac", 10)
-                                                for r in val_batch["runs"]
-                                            ]
-                                        )
-                                    )
-                                    if val_batch["runs"]
-                                    else 10.0,
-                                    avg_xl=float(
-                                        np.mean(
-                                            [
-                                                r.get("xp_level", 1)
-                                                for r in val_batch["runs"]
-                                            ]
-                                        )
-                                    )
-                                    if val_batch["runs"]
-                                    else 1.0,
+                                    avg_depth=u_depth,
+                                    p90_depth=u_p90,
+                                    max_depth=u_max,
+                                    avg_ac=u_ac,
+                                    avg_xl=u_xl,
                                     baseline_runs=list(baseline_runs),
                                     batch_digest=last_batch_digest,
                                 )
                                 if chosen_niche in self.policy_archive:
                                     self.policy_archive[chosen_niche] = tuned_entry
-                                if (
-                                    "descent" in self.policy_archive
-                                    and float(val_batch["avg_depth"])
-                                    >= self.policy_archive["descent"].avg_depth
-                                ):
-                                    self.policy_archive["descent"] = PolicyArchiveEntry(
-                                        policy_id=cand_id,
-                                        policy_code=current_policy,
-                                        niche="descent",
-                                        avg_depth=float(val_batch["avg_depth"]),
-                                        p90_depth=float(val_batch["p90_depth"]),
-                                        max_depth=int(val_batch["max_depth"]),
-                                        avg_ac=tuned_entry.avg_ac,
-                                        avg_xl=tuned_entry.avg_xl,
-                                        baseline_runs=list(baseline_runs),
-                                        batch_digest=last_batch_digest,
-                                    )
+                                self.policy_archive["descent"] = PolicyArchiveEntry(
+                                    policy_id=cand_id,
+                                    policy_code=current_policy,
+                                    niche="descent",
+                                    avg_depth=u_depth,
+                                    p90_depth=u_p90,
+                                    max_depth=u_max,
+                                    avg_ac=u_ac,
+                                    avg_xl=u_xl,
+                                    baseline_runs=list(baseline_runs),
+                                    batch_digest=last_batch_digest,
+                                )
                     else:
                         ui.warn(verdict["reason"])
                     continue
@@ -968,12 +1042,7 @@ class CampaignOrchestrator:
                     consecutive_failures = 0
                     current_policy = proposal.full_policy_code
                     current_policy_id = cand_id
-                    if (
-                        "descent" not in self.policy_archive
-                        or float(eval_res["avg_depth"])
-                        >= self.policy_archive["descent"].avg_depth
-                    ):
-                        self.save_active_policy(current_policy)
+                    self.save_active_policy(current_policy)
                     if proposal.hypothesis.get("skill_module") and getattr(
                         proposal, "skill_code", ""
                     ):
@@ -998,37 +1067,57 @@ class CampaignOrchestrator:
 
                     # Update Quality-Diversity (MAP-Elites) policy archive using clean non-shard baseline runs
                     clean_archive_runs = list(baseline_runs)
-                    c_runs = eval_res["runs"]
-                    c_depth = float(eval_res["avg_depth"])
-                    c_p90 = float(eval_res["p90_depth"])
-                    c_max = int(eval_res["max_depth"])
+                    stat_pool = (
+                        clean_archive_runs if clean_archive_runs else eval_res["runs"]
+                    )
+                    c_depth = (
+                        float(np.mean([r.get("max_depth", 1) for r in stat_pool]))
+                        if stat_pool
+                        else float(eval_res["avg_depth"])
+                    )
+                    if "descent" in self.policy_archive:
+                        c_depth = max(c_depth, self.policy_archive["descent"].avg_depth)
+                    c_p90 = (
+                        float(
+                            np.percentile(
+                                [r.get("max_depth", 1) for r in stat_pool], 90
+                            )
+                        )
+                        if stat_pool
+                        else float(eval_res["p90_depth"])
+                    )
+                    c_max = (
+                        int(max([r.get("max_depth", 1) for r in stat_pool]))
+                        if stat_pool
+                        else int(eval_res["max_depth"])
+                    )
                     c_ac = (
-                        float(np.mean([r.get("final_ac", 10) for r in c_runs]))
-                        if c_runs
+                        float(np.mean([r.get("final_ac", 10) for r in stat_pool]))
+                        if stat_pool
                         else 10.0
                     )
                     c_xl = (
-                        float(np.mean([r.get("xp_level", 1) for r in c_runs]))
-                        if c_runs
+                        float(np.mean([r.get("xp_level", 1) for r in stat_pool]))
+                        if stat_pool
                         else 1.0
                     )
 
-                    if (
-                        "descent" not in self.policy_archive
-                        or c_depth >= self.policy_archive["descent"].avg_depth
-                    ):
-                        self.policy_archive["descent"] = PolicyArchiveEntry(
-                            policy_id=cand_id,
-                            policy_code=current_policy,
-                            niche="descent",
-                            avg_depth=c_depth,
-                            p90_depth=c_p90,
-                            max_depth=c_max,
-                            avg_ac=c_ac,
-                            avg_xl=c_xl,
-                            baseline_runs=clean_archive_runs,
-                            batch_digest=last_batch_digest,
-                        )
+                    self.policy_archive["descent"] = PolicyArchiveEntry(
+                        policy_id=cand_id,
+                        policy_code=current_policy,
+                        niche="descent",
+                        avg_depth=c_depth,
+                        p90_depth=c_p90,
+                        max_depth=c_max,
+                        avg_ac=c_ac,
+                        avg_xl=c_xl,
+                        baseline_runs=clean_archive_runs,
+                        batch_digest=last_batch_digest,
+                    )
+                    if chosen_niche in self.policy_archive:
+                        self.policy_archive[chosen_niche] = self.policy_archive[
+                            "descent"
+                        ]
                     if (
                         "outlier" not in self.policy_archive
                         or c_p90 >= self.policy_archive["outlier"].p90_depth

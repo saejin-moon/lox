@@ -80,11 +80,14 @@ class ExecutionTracer:
         self.call_stack.clear()
         self.active_fn = "root"
 
-    def enter_fn(self, fn_name: str, has_value_return: bool = False) -> None:
+    def enter_fn(
+        self, fn_name: str, has_value_return: bool = False, is_gen: bool = False
+    ) -> None:
         self.call_stack.append([fn_name, self.total_turns, False])
         if not has_value_return:
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
-            self.active_fn = fn_name
+            if is_gen or fn_name in self._ROOT_FNS:
+                self.active_fn = fn_name
 
     def on_return(self, fn_name: str, val: Any) -> Any:
         is_noop = val is None or (
@@ -94,36 +97,28 @@ class ExecutionTracer:
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
             if self.call_stack:
                 self.call_stack[-1][2] = True
-            if val is not False:
+            if (
+                not isinstance(val, (bool, set, dict))
+                and type(val).__name__ != "ndarray"
+            ):
                 self.active_fn = fn_name
         return val
 
     def exit_fn(self, fn_name: str) -> None:
-        turns_at_enter = self.total_turns
-        returned_non_noop = False
         if self.call_stack:
             top_frame = self.call_stack.pop()
-            top_fn, turns_at_enter, returned_non_noop = (
-                top_frame[0],
-                top_frame[1],
-                top_frame[2],
-            )
+            top_fn = top_frame[0]
             if top_fn != fn_name:
                 while self.call_stack and self.call_stack[-1][0] != fn_name:
-                    f = self.call_stack.pop()
-                    turns_at_enter, returned_non_noop = f[1], f[2]
+                    self.call_stack.pop()
                 if self.call_stack and self.call_stack[-1][0] == fn_name:
-                    f = self.call_stack.pop()
-                    turns_at_enter, returned_non_noop = f[1], f[2]
+                    self.call_stack.pop()
 
         if not self.call_stack:
             return
 
         caller_fn = self.call_stack[-1][0]
-        yielded_inside = self.total_turns > turns_at_enter
         if caller_fn not in self._ROOT_FNS:
-            self.active_fn = caller_fn
-        elif not yielded_inside and not returned_non_noop:
             self.active_fn = caller_fn
 
     def record_turn_yield(self) -> str:
@@ -213,7 +208,9 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
         self.is_macro_module = is_macro_module
         self._current_fn_stack: list[str] = []
 
-    def _make_enter_stmt(self, fn_name: str, has_val_ret: bool = False) -> ast.stmt:
+    def _make_enter_stmt(
+        self, fn_name: str, has_val_ret: bool = False, is_gen: bool = False
+    ) -> ast.stmt:
         return ast.Expr(
             value=ast.Call(
                 func=ast.Attribute(
@@ -224,6 +221,7 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                 args=[
                     ast.Constant(value=fn_name),
                     ast.Constant(value=has_val_ret),
+                    ast.Constant(value=is_gen),
                 ],
                 keywords=[],
             )
@@ -277,14 +275,17 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
             isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in ast.walk(node)
         )
         has_val_ret = (not is_gen) and any(
-            isinstance(sub, ast.Return) for sub in ast.walk(node)
+            isinstance(sub, ast.Return)
+            and sub.value is not None
+            and not (isinstance(sub.value, ast.Constant) and sub.value.value is None)
+            for sub in ast.walk(node)
         )
         self._current_fn_stack.append(fn_name)
         self.generic_visit(node)
         self._current_fn_stack.pop()
 
         if fn_name != "__init__":
-            enter_stmt = self._make_enter_stmt(fn_name, has_val_ret)
+            enter_stmt = self._make_enter_stmt(fn_name, has_val_ret, is_gen)
             exit_stmt = self._make_exit_stmt(fn_name)
             # Keep docstring at index 0 if present
             if (

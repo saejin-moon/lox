@@ -52,7 +52,6 @@ def _get_worker_harness(
     if (
         _WORKER_HARNESS is None
         or _WORKER_ROLE != role
-        or _WORKER_MAX_STEPS != max_steps
         or _WORKER_BENCHMARK != benchmark
     ):
         if _WORKER_HARNESS is not None:
@@ -63,6 +62,9 @@ def _get_worker_harness(
         _WORKER_HARNESS = get_adapter(benchmark).create_harness(
             role=role, max_steps=max_steps
         )
+    else:
+        _WORKER_MAX_STEPS = max_steps
+        _WORKER_HARNESS.max_steps = max_steps
     return _WORKER_HARNESS
 
 
@@ -113,6 +115,9 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         state = harness.replay_bytes(seed=seed, recorded_bytes=replay_bytes)
         runner.tracer.reset_for_episode()
         max_steps = int(post_replay_max_steps or 200)
+        harness.step_count = 0
+        harness.max_steps = max_steps
+        harness.done = False
     else:
         state = harness.reset(seed=seed)
     curr_d = getattr(state, "depth", len(getattr(state, "achievements", ())) + 1)

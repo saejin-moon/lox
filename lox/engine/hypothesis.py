@@ -49,7 +49,17 @@ def progression_metric(run: dict[str, Any]) -> float:
     )
     tiles_bonus = 0.10 * min(1.0, tiles / 60.0)
 
-    return d + xl + ac_bonus + sc + stairs_bonus + tiles_bonus
+    shard_survival_bonus = (
+        0.08
+        if (
+            run.get("is_shard")
+            and int(run.get("final_hp", 0)) > 0
+            and str(run.get("end_reason", "")) in ("max_steps", "ascended")
+        )
+        else 0.0
+    )
+
+    return d + xl + ac_bonus + sc + stairs_bonus + tiles_bonus + shard_survival_bonus
 
 
 def compute_confidence_sequence(
