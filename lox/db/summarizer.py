@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter
 from typing import Any
 
@@ -83,12 +84,13 @@ def summarize_episode_ticks(
     # 2. Part A: Run-Length Encoded (RLE) Phase Timeline by (depth, active_function)
     segments: list[dict[str, Any]] = []
     for t in ticks:
-        d = t["depth"]
-        fn = t["active_function"]
-        act = t["action_name"]
-        hp = t["hp"]
-        turn = t["turn"]
-        pos = (t["y"], t["x"])
+        d = t.get("depth", 1)
+        fn = t.get("active_function", "root")
+        act = t.get("action_name", "")
+        hp = t.get("hp", 0)
+        turn = t.get("turn", 0)
+        pos = (t.get("y", 0), t.get("x", 0))
+        msg = str(t.get("message", "")).strip()
 
         if not segments or segments[-1]["depth"] != d or segments[-1]["fn"] != fn:
             segments.append(
@@ -102,6 +104,7 @@ def summarize_episode_ticks(
                     "end_hp": hp,
                     "actions": {act: 1},
                     "positions": {pos},
+                    "messages": {msg} if msg else set(),
                 }
             )
         else:
@@ -112,6 +115,8 @@ def summarize_episode_ticks(
             acts = seg["actions"]
             acts[act] = acts.get(act, 0) + 1
             seg["positions"].add(pos)
+            if msg:
+                seg["messages"].add(msg)
 
     # Collapse consecutive micro-segments if there are too many
     rle_lines: list[str] = []
@@ -141,6 +146,25 @@ def summarize_episode_ticks(
     n = len(ticks)
     window = 5
     candidates: list[tuple[float, int]] = []
+    inflection_fn = ""
+    pre_inflection_fn = ""
+    max_hp_drop = 0
+    best_drop_idx = -1
+
+    for i in range(0, max(1, n - window), 1):
+        t0 = ticks[i]
+        t1 = ticks[min(n - 1, i + window)]
+        drop = int(t0.get("hp", 0)) - int(t1.get("hp", 0))
+        max_hp = max(1, int(t0.get("max_hp", 1)))
+        if drop > max_hp_drop and drop / max_hp >= 0.25:
+            max_hp_drop = drop
+            best_drop_idx = i
+
+    if best_drop_idx >= 0:
+        inflection_fn = str(ticks[best_drop_idx].get("active_function", ""))
+        pre_idx = max(0, best_drop_idx - 5)
+        pre_inflection_fn = str(ticks[pre_idx].get("active_function", ""))
+
     for i in range(0, max(1, n - window), window):
         t0 = ticks[i]
         t1 = ticks[min(n - 1, i + window)]
@@ -179,14 +203,32 @@ def summarize_episode_ticks(
 
     # 4. Part C: Stagnation / Loop Detection (segments with >=40 steps and <=3 unique tiles)
     stalls: list[str] = []
+    stall_fns: set[str] = set()
     for seg in segments:
         if seg["steps"] >= 40 and len(seg["positions"]) <= 3:
+            fn_name = str(seg.get("fn", ""))
+            if fn_name:
+                stall_fns.add(fn_name)
             top_a = sorted(seg["actions"].items(), key=lambda kv: kv[1], reverse=True)[
                 :2
             ]
+            msgs_lower = " ".join(seg.get("messages", set())).lower()
+            if "swap places with" in msgs_lower or "in the way" in msgs_lower:
+                cause = "pet displacement loop (yield WAIT to let pet move)"
+            elif "locked" in msgs_lower:
+                cause = "locked door stall (needs seq(Action.KICK, dir))"
+            elif "try to move the boulder" in msgs_lower:
+                cause = "boulder blockage (path blocked by boulder)"
+            elif "solid stone" in msgs_lower or "doorway" in msgs_lower:
+                cause = "wall/doorway diagonal collision"
+            elif "descend the stairs" in msgs_lower:
+                cause = "staircase / --More-- pagination pause"
+            else:
+                cause = f"{len(seg['positions'])} tiles oscillation"
+
             stalls.append(
-                f"fn={seg['fn']} on Dlvl {seg['depth']} (T{seg['start_turn']}..{seg['end_turn']}, "
-                f"{seg['steps']} steps on {len(seg['positions'])} tiles: {top_a})"
+                f"fn={seg['fn']} on Dlvl {seg['depth']} [{cause}] (T{seg['start_turn']}..{seg['end_turn']}, "
+                f"{seg['steps']} steps: {top_a})"
             )
 
     t_last = ticks[-1]
@@ -209,6 +251,13 @@ def summarize_episode_ticks(
         ]
     )
 
+    d1_ticks = [t for t in ticks if t.get("depth", 1) == 1]
+    stairs_found = any(
+        t.get("action_name") == "DOWN"
+        or t.get("raw_key") == ord(">")
+        or "descend the stairs" in str(t.get("message", "")).lower()
+        for t in ticks
+    )
     milestones = {
         "max_depth": max(depths_seen) if depths_seen else 1,
         "depths_visited": depths_seen,
@@ -216,6 +265,13 @@ def summarize_episode_ticks(
         "best_ac": best_ac,
         "max_xl": max_xl,
         "stall_count": len(stalls),
+        "stall_functions": list(stall_fns),
+        "inflection_function": inflection_fn,
+        "pre_inflection_function": pre_inflection_fn,
+        "unique_tiles_d1": (
+            len({(t.get("y", 0), t.get("x", 0)) for t in d1_ticks}) if d1_ticks else 0
+        ),
+        "stairs_down_found": stairs_found,
     }
     return summary_digest, game_log, milestones
 
@@ -341,19 +397,76 @@ def compute_function_stats(
                     e_good += 1
                 else:
                     e_bad += 1
+                ms = r.get("milestones") or {}
+                if isinstance(ms, str):
+                    try:
+                        ms = json.loads(ms)
+                    except Exception:
+                        ms = {}
+                pre_inf = r.get("pre_inflection_function") or ms.get(
+                    "pre_inflection_function"
+                )
+                st_fns = r.get("stall_functions") or ms.get("stall_functions") or []
                 last_fn = r.get("last_active_function")
-                if (
-                    last_fn == fn or (last_fn is None and not r.get("is_outlier_good"))
-                ) and r.get("end_reason") != "ascended":
-                    deaths_while_active += 1
+                is_failed = r.get("end_reason") not in (
+                    "ascended",
+                    "max_steps",
+                ) and not r.get("is_outlier_good")
+                if is_failed:
+                    if (
+                        fn == pre_inf
+                        or fn in st_fns
+                        or (
+                            not pre_inf
+                            and not st_fns
+                            and (last_fn == fn or last_fn is None)
+                        )
+                    ):
+                        deaths_while_active += 1
 
         trig_rate = eps_trig / float(total_runs)
         avg_d = float(np.mean(depths_when_trig)) if depths_when_trig else 0.0
         death_rate = deaths_while_active / float(max(1, eps_trig))
 
-        # Ochiai similarity with `is_outlier_good = True`
+        # Depth-stratified progression rate
+        depth_progression_gains: list[float] = []
+        for d in range(1, 6):
+            at_d = [r for r in runs if int(r.get("max_depth", 1)) >= d]
+            if not at_d:
+                break
+            adv_base = sum(1 for r in at_d if int(r.get("max_depth", 1)) > d) / float(
+                len(at_d)
+            )
+            fn_at_d = [
+                r
+                for idx_r, r in enumerate(runs)
+                if int(r.get("max_depth", 1)) >= d
+                and int(parsed_trig[idx_r].get(fn, 0)) > 0
+            ]
+            if fn_at_d:
+                adv_fn = sum(
+                    1 for r in fn_at_d if int(r.get("max_depth", 1)) > d
+                ) / float(len(fn_at_d))
+                depth_progression_gains.append(adv_fn - adv_base)
+
+        prog_bonus = (
+            float(np.mean(depth_progression_gains)) if depth_progression_gains else 0.0
+        )
+
+        # Ochiai similarity with within-depth progression weighting
         denom_good = math.sqrt(float(max(1, n_good) * max(1, eps_trig)))
-        ochiai_good = e_good / denom_good if n_good > 0 and eps_trig > 0 else 0.0
+        base_ochiai = e_good / denom_good if n_good > 0 and eps_trig > 0 else 0.0
+        if base_ochiai >= 1.0:
+            ochiai_good = 1.0
+        else:
+            ochiai_good = (
+                max(
+                    0.0,
+                    min(1.0, base_ochiai * 0.7 + max(0.0, prog_bonus + 0.5) * 0.3),
+                )
+                if n_good > 0
+                else max(0.0, min(1.0, 0.5 + prog_bonus))
+            )
 
         # Liblit failure importance (dies while active vs overall active rate)
         liblit_fail = (
@@ -440,20 +553,52 @@ def build_batch_contrast_digest(
     )
     lines.append(f"\n- **Termination Breakdown**: {top_ends}")
 
-    # Detect Level 1 truncation / oscillation bottleneck
+    # Dynamic failure telemetry & environmental diagnostics
     max_d = int(batch_stats.get("max_depth", 1))
     max_steps_runs = sum(1 for r in runs if r.get("end_reason") == "max_steps")
     max_steps_rate = max_steps_runs / float(len(runs)) if runs else 0.0
 
-    if max_d <= 1 or max_steps_rate > 0.4:
+    # Aggregate environmental stall causes directly from summary_digest
+    stall_causes: Counter[str] = Counter()
+    for r in runs:
+        digest = str(r.get("summary_digest", ""))
+        for line in digest.splitlines():
+            if line.startswith("Stalls:"):
+                for m in re.finditer(r"\[(.*?)\]", line):
+                    cause = m.group(1).strip()
+                    if cause:
+                        stall_causes[cause] += 1
+
+    if max_d <= 1 or max_steps_rate > 0.3:
         lines.append(
-            "\n### ⚠️ CRITICAL PROGRESSION BOTTLENECK: STALLED ON DUNGEON LEVEL 1\n"
-            f"- **{max_steps_rate * 100:.1f}% of episodes ({max_steps_runs}/{len(runs)}) are hitting max_steps on Dlvl 1 without finding/descending stairs (`>`)!**\n"
-            "- **Observed Failure Modes from Episode Traces**:\n"
-            "  1. **Cyclic Positional Oscillations (Ping-Pong Loops)**: The hero gets trapped alternating between 2 adjacent tiles (e.g. N, S, N, S) because `handle_exploration` picks a new frontier tile every single step without target persistence, inverting distance ties each turn.\n"
-            "  2. **Stuck Detector Blindness**: `(state.y, state.x) == self.last_pos` only checks 1-tile stalls and resets `self.stuck_count` to 0 on 2-tile ping-pong loops! Use a ring buffer of recent positions (e.g. `(state.y, state.x) in self.pos_history[-6:]`) to detect cyclic loops and take random actions to break out.\n"
-            "  3. **Target Persistence in Exploration**: In `handle_exploration`, store and follow a persistent `self.target_tile`. Only pick a new target when the target is reached, impassable, or after N turns.\n"
-            "  4. **Stair Priority & Descent**: The down stairs (`>`) are the #1 objective to escape Dlvl 1. When `>` is visible, navigate directly to it and execute `Action.DOWN`."
+            "\n### 📊 Dynamic Failure Telemetry & Progression Diagnostics:\n"
+            f"- **Step Truncation Rate**: {max_steps_rate * 100:.1f}% ({max_steps_runs}/{len(runs)} runs reached step limit without advancing past Dlvl {max_d})."
+        )
+        if stall_causes:
+            stall_items = [
+                f"**{cause}**: {count} runs ({count * 100.0 / len(runs):.1f}%)"
+                for cause, count in stall_causes.most_common(5)
+            ]
+            lines.append(f"- **Top Environmental Stalls**: {'; '.join(stall_items)}")
+
+        # Unique tiles explored
+        tiles_seen = [
+            r.get("unique_tiles") for r in runs if r.get("unique_tiles") is not None
+        ]
+        if tiles_seen:
+            lines.append(
+                f"- **Exploration Tile Coverage**: Avg {np.mean(tiles_seen):.1f} unique tiles mapped per run."
+            )
+
+        # Stairs down discovery rate
+        stairs_seen = sum(
+            1
+            for r in runs
+            if r.get("stairs_down_found")
+            or "descend the stairs" in str(r.get("summary_digest", "")).lower()
+        )
+        lines.append(
+            f"- **Down Stairs (`>`) Discovery Rate**: {stairs_seen * 100.0 / len(runs):.1f}% ({stairs_seen}/{len(runs)} runs found or descended stairs)."
         )
 
     # Sample top 2 Outlier Good Run summaries right in the digest

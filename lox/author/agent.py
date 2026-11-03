@@ -37,7 +37,8 @@ class SynthesisProposal:
     full_policy_code: str
     full_macros_code: str
     target_functions: list[str]
-    tool_calls_made: int
+    tool_calls_made: int = 0
+    skill_code: str = ""
 
 
 class AuthorAgent:
@@ -77,6 +78,7 @@ class AuthorAgent:
         self.reasoning_effort = reasoning_effort
         self.routing = routing
         self.max_repair_turns = max_repair_turns
+        self.latest_attempted_hyp: dict[str, Any] = {}
         self.tools = AuthorToolRegistry(db_path=db_path, macros_path=macros_path)
 
     @staticmethod
@@ -107,6 +109,34 @@ class AuthorAgent:
         code_str = py_blocks[-1].strip() if py_blocks else ""
         return yaml_dict, code_str
 
+    @staticmethod
+    def extract_skill_code(content: str, hyp: dict[str, Any]) -> str:
+        """Extracts external skill module code if specified in hypothesis or markdown."""
+        skill_mod = hyp.get("skill_module")
+        if not skill_mod:
+            return ""
+        if hyp.get("skill_code"):
+            return str(hyp["skill_code"]).strip()
+
+        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL)
+        m = re.search(
+            rf"```(?:python:)?(?:skill|{re.escape(str(skill_mod))})\s*\n(.*?)```",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).strip()
+
+        py_blocks = re.findall(
+            r"```(?:python)?\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        if len(py_blocks) >= 2:
+            for b in py_blocks:
+                if "class Policy" not in b and ("def " in b or "class " in b):
+                    return b.strip()
+
+        return ""
+
     def _execute_tool_call(self, turn_idx: int, name: str, args: dict[str, Any]) -> str:
         t0 = time.perf_counter()
         if name == "query_db":
@@ -122,24 +152,33 @@ class AuthorAgent:
             topic = str(args.get("topic", "all"))
             out, summary = self.tools.query_policy_docs(topic)
             arg_disp = topic
+        elif name == "read_skill":
+            skill_name = str(args.get("skill_name", ""))
+            out, summary = self.tools.read_skill(skill_name)
+            arg_disp = skill_name
         elif name == "dry_run_policy":
-            code = str(args.get("code", ""))
-            is_macro = bool(args.get("is_macro", False))
-            seed = int(args.get("seed", 42))
-            mt = int(args.get("max_turns", 150))
-            replay_id = str(args.get("replay_run_id", ""))
-            replay_steps = int(args.get("replay_steps", 0))
-            out, summary = self.tools.dry_run_policy(
-                code=code,
-                is_macro=is_macro,
-                seed=seed,
-                max_turns=mt,
-                replay_run_id=replay_id,
-                replay_steps=replay_steps,
-            )
-            arg_disp = f"{len(code.splitlines())} lines, seed={seed}"
-            if replay_id:
-                arg_disp += f", replay={replay_id[:10]}..."
+            code = str(args.get("code", "")).strip()
+            if not code:
+                out = "Error: `dry_run_policy` requires a non-empty `code` string containing Python code."
+                summary = "MISSING_CODE"
+                arg_disp = "empty code"
+            else:
+                is_macro = bool(args.get("is_macro", False))
+                seed = int(args.get("seed", 42))
+                mt = int(args.get("max_turns", 150))
+                replay_id = str(args.get("replay_run_id", ""))
+                replay_steps = int(args.get("replay_steps", 0))
+                out, summary = self.tools.dry_run_policy(
+                    code=code,
+                    is_macro=is_macro,
+                    seed=seed,
+                    max_turns=mt,
+                    replay_run_id=replay_id,
+                    replay_steps=replay_steps,
+                )
+                arg_disp = f"{len(code.splitlines())} lines, seed={seed}"
+                if replay_id:
+                    arg_disp += f", replay={replay_id[:10]}..."
         else:
             out, summary = f"Unknown tool '{name}'.", "unknown"
             arg_disp = str(args)
@@ -188,15 +227,41 @@ class AuthorAgent:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=180.0) as client:
-            resp = client.post(url, headers=headers, json=payload)
-            if resp.status_code != 200 and "reasoning" in payload:
-                # Retry without reasoning field if endpoint does not support it
-                payload.pop("reasoning", None)
-                resp = client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]
+        if not self.api_key or self.api_key in ("your-api-key", "sk-or-v1-..."):
+            raise PermissionError(
+                "Missing or placeholder API key. Set a valid OPENROUTER_API_KEY in `.env` or pass `--api-key`."
+            )
+        for attempt in range(3):
+            try:
+                with httpx.Client(timeout=180.0) as client:
+                    resp = client.post(url, headers=headers, json=payload)
+                    if resp.status_code in (401, 402, 403):
+                        err_detail = resp.text[:200]
+                        try:
+                            err_detail = (
+                                resp.json().get("error", {}).get("message")
+                                or err_detail
+                            )
+                        except Exception:
+                            pass
+                        raise PermissionError(
+                            f"LLM API HTTP {resp.status_code}: {err_detail} "
+                            "(Check your OPENROUTER_API_KEY in `.env` or environment)"
+                        )
+                    if resp.status_code != 200 and "reasoning" in payload:
+                        # Retry without reasoning field if endpoint does not support it
+                        payload.pop("reasoning", None)
+                        resp = client.post(url, headers=headers, json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data["choices"][0]["message"]
+            except PermissionError:
+                raise
+            except (httpx.RequestError, httpx.HTTPStatusError):
+                if attempt == 2:
+                    raise
+                time.sleep(2.0 * (attempt + 1))
+        raise RuntimeError("Failed to obtain response from LLM API after retries.")
 
     def _synthesize_mock(
         self,
@@ -346,7 +411,8 @@ class AuthorAgent:
         pool: Any = None,
         baseline_runs: list[dict[str, Any]] | None = None,
         max_pilot_runs: int = 5,
-        pilot_episodes: int = 20,
+        pilot_episodes: int = 30,
+        skills: dict[str, str] | None = None,
     ) -> SynthesisProposal:
         """
         Runs a fresh, stateless multi-turn tool-calling session for `generation` and `mode`.
@@ -358,11 +424,14 @@ class AuthorAgent:
 
         self.tools.current_policy_code = current_policy
         self.tools.last_passed_code = ""
+        self.tools.skills = dict(skills) if skills else {}
         self.tools.configure_generation(
             pool=pool,
             baseline_runs=baseline_runs,
             max_pilot_runs=max_pilot_runs,
             pilot_episodes=pilot_episodes,
+            skills=skills,
+            generation=generation,
         )
         if max_tool_turns is None:
             max_tool_turns = 14 if mode == "FULL_WRITE" else 12
@@ -375,6 +444,7 @@ class AuthorAgent:
             macros_docs=self.tools.macro_lib.format_docs(),
             batch_digest=batch_digest,
             recent_experiments=recent_experiments,
+            skills=skills,
         )
 
         messages: list[dict[str, Any]] = [
@@ -385,6 +455,7 @@ class AuthorAgent:
         total_tool_calls = 0
         final_content = ""
         latest_hyp: dict[str, Any] = {}
+        last_attempted_code = ""
 
         for turn_idx in range(1, max_tool_turns + 2):
             allow_tools = turn_idx <= max_tool_turns
@@ -399,10 +470,80 @@ class AuthorAgent:
                 inter_hyp, _ = self.extract_yaml_and_python(msg_text)
                 if inter_hyp:
                     latest_hyp = inter_hyp
+                    self.latest_attempted_hyp = latest_hyp
 
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
                 _, found_code = self.extract_yaml_and_python(msg_text)
+
+                # Check if candidate code is present and has not yet passed a pilot evaluation
+                is_new_code = bool(
+                    found_code
+                    and (
+                        not self.tools.last_passed_code
+                        or found_code.strip() != self.tools.last_passed_code.strip()
+                    )
+                )
+                needs_pilot = is_new_code or not self.tools.last_pilot_improved
+
+                # Auto-pilot dispatch: if candidate code was emitted in text without running dry_run_policy
+                if (
+                    found_code
+                    and needs_pilot
+                    and self.tools.pilot_runs_used < self.tools.max_pilot_runs
+                    and turn_idx < max_tool_turns
+                    and mode != "MACRO_WRITE"
+                ):
+                    total_tool_calls += 1
+                    t0 = time.perf_counter()
+                    pilot_res, pilot_summary = self.tools.dry_run_policy(
+                        code=found_code
+                    )
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                    arg_disp = f"auto-pilot ({len(found_code.splitlines())} lines)"
+                    ui.tool_call(
+                        turn_idx,
+                        "dry_run_policy",
+                        arg_disp,
+                        pilot_summary,
+                        elapsed_ms,
+                    )
+
+                    if (
+                        not self.tools.last_pilot_improved
+                        and self.tools.pilot_runs_used < self.tools.max_pilot_runs
+                    ):
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"We executed your candidate code in {self.tools.pilot_episodes}-episode Pilot Revision {self.tools.pilot_runs_used}/{self.tools.max_pilot_runs}:\n"
+                                    f"{pilot_res}\n\n"
+                                    f"🛑 PILOT REVISION FAILED ({self.tools.last_pilot_summary}). "
+                                    f"You have {self.tools.max_pilot_runs - self.tools.pilot_runs_used} pilot revision(s) remaining.\n\n"
+                                    "MANDATORY SCIENTIFIC INVESTIGATION PROTOCOL:\n"
+                                    "DO NOT BLINDLY GUESS CODE EDITS!\n"
+                                    "1. Inspect the failed run logs and behavioral critic warnings above (look at the exact end_reason, HP, Dlvl, turn, and last actions).\n"
+                                    "2. Use your research tools right now before modifying code:\n"
+                                    "   - Call `query_wiki(query=...)` to check C engine mechanics for the failure cause (e.g. monster attacks, locked doors, trap effects, hunger).\n"
+                                    "   - Call `query_db(sql=...)` to inspect expert runs (`expert_runs` / `expert_ticks`) to see how human ascensions handled this scenario.\n"
+                                    "3. Once you have identified the concrete mechanism from the wiki/DB, revise your method and test again with `dry_run_policy(code=...)`."
+                                ),
+                            }
+                        )
+                        continue
+                    elif "COMPILE_ERROR" in pilot_res or "RUNTIME_ERROR" in pilot_res:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Your candidate code resulted in an error:\n{pilot_res}\n"
+                                    "Please fix the error and test with `dry_run_policy`."
+                                ),
+                            }
+                        )
+                        continue
+
                 # Early stop guard: if the model emitted a plan on an early turn without calling tools or testing code
                 if (
                     not found_code
@@ -410,15 +551,26 @@ class AuthorAgent:
                     and turn_idx < max_tool_turns
                     and mode != "MACRO_WRITE"
                 ):
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Please test your candidate code with `dry_run_policy(code=...)` before finalizing. "
-                                "This executes a 20-episode pilot test against the current baseline and reports where your code succeeds or fails."
-                            ),
-                        }
-                    )
+                    if (
+                        self.tools.pilot_runs_used > 0
+                        and not self.tools.last_pilot_improved
+                    ):
+                        nudge_msg = (
+                            f"Pilot revision {self.tools.pilot_runs_used}/{self.tools.max_pilot_runs} failed ({self.tools.last_pilot_summary}). "
+                            f"You have {self.tools.max_pilot_runs - self.tools.pilot_runs_used} revision(s) remaining.\n"
+                            "Please call `query_wiki` or `query_db` to investigate the failure mechanism, then test your revised code with `dry_run_policy(code=...)`."
+                        )
+                    elif total_tool_calls == 0 and turn_idx == 1:
+                        nudge_msg = (
+                            "Please begin your empirical investigation by calling `query_db` or `query_wiki` to examine the previous batch's failure modes and expert runs, "
+                            "then test your candidate method with `dry_run_policy(code=...)`."
+                        )
+                    else:
+                        nudge_msg = (
+                            "Please test your candidate code with `dry_run_policy(code=...)` before finalizing. "
+                            f"This executes a {self.tools.pilot_episodes}-episode pilot test against the current baseline and reports where your code succeeds or fails."
+                        )
+                    messages.append({"role": "user", "content": nudge_msg})
                     continue
 
                 # Iterative pilot revision nudge: if the pilot didn't beat baseline and revisions remain
@@ -428,20 +580,21 @@ class AuthorAgent:
                     and self.tools.pilot_runs_used < self.tools.max_pilot_runs
                     and turn_idx < max_tool_turns - 1
                     and mode == "FUNC_MOD_ADD"
+                    and (
+                        not found_code
+                        or found_code.strip() != last_attempted_code.strip()
+                    )
                 ):
+                    last_attempted_code = found_code
                     messages.append(
                         {
                             "role": "user",
                             "content": (
-                                f"Your latest 20-episode pilot did not beat the baseline ({self.tools.last_pilot_summary}). "
-                                f"You have {self.tools.max_pilot_runs - self.tools.pilot_runs_used} pilot revision(s) remaining. "
-                                "Please inspect the failed run logs and behavioral warnings above, revise your code to fix the stall/failure, "
-                                "and call `dry_run_policy(code=...)` again to verify your fix before submitting your final hypothesis."
+                                f"Your latest {self.tools.pilot_episodes}-episode pilot did not beat the baseline ({self.tools.last_pilot_summary}). "
+                                f"You have {self.tools.max_pilot_runs - self.tools.pilot_runs_used} pilot revision(s) remaining.\n"
+                                "🛑 Do NOT guess! Call `query_wiki` or `query_db` to investigate the failure mechanism, then revise your code and call `dry_run_policy(code=...)` to verify your fix."
                             ),
                         }
-                    )
-                    self.tools.last_pilot_improved = (
-                        True  # Avoid infinite nudging if the model repeats
                     )
                     continue
 
@@ -495,6 +648,7 @@ class AuthorAgent:
                 )
 
             if status.startswith("PASSED") or status.startswith("VALID"):
+                skill_code = self.extract_skill_code(final_content, hyp)
                 if is_macro_mode:
                     merged_macros, macro_names = self.tools.macro_lib.merge_macros(
                         code_patch
@@ -510,9 +664,13 @@ class AuthorAgent:
                         full_macros_code=merged_macros,
                         target_functions=list(targets),
                         tool_calls_made=total_tool_calls,
+                        skill_code=skill_code,
                     )
                 else:
-                    if mode == "FULL_WRITE" or not current_policy.strip():
+                    if (
+                        mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
+                        or not current_policy.strip()
+                    ):
                         spliced_policy = code_patch
                         changed_fns = hyp.get("target_functions") or ["run"]
                     else:
@@ -529,7 +687,14 @@ class AuthorAgent:
                         full_macros_code=self.tools.macro_lib.load_code(),
                         target_functions=list(changed_fns),
                         tool_calls_made=total_tool_calls,
+                        skill_code=skill_code,
                     )
+
+            if status == "PILOT_EXHAUSTED":
+                raise RuntimeError(
+                    f"Pilot revisions exhausted ({self.tools.pilot_runs_used}/{self.tools.max_pilot_runs}) "
+                    f"without beating baseline ({self.tools.last_pilot_summary})."
+                )
 
             if repair_idx < self.max_repair_turns:
                 ui.warn(
@@ -585,9 +750,23 @@ class AuthorAgent:
                             final_content = f"```python\n{t_args['code']}\n```"
                             updated_via_dry_run = True
                     if not updated_via_dry_run:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "Now that you have consulted your research tools, please provide your revised implementation in a single ```python ... ``` block.",
+                            }
+                        )
                         follow_msg = self._call_llm_api(messages, allow_tools=False)
                         messages.append(follow_msg)
-                        final_content = follow_msg.get("content") or ""
+                        f_text = follow_msg.get("content") or ""
+                        _, f_code = self.extract_yaml_and_python(f_text)
+                        _, r_code = self.extract_yaml_and_python(r_text)
+                        if f_code:
+                            final_content = f_text
+                        elif r_code:
+                            final_content = r_text
+                        else:
+                            final_content = f_text
                 else:
                     final_content = r_text
 
@@ -595,6 +774,7 @@ class AuthorAgent:
         if self.tools.last_passed_code:
             ui.info("Using verified code from earlier passing dry_run_policy call.")
             code_patch = self.tools.last_passed_code
+            skill_code = self.extract_skill_code(final_content, latest_hyp)
             if is_macro_mode:
                 merged_macros, macro_names = self.tools.macro_lib.merge_macros(
                     code_patch
@@ -607,8 +787,12 @@ class AuthorAgent:
                     full_macros_code=merged_macros,
                     target_functions=list(macro_names),
                     tool_calls_made=total_tool_calls,
+                    skill_code=skill_code,
                 )
-            if mode == "FULL_WRITE" or not current_policy.strip():
+            if (
+                mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
+                or not current_policy.strip()
+            ):
                 spliced_policy = code_patch
                 changed_fns = latest_hyp.get("target_functions") or ["run"]
             else:
@@ -625,6 +809,7 @@ class AuthorAgent:
                 full_macros_code=self.tools.macro_lib.load_code(),
                 target_functions=list(changed_fns),
                 tool_calls_made=total_tool_calls,
+                skill_code=skill_code,
             )
 
         raise RuntimeError(

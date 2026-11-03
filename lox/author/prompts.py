@@ -10,6 +10,8 @@ In User Prompt:
 
 from __future__ import annotations
 
+import ast
+
 from lox.db.schema import get_schema_markdown
 
 POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
@@ -62,12 +64,14 @@ Nothing is hardcoded in the harness: whatever you `yield` (or `return` from `ste
   `Action.PRAY` (`M('p')`), `Action.ENGRAVE` (`'E'`), `Action.DIP` (`M('d')`), `Action.OFFER` (`M('o')`),
   `Action.CHAT` (`M('c')`), `Action.PAY` (`'p'`), `Action.ENHANCE` (`M('e')`), `Action.UNTRAP` (`M('u')`),
   `Action.FIGHT` (`'F'`), `Action.MOVE` (`'m'`), `Action.ESC` (`'\\x1b'`), `Action.SPACE` (`' '`).
-- **Multi-Keystroke Sequences (`seq(...)`)**:
+- **Multi-Keystroke Sequences (`seq(...)`), Extended Commands (`extcmd`), & Repeats (`repeat`)**:
   Many NetHack actions prompt for a direction, inventory slot letter, or text. Send the full sequence in one turn using `seq(...)`:
   - Open a door at `(dy, dx)`: `yield seq(Action.OPEN, DIR_DELTAS[(dy, dx)])`
-  - Kick a door at `(dy, dx)`: `yield seq(Action.KICK, DIR_DELTAS[(dy, dx)])`
+  - Kick a door at `(dy, dx)`: `yield seq(Action.KICK, DIR_DELTAS[(dy, dx)])` (breaks locked doors into `.` in 1-3 kicks)
+  - Repeat action $N$ times: `yield repeat(10, Action.SEARCH)` or `yield repeat(5, Action.WAIT)`
+  - Extended commands: `yield extcmd("pray", "y")`, `yield extcmd("terrain")`, `yield extcmd("sit")`, `yield extcmd("chat", DIR_DELTAS[(dy, dx)])`
   - Eat inventory item in slot `'f'`: `yield seq(Action.EAT, 'f')`
-  - Eat a corpse on the floor (`'y'` to confirm): `yield seq(Action.EAT, 'y')`
+  - Eat a corpse on the floor (`'y'` to confirm): `yield seq(Action.EAT, 'y')` (Hero must be standing on the exact corpse tile: `c.y == state.y and c.x == state.x`. If adjacent, step onto the corpse tile first!)
   - Quaff potion in slot `'h'`: `yield seq(Action.QUAFF, 'h')`
   - Wear armor in slot `'d'`: `yield seq(Action.WEAR, 'd')`
   - Wield weapon in slot `'a'`: `yield seq(Action.WIELD, 'a')`
@@ -77,70 +81,91 @@ Nothing is hardcoded in the harness: whatever you `yield` (or `return` from `ste
   - Dip item `'a'` into fountain (`'y'`): `yield seq(Action.DIP, 'a', 'y')`
 
 #### 3. Querying `GameState` (`state`)
-Every turn, `state` exposes 100% of NetHack's observation arrays and C symbol tables:
+Every turn, `state` exposes 100% of NetHack's observation arrays, terminal screens, and C symbol tables:
 - **Hero Vitals & Coordinates**:
   `state.y` (0..20), `state.x` (0..78), `state.pos` (`(y, x)`),
   `state.hp`, `state.max_hp`, `state.energy`, `state.max_energy`, `state.ac`,
   `state.xp_level`, `state.xp`, `state.score`, `state.gold`, `state.turn`, `state.step_count`,
   `state.depth` (dungeon depth 1..50), `state.dungeon_num` (`0`=Dungeons of Doom, `1`=Gehennom, `2`=Gnomish Mines, `3`=Quest, `4`=Sokoban),
+  `state.deepest_level_reached` (`int`), `state.is_on_stairs_down` (`bool`), `state.internal_hunger` (`int` raw nutrition counter),
   `state.strength`, `state.dex`, `state.con`, `state.intel`, `state.wis`, `state.cha`, `state.align` (`1`=Lawful, `0`=Neutral, `-1`=Chaotic),
-  `state.hunger_state` (`0`=Satiated, `1`=Not Hungry, `2`=Hungry, `3`=Weak, `4`=Fainting, `5`=Fainted),
-  `state.carrying_capacity` (`0`=Unencumbered, `1`=Burdened, `2`=Stressed, `3`=Strained, `4`=Overtaxed, `5`=Overloaded).
+  `state.hunger_state` (`0`=Satiated, `1`=Not Hungry, `2`=Hungry, `3`=Weak, `4`=Fainting, `5`=Fainted), `state.hunger_name`,
+  `state.carrying_capacity` (`0`=Unencumbered, `1`=Burdened, `2`=Stressed, `3`=Strained, `4`=Overtaxed, `5`=Overloaded), `state.encumbrance_name`.
 - **Status Flags**:
   `state.is_blind`, `state.is_confused`, `state.is_stunned`, `state.is_hallucinating`, `state.is_levitating`,
   `state.is_food_poisoned`, `state.is_terminally_ill`, `state.is_stoning`, `state.is_slimed`, `state.is_strangled`, `state.condition_mask`.
-- **Messages & Screen Grids (21x79 NumPy Arrays)**:
+- **Messages & Screen Grids (21x79 & 24x80 Terminal)**:
   - `state.message` (`str`): Current turn's game message(s).
-  - `state.chars` (`uint8[21, 79]`): ASCII character codes on screen (e.g. `ord('.')` floor, `ord('#')` corridor, `ord('+')` closed door, `ord('>')` stairs down, `ord('<')` stairs up, `ord('{')` fountain, `ord('_')` altar, `ord('^')` trap).
+  - `state.chars` (`uint8[21, 79]`): ASCII character codes on screen:
+    * `.` : room floor, ice, or open doorway
+    * `#` : corridor or iron bars
+    * `+` : closed door (open with `Action.OPEN` or kick with `Action.KICK`)
+    * `\\` : open door or throne
+    * `>` : staircase down (descend with `Action.DOWN`)
+    * `<` : staircase up
+    * `{` : fountain or sink
+    * `_` : altar
+    * `^` : trap
+    * `)` : weapon on ground
+    * `[` : armor on ground
+    * `%` : food or corpse on ground
+    * `!` : potion on ground
+    * `?` : scroll on ground
+    * `/` : wand on ground
+    * `=` : ring on ground
+    * `"` : amulet on ground
+    * `(` : tool on ground
+    * `$` : gold on ground
+    * **CRITICAL MAP INVARIANT**: `'-'` (horizontal wall) and `'|'` (vertical wall) are SOLID, IMPASSABLE ROOM WALLS! NEVER mark `'-'` or `'|'` as passable! Bumping into `'-'` or `'|'` wastes turns and causes severe wall stalls!
   - `state.char_at(y, x) -> str`: Single ASCII character at `(y, x)`.
   - `state.glyphs` (`int32[21, 79]`): Raw NLE glyph IDs.
   - `state.colors` (`int8[21, 79]`), `state.specials` (`uint8[21, 79]`).
   - `state.ascii_map() -> str`: Full 21x79 ASCII rendering of the screen.
+  - `state.tty_text -> str`: Complete 24-line terminal screen rendering (includes message line 0, map lines 1-21, status lines 22-23, and all pop-up menus).
+- **Semantic Terrain & Trap Queries (Direct from NetHack C Symbol Tables)**:
+  - `state.terrain_at(y, x) -> str`: Semantic name of terrain at `(y, x)` (e.g. `'closed door'`, `'open door'`, `'floor of a room'`, `'corridor'`, `'staircase down'`, `'staircase up'`, `'altar'`, `'fountain'`, `'sink'`, `'grave'`, `'tree'`, `'iron bars'`, `'water'`, `'molten lava'`).
+  - `state.trap_at(y, x) -> str | None`: Specific trap name at `(y, x)` (e.g. `'arrow trap'`, `'bear trap'`, `'pit'`, `'teleportation trap'`) or `None`.
+  - `state.description_at(y, x) -> str`: Exact English description string from NLE's C engine for tile `(y, x)` (e.g. `'closed door'`, `'floor of a room'`, `'human valkyrie called Agent'`).
+  - `state.is_closed_door(y, x) -> bool`: True if tile is a closed door (`'+'`).
+  - `state.is_open_door(y, x) -> bool`: True if tile is an open door / doorway (`'\\'`, `'.'`).
+  - `state.is_stairs_down(y, x) -> bool`, `state.stairs_down_pos -> (y, x) | None`: Fast check and coordinates of downstairs `'>'`.
 - **Inventory (`state.inventory -> list[InventoryItem]`)**:
-  Each `item` has: `item.letter` (`'a'..'z'`), `item.name` (full description string, e.g. `'a +1 long sword (weapon in hand)'`, `'2 food rations'`), `item.glyph` (`int`), `item.oclass` (`int`), `item.char` (`str`: `')'` weapon, `'['` armor, `'%'` food, `'!'` potion, `'?'` scroll, `'/'` wand, `'='` ring, `'\"'` amulet, `'('` tool, `'$'` gold), `item.quantity` (`int`).
+  Each `item` has:
+  - `item.letter` (`'a'..'z'`), `item.name` (full description string, e.g. `'a +1 long sword (weapon in hand)'`, `'2 food rations'`), `item.quantity` (`int`), `item.char` (`str`: `')'` weapon, `'['` armor, `'%'` food, `'!'` potion, `'?'` scroll, `'/'` wand, `'='` ring, `'\"'` amulet, `'('` tool, `'$'` gold).
+  - Typed helper properties: `item.is_weapon`, `item.is_armor`, `item.is_food`, `item.is_potion`, `item.is_scroll`, `item.is_wand`, `item.is_ring`, `item.is_amulet`, `item.is_tool`.
+  - Status helper properties: `item.is_worn`, `item.is_wielded`, `item.is_quivered`, `item.is_blessed`, `item.is_uncursed`, `item.is_cursed`.
 - **Visible Monsters (`state.visible_monsters() -> list[VisibleMonster]`)**:
-  Each `m` has: `m.y`, `m.x`, `m.glyph`, `m.char`, `m.color`, `m.is_pet` (`bool`), `m.is_peaceful` (`bool`), and `m.info` (`MonsterInfo` directly from NLE's C `permonst` table: `m.info.name`, `m.info.symbol`, `m.info.level`, `m.info.speed`, `m.info.ac`, `m.info.mr`, `m.info.difficulty`, `m.info.nutrition`, `m.info.weight`, `m.info.resistances_mask`, `m.info.conveys_mask`, `m.info.attacks` tuple of `(aatyp, adtyp, damn, damd)` where `aatyp == 0` indicates passive gaze/paralysis/reflection attacks like floating eyes!).
+  Each `m` has: `m.y`, `m.x`, `m.name`, `m.char`, `m.color`, `m.is_pet`, `m.is_peaceful`, `m.is_hostile` (`not (is_pet or is_peaceful)`), `m.is_statue`, `m.is_ridden`, `m.is_invisible`, and `m.info` (`MonsterInfo`: `m.info.name`, `m.info.level`, `m.info.speed`, `m.info.ac`, `m.info.difficulty`, `m.info.nutrition`, `m.info.weight`, `m.info.attacks` tuple).
 - **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`)**:
-  Each `o` has: `o.y`, `o.x`, `o.glyph`, `o.char`, `o.color`, `o.is_corpse` (`bool`), `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`, with `o.corpse_monster.name`, `o.corpse_monster.nutrition`, etc.), `o.info` (`ObjectInfo | None`). *(Note: `VisibleObject` on the ground does NOT have `.name`; use `o.char`, `o.is_corpse`, and `o.corpse_monster`. Once picked up into `state.inventory`, `item.name` gives the full string.)*
-- **Fast Vectorized NumPy & Numba Pathfinding Helpers (Always prefer vectorized NumPy over nested 21x79 Python loops)**:
+  Each `o` has: `o.y`, `o.x`, `o.name`, `o.char`, `o.color`, `o.is_corpse`, `o.is_food`, `o.is_weapon`, `o.is_armor`, `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`), `o.info` (`ObjectInfo | None`: `o.info.name`, `o.info.cost`, `o.info.weight`).
+- **Fast Vectorized NumPy & Numba Pathfinding Helpers**:
   - `state.bfs_distances(passable_mask, start=(y, x), allow_diagonal=True) -> int32[21, 79]`: Shortest path step distances from `start` (`-1` if unreachable).
   - `state.path_step(passable_mask, target=(ty, tx), start=(y, x), allow_diagonal=True) -> (dy, dx)`: Returns the first step delta `(dy, dx)` along the shortest path from `start` to `target` (`(0, 0)` if unreachable).
-  - **Example Vectorized Navigation Idiom**:
+  - **Generic Vectorized Pathfinding Usage**:
     ```python
-    passable = np.isin(state.chars, [ord('.'), ord('#'), ord('>'), ord('<'), ord('+'), ord('_'), ord('{'), ord('$'), ord('%'), ord(')'), ord('['), ord('!'), ord('?'), ord('/')])
+    # Construct a boolean passable mask (e.g. from state.chars or state.mem.remembered_chars):
+    passable = np.isin(state.chars, [ord('.'), ord('#'), ord('>')])
+    # Exclude obstacles or hazardous positions:
     for m in state.visible_monsters():
-        if m.is_pet or m.is_peaceful:
-            passable[m.y, m.x] = False
-    # Step toward stairs '>' if visible:
-    stairs = np.argwhere(state.chars == ord('>'))
-    if len(stairs) > 0:
-        dy, dx = state.path_step(passable, (int(stairs[0, 0]), int(stairs[0, 1])))
-        if (dy, dx) != (0, 0):
-            return seq(Action.OPEN, DIR_DELTAS[(dy, dx)]) if state.char_at(state.y + dy, state.x + dx) == '+' else DIR_DELTAS[(dy, dx)]
+        passable[m.y, m.x] = False
+    # Find next step towards target coordinate:
+    dy, dx = state.path_step(passable, target=(target_y, target_x))
+    if (dy, dx) != (0, 0):
+        return DIR_DELTAS[(dy, dx)]
     ```
 
-#### 4. Canonical NetHack Early-Game Tactical Survival & Navigation Guide
+#### 4. Deterministic Zero-Heuristic WorldMemory (`state.mem`)
 
-1. **Dungeon Level 1 Escape & Stair Priority**:
-   - The primary objective on Dlvl 1 is locating and descending the downstairs (`>`) via `Action.DOWN`. Staying on Dlvl 1 past 300 turns leads to starvation and monster escalation.
-   - Rooms are enclosed by walls (`|`, `-`) and closed doors (`+`). You cannot reach the rest of the dungeon without opening doors!
-   - Step adjacent to closed doors (`+`) and yield `seq(Action.OPEN, dir)`. If locked, kick it open with `seq(Action.KICK, dir)`.
-   - Once stairs (`>`) are visible, navigate directly to them. When standing on `>`: yield `Action.DOWN` (`'>'`) to descend to Dlvl 2.
-
-2. **Robust Frontier Exploration & Target Persistence**:
-   - **Target Persistence Rule**: Store a persistent target: `self.target_tile`. Never recompute `min(frontier, ...)` from scratch every turn! When the hero steps 1 tile toward a target, Manhattan distances to opposing frontier tiles invert, creating an infinite 2-tile ping-pong oscillation (`A <-> B`). Commit to `self.target_tile` until reached, impassable, or after 25 turns!
-   - **Multi-Tile Cycle Detection**: `(state.y, state.x) == self.last_pos` is blind to 2-tile ping-pong loops (resets to 0 every turn). Maintain a position history ring buffer (`self.pos_history = collections.deque(maxlen=8)`). If `(state.y, state.x) in self.pos_history[:-1]`, you are trapped in an oscillation—immediately clear `self.target_tile` and take a random cardinal step to break the attractor.
-   - **Frontier Tiles**: Identify unvisited walkable tiles adjacent to visited tiles (`macros.get_frontier_tiles`).
-
-3. **Early Combat & Tactical Retreat**:
-   - **Never fight while weakened**: Flee to a corridor (`#`) or doorway if HP $< 50\%$ so only 1 monster can attack at a time.
-   - **Floating Eyes (`e`)**: NEVER melee blue `e` (floating eye) without blindfold/reflection—it paralyzes you for 50 turns. Use ranged weapons or throw daggers (`seq(Action.THROW, letter, dir)`).
-
-4. **Nutrition & Inventory**:
-   - Valkyries start with food rations (`%`) and +1 long sword + small shield.
-   - Equip armor on turn 1 (`seq(Action.WEAR, item.letter)`) and wield primary weapon (`seq(Action.WIELD, item.letter)`).
-   - Eat rations when `state.hunger_state >= 3` (Weak).
-   - Eat fresh safe corpses (`macros.get_safe_corpses`) on the ground (`seq(Action.EAT, 'y')`). Never eat kobolds (`k`, poisonous) or chickatrices (`c`, stoning).
+The harness automatically maintains deterministic, zero-heuristic spatial and episodic bookkeeping on `state.mem` across steps and replays:
+- `state.mem.visited`: `bool[21, 79]` mask of tiles the hero has physically visited on the current `(state.dungeon_num, state.level_num)` floor.
+- `state.mem.visit_count`: `int32[21, 79]` array of visit frequencies for each tile on the current floor.
+- `state.mem.remembered_chars`: `uint8[21, 79]` ASCII array of static terrain characters (walls, corridors, doors, stairs, altars, fountains) observed on the current floor, retaining them even when they leave current line-of-sight.
+- `state.mem.searched_counts`: `int16[21, 79]` count of how many times each tile has been searched via `Action.SEARCH` (crucial so the policy knows which walls or corridors have already been searched for secret doors).
+- `state.mem.stair_graph`: `dict[tuple[int, int, int, int], tuple[int, int, int, int]]` mapping `(dnum_from, dlvl_from, y_from, x_from) -> (dnum_to, dlvl_to, y_to, x_to)` bidirectional inter-floor transition graph recording stairs taken across dungeons (Dungeons of Doom, Gnomish Mines, Sokoban).
+- `state.mem.locked_doors`: `set[tuple[int, int]]` containing coordinates `(y, x)` on the current floor confirmed to be locked doors.
+- `state.mem.pos_history`: `deque[tuple[int, int, int, int]]` of the last 16 `(dungeon_num, level_num, y, x)` positions.
+- `state.mem.is_oscillating`: `bool`, `True` if <= 3 unique tiles were visited in the last 12 steps on the same floor (useful for anti-stall escape triggers).
+- `state.mem.get_floor(dnum, dlvl)`: returns the `FloorMemory` for any visited dungeon level.
 """
 
 
@@ -162,9 +187,86 @@ Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigati
 3. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py`.
 4. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
    - Tests candidate Python code in a live NetHack sandbox.
-   - **Step 1 (Smoke Check & Behavioral Critic)**: Verifies AST, checks reachability, detects 2-tile ping-pong oscillations and search spam. Optional `replay_run_id` fast-forwards into any recorded mid-game run in ~10ms.
-   - **Step 2 (20-Episode Parallel Pilot Batch)**: Dispatches 20 episodes across persistent workers (up to 5 pilot revisions per generation) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.
+   - **Step 1 (Smoke Check & Behavioral Critic)**: Verifies AST, checks reachability, detects oscillations and search spam. Optional `replay_run_id` fast-forwards into any recorded mid-game run in ~10ms.
+   - **Step 2 (30-Episode Parallel Pilot Batch)**: Dispatches 30 episodes across persistent workers (up to 5 pilot revisions per generation) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.
+
+### Scientific Investigation Protocol (MANDATORY)
+1. **Never Guess from Intuition**: NetHack mechanics are strictly ruled by the C engine (e.g. traps, secret doors, searching probabilities, hunger increments, prayer timeouts, pet displacement, monster ranged attacks). Guessing code changes without empirical research causes catastrophic regressions.
+2. **Four-Stage Scientific Workflow**:
+   - **Stage 1 (Diagnose)**: Inspect the Batch Overview, termination causes, and stall diagnostics. Query `runs` and `expert_runs` via `query_db` to see what separated ascensions from failures.
+   - **Stage 2 (Research Mechanics)**: Call `query_wiki` on the specific obstacles, monsters, or death reasons identified in Stage 1 (e.g. `query_wiki("bear trap")`, `query_wiki("praying")`, `query_wiki("secret door")`).
+   - **Stage 3 (Synthesize & Pilot Test)**: Formulate your causal hypothesis and test your candidate code using `dry_run_policy(code=...)`.
+   - **Stage 4 (Iterative Repair)**: If a pilot fails or regresses, STOP! Inspect the failing seed logs, call `query_wiki` or `query_db` to find the exact C engine rule you violated, and revise your skill before re-testing.
 """
+
+
+def _format_context_scoped_policy(current_policy: str, batch_digest: str = "") -> str:
+    lines = current_policy.splitlines()
+    if len(lines) <= 350:
+        return f"### Current `policy.py`:\n```python\n{current_policy}\n```"
+
+    from lox.lang.validator import extract_module_outline
+
+    outline = extract_module_outline(current_policy, module_name="policy.py")
+
+    try:
+        tree = ast.parse(current_policy)
+        policy_cls = None
+        for n in tree.body:
+            if isinstance(n, ast.ClassDef) and n.name in ("Policy", "Agent"):
+                policy_cls = n
+                break
+        if policy_cls is None:
+            for n in tree.body:
+                if isinstance(n, ast.ClassDef):
+                    policy_cls = n
+                    break
+
+        if policy_cls:
+            all_methods = [
+                m
+                for m in policy_cls.body
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            priority = [m for m in all_methods if m.name in ("__init__", "run")]
+
+            mentioned = []
+            digest_lower = batch_digest.lower()
+            for m in all_methods:
+                if m.name not in ("__init__", "run") and m.name.lower() in digest_lower:
+                    mentioned.append(m)
+
+            remaining = [
+                m for m in all_methods if m not in priority and m not in mentioned
+            ]
+            top_methods = (priority + mentioned + remaining)[:6]
+
+            code_snippets = []
+            for m in top_methods:
+                if (
+                    hasattr(m, "lineno")
+                    and hasattr(m, "end_lineno")
+                    and m.end_lineno is not None
+                ):
+                    snippet = "\n".join(lines[m.lineno - 1 : m.end_lineno])
+                    code_snippets.append(snippet)
+
+            joined_snippets = "\n\n".join(code_snippets)
+            names_included = ", ".join(m.name for m in top_methods)
+            return f"""### Current `policy.py` Outline:
+```python
+{outline}
+```
+
+### Full Source of Key Active Methods ({names_included}):
+*(Policy exceeds 350 lines; showing outline and key methods. Call `query_policy_docs('policy')` to view full code if needed.)*
+```python
+{joined_snippets}
+```"""
+    except Exception:
+        pass
+
+    return f"### Current `policy.py`:\n```python\n{current_policy}\n```"
 
 
 def build_user_prompt(
@@ -174,8 +276,23 @@ def build_user_prompt(
     macros_docs: str,
     batch_digest: str = "",
     recent_experiments: str = "",
+    skills: dict[str, str] | None = None,
 ) -> str:
     """Constructs the stateless Turn-0 prompt tailored to the active Modification Mode."""
+    from lox.lang.validator import extract_module_outline
+
+    skills_block = ""
+    if skills:
+        outlines = [
+            extract_module_outline(code, module_name=name)
+            for name, code in sorted(skills.items())
+        ]
+        skills_block = (
+            "\n### Hierarchical Skill Registry:\n```python\n"
+            + "\n\n".join(outlines)
+            + "\n```\n(Use `read_skill(skill_name)` tool to inspect full source of any skill module)\n"
+        )
+
     exp_block = (
         f"\n### Recent Experiment Lab Notebook (`experiments` table):\n{recent_experiments}\n"
         if recent_experiments
@@ -206,50 +323,80 @@ Your task:
 {digest_block}{exp_block}
 {macros_docs}
 
-### Current `policy.py`:
-```python
-{current_policy}
-```
+{_format_context_scoped_policy(current_policy, batch_digest)}
 
-Your task in `MACRO_WRITE` mode:
-1. Inspect `runs` (especially `is_outlier_good = TRUE` vs failed runs), `function_stats`, or `query_wiki` to identify reusable building blocks that `policy.py` needs (e.g., persistent level map/frontier helpers, multi-key item usage generators, safe corpse filtering, corridor/chokepoint detection, door breaching, etc.).
-2. Write one or more clean, well-documented helper functions or generator subroutines (`def macro_name(state, ...):`) to add to `macros.py`.
-3. Verify them with `dry_run_policy(code=..., is_macro=True)`.
-4. Output:
-   - A `yaml` block listing the macro names and their purpose:
+### Scientific Protocol for `MACRO_WRITE`:
+1. **Stage 1 (Empirical Investigation)**:
+   - Use `query_db` (on `runs` and `expert_runs`) and `query_wiki` to identify common subroutines that multiple policy skills need (e.g. door breaching, tactical retreat chokepoint detection, item identification/quaffing, inventory management, pathfinding around dangerous tiles).
+2. **Stage 2 (Macro Implementation)**:
+   - Write one or more clean, well-documented helper functions or generator subroutines (`def macro_name(state, ...):`) to add to `macros.py`.
+   - Macros must be pure, robust functions or generators with clear docstrings and type hints.
+3. **Stage 3 (Verification)**:
+   - Verify candidate macros with `dry_run_policy(code=..., is_macro=True)`. This runs real-state replay across diverse dungeon states to verify the macro does not crash or yield invalid actions.
+4. **Stage 4 (Commit Output)**:
+   - Output a `yaml` block listing the macro names and purpose:
      ```yaml
      mode: MACRO_WRITE
      target_functions: [your_macro_name]
      observation_from_db: "Why this macro is needed based on current runs"
      mechanism: "How the macro works and how policy.py can call it"
      ```
-   - Your macro function definition(s) in a single ```python ... ``` block. (Note: `MACRO_WRITE` commits directly to `macros.py` and immediately starts the next generation).
+   - Your macro function definition(s) in a single ```python ... ``` block. (Note: `MACRO_WRITE` commits directly to `macros.py` and immediately advances to the next generation).
+"""
+
+    if mode == "STRUCTURAL_REFACTOR":
+        return f"""### Generation {generation} — Mode: `STRUCTURAL_REFACTOR` (Architectural Policy Refactoring)
+{digest_block}{exp_block}
+{macros_docs}
+{skills_block}
+{_format_context_scoped_policy(current_policy, batch_digest)}
+
+### Scientific Protocol for `STRUCTURAL_REFACTOR`:
+Single-skill targeted patches have stalled or reached a local optimum. You have permission to perform a **structural refactoring** of `class Policy`.
+1. **Stage 1 (Empirical Investigation)**:
+   - Query DuckDB (`runs`, `experiments`, `expert_runs`) to identify why the previous architecture stalled (e.g. state management bottlenecks, lack of multi-turn goal commitment, unhandled traps or hunger states).
+2. **Stage 2 (Full Class Synthesis)**:
+   - Rewrite `class Policy:` from scratch or restructure its methods, attributes on `self`, and dispatch loop to break the plateau.
+   - You can freely use verified macros from `macros.py` (see above) and `state.mem` for zero-heuristic spatial/episodic memory.
+3. **Stage 3 (Verification)**:
+   - Test your candidate class using `dry_run_policy(code=...)`.
+4. **Stage 4 (Commit Output)**:
+   - Output a `yaml` block with `mode: STRUCTURAL_REFACTOR`, `target_functions: [run]`, observation and mechanism.
+   - Output your full `class Policy:` in a single ```python ... ``` block.
 """
 
     # Default: FUNC_MOD_ADD
     return f"""### Generation {generation} — Mode: `FUNC_MOD_ADD` (Targeted Single-Skill Addition / Modification)
 {digest_block}{exp_block}
 {macros_docs}
+{skills_block}
+{_format_context_scoped_policy(current_policy, batch_digest)}
 
-### Current `policy.py`:
-```python
-{current_policy}
-```
+### Scientific Investigation & Modification Protocol for `FUNC_MOD_ADD`:
 
-### Instructions for `FUNC_MOD_ADD`:
-1. **Focus on 1 Primary Skill**:
+1. **Stage 1: MANDATORY Empirical Research (Turn 1)**:
+   - **DO NOT OUTPUT CODE ON TURN 1.**
+   - Before writing or modifying any code, you MUST use your research tools to investigate the previous batch:
+     * Call `query_db(sql=...)` to inspect the failed runs, stall causes, or death reasons from the previous batch (`runs` table), or compare with how experts handled this stage in `expert_runs`.
+     * Call `query_wiki(query=...)` to look up the exact NetHack C engine mechanics for the specific monsters, items, traps, locked doors, or terrain causing stalls or deaths.
+   - Ground your hypothesis in empirical game facts, not blind intuition.
+
+2. **Stage 2: Focus on 1 Primary Skill**:
    - Target **1 primary skill** (1 specialist method, plus the caller e.g. `run` if wiring a new method) per generation.
    - Modifying 1 method costs only 150 triggered episodes and isolates causal attribution; modifying multiple unrelated methods inflates rollout budgets and couples unrelated bugs.
-2. **5 × 20-Episode Self-Iterative Pilot Revision Loop**:
-   - Before submitting your final hypothesis, call `dry_run_policy(code=...)`.
-   - It runs a **20-episode parallel pilot test** against the current baseline on 16 workers in ~0.5s, reporting paired Wins/Losses/Ties and the exact logs of the worst stalled runs.
-   - You have **up to 5 pilot revisions per generation**: inspect the stalled run logs and behavioral critic warnings, revise your code to fix the failure mode, and test again with `dry_run_policy` until you beat the baseline!
-3. **Interruptible State-Machine Skills & Anti-Oscillation Invariants**:
-   - NetHack is an interrupt-driven survival loop: specialist methods (`explore_step`, `handle_combat`, `handle_nutrition`) must return an action or `None` on each tick and rely on persistent attributes on `self` (`self.target_tile`, `self.pos_history = collections.deque(maxlen=8)`) to avoid 2-tile ping-pong oscillations.
-4. **Conditional Triggering & Method Wiring**:
-   - Any episode that does NOT call your modified/added method is immediately discarded.
-   - If adding a new method, also include the caller method (e.g. `run` or dispatcher) in your code block so it is wired in and called.
-5. **Output Format**:
+   - NetHack is an interrupt-driven survival loop: specialist methods (`explore_step`, `handle_combat`, `handle_nutrition`, etc.) must return an action or `None` on each tick and rely on persistent attributes on `self` (`self.target_tile`, `self.pos_history = collections.deque(maxlen=8)`) to avoid 2-tile ping-pong oscillations.
+
+3. **Stage 3: 30-Episode Pilot Verification (`dry_run_policy`)**:
+   - Test your candidate code using `dry_run_policy(code=...)`.
+   - It runs a **30-episode parallel pilot test** against the current baseline on 16 workers in ~1s, reporting paired Wins/Losses/Ties and the exact logs of the worst stalled runs.
+   - Any episode that does NOT call your modified/added method is immediately discarded (`triggered == False`). Ensure your method is called by `run()`.
+
+4. **Stage 4: Pilot Failure Protocol (If Pilot Fails)**:
+   - If `dry_run_policy` returns `PILOT_FAILED`, **STOP! Do NOT blindly guess another code variation.**
+   - Inspect the failed pilot logs and behavioral critic warnings.
+   - Call `query_wiki` or `query_db` to look up the exact mechanic that caused the failure before synthesizing a revised method. You have up to 5 pilot revisions per generation.
+
+5. **Output Format (Once Ready to Test or Submit)**:
    - Output a `yaml` hypothesis block detailing your qualitative causal hypothesis and skill spec:
      ```yaml
      mode: FUNC_MOD_ADD

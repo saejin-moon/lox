@@ -224,3 +224,35 @@ def test_mode_scheduler_and_end_to_end_mock_campaign(tmp_path):
         assert n_exps == 3
     finally:
         con.close()
+
+
+def test_bandit_anti_starvation_and_macro_cooldown():
+    sched = ModeScheduler(param_tune_every=4, macro_every=6, use_bandit_after_gen=2)
+    # Prime counts and give MACRO_WRITE a high historical credit
+    sched.counts["FULL_WRITE"] = 1
+    sched.counts["FUNC_MOD_ADD"] = 4
+    sched.counts["PARAM_TUNE"] = 2
+    sched.counts["MACRO_WRITE"] = 1
+    sched.history["MACRO_WRITE"] = [50.0]
+    sched.history["FUNC_MOD_ADD"] = [1.0]
+    sched.history["PARAM_TUNE"] = [1.0]
+    sched._last_macro_gen = 6
+    sched._gens_since_macro = 0  # Just ran MACRO_WRITE at gen 6
+
+    # Gen 7: MACRO_WRITE must NOT be picked because cooldown (>= 6 gens) is active
+    mode = sched.select_mode(7, has_policy=True, has_tunable_params=False)
+    assert mode != "MACRO_WRITE"
+
+    # Across gens 8 to 11, MACRO_WRITE remains ineligible despite high UCB
+    for g in range(8, 12):
+        m = sched.select_mode(g, has_policy=True, has_tunable_params=False)
+        assert m != "MACRO_WRITE"
+
+    # At gen 13 (7 gens after gen 6), MACRO_WRITE becomes eligible and is selected
+    sched._gens_since_macro = 7
+    m13 = sched.select_mode(13, has_policy=True, has_tunable_params=False)
+    assert m13 == "MACRO_WRITE"
+
+    # Immediately on gen 14, MACRO_WRITE cannot be selected consecutively
+    m14 = sched.select_mode(14, has_policy=True, has_tunable_params=False)
+    assert m14 != "MACRO_WRITE"

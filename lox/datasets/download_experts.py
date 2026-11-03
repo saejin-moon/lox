@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import bz2
 import json
-import lzma
 import os
 import re
 from typing import Any

@@ -22,3 +22,6 @@ htmlcov/
 data/*
 logs/
 *.log
+
+
+temp/

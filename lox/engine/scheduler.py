@@ -19,21 +19,23 @@ class ModeScheduler:
     def __init__(
         self,
         param_tune_every: int = 3,
-        macro_every: int = 5,
+        macro_every: int = 0,
         use_bandit_after_gen: int = 15,
     ):
         self.param_tune_every = max(1, int(param_tune_every))
-        self.macro_every = max(2, int(macro_every))
+        self.macro_every = int(macro_every)
         self.use_bandit_after_gen = int(use_bandit_after_gen)
         self.history: dict[str, deque[float]] = {
             "FUNC_MOD_ADD": deque(maxlen=10),
             "PARAM_TUNE": deque(maxlen=10),
             "MACRO_WRITE": deque(maxlen=10),
+            "STRUCTURAL_REFACTOR": deque(maxlen=10),
         }
         self.counts: dict[str, int] = {
             "FUNC_MOD_ADD": 0,
             "PARAM_TUNE": 0,
             "MACRO_WRITE": 0,
+            "STRUCTURAL_REFACTOR": 0,
         }
         self._func_mods_since_tune = 0
         self._gens_since_macro = 0
@@ -46,6 +48,7 @@ class ModeScheduler:
         has_policy: bool,
         has_tunable_params: bool = True,
         forced_mode: str | None = None,
+        consecutive_failures: int = 0,
     ) -> str:
         if forced_mode:
             return forced_mode.upper()
@@ -53,14 +56,21 @@ class ModeScheduler:
         if generation == 0 or not has_policy:
             return "FULL_WRITE"
 
+        if consecutive_failures >= 3:
+            self.counts["STRUCTURAL_REFACTOR"] += 1
+            return "STRUCTURAL_REFACTOR"
+
         self._gens_since_macro += 1
 
-        # Periodic Macro Synthesis so the Author builds up `macros.py` early and regularly
-        if (
-            generation > 0
-            and generation % self.macro_every == 0
-            and (generation - self._last_macro_gen) >= self.macro_every
-        ) or self._gens_since_macro >= self.macro_every:
+        # Periodic Macro Synthesis so the Author builds up `macros.py` early and regularly (only if enabled > 0)
+        if self.macro_every > 0 and (
+            (
+                generation > 0
+                and generation % self.macro_every == 0
+                and (generation - self._last_macro_gen) >= self.macro_every
+            )
+            or self._gens_since_macro >= self.macro_every
+        ):
             self._gens_since_macro = 0
             self._last_macro_gen = generation
             self.counts["MACRO_WRITE"] += 1
@@ -83,8 +93,17 @@ class ModeScheduler:
         # Optional Extreme-Value UCB bandit override after sufficient warmup generations
         total_pulls = sum(self.counts.values())
         if generation >= self.use_bandit_after_gen and total_pulls >= 6:
-            candidates = ["FUNC_MOD_ADD", "MACRO_WRITE"]
-            if has_tunable_params:
+            candidates = ["FUNC_MOD_ADD"]
+            # Enforce anti-starvation cooldown for MACRO_WRITE (never consecutive, min 6 gens cooldown)
+            if (
+                self._gens_since_macro >= max(6, self.macro_every)
+                and (generation - self._last_macro_gen) >= 6
+            ):
+                candidates.append("MACRO_WRITE")
+            if (
+                has_tunable_params
+                and (generation - self._last_tune_gen) >= self.param_tune_every
+            ):
                 candidates.append("PARAM_TUNE")
             max_credit = max(
                 (max(self.history[m]) if self.history[m] else 0.0) for m in candidates
@@ -106,8 +125,10 @@ class ModeScheduler:
                 self._func_mods_since_tune += 1
             elif best_m == "PARAM_TUNE":
                 self._func_mods_since_tune = 0
+                self._last_tune_gen = generation
             elif best_m == "MACRO_WRITE":
                 self._gens_since_macro = 0
+                self._last_macro_gen = generation
             return best_m
 
         self._func_mods_since_tune += 1

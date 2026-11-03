@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import os
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from lox.author.agent import AuthorAgent
 from lox.datasets.download_experts import ingest_expert_runs_into_duckdb
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
+from lox.db.shards import extract_shards_from_runs
 from lox.db.summarizer import build_batch_contrast_digest
 from lox.engine.hypothesis import (
     evaluate_paired_hypothesis,
@@ -23,11 +29,26 @@ from lox.engine.hypothesis import (
 )
 from lox.engine.modes import run_spsa_param_tuning
 from lox.engine.scheduler import ModeScheduler
-from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
+from lox.lang.macros import DEFAULT_MACROS_PATH, MacroHarvester, MacroLibrary
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
 
 DEFAULT_POLICY_PATH = "data/workspace/policy.py"
+
+
+@dataclass
+class PolicyArchiveEntry:
+    policy_id: str
+    policy_code: str
+    niche: str
+    avg_depth: float
+    p90_depth: float
+    max_depth: int
+    avg_ac: float
+    avg_xl: float
+    pull_count: int = 0
+    total_reward: float = 0.0
+    baseline_runs: list[dict[str, Any]] = field(default_factory=list)
 
 
 class CampaignOrchestrator:
@@ -48,11 +69,12 @@ class CampaignOrchestrator:
         func_mod_episodes_per_fn: int = 1000,
         param_tune_episodes: int = 100,
         param_tune_every: int = 3,
-        macro_every: int = 5,
+        macro_every: int = 0,
         early_stopping: bool = True,
         max_repair_turns: int = 5,
         pilot_revisions: int = 5,
-        pilot_episodes: int = 20,
+        pilot_episodes: int = 30,
+        benchmark: str = "nethack",
     ):
         self.provider = provider
         self.model = model
@@ -68,6 +90,9 @@ class CampaignOrchestrator:
         self.early_stopping = early_stopping
         self.pilot_revisions = pilot_revisions
         self.pilot_episodes = pilot_episodes
+        self.benchmark = benchmark
+        self.policy_archive: dict[str, PolicyArchiveEntry] = {}
+        self.workspace_dir = str(Path(self.policy_path).parent)
 
         os.makedirs(
             os.path.dirname(os.path.abspath(self.policy_path)) or ".", exist_ok=True
@@ -96,6 +121,7 @@ class CampaignOrchestrator:
             workers=workers,
             role=role,
             max_steps=max_steps,
+            benchmark=benchmark,
         )
 
     def load_active_policy(self) -> str:
@@ -108,7 +134,22 @@ class CampaignOrchestrator:
         with open(self.policy_path, "w", encoding="utf-8") as f:
             f.write(code.strip() + "\n" if code.strip() else "")
 
-    def get_recent_experiments_markdown(self, limit: int = 5) -> str:
+    def load_workspace_skills(self) -> dict[str, str]:
+        skills_dir = Path(self.workspace_dir) / "skills"
+        skills: dict[str, str] = {}
+        if skills_dir.exists():
+            for p in sorted(skills_dir.glob("*.py")):
+                if p.name != "__init__.py":
+                    skills[p.stem] = p.read_text(encoding="utf-8")
+        return skills
+
+    def save_workspace_skill(self, skill_name: str, code: str) -> None:
+        skills_dir = Path(self.workspace_dir) / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skills_dir / f"{skill_name}.py"
+        skill_path.write_text(code.strip() + "\n", encoding="utf-8")
+
+    def get_recent_experiments_markdown(self, limit: int = 10) -> str:
         con = connect_db(self.db_path, read_only=True)
         try:
             rows = con.execute(
@@ -272,6 +313,7 @@ class CampaignOrchestrator:
                     seed_start=seed_base,
                     record_ticks=True,
                     show_progress=True,
+                    skills=self.load_workspace_skills(),
                 )
                 if warm_res.get("registered_params"):
                     registered_params.update(warm_res["registered_params"])
@@ -301,11 +343,52 @@ class CampaignOrchestrator:
                     batch_metrics=warm_res,
                     verdict=warm_verdict,
                 )
+                self.db_logger.save_policy(
+                    policy_id=current_policy_id,
+                    generation=0,
+                    mode="FULL_WRITE",
+                    policy_code=current_policy,
+                    macros_code=self.macro_lib.load_code(),
+                    params={
+                        k: (
+                            p.get("default", 0.0)
+                            if isinstance(p, dict)
+                            else getattr(p, "default", 0.0)
+                        )
+                        for k, p in registered_params.items()
+                    },
+                    avg_depth=warm_res.get("avg_depth", 1.0),
+                    max_depth=warm_res.get("max_depth", 1),
+                    is_promoted=True,
+                )
                 last_batch_digest = build_batch_contrast_digest(
                     warm_res, baseline_runs, warm_fn_stats
                 )
 
+            consecutive_failures = 0
             for gen in range(start_gen, start_gen + max_generations):
+                # MAP-Elites UCB parent selection
+                if self.policy_archive:
+                    best_niche = "descent"
+                    best_score = -1e9
+                    total_p = sum(e.pull_count for e in self.policy_archive.values())
+                    for n_name, e in self.policy_archive.items():
+                        q = e.total_reward / max(1, e.pull_count)
+                        u = q + 0.5 * math.sqrt(
+                            2.0 * math.log(total_p + 1.0) / max(1, e.pull_count)
+                        )
+                        if u > best_score:
+                            best_score = u
+                            best_niche = n_name
+                    chosen_entry = self.policy_archive[best_niche]
+                    chosen_entry.pull_count += 1
+                    current_policy = chosen_entry.policy_code
+                    current_policy_id = chosen_entry.policy_id
+                    baseline_runs = chosen_entry.baseline_runs
+                    baseline_by_seed = {
+                        int(r["seed"]): r for r in baseline_runs if "seed" in r
+                    }
+
                 mode = self.scheduler.select_mode(
                     generation=gen,
                     has_policy=bool(current_policy),
@@ -313,6 +396,7 @@ class CampaignOrchestrator:
                         registered_params or "param(" in current_policy
                     ),
                     forced_mode=forced_mode,
+                    consecutive_failures=consecutive_failures,
                 )
                 batch_id = f"{campaign_id}_g{gen:03d}"
 
@@ -382,6 +466,18 @@ class CampaignOrchestrator:
                             },
                             verdict=verdict,
                         )
+                        self.db_logger.save_policy(
+                            policy_id=cand_id,
+                            generation=gen,
+                            mode="PARAM_TUNE",
+                            policy_code=spsa_res["new_policy_code"] or current_policy,
+                            macros_code=spsa_res.get("new_macros_code")
+                            or self.macro_lib.load_code(),
+                            params=spsa_res["optimized_params"],
+                            avg_depth=val_batch["avg_depth"],
+                            max_depth=val_batch["max_depth"],
+                            is_promoted=bool(verdict["passed"]),
+                        )
                         if verdict["passed"]:
                             current_policy = spsa_res["new_policy_code"]
                             current_policy_id = cand_id
@@ -400,29 +496,18 @@ class CampaignOrchestrator:
                             last_batch_digest = build_batch_contrast_digest(
                                 val_batch, val_batch["runs"], fn_stats
                             )
-                            self.db_logger.save_policy(
-                                policy_id=cand_id,
-                                generation=gen,
-                                mode="PARAM_TUNE",
-                                policy_code=current_policy,
-                                macros_code=self.macro_lib.load_code(),
-                                params=spsa_res["optimized_params"],
-                                avg_depth=val_batch["avg_depth"],
-                                max_depth=val_batch["max_depth"],
-                                is_promoted=True,
-                            )
                     else:
                         ui.warn(verdict["reason"])
                     continue
 
                 # --- MODES 1, 2, 3: STATELESS AUTHOR AGENT SYNTHESIS ---
-                recent_exps = self.get_recent_experiments_markdown(limit=5)
+                recent_exps = self.get_recent_experiments_markdown(limit=10)
                 if mode == "MACRO_WRITE":
                     ui.gen_header(gen=gen, mode="MACRO_WRITE", target_episodes=0)
-                elif mode == "FULL_WRITE":
+                elif mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR"):
                     ui.gen_header(
                         gen=gen,
-                        mode="FULL_WRITE",
+                        mode=mode,
                         target_episodes=self.full_write_episodes,
                     )
                 else:
@@ -443,10 +528,36 @@ class CampaignOrchestrator:
                         baseline_runs=baseline_runs,
                         max_pilot_runs=self.pilot_revisions,
                         pilot_episodes=self.pilot_episodes,
+                        skills=self.load_workspace_skills(),
                     )
+                except PermissionError as auth_err:
+                    ui.warn(f"Fatal authentication/billing error: {auth_err}")
+                    raise
                 except Exception as synth_err:
                     ui.warn(
                         f"Gen {gen:03d} synthesis failed after all repair turns ({synth_err}). Retrying next generation with fresh context."
+                    )
+                    consecutive_failures += 1
+                    last_hyp = getattr(self.author, "latest_attempted_hyp", {})
+                    last_targets = last_hyp.get("target_functions") or ["unknown"]
+                    self.db_logger.save_experiment(
+                        experiment_id=f"exp_{batch_id}_failed",
+                        generation=gen,
+                        batch_id=batch_id,
+                        mode=mode,
+                        target_functions=last_targets,
+                        hypothesis=last_hyp,
+                        verdict={
+                            "passed": False,
+                            "mean_delta": 0.0,
+                            "ci_lower": 0.0,
+                            "ci_upper": 0.0,
+                            "wilcoxon_p": 1.0,
+                            "wins": 0,
+                            "losses": 0,
+                            "ties": 0,
+                            "reason": f"Synthesis aborted: {synth_err}",
+                        },
                     )
                     continue
                 ui.hypothesis_box(proposal.hypothesis)
@@ -457,7 +568,7 @@ class CampaignOrchestrator:
                         f"Committed macro(s) {proposal.target_functions} to `{self.macros_path}`. "
                         "Skipping rollout and starting next generation."
                     )
-                    self.scheduler.record_outcome("MACRO_WRITE", 0.05, 1.0)
+                    self.scheduler.record_outcome("MACRO_WRITE", 0.0, 1.0)
                     self.db_logger.save_experiment(
                         experiment_id=f"exp_{batch_id}",
                         generation=gen,
@@ -477,9 +588,35 @@ class CampaignOrchestrator:
                             "reason": "Macro committed directly to macros.py",
                         },
                     )
+                    self.db_logger.save_policy(
+                        policy_id=f"pol_{batch_id}",
+                        generation=gen,
+                        mode="MACRO_WRITE",
+                        policy_code=current_policy,
+                        macros_code=proposal.full_macros_code,
+                        params={
+                            k: (
+                                p.get("default", 0.0)
+                                if isinstance(p, dict)
+                                else getattr(p, "default", 0.0)
+                            )
+                            for k, p in registered_params.items()
+                        },
+                        avg_depth=float(
+                            np.mean([r.get("max_depth", 1) for r in baseline_runs])
+                        )
+                        if baseline_runs
+                        else 1.0,
+                        max_depth=int(
+                            max([r.get("max_depth", 1) for r in baseline_runs])
+                        )
+                        if baseline_runs
+                        else 1,
+                        is_promoted=True,
+                    )
                     continue
 
-                # --- MODE 1 (`FULL_WRITE`) & MODE 3 (`FUNC_MOD_ADD`) ---
+                # --- MODE 1 (`FULL_WRITE`) & MODE 3 (`FUNC_MOD_ADD` / `STRUCTURAL_REFACTOR`) ---
                 raw_targets = [
                     f for f in proposal.target_functions if f and f != "__init__"
                 ]
@@ -488,36 +625,92 @@ class CampaignOrchestrator:
                 ]
                 target_fns = (
                     []
-                    if proposal.mode == "FULL_WRITE"
+                    if proposal.mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
                     else (non_root_targets or raw_targets)
                 )
-                num_funcs = max(1, len(target_fns))
                 target_eps = (
                     self.full_write_episodes
-                    if proposal.mode == "FULL_WRITE"
-                    else self.func_mod_episodes_per_fn * num_funcs
+                    if proposal.mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
+                    else self.func_mod_episodes_per_fn
                 )
 
                 # Prioritize seeds from baseline_runs so paired comparison is 1-to-1 on identical seeds
-                priority_seeds = (
-                    [int(r["seed"]) for r in baseline_runs] if baseline_runs else None
-                )
+                priority_seeds = None
+                eval_shards = None
+                if baseline_runs:
+                    base_triggered_seeds: list[int] = []
+                    base_remaining_seeds: list[int] = []
+                    target_set = set(target_fns or [])
+                    for r in baseline_runs:
+                        fn_map = r.get("triggered_functions") or r.get(
+                            "functions_triggered"
+                        )
+                        if isinstance(fn_map, str):
+                            try:
+                                fn_map = json.loads(fn_map)
+                            except Exception:
+                                fn_map = {}
+                        fn_keys = (
+                            set(fn_map.keys()) if isinstance(fn_map, dict) else set()
+                        )
+                        is_trig = bool(target_set and (target_set & fn_keys))
+                        is_fail = r.get("end_reason") not in (
+                            "ascended",
+                            "max_steps",
+                            "ended",
+                        )
+                        s = int(r["seed"])
+                        if is_trig or is_fail:
+                            base_triggered_seeds.append(s)
+                        else:
+                            base_remaining_seeds.append(s)
+                    priority_seeds = base_triggered_seeds + base_remaining_seeds
+
+                    if proposal.mode == "FUNC_MOD_ADD":
+                        fail_runs = [
+                            r
+                            for r in baseline_runs
+                            if r.get("end_reason") not in ("ascended", "max_steps")
+                        ]
+                        if fail_runs:
+                            eval_shards = extract_shards_from_runs(
+                                fail_runs,
+                                max_shards=min(20, max(5, target_eps // 4)),
+                                target_functions=target_fns,
+                            )
+
+                # Evaluate baseline policy on exact evaluation shards for apples-to-apples pairing
+                base_shard_runs: list[dict[str, Any]] = []
+                if eval_shards and current_policy:
+                    base_shard_res = self.pool.evaluate_batch(
+                        batch_id=f"{batch_id}_base_shards",
+                        policy_code=current_policy,
+                        macros_code=self.macro_lib.load_code(),
+                        target_episodes=len(eval_shards),
+                        shards=eval_shards,
+                        record_ticks=False,
+                        show_progress=False,
+                        skills=self.load_workspace_skills(),
+                    )
+                    base_shard_runs = base_shard_res.get("runs", [])
 
                 early_stop_cb = None
                 if (
                     self.early_stopping
                     and proposal.mode == "FUNC_MOD_ADD"
-                    and baseline_by_seed
+                    and (baseline_by_seed or base_shard_runs)
                 ):
                     min_p = min(60, max(20, target_eps // 4))
+                    baseline_all = baseline_runs + base_shard_runs
 
                     def _check_futility(
                         cand_runs: list[dict[str, Any]],
-                        _b=baseline_by_seed,
+                        _b=baseline_all,
                         _mp=min_p,
+                        _bm=self.benchmark,
                     ) -> bool:
                         return should_stop_early_for_futility(
-                            cand_runs, _b, min_pairs=_mp
+                            cand_runs, _b, min_pairs=_mp, benchmark=_bm
                         )
 
                     early_stop_cb = _check_futility
@@ -535,6 +728,8 @@ class CampaignOrchestrator:
                     record_ticks=True,
                     show_progress=True,
                     early_stop_fn=early_stop_cb,
+                    skills=self.load_workspace_skills(),
+                    shards=eval_shards if eval_shards else None,
                 )
 
                 if eval_res.get("registered_params"):
@@ -560,7 +755,8 @@ class CampaignOrchestrator:
                     missing_seeds = [
                         int(r["seed"])
                         for r in eval_res["runs"]
-                        if int(r["seed"]) not in baseline_by_seed
+                        if not r.get("is_shard")
+                        and int(r["seed"]) not in baseline_by_seed
                     ]
                     if (
                         missing_seeds
@@ -576,13 +772,32 @@ class CampaignOrchestrator:
                             priority_seeds=missing_seeds,
                             record_ticks=False,
                             show_progress=False,
+                            skills=self.load_workspace_skills(),
                         )
                         for br in backfill_res["runs"]:
                             baseline_by_seed[int(br["seed"])] = br
                         baseline_runs = list(baseline_by_seed.values())
+                        self.db_logger.save_batch(
+                            batch_id=f"{batch_id}_base_backfill",
+                            generation=gen,
+                            mode="BASELINE_BACKFILL",
+                            parent_policy_id="none",
+                            candidate_policy_id=current_policy_id,
+                            target_functions=[],
+                            runs=backfill_res["runs"],
+                            episodes_discarded=0,
+                            batch_metrics=backfill_res,
+                            verdict={
+                                "passed": True,
+                                "mean_delta": 0.0,
+                                "reason": "Baseline backfill for paired seeds",
+                            },
+                        )
 
                     verdict = evaluate_paired_hypothesis(
-                        eval_res["runs"], baseline_runs
+                        eval_res["runs"],
+                        baseline_runs + base_shard_runs,
+                        benchmark=self.benchmark,
                     )
                     if eval_res.get("early_stopped"):
                         verdict["reason"] = (
@@ -637,22 +852,113 @@ class CampaignOrchestrator:
                 )
 
                 if verdict["passed"]:
+                    consecutive_failures = 0
                     current_policy = proposal.full_policy_code
                     current_policy_id = cand_id
                     self.save_active_policy(current_policy)
+                    if proposal.hypothesis.get("skill_module") and getattr(
+                        proposal, "skill_code", ""
+                    ):
+                        self.save_workspace_skill(
+                            str(proposal.hypothesis["skill_module"]),
+                            proposal.skill_code,
+                        )
+
+                    # Update Quality-Diversity (MAP-Elites) policy archive
+                    c_runs = eval_res["runs"]
+                    c_depth = float(eval_res["avg_depth"])
+                    c_p90 = float(eval_res["p90_depth"])
+                    c_max = int(eval_res["max_depth"])
+                    c_ac = (
+                        float(np.mean([r.get("final_ac", 10) for r in c_runs]))
+                        if c_runs
+                        else 10.0
+                    )
+                    c_xl = (
+                        float(np.mean([r.get("xp_level", 1) for r in c_runs]))
+                        if c_runs
+                        else 1.0
+                    )
+
+                    if (
+                        "descent" not in self.policy_archive
+                        or c_depth >= self.policy_archive["descent"].avg_depth
+                    ):
+                        self.policy_archive["descent"] = PolicyArchiveEntry(
+                            policy_id=cand_id,
+                            policy_code=current_policy,
+                            niche="descent",
+                            avg_depth=c_depth,
+                            p90_depth=c_p90,
+                            max_depth=c_max,
+                            avg_ac=c_ac,
+                            avg_xl=c_xl,
+                            baseline_runs=c_runs,
+                        )
+                    if (
+                        "outlier" not in self.policy_archive
+                        or c_p90 >= self.policy_archive["outlier"].p90_depth
+                        or c_max >= self.policy_archive["outlier"].max_depth
+                    ):
+                        self.policy_archive["outlier"] = PolicyArchiveEntry(
+                            policy_id=cand_id,
+                            policy_code=current_policy,
+                            niche="outlier",
+                            avg_depth=c_depth,
+                            p90_depth=c_p90,
+                            max_depth=c_max,
+                            avg_ac=c_ac,
+                            avg_xl=c_xl,
+                            baseline_runs=c_runs,
+                        )
+                    if (
+                        "survivability" not in self.policy_archive
+                        or c_ac <= self.policy_archive["survivability"].avg_ac
+                        or c_xl >= self.policy_archive["survivability"].avg_xl
+                    ):
+                        self.policy_archive["survivability"] = PolicyArchiveEntry(
+                            policy_id=cand_id,
+                            policy_code=current_policy,
+                            niche="survivability",
+                            avg_depth=c_depth,
+                            p90_depth=c_p90,
+                            max_depth=c_max,
+                            avg_ac=c_ac,
+                            avg_xl=c_xl,
+                            baseline_runs=c_runs,
+                        )
+
+                    # Trigger bottom-up macro harvesting (DreamCoder/Voyager style)
+                    harvested = MacroHarvester.harvest_from_policy(
+                        policy_code=current_policy,
+                        macro_lib=self.macro_lib,
+                        fn_stats=fn_stats,
+                    )
+                    if harvested:
+                        ui.info(
+                            f"Bottom-Up Library Learning: Harvested verified macro(s) {harvested} into `{self.macros_path}`."
+                        )
+
                     if proposal.mode == "FULL_WRITE":
-                        baseline_by_seed = {int(r["seed"]): r for r in eval_res["runs"]}
+                        baseline_by_seed = {
+                            int(r["seed"]): r
+                            for r in eval_res["runs"]
+                            if not r.get("is_shard")
+                        }
                     else:
                         for r in eval_res["runs"]:
-                            baseline_by_seed[int(r["seed"])] = r
+                            if not r.get("is_shard"):
+                                baseline_by_seed[int(r["seed"])] = r
                     baseline_runs = list(baseline_by_seed.values())
                     last_batch_digest = build_batch_contrast_digest(
                         eval_res, eval_res["runs"], fn_stats
                     )
-                elif not last_batch_digest and eval_res["runs"]:
-                    last_batch_digest = build_batch_contrast_digest(
-                        eval_res, eval_res["runs"], fn_stats
-                    )
+                else:
+                    consecutive_failures += 1
+                    if not last_batch_digest and eval_res["runs"]:
+                        last_batch_digest = build_batch_contrast_digest(
+                            eval_res, eval_res["runs"], fn_stats
+                        )
 
                 uncond_avg_depth = (
                     float(

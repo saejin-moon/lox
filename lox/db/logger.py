@@ -121,16 +121,23 @@ class BatchDatabaseLogger:
                     "summary_digest": [str(r.get("summary_digest", "")) for r in runs],
                     "game_log": [str(r.get("game_log", "")) for r in runs],
                     "milestones_json": [
-                        json.dumps(
-                            r.get("milestones") or r.get("milestones_json") or {}
+                        (
+                            r.get("milestones_json")
+                            if isinstance(r.get("milestones_json"), str)
+                            and not r.get("milestones")
+                            else json.dumps(r.get("milestones") or {})
                         )
                         for r in runs
                     ],
                     "triggered_functions": [
-                        json.dumps(
+                        (
                             r.get("triggered_functions")
-                            if r.get("triggered_functions") is not None
-                            else r.get("functions_triggered", {})
+                            if isinstance(r.get("triggered_functions"), str)
+                            else json.dumps(
+                                r.get("triggered_functions")
+                                if r.get("triggered_functions") is not None
+                                else r.get("functions_triggered", {})
+                            )
                         )
                         for r in runs
                     ],

@@ -17,6 +17,8 @@ from nle.nethack.actions import (
     MiscAction,
     MiscDirection,
     TextCharacters,
+    UnsafeActions,
+    WizardCommand,
 )
 
 
@@ -147,6 +149,24 @@ class Action(enum.IntEnum):
     WIPE = Command.WIPE.value  # M('w')
     ZAP = Command.ZAP.value  # ord('z')
 
+    # Additional Native & Control Commands
+    SHELL = Command.SHELL.value  # ord('!')
+    HELP = UnsafeActions.HELP.value  # ord('?')
+    PREVMSG = UnsafeActions.PREVMSG.value  # C('p') == 16
+    AGAIN = 1  # C('a') == 1, Redo previous command
+    REDO = 1  # Alias for AGAIN
+    INTERRUPT = 3  # C('c') == 3, Interrupt/quit
+    SUSPEND = 26  # C('z') == 26, Suspend game
+
+    # Wizard / Debug Mode Commands
+    WIZDETECT = WizardCommand.WIZDETECT.value  # C('e') == 5
+    WIZMAP = WizardCommand.WIZMAP.value  # C('f') == 6
+    WIZGENESIS = WizardCommand.WIZGENESIS.value  # C('g') == 7
+    WIZIDENTIFY = WizardCommand.WIZIDENTIFY.value  # C('i') == 9
+    WIZWHERE = WizardCommand.WIZWHERE.value  # C('o') == 15
+    WIZLEVELPORT = WizardCommand.WIZLEVELPORT.value  # C('v') == 22
+    WIZWISH = WizardCommand.WIZWISH.value  # C('w') == 23
+
     # Text / Prompt Characters
     PLUS = TextCharacters.PLUS.value
     MINUS = TextCharacters.MINUS.value
@@ -271,6 +291,24 @@ def seq(*steps: str | int | Action | RawAction, label: str = "") -> ActionSequen
         else:
             raise ValueError(f"Unsupported element in seq(): {item!r}")
     return ActionSequence(tuple(out), label=label)
+
+
+def repeat(count: int, action: Action | str | RawAction | int) -> ActionSequence:
+    """Repeats a NetHack action `count` times via numeric prefix (e.g. `repeat(10, Action.SEARCH)`)."""
+    if count <= 0:
+        return seq(Action.WAIT)
+    return seq(*str(count), action)
+
+
+def extcmd(name: str, *subsequent_keys: Any, label: str = "") -> ActionSequence:
+    """
+    Executes an extended '#' command (e.g. `extcmd('pray', 'y')`, `extcmd('terrain')`, `extcmd('sit')`).
+    Automatically prefixes with `Action.EXTCMD`, appends the command name followed by newline `\r`,
+    and chains any subsequent prompt response keys.
+    """
+    steps: list[Any] = [Action.EXTCMD, f"{name.strip().lstrip('#')}\r"]
+    steps.extend(subsequent_keys)
+    return seq(*steps, label=label or f"#{name}")
 
 
 def normalize_action_to_bytes(yielded: Any) -> tuple[tuple[int, ...], str]:

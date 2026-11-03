@@ -13,14 +13,14 @@ import numpy as np
 from nle import nethack as nh
 
 from lox.env.actions import normalize_action_to_bytes
-from lox.env.state import GameState, astar_next_step, bfs_distance_grid
+from lox.env.state import GameState, WorldMemory, astar_next_step, bfs_distance_grid
 
 # Pre-warm Numba JIT kernels once at module import
 _DUMMY_MASK = np.ones((4, 4), dtype=np.bool_)
 bfs_distance_grid(_DUMMY_MASK, 0, 0, True)
 astar_next_step(_DUMMY_MASK, 0, 0, 2, 2, True)
 
-LEAN_OBSERVATION_KEYS: tuple[str, ...] = (
+ALL_OBSERVATION_KEYS: tuple[str, ...] = (
     "glyphs",
     "chars",
     "colors",
@@ -33,7 +33,13 @@ LEAN_OBSERVATION_KEYS: tuple[str, ...] = (
     "inv_oclasses",
     "program_state",
     "internal",
+    "screen_descriptions",
+    "tty_chars",
+    "tty_colors",
+    "tty_cursor",
+    "misc",
 )
+LEAN_OBSERVATION_KEYS: tuple[str, ...] = ALL_OBSERVATION_KEYS
 
 ASCII_SPACE = ord(" ")
 ASCII_ESC = 27
@@ -63,6 +69,7 @@ class NetHackHarness:
         self._idx_map = {k: i for i, k in enumerate(self._obs_keys)}
         self._prog_state_idx = self._idx_map["program_state"]
         self._msg_idx = self._idx_map["message"]
+        self._internal_idx = self._idx_map["internal"]
 
         self.nh = nh.Nethack(
             observation_keys=self._obs_keys,
@@ -78,8 +85,10 @@ class NetHackHarness:
         self.step_count: int = 0
         self.current_seed: int = 0
         self.action_bytes = bytearray()
+        self.step_byte_offsets: list[int] = []
         self._last_raw_tuple: tuple[np.ndarray, ...] = ()
         self.done: bool = False
+        self.mem: WorldMemory = WorldMemory()
 
     @property
     def steps_taken(self) -> int:
@@ -104,6 +113,9 @@ class NetHackHarness:
             .strip()
         )
 
+    def _waiting_for_space(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
+        return bool(obs_tuple[self._internal_idx][3] == 1)
+
     def _settle_prompts(
         self,
         obs_tuple: tuple[np.ndarray, ...],
@@ -111,24 +123,31 @@ class NetHackHarness:
         messages: list[str] | None = None,
     ) -> tuple[tuple[np.ndarray, ...], bool]:
         """
-        Matches standard NLE prompt completion when NetHack pauses outside `in_moveloop`
-        (e.g., `--More--` pagination or end-of-game prompts) so a single policy turn completes cleanly.
+        Matches standard NLE prompt completion when NetHack pauses on `--More--`
+        (xwaitforspace) or outside `in_moveloop` so a single policy turn completes cleanly.
         """
         if not self.auto_dismiss_more:
             return obs_tuple, done
         safety = 0
-        while not done and not self._in_moveloop(obs_tuple) and safety < 32:
+        while (
+            not done
+            and (self._waiting_for_space(obs_tuple) or not self._in_moveloop(obs_tuple))
+            and safety < 64
+        ):
             safety += 1
-            prog = obs_tuple[self._prog_state_idx]
-            # prog[0]=game_over, prog[1]=in_yn_function, prog[2]=in_getlin, prog[3]=in_moveloop
-            if prog[0] == 1:
+            if self._waiting_for_space(obs_tuple):
                 b = ASCII_SPACE
-            elif prog[2] == 1:
-                b = ASCII_ESC
-            elif prog[1] == 1:
-                b = ASCII_N
             else:
-                b = ASCII_SPACE
+                prog = obs_tuple[self._prog_state_idx]
+                # prog[0]=game_over, prog[1]=in_yn_function, prog[2]=in_getlin, prog[3]=in_moveloop
+                if prog[0] == 1:
+                    b = ASCII_SPACE
+                elif prog[2] == 1:
+                    b = ASCII_ESC
+                elif prog[1] == 1:
+                    b = ASCII_N
+                else:
+                    b = ASCII_SPACE
             self.action_bytes.append(b)
             obs_tuple, done = self.nh.step(b)
             if messages is not None:
@@ -146,10 +165,11 @@ class NetHackHarness:
         self.action_bytes.clear()
         self.step_count = 0
         self.done = False
+        self.mem.reset()
 
         obs_tuple = self.nh.reset(None, options=None)
         for _ in range(100):
-            if self._in_moveloop(obs_tuple):
+            if self._in_moveloop(obs_tuple) and not self._waiting_for_space(obs_tuple):
                 break
             self.action_bytes.append(ASCII_SPACE)
             obs_tuple, self.done = self.nh.step(ASCII_SPACE)
@@ -157,7 +177,10 @@ class NetHackHarness:
                 break
 
         self._last_raw_tuple = obs_tuple
-        return GameState(obs_tuple, step_count=0)
+        self.step_byte_offsets = [len(self.action_bytes)]
+        state = GameState(obs_tuple, step_count=0, mem=self.mem)
+        self.mem.update(state)
+        return state
 
     def step(self, policy_action: Any) -> tuple[GameState, bool, dict[str, Any]]:
         """
@@ -188,21 +211,38 @@ class NetHackHarness:
             if done:
                 break
 
-        if not done and not self._in_moveloop(obs_tuple):
+            # Dismiss intermediate --More-- pagination prompts between bytes of a sequence
+            if idx + 1 < len(bytes_seq) and b != ASCII_SPACE:
+                more_safety = 0
+                while (
+                    not done and self._waiting_for_space(obs_tuple) and more_safety < 16
+                ):
+                    more_safety += 1
+                    self.action_bytes.append(ASCII_SPACE)
+                    obs_tuple, done = self.nh.step(ASCII_SPACE)
+                    raw_m = self._extract_raw_message(obs_tuple)
+                    if raw_m and (not messages or messages[-1] != raw_m):
+                        messages.append(raw_m)
+
+        if not done and (
+            self._waiting_for_space(obs_tuple) or not self._in_moveloop(obs_tuple)
+        ):
             obs_tuple, done = self._settle_prompts(obs_tuple, done, messages=messages)
             raw_m = self._extract_raw_message(obs_tuple)
             if raw_m and (not messages or messages[-1] != raw_m):
                 messages.append(raw_m)
 
         self.step_count += 1
+        self.step_byte_offsets.append(len(self.action_bytes))
         truncated = self.step_count >= self.max_steps
         if truncated and not done:
             done = True
 
         self.done = bool(done)
         self._last_raw_tuple = obs_tuple
-        state = GameState(obs_tuple, step_count=self.step_count)
+        state = GameState(obs_tuple, step_count=self.step_count, mem=self.mem)
         state._message_cache = " | ".join(messages) if messages else ""
+        self.mem.update(state, action_name=action_name)
 
         is_ascended = False
         if self.done:
@@ -242,20 +282,50 @@ class NetHackHarness:
         self.action_bytes.clear()
         self.step_count = 0
         self.done = False
+        self.mem.reset()
 
         obs_tuple = self.nh.reset(None, options=None)
         limit = (
             len(buf) if stop_at_byte_idx is None else min(len(buf), stop_at_byte_idx)
         )
+        bl_idx = self._idx_map["blstats"]
+        step_ctr = 0
         for i in range(limit):
             b = int(buf[i])
             self.action_bytes.append(b)
             obs_tuple, self.done = self.nh.step(b)
+            bl = obs_tuple[bl_idx]
+            dnum, dlvl, by, bx = int(bl[23]), int(bl[24]), int(bl[1]), int(bl[0])
+            self.mem.pos_history.append((dnum, dlvl, by, bx))
+            fl = self.mem.get_floor(dnum, dlvl)
+            if 0 <= by < 21 and 0 <= bx < 79:
+                fl.visited[by, bx] = True
+                fl.visit_count[by, bx] += 1
+            if b == ord("s"):
+                fl.searched_counts[
+                    max(0, by - 1) : min(21, by + 2), max(0, bx - 1) : min(79, bx + 2)
+                ] += 1
+            if len(self.mem.pos_history) >= 2:
+                prev = self.mem.pos_history[-2]
+                now = self.mem.pos_history[-1]
+                if (prev[0], prev[1]) != (now[0], now[1]):
+                    self.mem.stair_graph[prev] = now
+                    self.mem.stair_graph[now] = prev
+            if self._in_moveloop(obs_tuple) and not self._waiting_for_space(obs_tuple):
+                step_ctr += 1
             if self.done:
                 break
 
+        if not self.done and (
+            self._waiting_for_space(obs_tuple) or not self._in_moveloop(obs_tuple)
+        ):
+            obs_tuple, self.done = self._settle_prompts(obs_tuple, self.done)
+
         self._last_raw_tuple = obs_tuple
-        return GameState(obs_tuple, step_count=limit)
+        self.step_count = step_ctr
+        state = GameState(obs_tuple, step_count=step_ctr, mem=self.mem)
+        self.mem.update(state)
+        return state
 
     def close(self) -> None:
         try:

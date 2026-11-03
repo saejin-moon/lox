@@ -11,6 +11,8 @@ import sys
 
 from dotenv import load_dotenv
 
+if os.environ.get("OPENROUTER_API_KEY") in ("your-api-key", "sk-or-v1-..."):
+    os.environ.pop("OPENROUTER_API_KEY", None)
 load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -59,6 +61,12 @@ def main() -> None:
         "--role",
         default="val-hum-law-fem",
         help="NetHack character role/race/align/gender (default: val-hum-law-fem)",
+    )
+    parser.add_argument(
+        "--benchmark",
+        default="nethack",
+        choices=["nethack", "craftax"],
+        help="Target benchmark environment (default: nethack)",
     )
     parser.add_argument(
         "--workers",
@@ -134,8 +142,8 @@ def main() -> None:
     parser.add_argument(
         "--pilot-episodes",
         type=int,
-        default=20,
-        help="Episodes per parallel pilot batch test (default: 20)",
+        default=30,
+        help="Episodes per parallel pilot batch test (default: 30)",
     )
     parser.add_argument(
         "--max-repairs",
@@ -164,6 +172,7 @@ def main() -> None:
         max_repair_turns=args.max_repairs,
         pilot_revisions=args.pilot_revisions,
         pilot_episodes=args.pilot_episodes,
+        benchmark=args.benchmark,
     )
     try:
         orchestrator.run_campaign(
@@ -171,6 +180,8 @@ def main() -> None:
             target_depth=args.target_depth,
             forced_mode=args.mode,
         )
+    except PermissionError:
+        sys.exit(1)
     except KeyboardInterrupt:
         ui.warn("Campaign interrupted by user (Ctrl+C). Exiting cleanly.")
     finally:

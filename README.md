@@ -2,11 +2,11 @@
 
 > **Architectural Motto:** *"Hard Code Nothing."*
 
-**LOX** is an autonomous, high-throughput neuro-symbolic program synthesis engine that discovers, tests, attributes, and refines executable Python control policies and reusable macro libraries for complex, long-horizon environments—starting with the **NetHack Learning Environment (NLE)**—from first principles.
+**LOX** is an autonomous, high-throughput neuro-symbolic program synthesis engine that discovers, tests, attributes, and refines executable Python control policies and reusable macro libraries for complex, long-horizon environments from first principles—supporting both the **NetHack Learning Environment (NLE)** and the **Crafter / Craftax** survival benchmark.
 
 Unlike traditional Deep Reinforcement Learning (which trains opaque neural weights over billions of frames) or online LLM agents (which query a slow, expensive language model at every environment step), **LOX puts the LLM in the outer scientific loop and compiled Python in the inner execution loop**:
-- **Inner Loop (CPU)**: Compiled Python 3.11+ generator policies execute directly against NLE's C engine at **50,000–121,000+ steps/sec** across worker cores (`0` LLM tokens per step).
-- **Outer Loop (Stateless Scientist LLM)**: Between batches, a stateless Author Agent queries a multi-table **DuckDB** analytical warehouse (`runs`, `ticks`, `function_stats`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki**, formulates a falsifiable causal hypothesis, tests candidate skills in a fast **5 × 20-episode self-iterative pilot revision loop** with behavioral critics and deterministic prefix replay, and triggers targeted evolutionary rollouts.
+- **Inner Loop (CPU)**: Compiled Python 3.11+ generator policies execute directly against the C/Python environment harness at **50,000–121,000+ steps/sec** across worker cores (`0` LLM tokens per step), featuring automatic C prompt settlement (`flags.xwaitforspace` / `--More--` dismissal) and microsecond byte replay.
+- **Outer Loop (Stateless Scientist LLM)**: Between batches, a stateless Author Agent queries a multi-table **DuckDB** analytical warehouse (`runs`, `ticks`, `function_stats`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Knowledge Base**, formulates a falsifiable causal hypothesis, tests candidate skills in a fast **5 × 30-episode self-iterative pilot revision loop** with behavioral critics and deterministic prefix-replay shards, and triggers targeted evolutionary rollouts.
 
 ---
 
@@ -14,13 +14,14 @@ Unlike traditional Deep Reinforcement Learning (which trains opaque neural weigh
 
 1. [Core Architectural Philosophy ("Hard Code Nothing")](#1-core-architectural-philosophy-hard-code-nothing)
 2. [System Architecture & Dataflow](#2-system-architecture--dataflow)
-3. [Theoretical & Research Foundations](#3-theoretical--research-foundations)
-4. [The Four Modification Modes](#4-the-four-modification-modes)
-5. [Multi-Table DuckDB Schema & Outlier Attribution](#5-multi-table-duckdb-schema--outlier-attribution)
-6. [Parameter-Free Sequential Hypothesis Testing](#6-parameter-free-sequential-hypothesis-testing)
-7. [Repository Structure](#7-repository-structure)
-8. [Quickstart & CLI Usage](#8-quickstart--cli-usage)
-9. [References & Citations](#9-references--citations)
+3. [Multi-Benchmark Architecture: NetHack & Craftax](#3-multi-benchmark-architecture-nethack--craftax)
+4. [Prefix-Replay Evaluation Shards & Spatial WorldMemory](#4-prefix-replay-evaluation-shards--spatial-worldmemory)
+5. [The Four Modification Modes & Library Learning](#5-the-four-modification-modes--library-learning)
+6. [Multi-Table DuckDB Schema & Outlier Attribution](#6-multi-table-duckdb-schema--outlier-attribution)
+7. [Parameter-Free Sequential Hypothesis Testing](#7-parameter-free-sequential-hypothesis-testing)
+8. [Repository Structure](#8-repository-structure)
+9. [Quickstart & CLI Usage](#9-quickstart--cli-usage)
+10. [References & Citations](#10-references--citations)
 
 ---
 
@@ -32,10 +33,11 @@ Earlier generations of LLM-guided game agents rely heavily on human-engineered w
 
 1. **Zero Hardcoded Strategy in the Harness ([`lox/env/`](lox/env/))**:
    - The harness contains **zero** game heuristics, **zero** monster/corpse/item lists, and **zero** hidden macro adapters.
-   - It provides a **pure 1-to-1 map** between policy yields and native NLE C actions ([`Action`](lox/env/actions.py) IntEnum, [`key(ch)`](lox/env/actions.py) raw ASCII bytes, and [`seq(...)`](lox/env/actions.py) multi-keystroke sequences).
-   - It exposes the complete NetHack game state lazily via [`GameState`](lox/env/state.py): all 27 `blstats` fields, `BL_MASK_*` status bitmasks, 21×79 screen grids (`glyphs`, `chars`, `colors`, `specials`), inventory slots, and pre-indexed C symbol table lookups over `nle.nethack.permonst` and `nle.nethack.objclass`, alongside generic Numba-JIT grid math ([`bfs_distance_grid`](lox/env/state.py), [`astar_next_step`](lox/env/state.py)).
+   - It provides a **pure 1-to-1 connection** between policy yields and native environment actions ([`Action`](lox/env/actions.py) / [`CraftaxAction`](lox/env/craftax/actions.py), [`key(ch)`](lox/env/actions.py) raw ASCII bytes, and [`seq(...)`](lox/env/actions.py) multi-keystroke sequences).
+   - It exposes the game state lazily via [`GameState`](lox/env/state.py): all 27 `blstats` fields, `BL_MASK_*` status bitmasks, 21×79 or 48×48 screen grids (`glyphs`, `chars`, `colors`, `specials`), inventory items, and pre-indexed C symbol table lookups over `nle.nethack.permonst` and `nle.nethack.objclass`, alongside generic Numba-JIT grid math ([`bfs_distance_grid`](lox/env/state.py), [`astar_next_step`](lox/env/state.py)).
+   - Transparently handles NetHack C engine pagination (`flags.xwaitforspace == 1`) by automatically clearing `--More--` pauses while logging every keystroke byte for bit-identical replay.
 2. **Near-Full Python 3.11+ Policy Language & Macro Library ([`lox/lang/`](lox/lang/))**:
-   - The Author Agent writes full Python 3.11+ in `data/workspace/policy.py` and `data/workspace/macros.py`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` structural pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
+   - The Author Agent writes full Python 3.11+ in `data/workspace/policy.py`, `data/workspace/macros.py`, and modular skills in `data/workspace/skills/`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` structural pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
    - Compile-time AST instrumentation ([`PolicyInstrumentTransformer`](lox/lang/instrument.py) & [`ExecutionTracer`](lox/lang/instrument.py)) injects `<1 µs` per-function call counting, per-function turn attribution, zero-yield infinite-loop protection ([`PolicyLoopError`](lox/lang/instrument.py)), and tunable numerical parameter hooks (`self.param(name, default, min_val, max_val)`).
 
 ---
@@ -48,8 +50,8 @@ Earlier generations of LLM-guided game agents rely heavily on human-engineered w
 │  • 100% Static Cached System Prompt (Policy Language Specs + DuckDB Schema)      │
 │  • Dynamic User Prompt: Mode Instructions + Active Code + Contrastive Digest     │
 │  • Tools: query_db(sql) | query_wiki(q) | query_policy_docs(t) | dry_run_policy  │
-│  • Self-Iterative Pilot Revisions: Up to 5 runs x 20 paired episodes (~0.5s)     │
-│    with Behavioral Critic (2-tile ping-pong & stall detection) + Prefix Replay   │
+│  • Self-Iterative Pilot Revisions: Up to 5 runs x 30 paired episodes (~0.8s)     │
+│    with Auto-Pilot Gate & Behavioral Critic (real-time physical stall telemetry)  │
 └───────────────────────────────────────┬──────────────────────────────────────────┘
                                         │ Emits Single-Skill YAML Hypothesis + Python Code
                                         ▼
@@ -57,142 +59,148 @@ Earlier generations of LLM-guided game agents rely heavily on human-engineered w
 │                        HYBRID CADENCE / BANDIT SCHEDULER                         │
 │  ┌────────────────┐  ┌────────────────┐  ┌──────────────────┐  ┌──────────────┐  │
 │  │ 1. FULL_WRITE  │  │ 2. MACRO_WRITE │  │ 3. FUNC_MOD_ADD  │  │ 4. PARAM_TUNE│  │
-│  │   10,000 eps   │  │  0 eps (skip)  │  │ 150 trig eps / fn│  │  0 LLM tokens│  │
+│  │    250 eps     │  │  0 eps (skip)  │  │ 150 trig eps / fn│  │  0 LLM tokens│  │
 │  │ (Gen 0 init)   │  │ -> macros.py   │  │ (single skill)   │  │  (CRN-SPSA)  │  │
 │  └───────┬────────┘  └───────┬────────┘  └────────┬─────────┘  └──────┬───────┘  │
 └──────────┼───────────────────┼────────────────────┼───────────────────┼──────────┘
            │                   │ (Instant Next Gen) │                   │
            ▼                   ▼                    ▼                   ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│                 PERSISTENT MULTI-CORE C++ NLE WORKER POOL                        │
-│  • Direct nle.nethack.Nethack.step(byte) (50k–121k+ steps/sec across workers)    │
+│             PERSISTENT MULTI-CORE WORKER POOL (NLE & Craftax Adapters)           │
+│  • Direct C / Numba Step Execution (50k–121k+ steps/sec across workers)          │
+│  • Checkpoint Prefix Shards: 200-step replay for pre-death & floor entry windows  │
 │  • Conditional Trigger Filter: discards episodes where target_fn call_count == 0 │
 │  • Unreachable Function Circuit Breaker + Sequential Futility Early Stopping     │
 └───────────────────────────────────────┬──────────────────────────────────────────┘
-                                        │ Recorded Triggered Episodes + 4KB Replay Bytes
+                                        │ Recorded Triggered Episodes + Replay Bytes
                                         ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │           MULTI-TABLE DUCKDB WAREHOUSE & OUTLIER SUMMARIZER (lox.duckdb)         │
 │  • RLE Phase Timeline Compressor + Critical Inflection & Stall Detector          │
 │  • Go-Explore Outlier Good-Run Marker (is_outlier_good = TRUE via Z-score / IQR) │
 │  • Spectrum-Based Function Attribution (Ochiai Good-Run & Liblit Failure Scores) │
-│  • Consolidated Human Ascensions & NLE Traces (expert_runs & expert_ticks)       │
+│  • Consolidated Human Ascensions & Expert Traces (expert_runs & expert_ticks)    │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Theoretical & Research Foundations
+## 3. Multi-Benchmark Architecture: NetHack & Craftax
 
-LOX synthesizes insights from eight distinct research traditions across reinforcement learning, program synthesis, software fault localization, distributed systems observability, and sequential statistics:
+LOX uses a unified [`BenchmarkAdapter`](lox/env/base.py) protocol that decouples environments from policy execution and statistical hypothesis testing:
 
-### 3.1 Evolutionary Program Synthesis & Library Learning
-- **FunSearch** *(Romera-Paredes et al., Nature 2024)* & **AlphaEvolve** *(Novikov et al., 2025)* demonstrated that pairing an LLM code generator with a fast, automated programmatic evaluator can discover novel algorithms when evolving executable functions rather than raw solutions. LOX extends this paradigm from static combinatorial scoring functions to **stateful, multi-thousand-turn closed-loop control policies**.
-- **DreamCoder** *(Ellis et al., PLDI 2021)* & **Voyager** *(Wang et al., 2023)* established the **Wake-Sleep Library Learning** paradigm: agents only scale to deep horizons when they factor recurring low-level action sequences into reusable abstractions. LOX implements this directly via its dedicated `MACRO_WRITE` mode (`data/workspace/macros.py`), allowing the Author Agent to build reusable generator subroutines (`yield from macro_name(state)`) without burning evaluation episodes.
+### 3.1 NetHack Learning Environment (`--benchmark nethack`)
+- **Engine**: Direct C++ `nle.nethack.Nethack` engine with `--More--` pause dismissal.
+- **State Representation**: 21×79 character grids, 27 status indicators, C permonst/objclass symbols.
+- **Progression Metric**: Composite progression index based on dungeon depth, character level, armor class, and gold.
 
-### 3.2 Go-Explore & Statistical Outlier Archiving
-- **Go-Explore** *(Ecoffet et al., Nature 2021)* & **MAP-Elites** *(Mouret & Clune, 2015)* showed that in sparse-reward, high-mortality environments like Montezuma's Revenge and NetHack, average-case batch statistics wash out rare breakthroughs. Progress depends on **identifying, archiving, and returning to exceptional outlier trajectories**.
-- In LOX, every evaluation batch automatically scores all episodes on a composite progression index and flags statistical breakthroughs (`Z-score >= 1.65` or `> Q75 + 1.5 * IQR`) with `is_outlier_good = TRUE` in the `runs` table. Furthermore, every run stores its raw keystroke stream (`action_bytes`, ~4 KB), enabling **14ms deterministic C-level replay** ([`NetHackHarness.replay_bytes`](lox/env/harness.py)) to any turn of any outlier run.
-
-### 3.3 Coverage-Guided Greybox Fuzzing & Conditional Episode Filtering
-- **AFL** *(Zalewski, 2014)* & **AFLFast** *(Böhme et al., CCS 2017)* revolutionized software testing by instrumenting basic-block edges at compile time and discarding inputs that fail to exercise targeted code paths.
-- LOX applies this exact principle to policy evaluation in `FUNC_MOD_ADD` mode: [`PolicyInstrumentTransformer`](lox/lang/instrument.py) instruments every function and macro in the AST. When the Author modifies or adds $K$ functions, the worker pool requires $1,000 \times K$ episodes that **actually execute** at least one modified function. Any episode where the hero dies before triggering the modified code is **immediately discarded in the worker** (`triggered == False`) and never pollutes database statistics or hypothesis tests.
-
-### 3.4 Spectrum-Based & Statistical Fault Localization (SBFL)
-- How does the Author Agent know *which* function caused outlier runs to succeed and *which* function caused normal runs to die? LOX draws directly from software debugging literature:
-  - **Ochiai Similarity Coefficient** *(Abreu et al., 2007)*: Originally used to correlate test coverage spectra with software faults, LOX inverts Ochiai to measure **Good-Run Function Attribution**:
-    $$\text{Ochiai}_{\text{good}}(f) = \frac{e_{\text{good}}(f)}{\sqrt{(e_{\text{good}}(f) + e_{\text{normal}}(f)) \cdot N_{\text{good}}}}$$
-    Functions with high $\text{Ochiai}_{\text{good}}(f)$ are the statistical drivers of `is_outlier_good = TRUE` breakthroughs.
-  - **Liblit Statistical Failure Importance** *(Liblit et al., PLDI 2005)*: Computes the harmonic contrast between a function's probability of being active on the fatal turn versus its baseline activation rate, pinpointing the exact subroutine responsible for mortality spikes.
-
-### 3.5 Tail-Based Distributed Tracing & RLE Trajectory Compression
-- **Dapper** *(Sigelman et al., 2010)* & **Sifter / Tail-Based Sampling** *(Las-Casas et al., SoCC 2019)* established that high-throughput distributed systems should make trace retention decisions *at the end of a request*—keeping 100% of anomalous/outlier traces while downsampling routine executions.
-- [`BatchDatabaseLogger`](lox/db/logger.py) implements **Smart Tail-Based Tick Sampling**: every run in `runs` receives a full **Run-Length Encoded (RLE) Phase Timeline**, **Critical Inflection Log**, and **Stall Heatmap** ([`summarize_episode_ticks`](lox/db/summarizer.py)), while the `ticks` table stores full tick-by-tick histories for all `is_outlier_good = TRUE` runs and diagnostic exemplars without multi-gigabyte storage bloat.
-
-### 3.6 Simultaneous Perturbation Stochastic Approximation with Common Random Numbers (CRN-SPSA)
-- **SPSA** *(Spall, IEEE TAC 1992, 1998)* & **CRN-SPSA** *(Kleinman, Spall & Naiman, 1999)* proved that in high-dimensional stochastic optimization ($p$ continuous/integer parameters), perturbing all parameters simultaneously along a Rademacher vector $\Delta_k \in \{-1, +1\}^p$ requires only **2 evaluations per gradient step** regardless of dimension $p$, and evaluating $\theta + c_k \Delta_k$ and $\theta - c_k \Delta_k$ on **identical random seeds** (Common Random Numbers) collapses gradient variance.
-- LOX uses **CRN-SPSA** in `PARAM_TUNE` mode ([`run_spsa_param_tuning`](lox/engine/modes.py)) to tune all `self.param(...)` thresholds in the policy simultaneously using **zero LLM tokens**, then bakes the winning constants back into the Python AST.
-
-### 3.7 Anytime-Valid Confidence Sequences & Non-Parametric Rank Testing
-- **Empirical Bernstein Confidence Sequences** *(Howard et al., Annals of Statistics 2021; Waudby-Smith & Ramdas, JRSS-B 2024)* provide time-uniform confidence intervals $[L_t, U_t]$ that remain statistically valid under continuous sequential monitoring and early stopping.
-- **Wilcoxon Signed-Rank Test** *(Wilcoxon, 1945)* provides non-parametric paired comparison robust to heavy-tailed NetHack score/depth distributions.
-- Together, these allow LOX to eliminate "LLM effect-size guessing" completely ([`lox/engine/hypothesis.py`](lox/engine/hypothesis.py)).
-
-### 3.8 Extreme-Value Multi-Armed Bandits for Mode Scheduling
-- **Max $K$-Armed Bandits** *(Cicirello & Smith, 2005; Streeter & Smith, 2006)* model mutation operator selection in evolutionary algorithms where the value of an operator is governed by the *maximum* breakthrough it produces per unit compute rather than its mean. [`ModeScheduler`](lox/engine/scheduler.py) combines a deterministic warmup cadence with Extreme-Value UCB credit assignment.
+### 3.2 Crafter / Craftax Benchmark (`--benchmark craftax`)
+- **Engine**: Pure deterministic Crafter/Craftax survival engine with 17 discrete actions.
+- **Facing Direction Mechanics**: `LEFT`, `RIGHT`, `UP`, and `DOWN` orient the player; `Action.DO` and `PLACE_*` act on the targeted coordinate `(y + dy, x + dx)`.
+- **Full 22-Achievement Survival Tech Tree**: Wood gathering, crafting table placement, wooden pickaxe crafting, stone mining, furnace placement, stone pickaxe, iron mining, iron smelting, weapon crafting, hostile mob combat, and thirst/hunger maintenance.
+- **Progression Metric**: Total survival achievements unlocked plus health and step survival bonuses.
 
 ---
 
-## 4. The Four Modification Modes
+## 4. Prefix-Replay Evaluation Shards & Spatial WorldMemory
 
-| Mode | Episode Budget | Trigger / Filter Rule | Purpose |
+### 4.1 Checkpoint Prefix Shards ([`lox/db/shards.py`](lox/db/shards.py))
+To evaluate late-game survival skills without waiting thousands of exploration steps, LOX automatically extracts **200-step Checkpoint Prefix Shards** from recorded baseline runs:
+1. **Pre-Death Windows**: Checkpoint sliced 30 turns prior to a fatal encounter.
+2. **Pre-Stall Windows**: Checkpoint sliced 5 turns prior to detected oscillation/stagnation.
+3. **Floor Entry Checkpoints**: Arrival checkpoint on new dungeon floors (`depth >= 2`).
+
+In `FUNC_MOD_ADD` and pilot testing, shards are replayed at microsecond speeds up to the cut point, after which the candidate policy takes control. Shards are paired **strictly against baseline shards** on identical prefixes, preventing false regressions against full 25,000-turn runs.
+
+### 4.2 Dynamic Spatial WorldMemory ([`lox/env/state.py`](lox/env/state.py))
+Policies have access to `state.mem` (`WorldMemory`), which dynamically adapts to map dimensions ($21 \times 79$ for NetHack, $48 \times 48$ for Craftax):
+- `visited`: Boolean grid tracking all observed/explored tiles.
+- `visit_count`: Integer matrix tracking exploration density and detecting loops.
+- `searched_counts`: Spatial grid incremented when `Action.SEARCH` is taken, aiding secret door discovery.
+- `stair_graph`: Bidirectional inter-floor transition graph tracking stair connections.
+- `pos_history`: Bounded coordinate history for cycle breaking and frontier navigation.
+
+---
+
+## 5. The Four Modification Modes & Library Learning
+
+| Mode | Episode Budget | Verification Gate | Purpose |
 | :--- | :--- | :--- | :--- |
-| **`FULL_WRITE`** | `250–10,000` episodes | All episodes recorded | Synthesizes `class Policy` from scratch on Generation 0 (no starter policy fed). |
-| **`MACRO_WRITE`** | `0` episodes *(instant)* | Syntax + AST sandbox check | Synthesizes reusable generator/helper macros into `data/workspace/macros.py` and immediately starts the next generation. |
-| **`FUNC_MOD_ADD`** | `150` triggered eps / fn | **Must call targeted function**; untriggered episodes are discarded | Surgically adds or modifies a single targeted skill on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)) after up to 5 self-iterative pilot revisions. |
-| **`PARAM_TUNE`** | `0` LLM tokens (`CRN-SPSA`) | Paired seed mini-batches + validation batch | Optimizes all `self.param(name, default, min, max)` constants via CRN-SPSA and bakes winning values into the AST. |
+| **`FULL_WRITE`** | `250` episodes | 30-episode live smoke test | Synthesizes `class Policy` from scratch on Generation 0 (no starter policy fed). |
+| **`MACRO_WRITE`** | `0` episodes *(instant)* | Real-state replay test across 3 diverse fixtures | Synthesizes verified generator/helper macros into `data/workspace/macros.py` with static contract linting. |
+| **`FUNC_MOD_ADD`** | `150` triggered eps / fn | 5 × 30-episode pilot revision loop | Surgically adds or modifies a single targeted method on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)). |
+| **`PARAM_TUNE`** | `0` LLM tokens (`CRN-SPSA`) | Paired CRN validation batch | Optimizes all `self.param(name, default, min, max)` thresholds via Common Random Numbers SPSA and bakes winning constants into the AST. |
+
+### Bottom-Up Macro Harvesting & Skill Packaging
+In addition to top-down LLM generation, LOX implements **Wake-Sleep Library Learning**:
+- **Macro Harvester** ([`lox/lang/macros.py`](lox/lang/macros.py)): After successful rollouts, helper methods with high Ochiai Good-Run correlation are automatically extracted into `data/workspace/macros.py`.
+- **Hierarchical Skills** ([`data/workspace/skills/`](data/workspace/skills/)): Author Agent can create and import modular sub-generators (e.g. `combat_tactics.py`, `trap_navigation.py`), which are dynamically loaded and scoped into the policy outline.
 
 ---
 
-## 5. Multi-Table DuckDB Schema & Outlier Attribution
+## 6. Multi-Table DuckDB Schema & Outlier Attribution
 
-All experimental telemetry and reference human ascensions live in a single consolidated DuckDB database (`data/lox.duckdb`) queryable by the Author Agent via `query_db(sql)`:
+All experimental telemetry and reference human ascensions live in a consolidated DuckDB warehouse (`data/lox.duckdb`):
 
-1. **`batches`**: Batch-level metadata (`batch_id`, `generation`, `mode`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`).
-2. **`runs`**: Every recorded episode (`run_id`, `batch_id`, `seed`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `final_ac`, `end_reason`, `summary_digest`, `game_log`, `milestones_json`, `triggered_functions`, `last_active_function`, `outlier_z_score`, `batch_percentile`, `is_outlier_good`, `action_bytes`).
-3. **`ticks`**: Tail-sampled step-by-step trace records (`run_id`, `turn`, `step_idx`, `depth`, `hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `active_function`, `message`).
-4. **`function_stats`**: Per-function execution spectrum (`function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, `ochiai_good_run_score`, `liblit_failure_score`).
-5. **`policies`**: Full source code and parameter snapshots for every generation (`policy_id`, `policy_code`, `macros_code`, `params_json`, `is_promoted`).
-6. **`experiments`**: Causal hypotheses and statistical verdicts (`observation_from_db`, `mechanism`, `passed`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`, `verdict_reason`).
-7. **`expert_runs`** & **`expert_ticks`**: Verified human NetHack ascensions (`archive.alt.org` xlogfile + dumplogs, *Hambro et al., 2022*) and NLE reference trajectories compiled into the **exact same `summary_digest` / `game_log` / overview stats format** as `runs` and `ticks`.
+1. **`batches`**: Metadata per generation batch (`batch_id`, `generation`, `mode`, `target_functions`, `avg_depth`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`).
+2. **`runs`**: Episode outcomes (`run_id`, `seed`, `depth`, `score`, `turns`, `end_reason`, `summary_digest`, `game_log`, `milestones_json`, `is_outlier_good`, `action_bytes`).
+3. **`ticks`**: Tail-sampled step traces (`run_id`, `turn`, `hp`, `ac`, `y`, `x`, `action_name`, `active_function`, `message`).
+4. **`function_stats`**: Spectrum-based attribution (`episodes_triggered`, `ochiai_good_run_score`, `liblit_failure_score`).
+5. **`policies`**: Complete snapshots of promoted and candidate policies and macros.
+6. **`experiments`**: Qualitative causal hypotheses, pilot outcomes, and statistical verdicts.
+7. **`expert_runs`** & **`expert_ticks`**: Verified human NetHack ascensions (`archive.alt.org` xlogfile + dumplogs) and expert reference trajectories.
 
 ---
 
-## 6. Parameter-Free Sequential Hypothesis Testing
+## 7. Parameter-Free Sequential Hypothesis Testing
 
-The Author Agent never guesses a numerical improvement target. Instead, it emits a structured qualitative causal hypothesis containing explicit skill invariants:
+The Author Agent never guesses numerical effect sizes. Instead, it emits a structured qualitative causal hypothesis:
 
 ```yaml
 mode: FUNC_MOD_ADD
 target_functions:
   - explore_step
-skill_name: "Persistent Frontier Exploration with Multi-Tile Cycle Breaking"
-precondition: "No adjacent hostile monsters; unvisited walkable tiles exist on the level."
+skill_name: "Frontier Exploration with Multi-Tile Cycle Breaking"
+precondition: "No adjacent hostile monsters; unvisited walkable tiles exist."
 state_persistence: "self.target_tile (held up to 25 steps) and self.pos_history (deque(maxlen=8))"
-postcondition: "Descends downstairs '>' or reaches an unvisited room via door '+'."
-observation_from_db: "In stalled runs on Dlvl 1, 85% of episodes oscillated between (2,49) and (3,49) because nearest frontier distance inverted every turn."
-mechanism: "Commit to self.target_tile until reached or blocked, and take random escape steps if current (y, x) is in self.pos_history[:-1]."
+postcondition: "Descends downstairs '>' or reaches an unvisited room."
+observation_from_db: "In stalled runs on Dlvl 1, 85% of episodes oscillated between two corridor tiles."
+mechanism: "Commit to target_tile and take random escape steps if (y, x) is in pos_history[:-1]."
 ```
 
 Candidate policies are evaluated on paired seeds against the active baseline using three objective statistical gates ([`lox/engine/hypothesis.py`](lox/engine/hypothesis.py)):
-1. **Sequential Futility Early Stopping**: If after $n \ge 60$ paired triggered seeds the 95% Empirical Bernstein Confidence Sequence upper bound satisfies $U_n \le 0.0$, the evaluation terminates early to save compute.
+1. **Sequential Futility Early Stopping**: If after $n \ge 60$ paired triggered seeds the 95% Empirical Bernstein Confidence Sequence upper bound satisfies $U_n \le 0.0$, rollout terminates early to conserve compute.
 2. **Positive Mean Progression Delta**: $\bar{d} > 0.0$ and strictly more improved seeds than regressed seeds ($\text{wins} > \text{losses}$).
-3. **Statistical Significance**: Either the 95% Confidence Sequence lower bound $L_N > 0.0$ or the one-sided Paired Wilcoxon Signed-Rank $p < 0.05$.
+3. **Statistical Significance**: Either 95% Confidence Sequence lower bound $L_N > 0.0$ or one-sided Paired Wilcoxon Signed-Rank $p < 0.05$.
 
 ---
 
-## 7. Repository Structure
+## 8. Repository Structure
 
 ```text
 lox/
 ├── env/
+│   ├── base.py             # BenchmarkAdapter protocol & registry
 │   ├── actions.py          # 1-to-1 Action IntEnum, key(), seq(), DIR_DELTAS
-│   ├── state.py            # Lazy zero-copy GameState, NLE C LUTs, Numba BFS & A*
-│   └── harness.py          # Direct C++ nle.nethack.Nethack harness & 14ms byte replay
+│   ├── state.py            # Lazy zero-copy GameState, WorldMemory, Numba BFS & A*
+│   ├── harness.py          # Direct C++ NLE harness & microsecond byte replay
+│   ├── nethack/            # NetHackAdapter & knowledge base integration
+│   └── craftax/            # CraftaxAdapter, 17 actions, 22-achievement survival ruleset
 ├── lang/
-│   ├── validator.py        # Python 3.11+ AST sandbox validator & surgical function splicer
+│   ├── validator.py        # Python 3.11+ AST sandbox validator & macro contract linter
 │   ├── instrument.py       # ExecutionTracer, TunableParam, PolicyInstrumentTransformer
-│   ├── macros.py           # Persistent MacroLibrary manager (data/workspace/macros.py)
-│   └── compiler.py         # Compiles macros.py + policy.py into PolicyRunner instances
+│   ├── macros.py           # MacroLibrary manager & MacroHarvester bottom-up library learning
+│   └── compiler.py         # Compiles macros.py + policy.py + skills into PolicyRunner instances
 ├── db/
 │   ├── schema.py           # 8-table DuckDB schema initialization & connections
-│   ├── summarizer.py       # RLE phase compressor, inflection detector, outlier marker, Ochiai/Liblit
+│   ├── shards.py           # PrefixShard extractor (pre-death, pre-stall, floor-entry)
+│   ├── summarizer.py       # RLE timeline compressor, stall analyzer, Ochiai/Liblit attribution
 │   └── logger.py           # High-throughput DuckDB batch logger with tail-based tick sampling
 ├── datasets/
 │   ├── wiki.py             # Offline NetHack 3.6.6 Wiki SQLite FTS5 BM25 search engine
 │   └── download_experts.py # Compiles NAO human ascensions & NLE traces into expert_runs / expert_ticks
 ├── runner/
-│   └── pool.py             # Persistent multi-core NLE worker pool & conditional trigger filter
+│   └── pool.py             # Persistent multi-core worker pool & conditional trigger filter
 ├── author/
 │   ├── prompts.py          # Static cacheable System Prompt & dynamic User Prompt builder
 │   ├── tools.py            # AuthorToolRegistry: query_db, query_wiki, query_policy_docs, dry_run_policy
@@ -206,87 +214,86 @@ lox/
     └── console.py          # Compact ANSI console UI with single-line progress & summary tables
 scripts/
 ├── run_lox.py              # Main CLI entrypoint for running synthesis campaigns
+├── reset_clean.py          # Resets campaign to Gen 0 while preserving expert corpus & wiki
 ├── download_experts.py     # Populates expert_runs and expert_ticks in data/lox.duckdb
 └── build_wiki_db.py        # Builds data/wiki_index.db from data/nethackwikidata.json
 tests/
-├── test_harness_speed.py   # 1-to-1 actions, GameState queries, replay bit-identity, throughput
-├── test_lang_instrument.py # Python 3.11+ features, sandbox security, tracer, loop guard, splicing
-├── test_db_summarizer.py   # RLE summarizer, outlier marker, Ochiai/Liblit, DuckDB logger & tools
-├── test_modes_and_eval.py  # Trigger filtering, unreachable circuit breaker, hypothesis CS, SPSA, mock campaign
-└── test_author_and_ui.py   # Author YAML/code parser, macro execution tracing, ConsoleUI rendering
+├── test_overhaul_verification.py       # Full regression test suite for adapters, shards, and logging
+├── test_skill_graph_and_adapters.py    # Multi-benchmark adapter and skill compilation tests
+├── test_todo_architectural_overhaul.py  # Spatial WorldMemory and prefix shard extraction tests
+├── test_harness_speed.py               # 1-to-1 actions, GameState queries, replay bit-identity
+├── test_lang_instrument.py             # Python 3.11+ features, tracer, loop guard, splicing
+├── test_db_summarizer.py               # RLE summarizer, outlier marker, Ochiai/Liblit, DuckDB logger
+├── test_modes_and_eval.py              # Trigger filtering, hypothesis testing, SPSA tuning
+└── test_author_and_ui.py               # Author YAML/code parser, macro verification, pilot revisions
 ```
 
 ---
 
-## 8. Quickstart & CLI Usage
+## 9. Quickstart & CLI Usage
 
-### 1. Lint & Run the Automated Verification Suite
+### 1. Verify the Test Suite
 ```bash
-uv run ruff check --fix .
-uv run ruff format .
+uv run ruff check .
+uv run ruff format --check .
 uv run pytest -v
 ```
 
-### 2. Initialize DuckDB & Add Expert NetHack Runs
-All expert runs and trajectories are compiled into `expert_runs` and `expert_ticks` inside `data/lox.duckdb`. You can add more expert runs at any time using `scripts/download_experts.py`:
-
+### 2. Reset Workspace to Clean State (Optional)
+To start a brand-new campaign while preserving the offline Wiki and expert ascensions:
 ```bash
-# Default: Ingest built-in verified human ascensions + NAO xlogfile + NLE reference traces
-uv run python scripts/download_experts.py --max-ascensions 50
-
-# Option A: Add local NetHack .txt dumplog files or an entire directory of dumplogs
-uv run python scripts/download_experts.py --dumplog path/to/game.nh366.txt
-uv run python scripts/download_experts.py --dumplog path/to/dumplogs_folder/
-
-# Option B: Add local .ttyrec or .ttyrec.bz2 recordings (e.g. from NLD-AA / NLD-NAO)
-uv run python scripts/download_experts.py --ttyrec path/to/ascension.ttyrec.bz2
-uv run python scripts/download_experts.py --ttyrec path/to/nld_aa_folder/
-
-# Option C: Add direct URLs to online NAO dumplogs
-uv run python scripts/download_experts.py \
-  --url https://alt.org/nethack/dumplog/e/eidolos/1590102000.nh363.txt
-
-# Option D: Force a larger online NAO xlogfile harvest
-uv run python scripts/download_experts.py --max-ascensions 200 --fetch-dumplogs 50 --force
+uv run python scripts/reset_clean.py
 ```
 
-### 3. Launch a Synthesis Campaign
+### 3. Ingest Expert Human NetHack Ascensions (Optional)
 ```bash
-export OPENROUTER_API_KEY="your-api-key"
+uv run python scripts/download_experts.py --max-ascensions 50
+```
 
-# Run with Gemma 4 31B (or DeepSeek R1 / GLM-5 / Qwen / Claude)
+### 4. Launch a Synthesis Campaign
+Ensure a valid `OPENROUTER_API_KEY` is set in `.env` (or exported in your shell):
+
+#### NetHack Learning Environment
+```bash
 uv run python scripts/run_lox.py \
   --provider openrouter \
   --model google/gemma-4-31b-it \
+  --benchmark nethack \
   --workers 16 \
   --generations 50 \
   --full-write-episodes 250 \
   --func-mod-episodes 150 \
+  --pilot-revisions 5 \
+  --pilot-episodes 30
+```
+
+#### Crafter / Craftax Survival Benchmark
+```bash
+uv run python scripts/run_lox.py \
+  --provider openrouter \
+  --model google/gemma-4-31b-it \
+  --benchmark craftax \
+  --workers 16 \
+  --generations 50 \
+  --full-write-episodes 100 \
+  --func-mod-episodes 80 \
   --pilot-revisions 5 \
   --pilot-episodes 20
 ```
 
 ---
 
-## 9. References & Citations
+## 10. References & Citations
 
-1. **Küttler, H., Nardelli, N., Miller, A. H., Raileanu, R., Selvatici, M., Grefenstette, E., & Rocktäschel, T.** (2020). *The NetHack Learning Environment.* Advances in Neural Information Processing Systems (NeurIPS), 33, 7671–7684.
-2. **Hambro, E., Raileanu, R., Rothermel, D., Mella, V., Rocktäschel, T., Küttler, H., & Murray, N.** (2022). *Insights from the NeurIPS 2021 NetHack Challenge.* Proceedings of Machine Learning Research (PMLR), 176, 41–52.
-3. **Hambro, E., Mohanty, S., Babaev, D., Byeon, M., Chakraborty, D., Grefenstette, E., Jiang, M., Küttler, H., et al.** (2022). *Dungeons and Data: A Large-Scale NetHack Dataset (NLD).* Advances in Neural Information Processing Systems (NeurIPS) Datasets and Benchmarks Track.
-4. **Ecoffet, A., Huizinga, J., Lehman, J., Stanley, K. O., & Clune, J.** (2021). *First return, then explore (Go-Explore).* Nature, 590(7847), 580–586.
-5. **Mouret, J.-B., & Clune, J.** (2015). *Illuminating search spaces by mapping elites (MAP-Elites).* arXiv:1504.04909.
-6. **Romera-Paredes, B., Barekatain, M., Novikov, A., Balog, M., Kumar, M. P., Dupont, E., Ruiz, F. J. R., Ellenberger, J. S., Wang, P., Fawzi, O., Kohli, P., & Fawzi, A.** (2024). *Mathematical discoveries from program search with large language models (FunSearch).* Nature, 625(7995), 468–475.
-7. **Novikov, A., Vu, N., Eisenberger, M., Dupont, E., Huang, P.-S., Wagner, A. Z., Shirobokov, S., Kozlovskii, B., Ruiz, F. J. R., Mehrabian, A., Kumar, M. P., See, A., Chaudhuri, S., Holland, G., Davies, A., Nowozin, S., Kohli, P., & Balog, M.** (2025). *AlphaEvolve: A coding agent for scientific and algorithmic discovery.* Google DeepMind Technical Report.
-8. **Ellis, K., Wong, C., Nye, M., Sablé-Meyer, M., Morales, L., Hewitt, L., Cary, L., Solar-Lezama, A., & Tenenbaum, J. B.** (2021). *DreamCoder: Bootstrapping inductive program synthesis with wake-sleep library learning.* Proceedings of the 42nd ACM SIGPLAN International Conference on Programming Language Design and Implementation (PLDI), 835–850.
-9. **Wang, G., Xie, Y., Jiang, Y., Mandlekar, A., Xiao, C., Zhu, Y., Fan, L., & Anandkumar, A.** (2023). *Voyager: An Open-Ended Embodied Agent with Large Language Models.* Transactions on Machine Learning Research (TMLR).
-10. **Ma, Y. J., Liang, W., Wang, G., Huang, D.-A., Bastani, O., Jayaraman, D., Zhu, Y., Fan, L., & Anandkumar, A.** (2024). *Eureka: Human-Level Reward Design via Coding Large Language Models.* International Conference on Learning Representations (ICLR).
-11. **Böhme, M., Pham, V.-T., & Roychoudhury, A.** (2017). *Coverage-Based Greybox Fuzzing as Markov Chain (AFLFast).* IEEE Transactions on Software Engineering / ACM CCS.
-12. **Abreu, R., Zoeteweij, P., & van Gemund, A. J. C.** (2007). *On the Accuracy of Spectrum-based Fault Localization (Ochiai).* Testing: Academic and Industrial Conference Practice and Research Techniques (TAICPART-MUTATION), IEEE, 89–98.
-13. **Liblit, B., Naik, M., Zheng, A. X., Aiken, A., & Jordan, M. I.** (2005). *Scalable statistical bug isolation.* Proceedings of the 2005 ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI), 15–26.
-14. **Las-Casas, P., Papakerashvili, G., Anand, V., & Mace, J.** (2019). *Sifter: Scalable Sampling for Distributed Traces, without Feature Engineering.* Proceedings of the ACM Symposium on Cloud Computing (SoCC), 312–324.
-15. **Spall, J. C.** (1992). *Multivariate stochastic approximation using a simultaneous perturbation gradient approximation (SPSA).* IEEE Transactions on Automatic Control, 37(3), 332–341.
-16. **Kleinman, N. L., Spall, J. C., & Naiman, D. Q.** (1999). *Simulation-based optimization with stochastic approximation using common random numbers.* Management Science, 45(11), 1570–1578.
-17. **Waudby-Smith, I., & Ramdas, A.** (2024). *Estimating means of bounded random variables by betting (Empirical Bernstein Confidence Sequences).* Journal of the Royal Statistical Society Series B: Statistical Methodology, 86(1), 1–27.
-18. **Howard, S. R., Ramdas, A., McAuliffe, J., & Sekhon, J.** (2021). *Time-uniform, nonparametric, nonasymptotic confidence sequences.* The Annals of Statistics, 49(2), 1055–1080.
-19. **Wilcoxon, F.** (1945). *Individual Comparisons by Ranking Methods.* Biometrics Bulletin, 1(6), 80–83.
-20. **Cicirello, V. A., & Smith, S. F.** (2005). *The Max K-Armed Bandit: A New Model of Exploration Applied to Search Heuristic Selection.* Proceedings of the Twentieth National Conference on Artificial Intelligence (AAAI), 1355–1361.
+1. **Küttler, H., et al.** (2020). *The NetHack Learning Environment.* NeurIPS 33.
+2. **Hambro, E., et al.** (2022). *Insights from the NeurIPS 2021 NetHack Challenge.* PMLR 176.
+3. **Ecoffet, A., et al.** (2021). *First return, then explore (Go-Explore).* Nature 590.
+4. **Romera-Paredes, B., et al.** (2024). *Mathematical discoveries from program search with large language models (FunSearch).* Nature 625.
+5. **Ellis, K., et al.** (2021). *DreamCoder: Bootstrapping inductive program synthesis with wake-sleep library learning.* ACM PLDI.
+6. **Wang, G., et al.** (2023). *Voyager: An Open-Ended Embodied Agent with Large Language Models.* TMLR.
+7. **Böhme, M., et al.** (2017). *Coverage-Based Greybox Fuzzing as Markov Chain (AFLFast).* IEEE TSE / ACM CCS.
+8. **Abreu, R., et al.** (2007). *On the Accuracy of Spectrum-based Fault Localization (Ochiai).* IEEE TAICPART.
+9. **Liblit, B., et al.** (2005). *Scalable statistical bug isolation.* ACM PLDI.
+10. **Spall, J. C.** (1992). *Multivariate stochastic approximation using a simultaneous perturbation gradient approximation (SPSA).* IEEE TAC 37(3).
+11. **Waudby-Smith, I., & Ramdas, A.** (2024). *Estimating means of bounded random variables by betting.* JRSS-B 86(1).
+12. **Howard, S. R., et al.** (2021). *Time-uniform, nonparametric, nonasymptotic confidence sequences.* Annals of Statistics 49(2).

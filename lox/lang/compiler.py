@@ -34,16 +34,20 @@ from lox.env.actions import (
     Action,
     ActionSequence,
     RawAction,
+    extcmd,
     key,
+    repeat,
     seq,
 )
 from lox.env.state import (
+    FloorMemory,
     GameState,
     InventoryItem,
     MonsterInfo,
     ObjectInfo,
     VisibleMonster,
     VisibleObject,
+    WorldMemory,
     astar_next_step,
     bfs_distance_grid,
 )
@@ -52,7 +56,11 @@ from lox.lang.instrument import (
     PolicyInstrumentTransformer,
     PolicyLoopError,
 )
-from lox.lang.validator import PolicyValidationError, validate_python_code
+from lox.lang.validator import (
+    PolicyValidationError,
+    check_macro_contracts,
+    validate_python_code,
+)
 
 SAFE_BUILTINS: dict[str, Any] = {
     "abs": abs,
@@ -143,6 +151,11 @@ def _safe_import(name: str, globals_dict=None, locals_dict=None, fromlist=(), le
     }
     if root in allowed_map:
         return allowed_map[root]
+    if root in ("skills", "lox"):
+        if name in sys.modules:
+            return sys.modules[name]
+        if root in sys.modules:
+            return sys.modules[root]
     raise ImportError(f"Import of '{name}' is not permitted in policy sandbox.")
 
 
@@ -186,7 +199,11 @@ def _build_base_namespace(tracer: ExecutionTracer) -> dict[str, Any]:
         "ACTION_BY_CHAR": ACTION_BY_CHAR,
         "key": key,
         "seq": seq,
+        "repeat": repeat,
+        "extcmd": extcmd,
         "GameState": GameState,
+        "WorldMemory": WorldMemory,
+        "FloorMemory": FloorMemory,
         "InventoryItem": InventoryItem,
         "MonsterInfo": MonsterInfo,
         "ObjectInfo": ObjectInfo,
@@ -214,6 +231,7 @@ class PolicyRunner:
         self.instance = policy_instance
         self.tracer = tracer
         self._gen: Any = None
+        self._active_subgen: Any = None
         self._started: bool = False
         self._mode: str = "step"
 
@@ -247,6 +265,27 @@ class PolicyRunner:
             setattr(self.instance, "state", state)
         except Exception:
             pass
+
+        crit_hp = getattr(self.instance, "flee_hp_ratio", 0.25)
+        hp_ratio = (state.hp / max(1, state.max_hp)) if state.max_hp > 0 else 1.0
+        if self._active_subgen is not None and hp_ratio < crit_hp:
+            self._active_subgen = None
+
+        if self._active_subgen is not None:
+            try:
+                act = (
+                    self._active_subgen.send(state)
+                    if hasattr(self._active_subgen, "send")
+                    else next(self._active_subgen)
+                )
+                if inspect.isgenerator(act):
+                    self._active_subgen = act
+                    act = next(self._active_subgen)
+                active_fn = self.tracer.record_turn_yield()
+                return act, active_fn
+            except StopIteration:
+                self._active_subgen = None
+
         try:
             if self._mode == "run":
                 if not self._started:
@@ -292,32 +331,65 @@ class PolicyRunner:
         except PolicyLoopError:
             raise
 
-        if isinstance(act, types.GeneratorType):
-            raise RuntimeError(
-                "Policy yielded a generator object directly instead of an Action. "
-                "When calling a generator subroutine, use `state = yield from self.sub_method(state)` "
-                "(not `yield self.sub_method(state)`)."
-            )
+        if inspect.isgenerator(act):
+            self._active_subgen = act
+            try:
+                act = (
+                    self._active_subgen.send(state)
+                    if hasattr(self._active_subgen, "send")
+                    else next(self._active_subgen)
+                )
+            except StopIteration:
+                self._active_subgen = None
+                act = Action.WAIT
 
         active_fn = self.tracer.record_turn_yield()
         return act, active_fn
 
 
 class CompiledPolicy:
-    """Compiled bytecode bundle for `macros.py` + `policy.py`."""
+    """Compiled bytecode bundle for `macros.py` + `policy.py` + optional `skills/` package."""
 
     def __init__(
         self,
         policy_code: str,
         macros_code: str = "",
+        skills: dict[str, str] | None = None,
         max_loop_ticks: int = 250000,
     ):
         self.policy_code = policy_code
         self.macros_code = macros_code
         self.max_loop_ticks = max_loop_ticks
+        self.skills = dict(skills) if skills else {}
+        self._skill_code_objs: dict[str, Any] = {}
+        self.skill_function_names: dict[str, list[str]] = {}
 
-        # Parse, validate, and instrument both ASTs once
+        # Parse, validate, and instrument skills package
+        for skill_name, skill_code in self.skills.items():
+            if not skill_code or not skill_code.strip():
+                continue
+            skill_tree = validate_python_code(
+                skill_code, filename=f"skills/{skill_name}.py"
+            )
+            skill_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(
+                skill_tree
+            )
+            ast.fix_missing_locations(skill_tree)
+            self._skill_code_objs[skill_name] = compile(
+                skill_tree, filename=f"skills/{skill_name}.py", mode="exec"
+            )
+            self.skill_function_names[skill_name] = [
+                n.name
+                for n in ast.walk(skill_tree)
+                if isinstance(n, ast.FunctionDef) and n.name != "__init__"
+            ]
+
+        # Parse, validate, and instrument macros
         if macros_code and macros_code.strip():
+            contract_errors = check_macro_contracts(policy_code, macros_code)
+            if contract_errors:
+                raise PolicyValidationError("\n".join(contract_errors))
+
             macro_tree = validate_python_code(macros_code, filename="macros.py")
             macro_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(
                 macro_tree
@@ -358,6 +430,19 @@ class CompiledPolicy:
             mod_obj = types.ModuleType("lox_policy")
             sys.modules["lox_policy"] = mod_obj
         mod_obj.__dict__.update(ns)
+
+        # Register and execute skills modules
+        skills_pkg = types.ModuleType("skills")
+        sys.modules["skills"] = skills_pkg
+        ns["skills"] = skills_pkg
+
+        for s_name, s_code_obj in self._skill_code_objs.items():
+            s_mod = types.ModuleType(f"skills.{s_name}")
+            s_mod.__dict__.update(ns)
+            exec(s_code_obj, s_mod.__dict__)
+            sys.modules[f"skills.{s_name}"] = s_mod
+            setattr(skills_pkg, s_name, s_mod)
+            ns[s_name] = s_mod
 
         if self._macro_code_obj is not None:
             exec(self._macro_code_obj, ns)
@@ -409,11 +494,30 @@ class CompiledPolicy:
 def compile_policy_and_macros(
     policy_code: str,
     macros_code: str = "",
+    skills_tuple: tuple[tuple[str, str], ...] = (),
     max_loop_ticks: int = 250000,
 ) -> CompiledPolicy:
-    """Validates and compiles `policy_code` and `macros_code` into a reusable `CompiledPolicy`."""
+    """Validates and compiles `policy_code`, `macros_code`, and skills into a reusable `CompiledPolicy`."""
+    skills_dict = dict(skills_tuple) if skills_tuple else None
     return CompiledPolicy(
         policy_code=policy_code,
         macros_code=macros_code,
+        skills=skills_dict,
+        max_loop_ticks=max_loop_ticks,
+    )
+
+
+def compile_policy_package(
+    policy_code: str,
+    macros_code: str = "",
+    skills: dict[str, str] | None = None,
+    max_loop_ticks: int = 250000,
+) -> CompiledPolicy:
+    """Validates and compiles a full hierarchical policy package with skills dictionary."""
+    skills_tuple = tuple(sorted(skills.items())) if skills else ()
+    return compile_policy_and_macros(
+        policy_code=policy_code,
+        macros_code=macros_code,
+        skills_tuple=skills_tuple,
         max_loop_ticks=max_loop_ticks,
     )

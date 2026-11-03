@@ -7,11 +7,13 @@ with zero per-tick computation when not queried.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import collections
+from dataclasses import dataclass, field
 
-import numba
 import numpy as np
 from nle import nethack as nh
+
+from lox.env.grid_utils import astar_next_step, bfs_distance_grid
 
 # Pre-build 1-to-1 C symbol table lookup caches from NLE's native C structs
 # (Zero hardcoded game heuristics: purely mirrors NLE's C permonst & objclass arrays in Python for O(1) access)
@@ -42,12 +44,56 @@ class MonsterInfo:
     attacks: tuple[tuple[int, int, int, int], ...] = ()
 
 
+# 1-to-1 NetHack object class ASCII character symbols and names
+_OCLASS_TO_CHAR: dict[int, str] = {
+    int(getattr(nh, "WEAPON_CLASS", 2)): ")",
+    int(getattr(nh, "ARMOR_CLASS", 3)): "[",
+    int(getattr(nh, "RING_CLASS", 4)): "=",
+    int(getattr(nh, "AMULET_CLASS", 5)): '"',
+    int(getattr(nh, "TOOL_CLASS", 6)): "(",
+    int(getattr(nh, "FOOD_CLASS", 7)): "%",
+    int(getattr(nh, "POTION_CLASS", 8)): "!",
+    int(getattr(nh, "SCROLL_CLASS", 9)): "?",
+    int(getattr(nh, "SPBOOK_CLASS", 10)): "+",
+    int(getattr(nh, "WAND_CLASS", 11)): "/",
+    int(getattr(nh, "COIN_CLASS", 12)): "$",
+    int(getattr(nh, "GEM_CLASS", 13)): "*",
+    int(getattr(nh, "ROCK_CLASS", 14)): "`",
+    int(getattr(nh, "BALL_CLASS", 15)): "0",
+    int(getattr(nh, "CHAIN_CLASS", 16)): "_",
+    int(getattr(nh, "VENOM_CLASS", 17)): ".",
+}
+
+_OCLASS_NAMES: dict[int, str] = {
+    int(getattr(nh, "WEAPON_CLASS", 2)): "weapon",
+    int(getattr(nh, "ARMOR_CLASS", 3)): "armor",
+    int(getattr(nh, "RING_CLASS", 4)): "ring",
+    int(getattr(nh, "AMULET_CLASS", 5)): "amulet",
+    int(getattr(nh, "TOOL_CLASS", 6)): "tool",
+    int(getattr(nh, "FOOD_CLASS", 7)): "food",
+    int(getattr(nh, "POTION_CLASS", 8)): "potion",
+    int(getattr(nh, "SCROLL_CLASS", 9)): "scroll",
+    int(getattr(nh, "SPBOOK_CLASS", 10)): "spellbook",
+    int(getattr(nh, "WAND_CLASS", 11)): "wand",
+    int(getattr(nh, "COIN_CLASS", 12)): "coin",
+    int(getattr(nh, "GEM_CLASS", 13)): "gem",
+    int(getattr(nh, "ROCK_CLASS", 14)): "rock",
+    int(getattr(nh, "BALL_CLASS", 15)): "ball",
+    int(getattr(nh, "CHAIN_CLASS", 16)): "chain",
+    int(getattr(nh, "VENOM_CLASS", 17)): "venom",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ObjectInfo:
     """1-to-1 mirror of NLE's C `objclass` struct for an object glyph."""
 
     obj_id: int
+    name: str
+    descr: str | None
     oclass: int
+    oclass_name: str
+    char: str
     weight: int
     cost: int
     delay: int
@@ -73,6 +119,82 @@ class InventoryItem:
     char: str
     quantity: int
 
+    @property
+    def is_weapon(self) -> bool:
+        return self.oclass == 2
+
+    @property
+    def is_armor(self) -> bool:
+        return self.oclass == 3
+
+    @property
+    def is_ring(self) -> bool:
+        return self.oclass == 4
+
+    @property
+    def is_amulet(self) -> bool:
+        return self.oclass == 5
+
+    @property
+    def is_tool(self) -> bool:
+        return self.oclass == 6
+
+    @property
+    def is_food(self) -> bool:
+        return self.oclass == 7
+
+    @property
+    def is_potion(self) -> bool:
+        return self.oclass == 8
+
+    @property
+    def is_scroll(self) -> bool:
+        return self.oclass == 9
+
+    @property
+    def is_spellbook(self) -> bool:
+        return self.oclass == 10
+
+    @property
+    def is_wand(self) -> bool:
+        return self.oclass == 11
+
+    @property
+    def is_coin(self) -> bool:
+        return self.oclass == 12
+
+    @property
+    def is_gem(self) -> bool:
+        return self.oclass == 13
+
+    @property
+    def is_worn(self) -> bool:
+        return "(being worn)" in self.name
+
+    @property
+    def is_wielded(self) -> bool:
+        return "(weapon in hand)" in self.name or "(wielded)" in self.name
+
+    @property
+    def is_quivered(self) -> bool:
+        return "(in quiver)" in self.name
+
+    @property
+    def is_blessed(self) -> bool:
+        return "blessed" in self.name
+
+    @property
+    def is_uncursed(self) -> bool:
+        return "uncursed" in self.name
+
+    @property
+    def is_cursed(self) -> bool:
+        return "cursed" in self.name
+
+    @property
+    def oclass_name(self) -> str:
+        return _OCLASS_NAMES.get(self.oclass, "unknown")
+
 
 @dataclass(frozen=True, slots=True)
 class VisibleMonster:
@@ -85,7 +207,15 @@ class VisibleMonster:
     color: int
     is_pet: bool
     is_peaceful: bool
+    is_statue: bool
+    is_ridden: bool
+    is_invisible: bool
+    name: str
     info: MonsterInfo | None
+
+    @property
+    def is_hostile(self) -> bool:
+        return not (self.is_pet or self.is_peaceful)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,19 +229,47 @@ class VisibleObject:
     color: int
     is_corpse: bool
     corpse_monster: MonsterInfo | None
+    name: str
     info: ObjectInfo | None
 
+    @property
+    def is_food(self) -> bool:
+        return self.is_corpse or (self.info is not None and self.info.oclass == 7)
 
-# Build O(1) lookup tables directly from NLE's C `permonst` and `objclass` tables at import time
+    @property
+    def is_weapon(self) -> bool:
+        return self.info is not None and self.info.oclass == 2
+
+    @property
+    def is_armor(self) -> bool:
+        return self.info is not None and self.info.oclass == 3
+
+    @property
+    def is_potion(self) -> bool:
+        return self.info is not None and self.info.oclass == 8
+
+    @property
+    def is_scroll(self) -> bool:
+        return self.info is not None and self.info.oclass == 9
+
+    @property
+    def is_wand(self) -> bool:
+        return self.info is not None and self.info.oclass == 11
+
+
+# Build O(1) lookup tables directly from NLE's C `permonst`, `objclass`, and `symdef` tables at import time
 _MON_INFO_BY_GLYPH: list[MonsterInfo | None] = [None] * _MAX_GLYPH
 _OBJ_INFO_BY_GLYPH: list[ObjectInfo | None] = [None] * _MAX_GLYPH
 _CORPSE_MON_BY_GLYPH: list[MonsterInfo | None] = [None] * _MAX_GLYPH
+_CMAP_NAME_BY_GLYPH: list[str | None] = [None] * _MAX_GLYPH
+_TRAP_NAME_BY_GLYPH: list[str | None] = [None] * _MAX_GLYPH
 
 _IS_MONSTER_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_PET_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_BODY_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_OBJECT_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_CMAP_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_TRAP_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_SWALLOW_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_WARNING_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 
@@ -122,6 +280,9 @@ _CHAR_LUT: tuple[str, ...] = tuple(
 _ASCII_TRANS_TABLE: bytes = bytes(b if 32 <= b <= 126 else 32 for b in range(256))
 _MG_PET: int = int(getattr(nh, "MG_PET", 0))
 _MG_PEACEFUL: int = int(getattr(nh, "MG_PEACEFUL", 0))
+_MG_RIDDEN: int = int(getattr(nh, "MG_RIDDEN", 0))
+_MG_STATUE: int = int(getattr(nh, "MG_STATUE", 0))
+_MG_INVIS: int = int(getattr(nh, "MG_INVIS", 0))
 
 
 def _make_mon_info(mid: int) -> MonsterInfo | None:
@@ -129,7 +290,8 @@ def _make_mon_info(mid: int) -> MonsterInfo | None:
         return None
     try:
         pm = nh.permonst(mid)
-        mlet = chr(pm.mlet) if 32 <= pm.mlet <= 126 else "?"
+        cs = nh.class_sym.from_mlet(pm.mlet)
+        msym = cs.sym if cs and cs.sym else "?"
         mattk_raw = getattr(pm, "mattk", ())
         attacks = tuple(
             (int(a.aatyp), int(a.adtyp), int(a.damn), int(a.damd))
@@ -138,8 +300,8 @@ def _make_mon_info(mid: int) -> MonsterInfo | None:
         )
         return MonsterInfo(
             mon_id=mid,
-            name=pm.mname,
-            symbol=mlet,
+            name=pm.mname or "",
+            symbol=msym,
             level=int(pm.mlevel),
             speed=int(pm.mmove),
             ac=int(pm.ac),
@@ -165,9 +327,16 @@ def _make_obj_info(oid: int) -> ObjectInfo | None:
         return None
     try:
         oc = nh.objclass(oid)
+        oclass = ord(oc.oc_class) if isinstance(oc.oc_class, str) else int(oc.oc_class)
+        name = nh.OBJ_NAME(oc)
+        descr = nh.OBJ_DESCR(oc)
         return ObjectInfo(
             obj_id=oid,
-            oclass=int(oc.oc_class),
+            name=name or "",
+            descr=descr,
+            oclass=oclass,
+            oclass_name=_OCLASS_NAMES.get(oclass, "unknown"),
+            char=_OCLASS_TO_CHAR.get(oclass, "?"),
             weight=int(oc.oc_weight),
             cost=int(oc.oc_cost),
             delay=int(oc.oc_delay),
@@ -177,6 +346,15 @@ def _make_obj_info(oid: int) -> ObjectInfo | None:
     except Exception:
         return None
 
+
+# Precompute symdef explanations for all MAXPCHARS
+_SYMDEF_EXPLANATIONS: list[str] = []
+for _idx in range(getattr(nh, "MAXPCHARS", 96)):
+    try:
+        _sd = nh.symdef.from_idx(_idx)
+        _SYMDEF_EXPLANATIONS.append(_sd.explanation)
+    except Exception:
+        _SYMDEF_EXPLANATIONS.append("")
 
 for _g in range(_MAX_GLYPH):
     if nh.glyph_is_monster(_g):
@@ -196,127 +374,218 @@ for _g in range(_MAX_GLYPH):
         _OBJ_INFO_BY_GLYPH[_g] = _make_obj_info(_oid)
     elif nh.glyph_is_cmap(_g):
         _IS_CMAP_LUT[_g] = True
+        _cid = nh.glyph_to_cmap(_g)
+        if 0 <= _cid < len(_SYMDEF_EXPLANATIONS):
+            _CMAP_NAME_BY_GLYPH[_g] = _SYMDEF_EXPLANATIONS[_cid]
     elif nh.glyph_is_swallow(_g):
         _IS_SWALLOW_LUT[_g] = True
     elif nh.glyph_is_warning(_g):
         _IS_WARNING_LUT[_g] = True
 
+    if nh.glyph_is_trap(_g):
+        _IS_TRAP_LUT[_g] = True
+        try:
+            _tid = nh.glyph_to_trap(_g)
+            if 0 <= _tid < len(_SYMDEF_EXPLANATIONS):
+                _TRAP_NAME_BY_GLYPH[_g] = _SYMDEF_EXPLANATIONS[_tid]
+            else:
+                _TRAP_NAME_BY_GLYPH[_g] = "trap"
+        except Exception:
+            _TRAP_NAME_BY_GLYPH[_g] = "trap"
 
-# Generic Numba-accelerated grid math utilities (pure algorithms, zero game rules)
-@numba.njit(cache=True)
-def bfs_distance_grid(
-    passable: np.ndarray, sy: int, sx: int, allow_diagonal: bool = True
-) -> np.ndarray:
+
+@dataclass
+class FloorMemory:
+    """Zero-heuristic spatial bookkeeping for a single (dungeon_num, level_num) floor."""
+
+    visited: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.bool_)
+    )
+    visit_count: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.int32)
+    )
+    remembered_chars: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.uint8)
+    )
+    searched_counts: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.int16)
+    )
+    locked_doors: set[tuple[int, int]] = field(default_factory=set)
+
+    def ensure_shape(self, min_h: int, min_w: int) -> None:
+        """Dynamically resizes spatial grids if game coordinates exceed initial bounds (e.g. Craftax 48x48)."""
+        cur_h, cur_w = self.visited.shape
+        if cur_h < min_h or cur_w < min_w:
+            new_h = max(cur_h, min_h)
+            new_w = max(cur_w, min_w)
+
+            new_visited = np.zeros((new_h, new_w), dtype=np.bool_)
+            new_visited[:cur_h, :cur_w] = self.visited
+            self.visited = new_visited
+
+            new_visit_count = np.zeros((new_h, new_w), dtype=np.int32)
+            new_visit_count[:cur_h, :cur_w] = self.visit_count
+            self.visit_count = new_visit_count
+
+            new_remembered = np.zeros((new_h, new_w), dtype=np.uint8)
+            new_remembered[:cur_h, :cur_w] = self.remembered_chars
+            self.remembered_chars = new_remembered
+
+            new_searched = np.zeros((new_h, new_w), dtype=np.int16)
+            new_searched[:cur_h, :cur_w] = self.searched_counts
+            self.searched_counts = new_searched
+
+
+class WorldMemory:
     """
-    Computes shortest-path step distances from (sy, sx) across any boolean `passable` (21, 79) mask.
-    Unreachable tiles have distance -1.
+    Zero-heuristic, deterministic spatial and episodic memory.
+    Maintained by NetHackHarness across steps and replays.
+    Tracks per-floor exploration grids, remembered static tiles,
+    locked door coordinates, position history, and inter-floor stair graph.
     """
-    h, w = passable.shape
-    dist = np.full((h, w), -1, dtype=np.int32)
-    if not (0 <= sy < h and 0 <= sx < w):
-        return dist
-    dist[sy, sx] = 0
-    qy = np.empty(h * w, dtype=np.int32)
-    qx = np.empty(h * w, dtype=np.int32)
-    head = 0
-    tail = 0
-    qy[tail] = sy
-    qx[tail] = sx
-    tail += 1
 
-    if allow_diagonal:
-        dys = (-1, 1, 0, 0, -1, -1, 1, 1)
-        dxs = (0, 0, -1, 1, -1, 1, -1, 1)
-        n_dirs = 8
-    else:
-        dys = (-1, 1, 0, 0, 0, 0, 0, 0)
-        dxs = (0, 0, -1, 1, 0, 0, 0, 0)
-        n_dirs = 4
+    __slots__ = ("floors", "pos_history", "current_floor_key", "stair_graph")
 
-    while head < tail:
-        cy = qy[head]
-        cx = qx[head]
-        head += 1
-        cd = dist[cy, cx] + 1
-        for i in range(n_dirs):
-            ny = cy + dys[i]
-            nx = cx + dxs[i]
-            if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] == -1 and passable[ny, nx]:
-                dist[ny, nx] = cd
-                qy[tail] = ny
-                qx[tail] = nx
-                tail += 1
-    return dist
+    def __init__(self) -> None:
+        self.floors: dict[tuple[int, int], FloorMemory] = {}
+        self.pos_history: collections.deque[tuple[int, int, int, int]] = (
+            collections.deque(maxlen=32)
+        )
+        self.current_floor_key: tuple[int, int] = (0, 1)
+        self.stair_graph: dict[
+            tuple[int, int, int, int], tuple[int, int, int, int]
+        ] = {}
 
+    def reset(self) -> None:
+        self.floors.clear()
+        self.pos_history.clear()
+        self.current_floor_key = (0, 1)
+        self.stair_graph.clear()
 
-@numba.njit(cache=True)
-def astar_next_step(
-    passable: np.ndarray,
-    sy: int,
-    sx: int,
-    ty: int,
-    tx: int,
-    allow_diagonal: bool = True,
-) -> tuple[int, int]:
-    """
-    Returns the first step delta `(dy, dx)` along the shortest path from `(sy, sx)` to `(ty, tx)`
-    on `passable`. Returns `(0, 0)` if already at target or unreachable.
-    """
-    if sy == ty and sx == tx:
-        return (0, 0)
-    h, w = passable.shape
-    if not (0 <= sy < h and 0 <= sx < w and 0 <= ty < h and 0 <= tx < w):
-        return (0, 0)
+    def get_floor(
+        self, dnum: int, dlvl: int, shape: tuple[int, int] = (21, 79)
+    ) -> FloorMemory:
+        key = (int(dnum), int(dlvl))
+        if key not in self.floors:
+            self.floors[key] = FloorMemory(
+                visited=np.zeros(shape, dtype=np.bool_),
+                visit_count=np.zeros(shape, dtype=np.int32),
+                remembered_chars=np.zeros(shape, dtype=np.uint8),
+                searched_counts=np.zeros(shape, dtype=np.int16),
+            )
+        return self.floors[key]
 
-    # Run BFS backwards from target (ty, tx) so first step from (sy, sx) is O(1) neighbor lookup
-    dist = np.full((h, w), -1, dtype=np.int32)
-    dist[ty, tx] = 0
-    qy = np.empty(h * w, dtype=np.int32)
-    qx = np.empty(h * w, dtype=np.int32)
-    head = 0
-    tail = 0
-    qy[tail] = ty
-    qx[tail] = tx
-    tail += 1
+    @property
+    def current_floor(self) -> FloorMemory:
+        return self.get_floor(self.current_floor_key[0], self.current_floor_key[1])
 
-    if allow_diagonal:
-        dys = (-1, 1, 0, 0, -1, -1, 1, 1)
-        dxs = (0, 0, -1, 1, -1, 1, -1, 1)
-        n_dirs = 8
-    else:
-        dys = (-1, 1, 0, 0, 0, 0, 0, 0)
-        dxs = (0, 0, -1, 1, 0, 0, 0, 0)
-        n_dirs = 4
+    @property
+    def visited(self) -> np.ndarray:
+        return self.current_floor.visited
 
-    while head < tail:
-        cy = qy[head]
-        cx = qx[head]
-        head += 1
-        if cy == sy and cx == sx:
-            break
-        cd = dist[cy, cx] + 1
-        for i in range(n_dirs):
-            ny = cy + dys[i]
-            nx = cx + dxs[i]
-            if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] == -1:
-                if passable[ny, nx] or (ny == sy and nx == sx):
-                    dist[ny, nx] = cd
-                    qy[tail] = ny
-                    qx[tail] = nx
-                    tail += 1
+    @property
+    def visit_count(self) -> np.ndarray:
+        return self.current_floor.visit_count
 
-    best_d = 999999
-    best_dy = 0
-    best_dx = 0
-    for i in range(n_dirs):
-        ny = sy + dys[i]
-        nx = sx + dxs[i]
-        if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] != -1:
-            if dist[ny, nx] < best_d:
-                best_d = dist[ny, nx]
-                best_dy = dys[i]
-                best_dx = dxs[i]
-    return (best_dy, best_dx)
+    @property
+    def remembered_chars(self) -> np.ndarray:
+        return self.current_floor.remembered_chars
+
+    @property
+    def locked_doors(self) -> set[tuple[int, int]]:
+        return self.current_floor.locked_doors
+
+    @property
+    def searched_counts(self) -> np.ndarray:
+        return self.current_floor.searched_counts
+
+    @property
+    def is_oscillating(self) -> bool:
+        if len(self.pos_history) < 12:
+            return False
+        recent = list(self.pos_history)[-12:]
+        f0 = (recent[0][0], recent[0][1])
+        if any((p[0], p[1]) != f0 for p in recent):
+            return False
+        unique_tiles = {(p[2], p[3]) for p in recent}
+        return len(unique_tiles) <= 3
+
+    def update(self, state: GameState, action_name: str = "") -> None:
+        try:
+            dnum = int(state.dungeon_num)
+            dlvl = int(state.level_num)
+            sy = int(state.y)
+            sx = int(state.x)
+        except Exception:
+            return
+
+        gh, gw = 21, 79
+        if hasattr(state, "chars") and hasattr(state.chars, "shape"):
+            gh, gw = state.chars.shape
+        elif hasattr(state, "map") and hasattr(state.map, "shape"):
+            gh, gw = state.map.shape
+        else:
+            gh, gw = max(21, sy + 1), max(79, sx + 1)
+
+        self.current_floor_key = (dnum, dlvl)
+        floor = self.get_floor(dnum, dlvl, shape=(gh, gw))
+        floor.ensure_shape(gh, gw)
+
+        if 0 <= sy < floor.visited.shape[0] and 0 <= sx < floor.visited.shape[1]:
+            floor.visited[sy, sx] = True
+            floor.visit_count[sy, sx] += 1
+            self.pos_history.append((dnum, dlvl, sy, sx))
+
+        # Update searched counts if SEARCH was executed
+        if action_name and "search" in action_name.lower():
+            floor.searched_counts[
+                max(0, sy - 1) : min(floor.visited.shape[0], sy + 2),
+                max(0, sx - 1) : min(floor.visited.shape[1], sx + 2),
+            ] += 1
+
+        # Track inter-floor stair graph transitions
+        if len(self.pos_history) >= 2:
+            prev = self.pos_history[-2]
+            now = self.pos_history[-1]
+            if (prev[0], prev[1]) != (now[0], now[1]):
+                self.stair_graph[prev] = now
+                self.stair_graph[now] = prev
+
+        # Update remembered terrain chars using C engine cmap glyph lookup
+        try:
+            glyphs = state.glyphs
+            chars = state.chars
+            is_cmap = _IS_CMAP_LUT[glyphs]
+            mask = is_cmap & (chars != 0) & (chars != ord(" "))
+            floor.remembered_chars[mask] = chars[mask]
+        except Exception:
+            pass
+
+        # Update locked doors
+        try:
+            msg = str(state.message).lower() if hasattr(state, "message") else ""
+            if "locked" in msg:
+                for dy, dx in [
+                    (-1, 0),
+                    (1, 0),
+                    (0, -1),
+                    (0, 1),
+                    (-1, -1),
+                    (-1, 1),
+                    (1, -1),
+                    (1, 1),
+                ]:
+                    ny, nx = sy + dy, sx + dx
+                    if 0 <= ny < 21 and 0 <= nx < 79:
+                        if state.chars[ny, nx] == ord("+"):
+                            floor.locked_doors.add((ny, nx))
+            for dy_door, dx_door in list(floor.locked_doors):
+                if 0 <= dy_door < 21 and 0 <= dx_door < 79:
+                    c = state.chars[dy_door, dx_door]
+                    if c != 0 and c != ord(" ") and c != ord("+"):
+                        floor.locked_doors.discard((dy_door, dx_door))
+        except Exception:
+            pass
 
 
 class GameState:
@@ -328,6 +597,7 @@ class GameState:
 
     __slots__ = (
         "_raw_dict",
+        "mem",
         "blstats",
         "_blstats_list",
         "glyphs",
@@ -340,18 +610,27 @@ class GameState:
         "inv_letters",
         "inv_oclasses",
         "program_state",
+        "internal",
+        "screen_descriptions",
+        "tty_chars",
+        "tty_colors",
+        "tty_cursor",
+        "misc",
         "step_count",
         "_message_cache",
         "_inventory_cache",
         "_monsters_cache",
         "_monsters_no_self_cache",
         "_objects_cache",
+        "_tty_text_cache",
+        "_tty_lines_cache",
     )
 
     def __init__(
         self,
         raw_obs: dict[str, np.ndarray] | tuple[np.ndarray, ...],
         step_count: int = 0,
+        mem: WorldMemory | None = None,
     ):
         if isinstance(raw_obs, (tuple, list)):
             self._raw_dict = None
@@ -368,6 +647,22 @@ class GameState:
             self.program_state: np.ndarray | None = (
                 raw_obs[10] if len(raw_obs) > 10 else None
             )
+            self.internal: np.ndarray | None = (
+                raw_obs[11] if len(raw_obs) > 11 else None
+            )
+            self.screen_descriptions: np.ndarray | None = (
+                raw_obs[12] if len(raw_obs) > 12 else None
+            )
+            self.tty_chars: np.ndarray | None = (
+                raw_obs[13] if len(raw_obs) > 13 else None
+            )
+            self.tty_colors: np.ndarray | None = (
+                raw_obs[14] if len(raw_obs) > 14 else None
+            )
+            self.tty_cursor: np.ndarray | None = (
+                raw_obs[15] if len(raw_obs) > 15 else None
+            )
+            self.misc: np.ndarray | None = raw_obs[16] if len(raw_obs) > 16 else None
         else:
             self._raw_dict = raw_obs
             self.blstats = raw_obs["blstats"]
@@ -381,6 +676,12 @@ class GameState:
             self.inv_letters = raw_obs["inv_letters"]
             self.inv_oclasses = raw_obs["inv_oclasses"]
             self.program_state = raw_obs.get("program_state")
+            self.internal = raw_obs.get("internal")
+            self.screen_descriptions = raw_obs.get("screen_descriptions")
+            self.tty_chars = raw_obs.get("tty_chars")
+            self.tty_colors = raw_obs.get("tty_colors")
+            self.tty_cursor = raw_obs.get("tty_cursor")
+            self.misc = raw_obs.get("misc")
 
         self.step_count: int = step_count
         self._blstats_list: list[int] = self.blstats.tolist()
@@ -389,6 +690,14 @@ class GameState:
         self._monsters_cache: list[VisibleMonster] | None = None
         self._monsters_no_self_cache: list[VisibleMonster] | None = None
         self._objects_cache: list[VisibleObject] | None = None
+        self._tty_text_cache: str | None = None
+        self._tty_lines_cache: list[str] | None = None
+
+        if mem is None:
+            self.mem = WorldMemory()
+            self.mem.update(self)
+        else:
+            self.mem = mem
 
     @property
     def raw(self) -> dict[str, np.ndarray]:
@@ -405,6 +714,12 @@ class GameState:
                 "inv_letters": self.inv_letters,
                 "inv_oclasses": self.inv_oclasses,
                 "program_state": self.program_state,
+                "internal": self.internal,
+                "screen_descriptions": self.screen_descriptions,
+                "tty_chars": self.tty_chars,
+                "tty_colors": self.tty_colors,
+                "tty_cursor": self.tty_cursor,
+                "misc": self.misc,
             }
         return self._raw_dict
 
@@ -644,7 +959,7 @@ class GameState:
                 )
                 g = int(inv_glyphs[i])
                 oc = int(inv_oclasses[i])
-                ch = _CHAR_LUT[oc] if oc < 256 else "?"
+                ch = _OCLASS_TO_CHAR.get(oc, "?")
                 sp = desc.find(" ")
                 first_word = desc[:sp] if sp != -1 else desc
                 qty = int(first_word) if first_word.isdigit() else 1
@@ -694,6 +1009,10 @@ class GameState:
         return 0 <= glyph < _MAX_GLYPH and bool(_IS_CMAP_LUT[glyph])
 
     @staticmethod
+    def is_trap_glyph(glyph: int) -> bool:
+        return 0 <= glyph < _MAX_GLYPH and bool(_IS_TRAP_LUT[glyph])
+
+    @staticmethod
     def is_swallow_glyph(glyph: int) -> bool:
         return 0 <= glyph < _MAX_GLYPH and bool(_IS_SWALLOW_LUT[glyph])
 
@@ -712,6 +1031,186 @@ class GameState:
         if 0 <= glyph < _MAX_GLYPH:
             return _OBJ_INFO_BY_GLYPH[glyph]
         return None
+
+    @staticmethod
+    def cmap_name(glyph: int) -> str | None:
+        if 0 <= glyph < _MAX_GLYPH:
+            return _CMAP_NAME_BY_GLYPH[glyph]
+        return None
+
+    @staticmethod
+    def trap_name(glyph: int) -> str | None:
+        if 0 <= glyph < _MAX_GLYPH:
+            return _TRAP_NAME_BY_GLYPH[glyph]
+        return None
+
+    def terrain_at(self, y: int, x: int) -> str:
+        """Returns the semantic terrain / feature name at (y, x) (e.g. 'closed door', 'open door', 'staircase down', 'altar')."""
+        if 0 <= y < 21 and 0 <= x < 79:
+            g = int(self.glyphs[y, x])
+            cmap = _CMAP_NAME_BY_GLYPH[g]
+            if cmap is not None:
+                return cmap
+            c = int(self.chars[y, x])
+            if c == ord("+"):
+                return "closed door"
+            if c in (ord("-"), ord("|")) and self.is_cmap_glyph(g):
+                return "open door"
+            if c == ord(">"):
+                return "staircase down"
+            if c == ord("<"):
+                return "staircase up"
+            return _CHAR_LUT[c] if c < 256 else " "
+        return " "
+
+    def trap_at(self, y: int, x: int) -> str | None:
+        """Returns the specific trap name at (y, x) (e.g. 'arrow trap', 'bear trap') or None."""
+        if 0 <= y < 21 and 0 <= x < 79:
+            g = int(self.glyphs[y, x])
+            return _TRAP_NAME_BY_GLYPH[g]
+        return None
+
+    def description_at(self, y: int, x: int) -> str:
+        """Returns the full English tile description from NLE's C engine for (y, x)."""
+        if self.screen_descriptions is not None and 0 <= y < 21 and 0 <= x < 79:
+            raw = bytes(self.screen_descriptions[y, x])
+            nul = raw.find(b"\x00")
+            desc = (
+                (raw[:nul] if nul != -1 else raw)
+                .decode("latin1", errors="ignore")
+                .strip()
+            )
+            if desc:
+                return desc
+        return self.terrain_at(y, x)
+
+    def is_closed_door(self, y: int, x: int) -> bool:
+        return self.char_at(y, x) == "+" or self.terrain_at(y, x) == "closed door"
+
+    def is_open_door(self, y: int, x: int) -> bool:
+        return self.terrain_at(y, x) in ("open door", "doorway")
+
+    def is_stairs_down(self, y: int, x: int) -> bool:
+        return self.char_at(y, x) == ">" or "staircase down" in self.terrain_at(y, x)
+
+    def is_stairs_up(self, y: int, x: int) -> bool:
+        return self.char_at(y, x) == "<" or "staircase up" in self.terrain_at(y, x)
+
+    def is_altar(self, y: int, x: int) -> bool:
+        return self.char_at(y, x) == "_" or self.terrain_at(y, x) == "altar"
+
+    def is_fountain(self, y: int, x: int) -> bool:
+        return self.char_at(y, x) == "{" or self.terrain_at(y, x) == "fountain"
+
+    def is_sink(self, y: int, x: int) -> bool:
+        return self.terrain_at(y, x) == "sink"
+
+    def is_trap(self, y: int, x: int) -> bool:
+        if 0 <= y < 21 and 0 <= x < 79:
+            return bool(_IS_TRAP_LUT[int(self.glyphs[y, x])])
+        return False
+
+    @property
+    def stairs_down_pos(self) -> tuple[int, int] | None:
+        """Finds the coordinates of the staircase down on the current screen, if visible."""
+        stairs = np.argwhere(self.chars == ord(">"))
+        if len(stairs) > 0:
+            return (int(stairs[0, 0]), int(stairs[0, 1]))
+        return None
+
+    @property
+    def stairs_up_pos(self) -> tuple[int, int] | None:
+        """Finds the coordinates of the staircase up on the current screen, if visible."""
+        stairs = np.argwhere(self.chars == ord("<"))
+        if len(stairs) > 0:
+            return (int(stairs[0, 0]), int(stairs[0, 1]))
+        return None
+
+    # --- Full 24x80 Terminal & Text Queries ---
+    @property
+    def tty_lines(self) -> list[str]:
+        if self._tty_lines_cache is None:
+            lines = []
+            if self.tty_chars is not None:
+                for r in range(len(self.tty_chars)):
+                    line = (
+                        bytes(self.tty_chars[r])
+                        .translate(_ASCII_TRANS_TABLE)
+                        .decode("latin1")
+                        .rstrip()
+                    )
+                    lines.append(line)
+            self._tty_lines_cache = lines
+        return self._tty_lines_cache
+
+    @property
+    def tty_text(self) -> str:
+        if self._tty_text_cache is None:
+            self._tty_text_cache = "\n".join(self.tty_lines)
+        return self._tty_text_cache
+
+    # --- 1-to-1 NLE Internal & Program State Properties ---
+    @property
+    def deepest_level_reached(self) -> int:
+        if self.internal is not None and len(self.internal) > 0:
+            return int(self.internal[0])
+        return self.depth
+
+    @property
+    def is_on_stairs_down(self) -> bool:
+        if self.internal is not None and len(self.internal) > 4:
+            return bool(self.internal[4])
+        sd = self.stairs_down_pos
+        return sd is not None and sd == self.pos
+
+    @property
+    def internal_hunger(self) -> int:
+        """Raw internal integer nutrition counter from NetHack's C engine."""
+        if self.internal is not None and len(self.internal) > 7:
+            return int(self.internal[7])
+        return 900
+
+    @property
+    def waiting_for_space(self) -> bool:
+        if self.internal is not None and len(self.internal) > 3:
+            return bool(self.internal[3])
+        return False
+
+    @property
+    def is_in_moveloop(self) -> bool:
+        if self.program_state is not None and len(self.program_state) > 3:
+            return bool(self.program_state[3])
+        return True
+
+    @property
+    def in_moveloop(self) -> bool:
+        return self.is_in_moveloop
+
+    @property
+    def is_in_yn(self) -> bool:
+        if self.program_state is not None and len(self.program_state) > 1:
+            return bool(self.program_state[1])
+        return False
+
+    @property
+    def in_yn_prompt(self) -> bool:
+        return self.is_in_yn
+
+    @property
+    def is_in_getlin(self) -> bool:
+        if self.program_state is not None and len(self.program_state) > 2:
+            return bool(self.program_state[2])
+        return False
+
+    @property
+    def in_text_prompt(self) -> bool:
+        return self.is_in_getlin
+
+    @property
+    def is_game_over(self) -> bool:
+        if self.program_state is not None and len(self.program_state) > 0:
+            return bool(self.program_state[0])
+        return False
 
     def visible_monsters(self, exclude_self: bool = True) -> list[VisibleMonster]:
         """Returns all monsters currently visible on the 21x79 screen."""
@@ -733,6 +1232,11 @@ class GameState:
                 spec = int(specials[yi, xi])
                 is_pet = bool(_IS_PET_LUT[g]) or bool(spec & _MG_PET)
                 is_peaceful = bool(spec & _MG_PEACEFUL)
+                is_statue = bool(spec & _MG_STATUE)
+                is_ridden = bool(spec & _MG_RIDDEN)
+                is_invis = bool(spec & _MG_INVIS)
+                m_info = _MON_INFO_BY_GLYPH[g]
+                name = m_info.name if m_info else ch
                 mons.append(
                     VisibleMonster(
                         y=yi,
@@ -742,7 +1246,11 @@ class GameState:
                         color=col,
                         is_pet=is_pet,
                         is_peaceful=is_peaceful,
-                        info=_MON_INFO_BY_GLYPH[g],
+                        is_statue=is_statue,
+                        is_ridden=is_ridden,
+                        is_invisible=is_invis,
+                        name=name,
+                        info=m_info,
                     )
                 )
             self._monsters_cache = mons
@@ -772,6 +1280,14 @@ class GameState:
                 ch = _CHAR_LUT[c] if c < 256 else "?"
                 col = int(colors[yi, xi])
                 is_corpse = bool(_IS_BODY_LUT[g])
+                corpse_mon = _CORPSE_MON_BY_GLYPH[g] if is_corpse else None
+                o_info = _OBJ_INFO_BY_GLYPH[g]
+                if is_corpse and corpse_mon:
+                    name = f"corpse of {corpse_mon.name}"
+                elif o_info and o_info.name:
+                    name = o_info.name
+                else:
+                    name = ch
                 objs.append(
                     VisibleObject(
                         y=yi,
@@ -780,8 +1296,9 @@ class GameState:
                         char=ch,
                         color=col,
                         is_corpse=is_corpse,
-                        corpse_monster=_CORPSE_MON_BY_GLYPH[g] if is_corpse else None,
-                        info=_OBJ_INFO_BY_GLYPH[g],
+                        corpse_monster=corpse_mon,
+                        name=name,
+                        info=o_info,
                     )
                 )
             self._objects_cache = objs

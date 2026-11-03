@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import textwrap
+from typing import Any
 
 
 class PolicyValidationError(Exception):
@@ -32,6 +33,8 @@ ALLOWED_IMPORT_MODULES: frozenset[str] = frozenset(
         "operator",
         "bisect",
         "copy",
+        "skills",
+        "lox",
     }
 )
 
@@ -139,7 +142,7 @@ def validate_python_code(code: str, filename: str = "<policy>") -> ast.Module:
     """Parses and validates Python source code, returning the parsed AST Module."""
     if not code or not code.strip():
         raise PolicyValidationError(f"Empty code submitted for {filename}.")
-    cleaned = code.replace("\t", "    ").strip()
+    cleaned = textwrap.dedent(code.replace("\t", "    ")).strip()
     try:
         tree = ast.parse(cleaned, filename=filename)
     except SyntaxError as exc:
@@ -328,3 +331,135 @@ def splice_functions_into_policy(
         changed_names = non_root_changed
 
     return ast.unparse(base_tree), changed_names
+
+
+def check_macro_contracts(policy_code: str, macros_code: str) -> list[str]:
+    """
+    Statically inspects macro call sites in `policy_code` against function signatures
+    and generator protocols defined in `macros_code`.
+    Returns a list of diagnostic error strings (empty if contracts are satisfied).
+    """
+    if (
+        not macros_code
+        or not macros_code.strip()
+        or not policy_code
+        or not policy_code.strip()
+    ):
+        return []
+
+    try:
+        macro_tree = ast.parse(macros_code)
+        policy_tree = ast.parse(policy_code)
+    except Exception:
+        return []
+
+    macro_specs: dict[str, dict[str, Any]] = {}
+    for node in macro_tree.body:
+        if isinstance(node, ast.FunctionDef):
+            is_gen = any(
+                isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node)
+            )
+            args = [a.arg for a in node.args.args if a.arg != "self"]
+            defaults_count = len(node.args.defaults)
+            min_args = len(args) - defaults_count
+            max_args = len(args)
+            macro_specs[node.name] = {
+                "min_args": min_args,
+                "max_args": max_args,
+                "is_generator": is_gen,
+                "arg_names": set(args),
+            }
+
+    if not macro_specs:
+        return []
+
+    errors: list[str] = []
+
+    # Map each node to its parent to check if a call is inside a yield instead of yield from
+    parent_map: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(policy_tree):
+        for child in ast.iter_child_nodes(parent):
+            parent_map[child] = parent
+
+    for node in ast.walk(policy_tree):
+        if isinstance(node, ast.Call):
+            fn_name: str | None = None
+            if isinstance(node.func, ast.Name) and node.func.id in macro_specs:
+                fn_name = node.func.id
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in macro_specs:
+                if isinstance(node.func.value, ast.Name) and node.func.value.id in (
+                    "macros",
+                    "m",
+                ):
+                    fn_name = node.func.attr
+
+            if fn_name:
+                spec = macro_specs[fn_name]
+                passed_args = len(node.args)
+                passed_kwargs = len(node.keywords)
+                total_passed = passed_args + passed_kwargs
+                if total_passed < spec["min_args"]:
+                    errors.append(
+                        f"MacroContractError: Macro '{fn_name}' requires at least {spec['min_args']} argument(s), "
+                        f"but only {total_passed} were provided."
+                    )
+                elif total_passed > spec["max_args"]:
+                    errors.append(
+                        f"MacroContractError: Macro '{fn_name}' takes at most {spec['max_args']} argument(s), "
+                        f"but {total_passed} were provided."
+                    )
+
+                # Check if generator macro is directly yielded (yield macro(...)) instead of (yield from macro(...))
+                parent = parent_map.get(node)
+                if spec["is_generator"] and isinstance(parent, ast.Yield):
+                    errors.append(
+                        f"MacroContractError: Macro '{fn_name}' is a generator. "
+                        f"Use 'yield from {fn_name}(...)' instead of direct 'yield {fn_name}(...)'."
+                    )
+
+    return errors
+
+
+def extract_module_outline(code: str, module_name: str = "") -> str:
+    """
+    Extracts high-level class/function signatures and one-line docstrings from
+    Python module AST for context-scoped prompting without token bloat.
+    """
+    if not code or not code.strip():
+        return ""
+    try:
+        tree = ast.parse(code)
+    except Exception:
+        return f"# Module: {module_name} (syntax error in source)"
+
+    lines = [f"# Module: {module_name}"] if module_name else []
+    mod_doc = ast.get_docstring(tree)
+    if mod_doc:
+        first_line = mod_doc.strip().split("\n")[0]
+        lines.append(f'"""{first_line}"""')
+
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            lines.append(f"class {node.name}:")
+            cls_doc = ast.get_docstring(node)
+            if cls_doc:
+                lines.append(f'    """{cls_doc.strip().split(chr(10))[0]}"""')
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    args_str = ", ".join(a.arg for a in item.args.args)
+                    lines.append(f"    def {item.name}({args_str}):")
+                    fn_doc = ast.get_docstring(item)
+                    if fn_doc:
+                        lines.append(
+                            f'        """{fn_doc.strip().split(chr(10))[0]}"""'
+                        )
+                    lines.append("        ...")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args_str = ", ".join(a.arg for a in node.args.args)
+            lines.append(f"def {node.name}({args_str}):")
+            fn_doc = ast.get_docstring(node)
+            if fn_doc:
+                lines.append(f'    """{fn_doc.strip().split(chr(10))[0]}"""')
+            lines.append("    ...")
+
+    return "\n".join(lines)

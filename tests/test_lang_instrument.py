@@ -213,3 +213,88 @@ def run(self, state):
 """
     _, changed_fns = splice_functions_into_policy(code, patch_with_caller)
     assert changed_fns == ["pray_when_weak"]
+
+
+def test_macro_contract_linting():
+    from lox.lang.validator import check_macro_contracts
+
+    macros_code = """
+def find_corridors(state):
+    return state.chars == ord('#')
+
+def kick_door(state, direction):
+    yield seq(Action.KICK, direction)
+"""
+
+    # 1. Valid policy call
+    valid_policy = """
+class Policy:
+    def run(self, state):
+        mask = macros.find_corridors(state)
+        yield from macros.kick_door(state, Action.EAST)
+"""
+    errors = check_macro_contracts(valid_policy, macros_code)
+    assert errors == []
+
+    # 2. Too few arguments
+    too_few_args = """
+class Policy:
+    def run(self, state):
+        mask = macros.find_corridors()
+"""
+    errs = check_macro_contracts(too_few_args, macros_code)
+    assert len(errs) == 1
+    assert "requires at least 1 argument" in errs[0]
+
+    # 3. Direct yield instead of yield from for generator macro
+    bad_yield = """
+class Policy:
+    def run(self, state):
+        state = yield macros.kick_door(state, Action.NORTH)
+"""
+    errs = check_macro_contracts(bad_yield, macros_code)
+    assert any("is a generator. Use 'yield from" in e for e in errs)
+
+
+def test_bottom_up_macro_harvester(tmp_path):
+    from lox.lang.macros import MacroHarvester, MacroLibrary
+
+    macros_file = str(tmp_path / "macros.py")
+    ml = MacroLibrary(path=macros_file)
+
+    champion_code = """
+class Policy:
+    def __init__(self):
+        self.step_count = 0
+
+    def find_stairs_down(self, state):
+        '''Locates downstairs coordinates.'''
+        stairs = np.argwhere(state.chars == ord('>'))
+        return tuple(stairs[0]) if len(stairs) > 0 else None
+
+    def stateful_method(self, state):
+        self.step_count += 1
+        return self.step_count
+
+    def run(self, state):
+        while True:
+            target = self.find_stairs_down(state)
+            state = yield Action.SEARCH
+"""
+    fn_stats = [
+        {"function_name": "find_stairs_down", "ochiai_good_run_score": 0.45},
+        {"function_name": "stateful_method", "ochiai_good_run_score": 0.50},
+    ]
+
+    harvested = MacroHarvester.harvest_from_policy(
+        policy_code=champion_code,
+        macro_lib=ml,
+        fn_stats=fn_stats,
+    )
+
+    assert harvested == ["find_stairs_down"]
+    saved_code = ml.load_code()
+    assert "def find_stairs_down(state):" in saved_code
+    assert "Locates downstairs coordinates." in saved_code
+    assert "stateful_method" not in saved_code
+    assert "run" not in saved_code

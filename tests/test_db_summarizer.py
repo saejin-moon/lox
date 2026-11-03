@@ -235,7 +235,7 @@ def test_duckdb_logger_and_author_tools(tmp_path):
     out_exp, _ = tools.query_db(
         "SELECT player, role, max_depth, end_reason FROM expert_runs LIMIT 5"
     )
-    assert "eidolos" in out_exp or "reference_explorer" in out_exp
+    assert "ascended" in out_exp
 
     # Read-only guardrail blocks DROP/DELETE
     blocked, status = tools.query_db("DROP TABLE runs")
@@ -341,3 +341,119 @@ def test_save_batch_throughput_150_runs(tmp_path):
     assert elapsed < 1.0, (
         f"save_batch took {elapsed:.2f}s for 150 runs (expected < 1.0s)"
     )
+
+
+def test_stall_cause_classification_and_progression_metrics():
+    from lox.db.summarizer import summarize_episode_ticks
+    from lox.engine.hypothesis import progression_metric
+
+    # Simulate ticks with pet displacement loop
+    pet_ticks = [
+        {
+            "turn": t,
+            "step_idx": t,
+            "depth": 1,
+            "dungeon_num": 0,
+            "hp": 16,
+            "max_hp": 16,
+            "energy": 2,
+            "ac": 6,
+            "xp_level": 1,
+            "score": 0,
+            "hunger_state": 1,
+            "condition_mask": 0,
+            "y": 10,
+            "x": 20 if t % 2 == 0 else 21,
+            "action_name": "E" if t % 2 == 0 else "W",
+            "raw_key": ord("l") if t % 2 == 0 else ord("h"),
+            "active_function": "explore",
+            "message": "You swap places with your kitten." if t % 2 == 0 else "",
+        }
+        for t in range(1, 55)
+    ]
+    digest, _, milestones = summarize_episode_ticks(pet_ticks)
+    assert "pet displacement loop" in digest
+    assert "unique_tiles_d1" in milestones
+    assert milestones["unique_tiles_d1"] == 2
+
+    # Verify progression metric rewards stairs discovery and unique tiles
+    run_stalled = {
+        "max_depth": 1,
+        "score": 0,
+        "xp_level": 1,
+        "final_ac": 6,
+        "unique_tiles": 2,
+        "stairs_down_found": False,
+    }
+    run_explored = {
+        "max_depth": 1,
+        "score": 0,
+        "xp_level": 1,
+        "final_ac": 6,
+        "unique_tiles": 50,
+        "stairs_down_found": True,
+    }
+    assert progression_metric(run_explored) > progression_metric(run_stalled) + 0.20
+
+
+def test_dynamic_failure_telemetry_digest():
+    from lox.db.summarizer import build_batch_contrast_digest
+
+    batch_stats = {
+        "batch_id": "b_test_01",
+        "max_depth": 1,
+        "avg_depth": 1.0,
+        "p90_depth": 1.0,
+        "episodes_discarded": 0,
+    }
+    runs = [
+        {
+            "run_id": "r1",
+            "seed": 42,
+            "max_depth": 1,
+            "score": 0,
+            "turns": 1000,
+            "steps": 1000,
+            "end_reason": "max_steps",
+            "unique_tiles": 15,
+            "stairs_down_found": False,
+            "summary_digest": "Stalls: fn=explore on Dlvl 1 [locked door stall] (T10..T100)\nOverview: Depth=1",
+        },
+        {
+            "run_id": "r2",
+            "seed": 43,
+            "max_depth": 1,
+            "score": 0,
+            "turns": 1000,
+            "steps": 1000,
+            "end_reason": "max_steps",
+            "unique_tiles": 22,
+            "stairs_down_found": True,
+            "summary_digest": "Stalls: fn=explore on Dlvl 1 [pet displacement loop] (T50..T150)\nOverview: Depth=1",
+        },
+    ]
+    fn_stats = [
+        {
+            "function_name": "explore",
+            "trigger_rate": 1.0,
+            "total_turns_active": 2000,
+            "avg_depth_when_triggered": 1.0,
+            "death_rate_while_active": 0.0,
+            "ochiai_good_run_score": 0.0,
+            "liblit_failure_score": 0.0,
+        }
+    ]
+
+    digest = build_batch_contrast_digest(batch_stats, runs, fn_stats)
+
+    # Must contain dynamic telemetry
+    assert "Dynamic Failure Telemetry & Progression Diagnostics" in digest
+    assert "locked door stall" in digest
+    assert "pet displacement loop" in digest
+    assert "Down Stairs (`>`) Discovery Rate" in digest
+    assert "Avg 18.5 unique tiles mapped" in digest
+
+    # Must NOT contain old misleading hardcoded text
+    assert "Cyclic Positional Oscillations (Ping-Pong Loops)" not in digest
+    assert "Stuck Detector Blindness" not in digest
+    assert "Use a ring buffer of recent positions" not in digest

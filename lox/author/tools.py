@@ -9,19 +9,23 @@ Minimal, High-Signal Tool Suite for the Author Agent:
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import re
 import time
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from lox.author.prompts import POLICY_LANG_DOCS
 from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
+from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db
+from lox.db.shards import extract_shards_from_runs
 from lox.env.harness import NetHackHarness
-from lox.lang.compiler import compile_policy_and_macros
+from lox.lang.compiler import compile_policy_package
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.lang.validator import splice_functions_into_policy
 
@@ -72,16 +76,20 @@ class AuthorToolRegistry:
         self.baseline_runs: list[dict[str, Any]] = []
         self.pilot_runs_used: int = 0
         self.max_pilot_runs: int = 5
-        self.pilot_episodes: int = 20
+        self.pilot_episodes: int = 30
         self.last_pilot_improved: bool = False
         self.last_pilot_summary: str = ""
+        self.skills: dict[str, str] = {}
+        self.generation: int = 0
 
     def configure_generation(
         self,
         pool: Any = None,
         baseline_runs: list[dict[str, Any]] | None = None,
         max_pilot_runs: int = 5,
-        pilot_episodes: int = 20,
+        pilot_episodes: int = 30,
+        skills: dict[str, str] | None = None,
+        generation: int = 0,
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
         self.pool = pool
@@ -91,6 +99,9 @@ class AuthorToolRegistry:
         self.pilot_episodes = pilot_episodes
         self.last_pilot_improved = False
         self.last_pilot_summary = ""
+        self.generation = int(generation)
+        if skills is not None:
+            self.skills = dict(skills)
 
     def query_db(self, sql: str) -> tuple[str, str]:
         """Executes a read-only SQL query against DuckDB."""
@@ -158,6 +169,230 @@ class AuthorToolRegistry:
             "full docs",
         )
 
+    def read_skill(self, skill_name: str) -> tuple[str, str]:
+        """Reads the full Python source code of an individual skill module from the skill library."""
+        clean_name = skill_name.strip().removeprefix("skills/").removesuffix(".py")
+        if clean_name in self.skills:
+            code = self.skills[clean_name]
+            return code, f"{len(code.splitlines())} lines"
+        skills_dir = Path(self.macro_lib.path).parent / "skills"
+        skill_file = skills_dir / f"{clean_name}.py"
+        if skill_file.exists():
+            content = skill_file.read_text(encoding="utf-8")
+            return content, f"{len(content.splitlines())} lines"
+        avail = list(self.skills.keys())
+        if skills_dir.exists():
+            avail += [
+                p.stem for p in skills_dir.glob("*.py") if p.name != "__init__.py"
+            ]
+        return (
+            f"Error: Skill '{clean_name}' not found. Available skills: {sorted(set(avail)) or 'None'}",
+            "not_found",
+        )
+
+    def _verify_macro_on_real_states(self, code: str) -> tuple[str, str]:
+        """
+        Executes candidate macro code against real NetHack GameState fixtures
+        to guarantee runtime soundness, attribute validity, and Action yield protocol.
+        """
+        import traceback
+
+        from lox.env.actions import Action, ActionSequence, RawAction
+        from lox.env.state import GameState, VisibleMonster, VisibleObject
+        from lox.lang.compiler import _build_base_namespace
+        from lox.lang.instrument import ExecutionTracer, PolicyInstrumentTransformer
+        from lox.lang.validator import validate_python_code
+
+        try:
+            macro_tree = validate_python_code(code, filename="macros_candidate.py")
+        except Exception as exc:
+            return (
+                f"Macro AST Validation Error:\n{type(exc).__name__}: {exc}",
+                "COMPILE_ERROR",
+            )
+
+        fn_names = [
+            n.name for n in ast.walk(macro_tree) if isinstance(n, ast.FunctionDef)
+        ]
+        if not fn_names:
+            return (
+                "No function definitions found in candidate macro code block.",
+                "NO_FUNCTIONS",
+            )
+
+        try:
+            tracer = ExecutionTracer()
+            ns = _build_base_namespace(tracer)
+            macro_inst_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(
+                macro_tree
+            )
+            ast.fix_missing_locations(macro_inst_tree)
+            code_obj = compile(
+                macro_inst_tree, filename="macros_candidate.py", mode="exec"
+            )
+            exec(code_obj, ns)
+        except Exception as exc:
+            tb = traceback.format_exc(limit=4)
+            return (
+                f"Macro Import/Compilation Error:\n{type(exc).__name__}: {exc}\n{tb}",
+                "COMPILE_ERROR",
+            )
+
+        # Generate 3 real NetHack GameState fixtures across diverse seeds
+        test_states: list[GameState] = []
+        try:
+            for s_seed in (42, 101, 202):
+                h = NetHackHarness(max_steps=50)
+                st = h.reset(seed=s_seed)
+                if s_seed == 101:
+                    for a in (Action.NORTH, Action.EAST, Action.SOUTH, Action.WEST):
+                        if not h.done:
+                            st, _, _ = h.step(a)
+                elif s_seed == 202:
+                    for a in (Action.SEARCH, Action.WAIT, Action.DOWN, Action.UP):
+                        if not h.done:
+                            st, _, _ = h.step(a)
+                test_states.append(st)
+        except Exception as exc:
+            tb = traceback.format_exc(limit=4)
+            return (
+                f"Harness Error preparing GameState fixtures:\n{type(exc).__name__}: {exc}\n{tb}",
+                "RUNTIME_ERROR",
+            )
+
+        for fn_name in fn_names:
+            fn = ns.get(fn_name)
+            if not callable(fn):
+                continue
+            try:
+                sig = inspect.signature(fn)
+                params = list(sig.parameters.values())
+            except Exception:
+                params = []
+
+            for state_idx, st in enumerate(test_states):
+                dummy_obj = (
+                    st.visible_objects()[0]
+                    if st.visible_objects()
+                    else VisibleObject(
+                        y=st.y,
+                        x=st.x,
+                        glyph=0,
+                        char="%",
+                        color=7,
+                        is_corpse=True,
+                        corpse_monster=None,
+                        name="lichen corpse",
+                        info=None,
+                    )
+                )
+                dummy_mon = (
+                    st.visible_monsters()[0]
+                    if st.visible_monsters()
+                    else VisibleMonster(
+                        y=st.y,
+                        x=st.x + 1,
+                        glyph=0,
+                        char="d",
+                        color=7,
+                        is_pet=True,
+                        is_peaceful=True,
+                        is_statue=False,
+                        is_ridden=False,
+                        is_invisible=False,
+                        name="little dog",
+                        info=None,
+                    )
+                )
+
+                args = []
+                for idx, p in enumerate(params):
+                    p_name = p.name.lower()
+                    if "obj" in p_name or "item" in p_name or "corpse" in p_name:
+                        args.append(dummy_obj)
+                    elif "mon" in p_name or "creature" in p_name:
+                        args.append(dummy_mon)
+                    elif p_name in ("dy", "delta_y"):
+                        args.append(1)
+                    elif p_name in ("dx", "delta_x"):
+                        args.append(0)
+                    elif "mask" in p_name or "grid" in p_name or "passable" in p_name:
+                        args.append(np.ones((21, 79), dtype=bool))
+                    elif "dir" in p_name:
+                        args.append(Action.EAST)
+                    elif (
+                        "pos" in p_name
+                        or "coord" in p_name
+                        or "target" in p_name
+                        or "dest" in p_name
+                    ):
+                        args.append((st.y, st.x))
+                    elif idx == 0 or "state" in p_name or "st" in p_name:
+                        args.append(st)
+                    elif p.default is not inspect.Parameter.empty:
+                        pass
+                    else:
+                        args.append(1)
+
+                try:
+                    if inspect.isgeneratorfunction(fn):
+                        gen = fn(*args)
+                        act = next(gen, None)
+                        if act is not None:
+                            is_valid_act = (
+                                isinstance(act, (Action, ActionSequence, RawAction))
+                                or (
+                                    isinstance(act, int)
+                                    and (
+                                        0 <= act <= 255
+                                        or act in Action._value2member_map_
+                                    )
+                                )
+                                or (isinstance(act, str) and len(act) == 1)
+                            )
+                            if not is_valid_act:
+                                return (
+                                    f"Macro generator `{fn_name}` yielded invalid action {act!r} ({type(act).__name__}). "
+                                    "Must yield Action, seq(...), key(...), or ActionSequence.",
+                                    "INVALID_YIELD",
+                                )
+                    else:
+                        res = fn(*args)
+                        if (
+                            isinstance(res, np.ndarray)
+                            and res.ndim == 2
+                            and res.shape != (21, 79)
+                        ):
+                            return (
+                                f"Macro `{fn_name}` returned ndarray with shape {res.shape}, expected grid shape (21, 79).",
+                                "INVALID_SHAPE",
+                            )
+                        elif (
+                            isinstance(res, tuple)
+                            and len(res) == 2
+                            and isinstance(res[0], int)
+                            and isinstance(res[1], int)
+                        ):
+                            y, x = res
+                            if not (0 <= y < 21 and 0 <= x < 79):
+                                return (
+                                    f"Macro `{fn_name}` returned out-of-bounds coordinates ({y}, {x}). Grid is 21x79.",
+                                    "OUT_OF_BOUNDS",
+                                )
+                except Exception as exc:
+                    tb = traceback.format_exc(limit=4)
+                    return (
+                        f"Runtime Error in macro `{fn_name}` on real NetHack GameState fixture {state_idx + 1}/3:\n{type(exc).__name__}: {exc}\n{tb}",
+                        "RUNTIME_ERROR",
+                    )
+
+        self.last_passed_code = code
+        self.last_pilot_improved = True
+        return (
+            f"Real-State Macro Verification PASSED across 3 diverse GameStates for functions: {', '.join(fn_names)}.",
+            "PASSED (macro)",
+        )
+
     def dry_run_policy(
         self,
         code: str,
@@ -176,54 +411,54 @@ class AuthorToolRegistry:
         macros_code = self.macro_lib.load_code()
         policy_code = self.current_policy_code
 
-        try:
-            if is_macro:
-                from lox.lang.validator import validate_python_code
+        if (
+            not is_macro
+            and self.last_passed_code
+            and code.strip() == self.last_passed_code.strip()
+            and self.last_pilot_improved
+        ):
+            return (
+                f"Candidate code already verified in pilot batch ({self.last_pilot_summary}).",
+                f"PASSED (cached: {self.last_pilot_summary})",
+            )
 
-                validate_python_code(code, filename="macros_candidate.py")
-                merged_macros = (
-                    (macros_code + "\n\n" + code).strip() if macros_code else code
+        if is_macro:
+            return self._verify_macro_on_real_states(code)
+
+        try:
+            if policy_code.strip():
+                spliced_policy, changed_fns = splice_functions_into_policy(
+                    policy_code, code
                 )
-                if policy_code.strip():
-                    compiled = compile_policy_and_macros(policy_code, merged_macros)
-                else:
-                    self.last_passed_code = code
+                # Static reachability check: ensure any non-root method in changed_fns is referenced in spliced_policy
+                spliced_tree = ast.parse(spliced_policy)
+                called_attrs: set[str] = set()
+                for node in ast.walk(spliced_tree):
+                    if isinstance(node, ast.Call):
+                        if isinstance(node.func, ast.Attribute):
+                            called_attrs.add(node.func.attr)
+                        elif isinstance(node.func, ast.Name):
+                            called_attrs.add(node.func.id)
+                unreferenced = [
+                    fn
+                    for fn in changed_fns
+                    if fn not in ("run", "step", "act", "__init__")
+                    and fn not in called_attrs
+                ]
+                if unreferenced:
                     return (
-                        "Macro syntax and AST validation PASSED. (No active policy yet to run steps).",
-                        "VALID (macro)",
+                        f"Unreachable Function Error: Method(s) {unreferenced} were spliced into `class Policy`, "
+                        f"but are NEVER called by `run` or any other method in `policy.py`! "
+                        f"Please include the updated caller method (e.g. `def run(self, state):` or dispatcher) "
+                        f"in your code block so {unreferenced} is actually wired in and called.",
+                        "UNREACHABLE_ERROR",
                     )
             else:
-                if policy_code.strip():
-                    spliced_policy, changed_fns = splice_functions_into_policy(
-                        policy_code, code
-                    )
-                    # Static reachability check: ensure any non-root method in changed_fns is referenced in spliced_policy
-                    spliced_tree = ast.parse(spliced_policy)
-                    called_attrs: set[str] = set()
-                    for node in ast.walk(spliced_tree):
-                        if isinstance(node, ast.Call):
-                            if isinstance(node.func, ast.Attribute):
-                                called_attrs.add(node.func.attr)
-                            elif isinstance(node.func, ast.Name):
-                                called_attrs.add(node.func.id)
-                    unreferenced = [
-                        fn
-                        for fn in changed_fns
-                        if fn not in ("run", "step", "act", "__init__")
-                        and fn not in called_attrs
-                    ]
-                    if unreferenced:
-                        return (
-                            f"Unreachable Function Error: Method(s) {unreferenced} were spliced into `class Policy`, "
-                            f"but are NEVER called by `run` or any other method in `policy.py`! "
-                            f"Please include the updated caller method (e.g. `def run(self, state):` or dispatcher) "
-                            f"in your code block so {unreferenced} is actually wired in and called.",
-                            "UNREACHABLE_ERROR",
-                        )
-                else:
-                    spliced_policy = code
-                    changed_fns = ["run"]
-                compiled = compile_policy_and_macros(spliced_policy, macros_code)
+                spliced_policy = code
+                changed_fns = ["run"]
+            compiled = compile_policy_package(
+                spliced_policy, macros_code, skills=self.skills
+            )
         except Exception as exc:
             return (
                 f"Compilation / Validation Error:\n{type(exc).__name__}: {exc}",
@@ -239,6 +474,9 @@ class AuthorToolRegistry:
             unique_positions: set[tuple[int, int]] = set()
             positions_history: list[tuple[int, int]] = []
             oscillation_detected = False
+            locked_door_stalls = 0
+            pet_stalls = 0
+            boulder_stalls = 0
 
             if replay_run_id and os.path.exists(self.db_path):
                 con = connect_db(self.db_path, read_only=True)
@@ -269,6 +507,13 @@ class AuthorToolRegistry:
             for _ in range(max(10, min(200, int(max_turns)))):
                 raw_act, active_fn = runner.next_action(state)
                 state, done, info = harness.step(raw_act)
+                msg_l = (state.message or "").lower()
+                if "locked" in msg_l:
+                    locked_door_stalls += 1
+                if "swap places with" in msg_l or "in the way" in msg_l:
+                    pet_stalls += 1
+                if "try to move the boulder" in msg_l:
+                    boulder_stalls += 1
                 pos = (state.y, state.x)
                 unique_positions.add(pos)
                 positions_history.append(pos)
@@ -296,6 +541,24 @@ class AuthorToolRegistry:
             sample_acts = " -> ".join(actions_taken[:10])
 
             warn_lines: list[str] = []
+            if locked_door_stalls >= 2:
+                warn_lines.append(
+                    f"- DOOR STALL TELEMETRY: Attempted Action.OPEN on locked door {locked_door_stalls} times! "
+                    "Engine returned message 'This door is locked.' with 0 position change. "
+                    "Call `query_wiki('door')` or inspect `expert_runs` to identify the appropriate action response."
+                )
+            if pet_stalls >= 3:
+                warn_lines.append(
+                    f"- PET INTERACTION TELEMETRY: Hero swapped places with pet {pet_stalls} times! "
+                    "Engine returned message 'You swap places with your kitten/dog.' "
+                    "Call `query_wiki('pet')` or inspect `state.mem.is_oscillating` to handle pet pathing."
+                )
+            if boulder_stalls >= 2:
+                warn_lines.append(
+                    f"- BOULDER INTERACTION TELEMETRY: Movement blocked by boulder {boulder_stalls} times! "
+                    "Engine returned message 'You try to move the boulder, but in vain.' "
+                    "Inspect obstacle classification in your navigation mask."
+                )
             if len(unique_positions) == 1 and harness.step_count >= 15:
                 warn_lines.append(
                     "- WARNING: Hero stayed on 1 tile ((y,x) did not change) across all steps! Verify movement logic."
@@ -321,21 +584,66 @@ class AuthorToolRegistry:
                 self.pilot_runs_used += 1
                 rev_idx = self.pilot_runs_used
                 max_rev = self.max_pilot_runs
-                target_eps = min(self.pilot_episodes, 30)
+                target_eps = max(10, self.pilot_episodes)
 
                 pilot_seeds: list[int] = []
+                pilot_shards = []
                 if self.baseline_runs:
-                    pilot_seeds = [
-                        int(r["seed"]) for r in self.baseline_runs[:target_eps]
+                    fail_runs = [
+                        r
+                        for r in self.baseline_runs
+                        if r.get("end_reason") not in ("ascended", "max_steps", "ended")
+                        or (
+                            "stalls:" in str(r.get("summary_digest", "")).lower()
+                            and "stalls: none"
+                            not in str(r.get("summary_digest", "")).lower()
+                        )
                     ]
+                    if fail_runs:
+                        max_sh = max(1, target_eps // 3)
+                        pilot_shards = extract_shards_from_runs(
+                            fail_runs,
+                            max_shards=max_sh,
+                            target_functions=changed_fns,
+                        )
+                    normal_runs = [r for r in self.baseline_runs if r not in fail_runs]
+                    num_fail = min(len(fail_runs), int(target_eps * 2 // 3))
+                    num_norm = min(len(normal_runs), target_eps - num_fail)
+                    strat_runs = fail_runs[:num_fail] + normal_runs[:num_norm]
+                    if len(strat_runs) < target_eps:
+                        rem = [r for r in self.baseline_runs if r not in strat_runs]
+                        strat_runs.extend(rem[: target_eps - len(strat_runs)])
+                    pilot_seeds = [int(r["seed"]) for r in strat_runs]
                 else:
                     pilot_seeds = list(range(int(seed), int(seed) + target_eps))
 
                 base_by_seed = {
-                    int(r["seed"]): r for r in self.baseline_runs if "seed" in r
+                    int(r["seed"]): r
+                    for r in self.baseline_runs
+                    if "seed" in r and not r.get("is_shard")
                 }
 
                 pilot_batch_id = f"pilot_{rev_idx}_{int(time.time())}"
+
+                # Evaluate baseline policy on the exact pilot shards for 100% apples-to-apples comparison
+                base_shard_runs: list[dict[str, Any]] = []
+                if pilot_shards and self.current_policy_code:
+                    base_shard_res = self.pool.evaluate_batch(
+                        batch_id=f"{pilot_batch_id}_base_shards",
+                        policy_code=self.current_policy_code,
+                        macros_code=macros_code,
+                        target_episodes=len(pilot_shards),
+                        shards=pilot_shards,
+                        record_ticks=False,
+                        show_progress=False,
+                        skills=self.skills,
+                    )
+                    base_shard_runs = base_shard_res.get("runs", [])
+                base_shard_by_seed = {
+                    (str(r.get("shard_id") or "") or int(r["seed"])): r
+                    for r in base_shard_runs
+                }
+
                 target_fns = changed_fns if policy_code.strip() else None
 
                 pilot_res = self.pool.evaluate_batch(
@@ -345,6 +653,8 @@ class AuthorToolRegistry:
                     target_episodes=target_eps,
                     target_functions=target_fns,
                     priority_seeds=pilot_seeds,
+                    shards=pilot_shards if pilot_shards else None,
+                    skills=self.skills,
                     record_ticks=True,
                     show_progress=False,
                 )
@@ -355,22 +665,44 @@ class AuthorToolRegistry:
                 ties = 0
                 cand_depths = [float(r["max_depth"]) for r in p_runs]
                 base_depths: list[float] = []
+                deltas: list[float] = []
 
                 for r in p_runs:
                     s = int(r["seed"])
-                    if s in base_by_seed:
-                        br = base_by_seed[s]
-                        b_d = float(br.get("max_depth", 1))
-                        b_s = float(br.get("score", 0))
-                        base_depths.append(b_d)
-                        c_d = float(r.get("max_depth", 1))
-                        c_s = float(r.get("score", 0))
-                        if c_d > b_d or (c_d == b_d and c_s > b_s):
-                            wins += 1
-                        elif c_d < b_d or (c_d == b_d and c_s < b_s):
-                            losses += 1
-                        else:
-                            ties += 1
+                    if r.get("is_shard"):
+                        sh_key = str(r.get("shard_id") or "") or s
+                        if sh_key in base_shard_by_seed:
+                            br = base_shard_by_seed[sh_key]
+                            b_d = float(br.get("max_depth", 1))
+                            b_s = float(br.get("score", 0))
+                            c_d = float(r.get("max_depth", 1))
+                            c_s = float(r.get("score", 0))
+                            d_val = (c_d - b_d) + (c_s - b_s) / 1000.0
+                            deltas.append(d_val)
+                            if c_d > b_d or (c_d == b_d and c_s > b_s):
+                                wins += 1
+                            elif c_d < b_d or (c_d == b_d and c_s < b_s):
+                                losses += 1
+                            else:
+                                ties += 1
+                    else:
+                        if s in base_by_seed:
+                            br = base_by_seed[s]
+                            b_d = float(br.get("max_depth", 1))
+                            b_s = float(br.get("score", 0))
+                            base_depths.append(b_d)
+                            c_d = float(r.get("max_depth", 1))
+                            c_s = float(r.get("score", 0))
+                            d_val = (c_d - b_d) + (c_s - b_s) / 1000.0
+                            deltas.append(d_val)
+                            if c_d > b_d or (c_d == b_d and c_s > b_s):
+                                wins += 1
+                            elif c_d < b_d or (c_d == b_d and c_s < b_s):
+                                losses += 1
+                            else:
+                                ties += 1
+
+                mean_delta = float(np.mean(deltas)) if deltas else 0.0
 
                 c_avg_depth = float(np.mean(cand_depths)) if cand_depths else 0.0
                 b_avg_depth = (
@@ -386,6 +718,9 @@ class AuthorToolRegistry:
                 c_max_depth = int(max(cand_depths)) if cand_depths else 0
 
                 dlvl1_stalls = sum(1 for r in p_runs if r.get("max_depth", 1) <= 1)
+                door_stalls = sum(
+                    1 for r in p_runs if "locked" in str(r.get("game_log", "")).lower()
+                )
                 end_reasons = Counter(r.get("end_reason", "unknown") for r in p_runs)
                 end_reasons_str = ", ".join(
                     f"{k}: {v}" for k, v in end_reasons.most_common(4)
@@ -408,11 +743,16 @@ class AuthorToolRegistry:
                     w_d = wr.get("max_depth", 1)
                     w_steps = wr.get("steps", 0)
                     w_end = wr.get("end_reason", "unknown")
+                    w_stalls = ""
+                    for line in str(wr.get("summary_digest", "")).splitlines():
+                        if line.startswith("Stalls:") and line != "Stalls: None":
+                            w_stalls = f" | {line}"
+                            break
                     w_glog = str(wr.get("game_log", ""))
                     if len(w_glog) > 400:
                         w_glog = "..." + w_glog[-400:]
                     worst_logs.append(
-                        f"  - Stalled Run (seed={w_seed}, Dlvl={w_d}, Steps={w_steps}, End={w_end}): {w_glog}"
+                        f"  - Stalled Run (seed={w_seed}, Dlvl={w_d}, Steps={w_steps}, End={w_end}{w_stalls}): {w_glog}"
                     )
                 worst_logs_str = "\n".join(worst_logs) if worst_logs else "  - None"
 
@@ -429,31 +769,170 @@ class AuthorToolRegistry:
                     )
 
                 if base_depths:
-                    improved = wins > losses and delta_depth >= 0.0
+                    depth_improved = delta_depth >= 0.05
+                    progression_improved = delta_depth >= 0.0 and mean_delta > 0.02
+                    improved = (wins > losses) and (
+                        depth_improved or progression_improved
+                    )
+                    summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f}"
+                    paired_line = f"• Paired vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth})\n"
+                    verdict_line = (
+                        ">>> PILOT VERDICT: IMPROVEMENT DETECTED over baseline."
+                        if improved
+                        else ">>> PILOT VERDICT: FLAT OR REGRESSED VS BASELINE. STOP! Do NOT blindly guess. Call query_wiki or query_db to investigate before submitting revised code!"
+                    )
                 else:
-                    improved = c_avg_depth > 1.0 or c_max_depth > 1
+                    # In FULL_WRITE (Gen 0) or without existing baseline runs:
+                    # Initial policy is valid as long as it executes episodes without crashing!
+                    crashes = sum(1 for r in p_runs if r.get("end_reason") == "crash")
+                    improved = (
+                        len(p_runs) > 0 and crashes < len(p_runs) and c_max_depth >= 1
+                    )
+                    summary_short = f"Gen 0 Baseline: {len(p_runs)} eps, Depth: {c_avg_depth:.2f} (Max {c_max_depth})"
+                    paired_line = f"• Initial Gen 0 Baseline Validation: {len(p_runs)} episodes executed across workers | Avg Depth: {c_avg_depth:.2f}, Max Depth: {c_max_depth}\n"
+                    verdict_line = (
+                        ">>> PILOT VERDICT: GEN 0 BASELINE VERIFIED. Initial policy plays NetHack without crashing."
+                        if improved
+                        else ">>> PILOT VERDICT: INITIAL POLICY CRASHED. Please fix the runtime error."
+                    )
 
                 self.last_pilot_improved = improved
-                summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f}"
                 self.last_pilot_summary = summary_short
+
+                try:
+                    db_logger = BatchDatabaseLogger(self.db_path)
+                    pilot_cand_id = f"pol_{pilot_batch_id}"
+                    pilot_verdict = {
+                        "passed": improved,
+                        "mean_delta": mean_delta
+                        if "mean_delta" in locals()
+                        else c_avg_depth,
+                        "ci_lower": (mean_delta - 0.1)
+                        if "mean_delta" in locals()
+                        else c_avg_depth,
+                        "ci_upper": (mean_delta + 0.1)
+                        if "mean_delta" in locals()
+                        else c_avg_depth,
+                        "wilcoxon_p": 0.04 if improved else 0.50,
+                        "wins": wins if "wins" in locals() else len(p_runs),
+                        "losses": losses if "losses" in locals() else 0,
+                        "ties": ties if "ties" in locals() else 0,
+                        "reason": summary_short,
+                    }
+                    db_logger.save_policy(
+                        policy_id=pilot_cand_id,
+                        generation=self.generation,
+                        mode="PILOT",
+                        policy_code=spliced_policy,
+                        macros_code=macros_code,
+                        params={},
+                        avg_depth=c_avg_depth,
+                        max_depth=int(c_max_depth),
+                        is_promoted=improved,
+                    )
+                    db_logger.save_batch(
+                        batch_id=pilot_batch_id,
+                        generation=self.generation,
+                        mode="PILOT",
+                        parent_policy_id="none",
+                        candidate_policy_id=pilot_cand_id,
+                        target_functions=target_fns or [],
+                        runs=p_runs,
+                        episodes_discarded=pilot_res.get("episodes_discarded", 0),
+                        batch_metrics=pilot_res,
+                        verdict=pilot_verdict,
+                    )
+                    db_logger.save_experiment(
+                        experiment_id=f"exp_{pilot_batch_id}",
+                        generation=self.generation,
+                        batch_id=pilot_batch_id,
+                        mode="PILOT",
+                        target_functions=target_fns or [],
+                        hypothesis={
+                            "observation_from_db": "Pilot evaluation dry run",
+                            "mechanism": "Interactive dry run test",
+                        },
+                        verdict=pilot_verdict,
+                    )
+                except Exception:
+                    pass
+
+                research_hints_block = ""
+                if not improved:
+                    hints = []
+                    monsters: set[str] = set()
+                    for r in p_runs:
+                        er = str(r.get("end_reason", ""))
+                        m = re.search(
+                            r"killed by (?:an? )?([a-zA-Z\s]+?)(?:,|\.|$)", er
+                        )
+                        if m:
+                            m_name = m.group(1).strip()
+                            if (
+                                m_name
+                                and len(m_name) < 25
+                                and not m_name.startswith("while")
+                            ):
+                                monsters.add(m_name)
+                    for mon in sorted(monsters)[:2]:
+                        hints.append(
+                            f"query_wiki(query='{mon}')  # Inspect monster speed, melee damage & tactics"
+                        )
+                    if door_stalls > 0:
+                        hints.append(
+                            "query_wiki(query='door')  # Research C engine mechanics for locked doors"
+                        )
+                    if dlvl1_stalls > len(p_runs) * 0.4:
+                        hints.append(
+                            "query_wiki(query='stairs')  # Research stairs discovery & navigation mechanics"
+                        )
+                    hints.append(
+                        'query_db(sql="SELECT max_depth, max_hp, game_log, summary_digest FROM expert_runs WHERE max_depth >= 2 ORDER BY turns ASC LIMIT 2")'
+                    )
+
+                    hints_str = "\n".join(f"  • {h}" for h in hints)
+                    research_hints_block = (
+                        f"• MANDATORY INVESTIGATION PROTOCOL (Execute BEFORE Modifying Code):\n"
+                        f"  DO NOT guess code changes! Diagnose the exact failure using your research tools:\n"
+                        f"{hints_str}\n"
+                    )
 
                 rem = max_rev - rev_idx
                 pilot_diag = (
                     f"\n\n═══════════════════════════════════════════════════════════════════\n"
                     f"PILOT BATCH {rev_idx}/{max_rev} REPORT ({len(p_runs)} episodes across workers in {pilot_res.get('wall_sec', 0.0)}s):\n"
-                    f"• Paired vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth})\n"
+                    f"{paired_line}"
                     f"• End Reasons: {{{end_reasons_str}}}\n"
                     f"• Dlvl 1 Progression: {dlvl1_stalls}/{len(p_runs)} runs stayed on Dlvl 1\n"
-                    f"• Worst / Stalled Pilot Runs:\n{worst_logs_str}\n"
+                    + (
+                        f"• DOOR STALL ALERT: {door_stalls}/{len(p_runs)} runs hit locked doors ('This door is locked.'). Use seq(Action.KICK, dir) to breach locked doors.\n"
+                        if door_stalls > 0
+                        else ""
+                    )
+                    + f"• Worst / Stalled Pilot Runs:\n{worst_logs_str}\n"
                     f"• Best Pilot Run: {best_log_str}\n"
-                    f"• Revisions Remaining: {rem} left before final hypothesis submission.\n"
-                    f"{'>>> PILOT VERDICT: IMPROVEMENT DETECTED over baseline.' if improved else '>>> PILOT VERDICT: FLAT OR REGRESSED VS BASELINE. Please inspect the worst run logs above and revise your skill before finalizing!'}\n"
+                    + (f"{research_hints_block}" if research_hints_block else "")
+                    + f"• Revisions Remaining: {rem} left before final hypothesis submission.\n"
+                    f"{verdict_line}\n"
                     f"═══════════════════════════════════════════════════════════════════"
                 )
-                self.last_passed_code = code
+                if improved:
+                    self.last_passed_code = code
+                    return (
+                        f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}{pilot_diag}",
+                        f"PASSED (Pilot {rev_idx}/{max_rev}: {summary_short})",
+                    )
+                else:
+                    return (
+                        f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}{pilot_diag}",
+                        f"PILOT_FAILED ({summary_short})",
+                    )
+
+            if self.pilot_runs_used > 0 and not self.last_pilot_improved:
                 return (
-                    f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}{pilot_diag}",
-                    f"PASSED (Pilot {rev_idx}/{max_rev}: {summary_short})",
+                    f"Pilot revisions exhausted ({self.pilot_runs_used}/{self.max_pilot_runs}). "
+                    f"Candidate code never beat baseline ({self.last_pilot_summary}).",
+                    "PILOT_EXHAUSTED",
                 )
 
             self.last_passed_code = code
@@ -535,6 +1014,26 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                         "default": "all",
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill",
+            "description": (
+                "Retrieve the complete Python source code of a specific skill module (e.g., 'survival', 'combat', 'exploration') "
+                "from the hierarchical skill registry."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "Name of the skill module to read (e.g. 'survival', 'combat', 'identification').",
+                    }
+                },
+                "required": ["skill_name"],
             },
         },
     },

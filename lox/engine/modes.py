@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from lox.db.shards import extract_shards_from_runs
 from lox.engine.hypothesis import evaluate_paired_hypothesis, progression_metric
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
@@ -178,6 +179,7 @@ def run_spsa_param_tuning(
         if baseline_runs
         else list(range(10000, 10200))
     )
+    shards = extract_shards_from_runs(baseline_runs, max_shards=minibatch_size * 2)
 
     # Spall SPSA standard gain schedule
     c0 = 0.12
@@ -185,6 +187,33 @@ def run_spsa_param_tuning(
     A = max(1.0, 0.1 * iterations)
     alpha_exp = 0.602
     gamma_exp = 0.101
+
+    shard_base_mb = 0.0
+    if shards:
+        base_shard_tasks = [
+            {
+                "seed": sh.seed,
+                "run_id": f"{batch_id}_spsa_base_s{idx:05d}",
+                "role": pool.role,
+                "max_steps": 150,
+                "policy_code": policy_code,
+                "macros_code": macros_code,
+                "target_functions": [],
+                "param_overrides": _denorm(theta),
+                "record_ticks": False,
+                "replay_bytes": sh.action_bytes,
+                "post_replay_max_steps": 150,
+                "is_priority_seed": True,
+                "enforce_trigger": False,
+            }
+            for idx, sh in enumerate(shards[:minibatch_size], 1)
+        ]
+        base_shard_runs = pool.evaluate_tasks(base_shard_tasks)
+        shard_base_mb = (
+            float(np.mean([progression_metric(r) for r in base_shard_runs]))
+            if base_shard_runs
+            else 0.0
+        )
 
     for k in range(iterations):
         ui.status(
@@ -197,49 +226,92 @@ def run_spsa_param_tuning(
         theta_plus = np.clip(theta + ck * delta_vec, 0.0, 1.0)
         theta_minus = np.clip(theta - ck * delta_vec, 0.0, 1.0)
 
-        # Common Random Numbers: evaluate theta_plus and theta_minus on the exact same mini-batch of seeds concurrently
+        # Common Random Numbers: evaluate theta_plus and theta_minus on the exact same mini-batch concurrently
         mb_seeds = [
             int(s)
             for s in rng.choice(
                 base_seeds, size=min(minibatch_size, len(base_seeds)), replace=False
             )
         ]
-        j_base_mb = (
-            float(np.mean([base_by_seed[s] for s in mb_seeds if s in base_by_seed]))
-            if base_by_seed
-            else 0.0
-        )
+        if shards:
+            j_base_mb = shard_base_mb
+        else:
+            j_base_mb = (
+                float(np.mean([base_by_seed[s] for s in mb_seeds if s in base_by_seed]))
+                if base_by_seed
+                else 0.0
+            )
 
         p_overrides = _denorm(theta_plus)
         m_overrides = _denorm(theta_minus)
-        p_tasks = [
-            {
-                "seed": s,
-                "run_id": f"{batch_id}_spsa_{k}p_r{idx:05d}",
-                "role": pool.role,
-                "max_steps": pool.max_steps,
-                "policy_code": policy_code,
-                "macros_code": macros_code,
-                "target_functions": [],
-                "param_overrides": p_overrides,
-                "record_ticks": False,
-            }
-            for idx, s in enumerate(mb_seeds, 1)
-        ]
-        m_tasks = [
-            {
-                "seed": s,
-                "run_id": f"{batch_id}_spsa_{k}m_r{idx:05d}",
-                "role": pool.role,
-                "max_steps": pool.max_steps,
-                "policy_code": policy_code,
-                "macros_code": macros_code,
-                "target_functions": [],
-                "param_overrides": m_overrides,
-                "record_ticks": False,
-            }
-            for idx, s in enumerate(mb_seeds, 1)
-        ]
+
+        if shards:
+            eval_shards = shards[:minibatch_size]
+            p_tasks = [
+                {
+                    "seed": sh.seed,
+                    "run_id": f"{batch_id}_spsa_{k}p_s{idx:05d}",
+                    "role": pool.role,
+                    "max_steps": 150,
+                    "policy_code": policy_code,
+                    "macros_code": macros_code,
+                    "target_functions": [],
+                    "param_overrides": p_overrides,
+                    "record_ticks": False,
+                    "replay_bytes": sh.action_bytes,
+                    "post_replay_max_steps": 150,
+                    "is_priority_seed": True,
+                    "enforce_trigger": False,
+                }
+                for idx, sh in enumerate(eval_shards, 1)
+            ]
+            m_tasks = [
+                {
+                    "seed": sh.seed,
+                    "run_id": f"{batch_id}_spsa_{k}m_s{idx:05d}",
+                    "role": pool.role,
+                    "max_steps": 150,
+                    "policy_code": policy_code,
+                    "macros_code": macros_code,
+                    "target_functions": [],
+                    "param_overrides": m_overrides,
+                    "record_ticks": False,
+                    "replay_bytes": sh.action_bytes,
+                    "post_replay_max_steps": 150,
+                    "is_priority_seed": True,
+                    "enforce_trigger": False,
+                }
+                for idx, sh in enumerate(eval_shards, 1)
+            ]
+        else:
+            p_tasks = [
+                {
+                    "seed": s,
+                    "run_id": f"{batch_id}_spsa_{k}p_r{idx:05d}",
+                    "role": pool.role,
+                    "max_steps": pool.max_steps,
+                    "policy_code": policy_code,
+                    "macros_code": macros_code,
+                    "target_functions": [],
+                    "param_overrides": p_overrides,
+                    "record_ticks": False,
+                }
+                for idx, s in enumerate(mb_seeds, 1)
+            ]
+            m_tasks = [
+                {
+                    "seed": s,
+                    "run_id": f"{batch_id}_spsa_{k}m_r{idx:05d}",
+                    "role": pool.role,
+                    "max_steps": pool.max_steps,
+                    "policy_code": policy_code,
+                    "macros_code": macros_code,
+                    "target_functions": [],
+                    "param_overrides": m_overrides,
+                    "record_ticks": False,
+                }
+                for idx, s in enumerate(mb_seeds, 1)
+            ]
 
         all_results = pool.evaluate_tasks(p_tasks + m_tasks)
         plus_runs = [r for r in all_results if f"_spsa_{k}p_" in r.get("run_id", "")]

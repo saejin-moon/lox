@@ -23,13 +23,33 @@ def progression_metric(run: dict[str, Any]) -> float:
     - `xp_level` (0.12 per XL above 1)
     - `final_ac` (0.04 per AC point below 10, rewarding armor/protection)
     - `score` (0.06 * log1p(score), uncapped logarithmic progression)
+    - `stairs_down_found` (0.20 milestone bonus for locating downstairs on Dlvl 1)
+    - `unique_tiles` (0.10 * min(1.0, unique_tiles / 60.0) exploration coverage)
     """
     d = float(run.get("max_depth", run.get("depth", 1)))
     xl = max(0.0, min(float(run.get("xp_level", 1)), 30.0) - 1.0) * 0.12
     ac_val = float(run.get("final_ac", 10))
     ac_bonus = max(0.0, 10.0 - ac_val) * 0.04
     sc = math.log1p(max(0.0, float(run.get("score", 0)))) * 0.06
-    return d + xl + ac_bonus + sc
+
+    # Intermediate exploration signals (critical on Dlvl 1 before descent)
+    stairs_bonus = (
+        0.20
+        if (
+            run.get("stairs_down_found")
+            or run.get("milestones", {}).get("stairs_down_found")
+        )
+        else 0.0
+    )
+    tiles = float(
+        run.get(
+            "unique_tiles",
+            run.get("milestones", {}).get("unique_tiles_d1", 0),
+        )
+    )
+    tiles_bonus = 0.10 * min(1.0, tiles / 60.0)
+
+    return d + xl + ac_bonus + sc + stairs_bonus + tiles_bonus
 
 
 def compute_confidence_sequence(
@@ -113,8 +133,9 @@ def wilcoxon_signed_rank_p(deltas: np.ndarray) -> tuple[float, int, int, int]:
 
 def should_stop_early_for_futility(
     candidate_runs: list[dict[str, Any]],
-    baseline_by_seed: dict[int, dict[str, Any]],
+    baseline_by_seed: dict[Any, dict[str, Any]] | list[dict[str, Any]],
     min_pairs: int = 60,
+    benchmark: str = "nethack",
 ) -> bool:
     """
     Sequential Futility Gate: returns True if we have at least `min_pairs` paired triggered seeds
@@ -124,13 +145,47 @@ def should_stop_early_for_futility(
     if len(candidate_runs) < min_pairs or not baseline_by_seed:
         return False
 
+    if benchmark != "nethack":
+        from lox.env import get_adapter
+
+        metric_fn = get_adapter(benchmark).progression_metric
+    else:
+        metric_fn = progression_metric
+
+    if isinstance(baseline_by_seed, list):
+        base_shards = [r for r in baseline_by_seed if r.get("is_shard")]
+        base_full = [r for r in baseline_by_seed if not r.get("is_shard")]
+        base_shard_map = {
+            (str(r.get("shard_id") or "") or int(r["seed"])): r for r in base_shards
+        }
+        base_full_map = {int(r["seed"]): r for r in base_full if "seed" in r}
+    else:
+        base_shard_map = {
+            k: v for k, v in baseline_by_seed.items() if v.get("is_shard")
+        }
+        base_full_map = {
+            int(k): v
+            for k, v in baseline_by_seed.items()
+            if not v.get("is_shard") and (isinstance(k, int) or str(k).isdigit())
+        }
+
+    cand_shards = [r for r in candidate_runs if r.get("is_shard")]
+    cand_full = [r for r in candidate_runs if not r.get("is_shard")]
+
     paired_deltas: list[float] = []
-    for r in candidate_runs:
-        s = int(r["seed"])
-        if s in baseline_by_seed:
+    for r in cand_shards:
+        sh_key = str(r.get("shard_id") or "") or int(r["seed"])
+        if sh_key in base_shard_map:
+            paired_deltas.append(metric_fn(r) - metric_fn(base_shard_map[sh_key]))
+        elif int(r.get("seed", 0)) in base_shard_map:
             paired_deltas.append(
-                progression_metric(r) - progression_metric(baseline_by_seed[s])
+                metric_fn(r) - metric_fn(base_shard_map[int(r["seed"])])
             )
+
+    for r in cand_full:
+        s = int(r["seed"])
+        if s in base_full_map:
+            paired_deltas.append(metric_fn(r) - metric_fn(base_full_map[s]))
 
     if len(paired_deltas) < min_pairs:
         return False
@@ -148,6 +203,7 @@ def evaluate_paired_hypothesis(
     candidate_runs: list[dict[str, Any]],
     baseline_runs: list[dict[str, Any]],
     alpha: float = 0.05,
+    benchmark: str = "nethack",
 ) -> dict[str, Any]:
     """
     Evaluates a candidate policy batch against the baseline batch on triggered seeds.
@@ -171,26 +227,56 @@ def evaluate_paired_hypothesis(
             "reason": "0 triggered episodes recorded (function was unreachable).",
         }
 
-    base_by_seed = {int(r["seed"]): r for r in baseline_runs}
+    if benchmark != "nethack":
+        from lox.env import get_adapter
+
+        metric_fn = get_adapter(benchmark).progression_metric
+    else:
+        metric_fn = progression_metric
+
+    cand_shards = [r for r in candidate_runs if r.get("is_shard")]
+    cand_full = [r for r in candidate_runs if not r.get("is_shard")]
+    base_shards = [r for r in baseline_runs if r.get("is_shard")]
+    base_full = [r for r in baseline_runs if not r.get("is_shard")]
+
     paired_deltas: list[float] = []
-    for r in candidate_runs:
-        s = int(r["seed"])
-        if s in base_by_seed:
-            paired_deltas.append(
-                progression_metric(r) - progression_metric(base_by_seed[s])
-            )
+
+    # 1. Pair shard runs apples-to-apples against baseline shard runs
+    if cand_shards and base_shards:
+        base_shard_map = {
+            (str(r.get("shard_id") or "") or int(r["seed"])): r for r in base_shards
+        }
+        for r in cand_shards:
+            key = str(r.get("shard_id") or "") or int(r["seed"])
+            if key in base_shard_map:
+                paired_deltas.append(metric_fn(r) - metric_fn(base_shard_map[key]))
+
+    # 2. Pair full runs apples-to-apples against baseline full runs
+    if cand_full and base_full:
+        base_full_map = {int(r["seed"]): r for r in base_full}
+        for r in cand_full:
+            s = int(r["seed"])
+            if s in base_full_map:
+                paired_deltas.append(metric_fn(r) - metric_fn(base_full_map[s]))
+    elif not cand_shards and not base_shards:
+        # Legacy fallback when neither has shards marked
+        base_by_seed = {int(r["seed"]): r for r in baseline_runs}
+        for r in candidate_runs:
+            s = int(r["seed"])
+            if s in base_by_seed:
+                paired_deltas.append(metric_fn(r) - metric_fn(base_by_seed[s]))
 
     if len(paired_deltas) >= 5:
         deltas = np.asarray(paired_deltas, dtype=np.float64)
     else:
         # Fallback if seeds didn't overlap: compare against baseline mean progression
         base_mean = (
-            float(np.mean([progression_metric(r) for r in baseline_runs]))
+            float(np.mean([metric_fn(r) for r in baseline_runs]))
             if baseline_runs
             else 1.0
         )
         deltas = np.asarray(
-            [progression_metric(r) - base_mean for r in candidate_runs],
+            [metric_fn(r) - base_mean for r in candidate_runs],
             dtype=np.float64,
         )
 

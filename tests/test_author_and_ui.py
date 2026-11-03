@@ -291,3 +291,256 @@ def test_dry_run_policy_replay_run_id_fast_forward(tmp_path):
     )
     assert status.startswith("PASSED")
     assert "Dry-Run PASSED" in out
+
+
+def test_author_agent_auto_pilot_dispatch(tmp_path, monkeypatch):
+    from lox.db.schema import init_db
+    from lox.runner.pool import PersistentEvalPool
+
+    db_path = str(tmp_path / "test_ap.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=20)
+    try:
+        agent = AuthorAgent(provider="openrouter", db_path=db_path)
+        baseline_runs = [
+            {"seed": 10, "max_depth": 0, "score": 0},
+            {"seed": 11, "max_depth": 0, "score": 0},
+        ]
+
+        turn_count = 0
+
+        def mock_call_llm_api(messages, allow_tools=True):
+            nonlocal turn_count
+            turn_count += 1
+            if turn_count == 1:
+                # LLM outputs YAML + code directly without calling dry_run_policy
+                return {
+                    "role": "assistant",
+                    "content": """```yaml
+mode: FUNC_MOD_ADD
+target_functions: [run]
+observation_from_db: "Baseline exploration"
+mechanism: "Wait actions"
+```
+
+```python
+class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.WAIT
+```""",
+                    "tool_calls": [],
+                }
+            else:
+                # LLM responds after pilot feedback
+                return {
+                    "role": "assistant",
+                    "content": """```yaml
+mode: FUNC_MOD_ADD
+target_functions: [run]
+observation_from_db: "Revised exploration"
+mechanism: "Wait and search"
+```
+
+```python
+class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.SEARCH
+```""",
+                    "tool_calls": [],
+                }
+
+        monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm_api)
+
+        proposal = agent.synthesize(
+            mode="FUNC_MOD_ADD",
+            generation=1,
+            current_policy="class Policy:\n    def run(self, state):\n        state = yield Action.WAIT",
+            pool=pool,
+            baseline_runs=baseline_runs,
+            max_pilot_runs=3,
+            pilot_episodes=2,
+            max_tool_turns=4,
+        )
+
+        # Auto-pilot should have automatically executed the candidate code
+        assert agent.tools.pilot_runs_used >= 1
+        assert "class Policy" in proposal.full_policy_code
+    finally:
+        pool.close()
+
+
+def test_real_state_macro_verification(tmp_path):
+    from lox.author.tools import AuthorToolRegistry
+
+    tools = AuthorToolRegistry(db_path=str(tmp_path / "test.duckdb"))
+
+    # 1. Valid macro should execute on real states and return PASSED (macro)
+    valid_macro = """
+def get_walkable_mask(state):
+    return state.chars == ord('.')
+
+def step_wait(state):
+    yield Action.WAIT
+
+def is_safe_corpse(obj):
+    return obj.is_corpse and 'poison' not in obj.name.lower()
+
+def execute_move(state, dy, dx):
+    target_y = state.y + dy
+    return DIR_DELTAS.get((dy, dx), Action.WAIT)
+
+def conditional_generator(state):
+    for o in state.visible_objects():
+        if o.is_corpse:
+            yield seq(Action.EAT, 'y')
+"""
+    msg, status = tools.dry_run_policy(code=valid_macro, is_macro=True)
+    assert status == "PASSED (macro)"
+    assert "Real-State Macro Verification PASSED" in msg
+
+    # 2. Broken macro with invalid attribute lookup should fail with RUNTIME_ERROR
+    broken_macro = """
+def bad_macro(state):
+    return state.non_existent_attribute_xyz
+"""
+    msg, status = tools.dry_run_policy(code=broken_macro, is_macro=True)
+    assert status == "RUNTIME_ERROR"
+    assert "non_existent_attribute_xyz" in msg
+
+    # 3. Invalid generator yield should be caught as INVALID_YIELD
+    bad_generator = """
+def bad_gen(state):
+    yield 123456789  # Not a valid Action / sequence
+"""
+    msg, status = tools.dry_run_policy(code=bad_generator, is_macro=True)
+    assert status == "INVALID_YIELD"
+
+
+def test_gen0_full_write_pilot_verification(tmp_path):
+    from lox.author.tools import AuthorToolRegistry
+    from lox.runner.pool import PersistentEvalPool
+
+    pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=15)
+    try:
+        tools = AuthorToolRegistry(db_path=str(tmp_path / "gen0.duckdb"))
+        # In Gen 0 FULL_WRITE, baseline_runs is empty
+        tools.configure_generation(
+            pool=pool,
+            baseline_runs=[],
+            max_pilot_runs=3,
+            pilot_episodes=2,
+        )
+
+        valid_starter_policy = """class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.WAIT
+"""
+        msg, status = tools.dry_run_policy(valid_starter_policy)
+        assert status.startswith("PASSED")
+        assert "Gen 0 Baseline:" in status
+        assert "GEN 0 BASELINE VERIFIED" in msg
+        assert tools.last_passed_code == valid_starter_policy
+        assert tools.last_pilot_improved is True
+    finally:
+        pool.close()
+
+
+def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypatch):
+    from lox.author.prompts import build_user_prompt
+    from lox.author.tools import AuthorToolRegistry
+    from lox.runner.pool import PersistentEvalPool
+
+    # 1. Prompt check: FUNC_MOD_ADD mandates empirical research on Turn 1
+    prompt = build_user_prompt(
+        mode="FUNC_MOD_ADD",
+        generation=2,
+        current_policy="class Policy:\n    pass\n",
+        macros_docs="",
+        batch_digest="Sample digest",
+    )
+    assert "MANDATORY Empirical Research (Turn 1)" in prompt
+    assert "DO NOT OUTPUT CODE ON TURN 1" in prompt
+    assert "query_wiki" in prompt
+    assert "query_db" in prompt
+
+    # 2. Pilot failure report includes diagnostic research recommendations
+    pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=10)
+    try:
+        tools = AuthorToolRegistry(db_path=str(tmp_path / "diag.duckdb"))
+        # Baseline with higher depth so candidate policy fails
+        baseline_runs = [
+            {"seed": 100, "max_depth": 5, "score": 500},
+            {"seed": 101, "max_depth": 5, "score": 500},
+        ]
+        tools.configure_generation(
+            pool=pool,
+            baseline_runs=baseline_runs,
+            max_pilot_runs=2,
+            pilot_episodes=2,
+        )
+
+        failing_code = """class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.WAIT
+"""
+        msg, status = tools.dry_run_policy(failing_code)
+        assert status.startswith("PILOT_FAILED")
+        assert "MANDATORY INVESTIGATION PROTOCOL" in msg
+        assert "query_wiki" in msg
+        assert "query_db" in msg
+        assert tools.last_pilot_improved is False
+
+        # 3. Agent synthesize sends scientific investigation guidance on pilot failure
+        agent = AuthorAgent(
+            provider="openrouter", db_path=str(tmp_path / "diag.duckdb")
+        )
+        received_messages = []
+
+        def mock_call_llm(messages, allow_tools=True):
+            received_messages.extend(messages)
+            if len(received_messages) <= 3:
+                # Turn 1: LLM emits code that fails
+                return {
+                    "role": "assistant",
+                    "content": f"```yaml\nmode: FUNC_MOD_ADD\ntarget_functions: [run]\nobservation_from_db: 'test'\nmechanism: 'test'\n```\n```python\n{failing_code}```",
+                    "tool_calls": [],
+                }
+            else:
+                # Turn 2: LLM receives failure guidance
+                return {
+                    "role": "assistant",
+                    "content": f"```yaml\nmode: FUNC_MOD_ADD\ntarget_functions: [run]\nobservation_from_db: 'fixed'\nmechanism: 'fixed'\n```\n```python\n{failing_code}```",
+                    "tool_calls": [],
+                }
+
+        monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm)
+        import pytest
+
+        with pytest.raises(RuntimeError) as exc_info:
+            agent.synthesize(
+                mode="FUNC_MOD_ADD",
+                generation=2,
+                current_policy=failing_code,
+                pool=pool,
+                baseline_runs=baseline_runs,
+                max_pilot_runs=2,
+                pilot_episodes=2,
+            )
+        assert "Pilot revisions exhausted" in str(exc_info.value)
+
+        user_msgs = [m["content"] for m in received_messages if m.get("role") == "user"]
+        failure_guidance = [m for m in user_msgs if "🛑 PILOT REVISION FAILED" in m]
+        assert len(failure_guidance) > 0, (
+            "Agent must send scientific investigation guidance on pilot failure"
+        )
+        assert "DO NOT BLINDLY GUESS CODE EDITS!" in failure_guidance[0]
+        assert "query_wiki" in failure_guidance[0]
+        assert "query_db" in failure_guidance[0]
+    finally:
+        pool.close()

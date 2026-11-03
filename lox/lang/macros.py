@@ -7,8 +7,10 @@ functions and generator subroutines across generations without hardcoding them i
 from __future__ import annotations
 
 import ast
+import copy
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from lox.lang.validator import validate_python_code
 
@@ -176,3 +178,147 @@ class MacroLibrary:
             )
             lines.append(f"- `{s.signature}` {kind}\n  {s.docstring}")
         return "\n".join(lines)
+
+
+class MacroHarvester:
+    """
+    Bottom-up library learning utility (DreamCoder/Voyager style).
+    Inspects promoted champion policies and harvests verified, stateless helper methods
+    into `data/workspace/macros.py`.
+    """
+
+    @classmethod
+    def harvest_from_policy(
+        cls,
+        policy_code: str,
+        macro_lib: MacroLibrary,
+        fn_stats: list[dict[str, Any]] | None = None,
+        min_ochiai: float = 0.2,
+    ) -> list[str]:
+        """
+        Extracts candidate helper methods from `policy_code` that:
+        1. Are not root entrypoints (`run`, `step`, `act`, `__init__`).
+        2. Do not access `self.<attr>` properties or mutate `self`.
+        3. Had positive or neutral good-run correlation in the winning batch.
+        Merges qualified methods into `macro_lib` and returns list of harvested macro names.
+        """
+        if not policy_code or not policy_code.strip():
+            return []
+
+        try:
+            tree = ast.parse(policy_code)
+        except Exception:
+            return []
+
+        # Find target class
+        target_cls: ast.ClassDef | None = None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and (
+                node.name in ("Policy", "Agent")
+                or any(
+                    isinstance(m, ast.FunctionDef) and m.name in ("run", "step", "act")
+                    for m in node.body
+                )
+            ):
+                target_cls = node
+                break
+
+        if target_cls is None:
+            return []
+
+        # Build lookup for Ochiai scores if available
+        fn_ochiai: dict[str, float] = {}
+        if fn_stats:
+            for fs in fn_stats:
+                fn_ochiai[fs.get("function_name", "")] = float(
+                    fs.get("ochiai_good_run_score", 0.0)
+                )
+
+        root_names = {"run", "step", "act", "__init__"}
+        harvested_code_snippets: list[str] = []
+        harvested_names: list[str] = []
+
+        for item in target_cls.body:
+            if not isinstance(item, ast.FunctionDef) or item.name in root_names:
+                continue
+
+            # Check if function name had poor statistical correlation
+            if item.name in fn_ochiai and fn_ochiai[item.name] < min_ochiai:
+                continue
+
+            # Clone method and rewrite self accesses to state.mem or helper names
+            cloned = copy.deepcopy(item)
+            has_state_arg = any(a.arg in ("state", "st") for a in cloned.args.args)
+            state_arg_name = "state"
+            for a in cloned.args.args:
+                if a.arg in ("state", "st"):
+                    state_arg_name = a.arg
+                    break
+
+            class SelfRewriter(ast.NodeTransformer):
+                def __init__(self) -> None:
+                    self.invalid = False
+
+                def visit_Attribute(self, node: ast.Attribute) -> Any:
+                    self.generic_visit(node)
+                    if isinstance(node.value, ast.Name) and node.value.id == "self":
+                        if has_state_arg and node.attr in (
+                            "visited",
+                            "visit_count",
+                            "pos_history",
+                            "locked_doors",
+                            "remembered_chars",
+                            "is_oscillating",
+                        ):
+                            return ast.Attribute(
+                                value=ast.Attribute(
+                                    value=ast.Name(id=state_arg_name, ctx=ast.Load()),
+                                    attr="mem",
+                                    ctx=ast.Load(),
+                                ),
+                                attr=node.attr,
+                                ctx=node.ctx,
+                            )
+                        elif node.attr in [
+                            m.name
+                            for m in target_cls.body
+                            if isinstance(m, ast.FunctionDef)
+                        ]:
+                            return ast.Name(id=node.attr, ctx=node.ctx)
+                        else:
+                            self.invalid = True
+                    return node
+
+            rewriter = SelfRewriter()
+            cloned = rewriter.visit(cloned)
+            ast.fix_missing_locations(cloned)
+
+            if rewriter.invalid:
+                continue
+
+            # Remove self from arguments
+            if cloned.args.args and cloned.args.args[0].arg == "self":
+                cloned.args.args.pop(0)
+
+            # Ensure docstring
+            doc = ast.get_docstring(cloned)
+            if not doc:
+                doc_node = ast.Expr(
+                    value=ast.Constant(
+                        value=f"Harvested helper macro `{cloned.name}` from champion policy."
+                    )
+                )
+                cloned.body.insert(0, doc_node)
+
+            harvested_code_snippets.append(ast.unparse(cloned))
+            harvested_names.append(cloned.name)
+
+        if not harvested_code_snippets:
+            return []
+
+        combined_code = "\n\n".join(harvested_code_snippets)
+        try:
+            macro_lib.merge_macros(combined_code)
+            return harvested_names
+        except Exception:
+            return []
