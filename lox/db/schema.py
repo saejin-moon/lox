@@ -166,6 +166,22 @@ CREATE TABLE IF NOT EXISTS experiments (
     created_at TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS discoveries (
+    discovery_id VARCHAR PRIMARY KEY,
+    generation INTEGER,
+    batch_id VARCHAR,
+    mode VARCHAR,
+    target_functions VARCHAR,
+    binding_constraint VARCHAR,
+    verified_c_rule VARCHAR,
+    mechanism VARCHAR,
+    mean_delta DOUBLE,
+    avg_depth DOUBLE,
+    p90_depth DOUBLE,
+    max_depth INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS expert_runs (
     run_id VARCHAR PRIMARY KEY,
     source VARCHAR,

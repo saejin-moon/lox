@@ -11,6 +11,8 @@ In User Prompt:
 from __future__ import annotations
 
 import ast
+import json
+from typing import Any
 
 from lox.db.schema import get_schema_markdown
 
@@ -327,6 +329,8 @@ def build_user_prompt(
     batch_digest: str = "",
     recent_experiments: str = "",
     skills: dict[str, str] | None = None,
+    recent_discoveries: list[dict[str, Any]] | None = None,
+    recent_failures: list[dict[str, Any]] | None = None,
 ) -> str:
     """Constructs the stateless Turn-0 prompt tailored to the active Modification Mode."""
     from lox.lang.validator import extract_module_outline
@@ -343,6 +347,45 @@ def build_user_prompt(
             + "\n```\n(Use `read_skill(skill_name)` tool to inspect full source of any skill module)\n"
         )
 
+    discoveries_block = ""
+    if recent_discoveries:
+        disc_lines = []
+        for d in recent_discoveries[:8]:
+            rule = d.get("verified_c_rule") or d.get("binding_constraint") or ""
+            mech = d.get("mechanism") or ""
+            d_gen = d.get("generation", 0)
+            if rule or mech:
+                disc_lines.append(f"- [Gen {d_gen}] **{rule}** -> {mech}")
+        if disc_lines:
+            discoveries_block = (
+                "\n### Verified Campaign Discoveries (Do Not Regress):\n"
+                + "\n".join(disc_lines)
+                + "\n"
+            )
+
+    failures_block = ""
+    if recent_failures:
+        fail_lines = []
+        for f in recent_failures[:6]:
+            tf = f.get("target_functions")
+            if isinstance(tf, str):
+                try:
+                    tf = json.loads(tf)
+                except Exception:
+                    pass
+            tf_str = ", ".join(tf) if isinstance(tf, list) else str(tf or "policy")
+            mech = f.get("mechanism") or f.get("observation_from_db") or ""
+            reason = f.get("verdict_reason") or ""
+            fail_lines.append(
+                f"- [Gen {f.get('generation', 0)}] Target: `{tf_str}` | Hyp: {mech[:100]} | Rejection: *{reason[:100]}*"
+            )
+        if fail_lines:
+            failures_block = (
+                "\n### Recent Rejected Hypotheses (Do NOT Repeat):\n"
+                + "\n".join(fail_lines)
+                + "\n"
+            )
+
     exp_block = (
         f"\n### Recent Experiment Lab Notebook (`experiments` table):\n{recent_experiments}\n"
         if recent_experiments
@@ -352,7 +395,7 @@ def build_user_prompt(
 
     if mode == "FULL_WRITE":
         return f"""### Generation {generation} — Mode: `FULL_WRITE` (Initial Baseline Synthesis)
-You are bootstrapping the policy from a **completely clean slate** (no pre-written policy is provided).
+{discoveries_block}{failures_block}You are bootstrapping the policy from a **completely clean slate** (no pre-written policy is provided).
 Your task:
 1. Use multiple tool calls (`query_db` on `expert_runs` / `expert_ticks`, `query_wiki`, `query_policy_docs`) to study successful NetHack runs, early-game survival mechanics, dungeon navigation, door opening/kicking, stair descent, combat, and food/corpse consumption.
 2. Design a well-structured, modular `class Policy:` with clear methods (e.g. `run(self, state)`, `update_memory(self, state)`, `handle_combat(self, state)`, `handle_nutrition(self, state)`, `explore_level(self, state)`, etc.) and tunable thresholds declared via `self.param("name", default, min_val, max_val)`.
@@ -377,7 +420,7 @@ Your task:
 
     if mode == "MACRO_WRITE":
         return f"""### Generation {generation} — Mode: `MACRO_WRITE` (Reusable Macro Library Synthesis)
-{digest_block}{exp_block}
+{digest_block}{exp_block}{discoveries_block}{failures_block}
 {macros_docs}
 
 {_format_context_scoped_policy(current_policy, batch_digest)}
@@ -403,7 +446,7 @@ Your task:
 
     if mode == "STRUCTURAL_REFACTOR":
         return f"""### Generation {generation} — Mode: `STRUCTURAL_REFACTOR` (Architectural Policy Refactoring)
-{digest_block}{exp_block}
+{digest_block}{exp_block}{discoveries_block}{failures_block}
 {macros_docs}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
@@ -414,9 +457,10 @@ Single-skill targeted patches have stalled or reached a local optimum. You have 
    - **The Binding Constraint Rule**: Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint).
    - Query DuckDB (`runs`, `experiments`, `expert_runs`) to identify why the previous architecture stalled (e.g. state management bottlenecks, lack of multi-turn goal commitment, unhandled traps or hunger states).
    - Use `query_wiki` to confirm the C engine mechanics governing the bottleneck.
-2. **Stage 2: Full Class Synthesis**:
+2. **Stage 2: Full Class Synthesis & Automatic Subsystem Modularization**:
    - Rewrite `class Policy:` from scratch or restructure its methods, attributes on `self`, and dispatch loop to break the plateau.
    - You can freely use verified macros from `macros.py` (see above) and `state.mem` for zero-heuristic spatial/episodic memory.
+   - **Modular Subsystems**: When `policy.py` exceeds 450 lines, extract cohesive domain helpers (e.g., corpse/nutrition logic, equipment/AC scoring, or special-level puzzle handlers) into `data/workspace/skills/<skill_module>.py` by specifying `skill_module: "<name>"` in the YAML hypothesis and providing a second `# skill_module: <name>` Python block, or promote stateless helpers into `macros.py`.
 3. **Stage 3: Verification & Pre-Submission Invariants**:
    - Mentally verify all 4 invariants (Generator Invariant, State Persistence, Passability Mask, Trigger Reachability).
    - Test your candidate class using `dry_run_policy(code=...)`.
@@ -435,7 +479,7 @@ Single-skill targeted patches have stalled or reached a local optimum. You have 
 
     # Default: FUNC_MOD_ADD
     return f"""### Generation {generation} — Mode: `FUNC_MOD_ADD` (Targeted Single-Skill Addition / Modification)
-{digest_block}{exp_block}
+{digest_block}{exp_block}{discoveries_block}{failures_block}
 {macros_docs}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}

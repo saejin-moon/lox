@@ -278,6 +278,8 @@ class MacroHarvester:
                             "door_mask",
                             "searched_counts",
                             "stair_graph",
+                            "kv",
+                            "recent_messages",
                         ):
                             return ast.Attribute(
                                 value=ast.Attribute(

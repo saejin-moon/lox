@@ -447,7 +447,7 @@ def test_dynamic_failure_telemetry_digest():
     digest = build_batch_contrast_digest(batch_stats, runs, fn_stats)
 
     # Must contain dynamic telemetry
-    assert "Dynamic Failure Telemetry & Progression Diagnostics" in digest
+    assert "Dynamic Failure Telemetry" in digest
     assert "locked door stall" in digest
     assert "pet displacement loop" in digest
     assert "Down Stairs (`>`) Discovery Rate" in digest

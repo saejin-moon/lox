@@ -68,11 +68,13 @@ class AuthorToolRegistry:
         wiki_db_path: str = DEFAULT_WIKI_DB,
         macros_path: str = DEFAULT_MACROS_PATH,
         benchmark: str = "nethack",
+        max_steps: int = 5000,
     ):
         self.db_path = db_path
         self.wiki = WikiEngine(db_path=wiki_db_path)
         self.macro_lib = MacroLibrary(path=macros_path)
         self.benchmark = str(benchmark)
+        self.max_steps = max_steps
         self.current_policy_code: str = ""
         self.last_passed_code: str = ""
         self.best_pilot_code: str = ""
@@ -673,10 +675,10 @@ class AuthorToolRegistry:
                             not in str(r.get("summary_digest", "")).lower()
                         )
                     ]
-                    if fail_runs:
-                        max_sh = max(1, target_eps // 3)
+                    if self.baseline_runs:
+                        max_sh = min(40, max(1, target_eps // 3))
                         pilot_shards = extract_shards_from_runs(
-                            fail_runs,
+                            self.baseline_runs,
                             max_shards=max_sh,
                             target_functions=changed_fns,
                         )
@@ -726,6 +728,7 @@ class AuthorToolRegistry:
                         macros_code=macros_code,
                         target_episodes=len(pilot_shards),
                         shards=pilot_shards,
+                        max_steps=self.max_steps,
                         record_ticks=False,
                         show_progress=False,
                         skills=self.skills,
@@ -757,6 +760,7 @@ class AuthorToolRegistry:
                     unconditional_seeds=base_trig_seeds if base_trig_seeds else None,
                     shards=pilot_shards if pilot_shards else None,
                     skills=self.skills,
+                    max_steps=self.max_steps,
                     record_ticks=True,
                     show_progress=False,
                 )

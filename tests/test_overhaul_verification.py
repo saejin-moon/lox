@@ -29,6 +29,7 @@ from lox.env.craftax.actions import CraftaxAction
 from lox.env.craftax.harness import CraftaxHarness
 from lox.env.harness import NetHackHarness
 from lox.env.nethack.adapter import NetHackAdapter
+from lox.lang.compiler import compile_policy_and_macros
 from lox.runner.pool import PersistentEvalPool
 
 
@@ -836,7 +837,6 @@ def test_pass5_deep_audit_fixes(tmp_path: Path) -> None:
     from lox.author.tools import AuthorToolRegistry
     from lox.env.harness import NetHackHarness
     from lox.env.state import _IS_BODY_LUT, WorldMemory
-    from lox.lang.compiler import compile_policy_and_macros
 
     # 1. Under-Hero Object Visibility
     mem = WorldMemory()
@@ -961,7 +961,6 @@ class Policy:
 def test_pass6_overnight_audit_fixes(tmp_path: Path) -> None:
     """Pass 6: Overnight Campaign & Runtime Audit Overhaul Verification."""
     from lox.engine.scheduler import ModeScheduler
-    from lox.lang.compiler import compile_policy_and_macros
     from lox.lang.validator import splice_functions_into_policy
     from lox.ui.console import ConsoleUI
 
@@ -1133,7 +1132,6 @@ class Policy:
 
 def test_pass7_final_preflight_audit_fixes(tmp_path: Path) -> None:
     """Pass 7: Final Pre-Flight Deep Sweep Verification."""
-    from lox.lang.compiler import compile_policy_and_macros
     from lox.lang.macros import MacroHarvester, MacroLibrary
     from lox.runner.pool import run_single_episode
 
@@ -1248,3 +1246,252 @@ class Policy:
     harvested = MacroHarvester.harvest_from_policy(candidate_pol, m_lib)
     assert "helper_valid" in harvested
     assert "helper_invalid" not in harvested
+
+
+def test_pass8_long_horizon_and_unattended_ops(tmp_path: Path) -> None:
+    """Pass 8: Multi-Week Unattended Ascension & Deep-Horizon Scaling Architecture."""
+    from lox.db.shards import extract_shards_from_runs
+    from lox.engine.orchestrator import (
+        compute_adaptive_max_steps,
+        write_status_report,
+    )
+    from lox.env.state import (
+        _IS_ICE_GLYPH_LUT,
+        _IS_IRON_BARS_OR_TREE_LUT,
+        WorldMemory,
+    )
+    from lox.lang.compiler import compile_policy_and_macros
+
+    # 1. Adaptive Max Steps Progression
+    assert compute_adaptive_max_steps(1) == 5000
+    assert compute_adaptive_max_steps(3) == 5000
+    assert compute_adaptive_max_steps(4) == 10000
+    assert compute_adaptive_max_steps(7) == 10000
+    assert compute_adaptive_max_steps(8) == 18000
+    assert compute_adaptive_max_steps(12) == 18000
+    assert compute_adaptive_max_steps(13) == 30000
+    assert compute_adaptive_max_steps(20) == 30000
+    assert compute_adaptive_max_steps(21) == 50000
+    assert compute_adaptive_max_steps(50) == 50000
+
+    # 2. WorldMemory & GameState persistence & normalization
+    wm = WorldMemory()
+    assert hasattr(wm, "kv") and isinstance(wm.kv, dict)
+    assert hasattr(wm, "recent_messages")
+    wm.kv["found_altar"] = True
+
+    # Test GameState methods & properties via harness
+    harness = NetHackHarness(max_steps=10)
+    try:
+        state = harness.reset(seed=42)
+        assert hasattr(state, "kv")
+        assert state.kv is state.mem.kv
+        state.kv["test_key"] = 123
+        assert state.mem.kv["test_key"] == 123
+        assert hasattr(state, "recent_messages")
+        assert isinstance(state.recent_messages, list)
+
+        # Tree / Iron bars normalization to ord("|")
+        tree_g = int(np.where(_IS_IRON_BARS_OR_TREE_LUT)[0][0])
+        state.glyphs[10, 10] = tree_g
+        state.chars[10, 10] = ord("#")
+        state.mem.update(state)
+        fl = state.mem.get_floor(state.dungeon_num, state.level_num)
+        assert fl.remembered_chars[10, 10] == ord("|")
+
+        # Ice / Lowered drawbridge normalization to ord(".")
+        ice_g = int(np.where(_IS_ICE_GLYPH_LUT)[0][0])
+        state.glyphs[11, 11] = ice_g
+        state.chars[11, 11] = ord("-")
+        state.mem.update(state)
+        assert fl.remembered_chars[11, 11] == ord(".")
+
+        assert hasattr(state, "is_water")
+        assert hasattr(state, "is_lava")
+        assert hasattr(state, "is_ice")
+        assert hasattr(state, "is_iron_bars")
+        assert hasattr(state, "is_boulder")
+        assert isinstance(state.boulder_positions, list)
+        assert isinstance(state.is_water(state.y, state.x), (bool, np.bool_))
+        assert isinstance(state.is_lava(state.y, state.x), (bool, np.bool_))
+        assert isinstance(state.is_ice(state.y, state.x), (bool, np.bool_))
+        assert isinstance(state.is_iron_bars(state.y, state.x), (bool, np.bool_))
+        assert isinstance(state.is_boulder(state.y, state.x), (bool, np.bool_))
+    finally:
+        harness.close()
+
+    # 3. Shard Stratification & Deep Horizon (400 steps on Dlvl >= 5)
+    synthetic_runs = [
+        {
+            "run_id": "r_deep_10",
+            "seed": 101,
+            "max_depth": 10,
+            "depth": 10,
+            "steps": 200,
+            "turns": 200,
+            "action_bytes": b"k" * 200,
+            "milestones": {"depth_first_turn": {"10": 150}},
+            "end_reason": "killed_by_dragon",
+        },
+        {
+            "run_id": "r_deep_6",
+            "seed": 102,
+            "max_depth": 6,
+            "depth": 6,
+            "steps": 120,
+            "turns": 120,
+            "action_bytes": b"k" * 120,
+            "milestones": {"depth_first_turn": {"6": 90}},
+            "end_reason": "killed_by_soldier_ant",
+        },
+        {
+            "run_id": "r_shallow_3",
+            "seed": 103,
+            "max_depth": 3,
+            "depth": 3,
+            "steps": 60,
+            "turns": 60,
+            "action_bytes": b"k" * 60,
+            "milestones": {"depth_first_turn": {"3": 40}},
+            "end_reason": "killed_by_jackal",
+        },
+        {
+            "run_id": "r_shallow_1",
+            "seed": 104,
+            "max_depth": 1,
+            "depth": 1,
+            "steps": 30,
+            "turns": 30,
+            "action_bytes": b"k" * 30,
+            "milestones": {},
+            "end_reason": "killed_by_lichen",
+        },
+    ]
+    shards = extract_shards_from_runs(synthetic_runs, max_shards=20)
+    assert len(shards) >= 3
+    deep_shards = [
+        s for s in shards if s.depth_at_cut >= 5 and "floor_entry" in s.trigger_context
+    ]
+    shallow_shards = [
+        s for s in shards if s.depth_at_cut < 5 and "floor_entry" in s.trigger_context
+    ]
+    assert len(deep_shards) >= 1
+    for s in deep_shards:
+        assert s.post_replay_max_steps == 400
+    for s in shallow_shards:
+        assert s.post_replay_max_steps == 200
+
+    # 4. PolicyRunner Preemption on in_yn_prompt or critical hp
+    pol_macro_src = """
+class Policy:
+    def __init__(self):
+        self.flee_hp_ratio = 0.5
+    def subgen(self):
+        while True:
+            yield Action.WAIT
+    def run(self, state):
+        while True:
+            if (state.hp / max(1, state.max_hp)) < self.flee_hp_ratio:
+                yield Action.SEARCH
+            else:
+                yield self.subgen()
+"""
+    compiled = compile_policy_and_macros(pol_macro_src)
+    runner = compiled.create_runner()
+    h4 = NetHackHarness(max_steps=10)
+    try:
+        st = h4.reset(seed=55)
+        # 1st step creates runner._active_subgen
+        act1, _ = runner.next_action(st)
+        assert act1 == Action.WAIT
+        assert runner._active_subgen is not None
+        # Now drop HP below flee_hp_ratio
+        st.blstats[10] = 1  # HP = 1
+        st.blstats[11] = 20  # Max HP = 20
+        st._blstats_list[10] = 1
+        st._blstats_list[11] = 20
+        # Next action must preempt the subgen
+        act2, _ = runner.next_action(st)
+        assert act2 == Action.SEARCH
+        assert runner._active_subgen is None
+    finally:
+        h4.close()
+
+    # 5. Discoveries Table, Logger Methods, and Pruning
+    db_path = str(tmp_path / "test_p8.duckdb")
+    logger = BatchDatabaseLogger(db_path)
+    logger.save_discovery(
+        discovery_id="disc_001",
+        generation=1,
+        batch_id="batch_01",
+        mode="FUNC_MOD_ADD",
+        target_functions=["kick_doors"],
+        binding_constraint="locked doors block progress",
+        verified_c_rule="kicking breaks wooden doors",
+        mechanism="lets hero enter locked rooms for food",
+        mean_delta=3.4,
+        avg_depth=5.2,
+        p90_depth=7.0,
+        max_depth=9,
+    )
+    discoveries = logger.get_recent_discoveries(limit=5)
+    assert len(discoveries) == 1
+    assert discoveries[0]["discovery_id"] == "disc_001"
+    assert discoveries[0]["verified_c_rule"] == "kicking breaks wooden doors"
+
+    # Save failed experiment
+    logger.save_experiment(
+        experiment_id="exp_fail_01",
+        generation=2,
+        batch_id="batch_02",
+        mode="FUNC_MOD_ADD",
+        target_functions=["eat_unknown"],
+        hypothesis={"mechanism": "eat floating eye corpse"},
+        verdict={"passed": False, "reason": "paralyzed forever"},
+    )
+    failures = logger.get_recent_failed_experiments(limit=5)
+    assert len(failures) == 1
+    assert failures[0]["mechanism"] == "eat floating eye corpse"
+
+    # Prune telemetry
+    logger.prune_old_telemetry(current_generation=25, keep_generations=20)
+
+    # 6. write_status_report and scripts/status_lox.py
+    ws_dir = str(tmp_path / "workspace")
+    Path(ws_dir).mkdir(parents=True, exist_ok=True)
+    write_status_report(
+        workspace_dir=ws_dir,
+        db_path=db_path,
+        gen=5,
+        active_max_steps=18000,
+        current_policy="class Policy:\n    pass\n",
+    )
+    status_file = Path(ws_dir) / "STATUS.md"
+    assert status_file.exists()
+    status_content = status_file.read_text()
+    assert "LOX Campaign Status" in status_content
+    assert "18,000" in status_content
+
+    # 7. Unreachable Target Function Circuit Breaker in PersistentEvalPool
+    pool = PersistentEvalPool(workers=2, max_steps=10)
+    try:
+        pol_idle = """
+class Policy:
+    def target_method(self, state):
+        return Action.WAIT
+    def run(self, state):
+        while True:
+            yield Action.WAIT
+"""
+        eval_res = pool.evaluate_batch(
+            batch_id="b_unreach",
+            policy_code=pol_idle,
+            target_functions=["target_method"],
+            target_episodes=5,
+            unreachable_abort_after=2,
+            max_raw_multiplier=1,
+            show_progress=False,
+        )
+        assert eval_res.get("unreachable_abort") is True
+    finally:
+        pool.close()

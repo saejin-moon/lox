@@ -430,7 +430,8 @@ def compute_function_stats(
 
         # Depth-stratified progression rate
         depth_progression_gains: list[float] = []
-        for d in range(1, 6):
+        max_d_seen = max((int(r.get("max_depth", 1)) for r in runs), default=1)
+        for d in range(1, max(6, max_d_seen + 1)):
             at_d = [r for r in runs if int(r.get("max_depth", 1)) >= d]
             if not at_d:
                 break
@@ -555,6 +556,7 @@ def build_batch_contrast_digest(
 
     # Dynamic failure telemetry & environmental diagnostics
     max_d = int(batch_stats.get("max_depth", 1))
+    norm_d = float(batch_stats.get("avg_depth", 1.0))
     max_steps_runs = sum(1 for r in runs if r.get("end_reason") == "max_steps")
     max_steps_rate = max_steps_runs / float(len(runs)) if runs else 0.0
 
@@ -569,37 +571,47 @@ def build_batch_contrast_digest(
                     if cause:
                         stall_causes[cause] += 1
 
-    if max_d <= 1 or max_steps_rate > 0.3:
-        lines.append(
-            "\n### 📊 Dynamic Failure Telemetry & Progression Diagnostics:\n"
-            f"- **Step Truncation Rate**: {max_steps_rate * 100:.1f}% ({max_steps_runs}/{len(runs)} runs reached step limit without advancing past Dlvl {max_d})."
-        )
-        if stall_causes:
-            stall_items = [
-                f"**{cause}**: {count} runs ({count * 100.0 / len(runs):.1f}%)"
-                for cause, count in stall_causes.most_common(5)
-            ]
-            lines.append(f"- **Top Environmental Stalls**: {'; '.join(stall_items)}")
-
-        # Unique tiles explored
-        tiles_seen = [
-            r.get("unique_tiles") for r in runs if r.get("unique_tiles") is not None
+    lines.append(
+        "\n### 📊 Dynamic Failure Telemetry & Frontier Bottleneck Diagnostics:\n"
+        f"- **Step Truncation Rate**: {max_steps_rate * 100:.1f}% ({max_steps_runs}/{len(runs)} runs reached step limit without advancing past Dlvl {max_d})."
+    )
+    top_killers = Counter(
+        str(r.get("killer_name") or r.get("end_reason", "ended"))
+        for r in runs
+        if r.get("end_reason") == "died"
+    ).most_common(5)
+    if top_killers:
+        killer_items = [
+            f"{k}: {count} ({count * 100.0 / len(runs):.1f}%)"
+            for k, count in top_killers
         ]
-        if tiles_seen:
-            lines.append(
-                f"- **Exploration Tile Coverage**: Avg {np.mean(tiles_seen):.1f} unique tiles mapped per run."
-            )
+        lines.append(f"- **Top Lethal Monsters/Hazards**: {'; '.join(killer_items)}")
+    if stall_causes:
+        stall_items = [
+            f"**{cause}**: {count} runs ({count * 100.0 / len(runs):.1f}%)"
+            for cause, count in stall_causes.most_common(5)
+        ]
+        lines.append(f"- **Top Environmental Stalls**: {'; '.join(stall_items)}")
 
-        # Stairs down discovery rate
-        stairs_seen = sum(
-            1
-            for r in runs
-            if r.get("stairs_down_found")
-            or "descend the stairs" in str(r.get("summary_digest", "")).lower()
-        )
+    # Unique tiles explored
+    tiles_seen = [
+        r.get("unique_tiles") for r in runs if r.get("unique_tiles") is not None
+    ]
+    if tiles_seen:
         lines.append(
-            f"- **Down Stairs (`>`) Discovery Rate**: {stairs_seen * 100.0 / len(runs):.1f}% ({stairs_seen}/{len(runs)} runs found or descended stairs)."
+            f"- **Exploration Tile Coverage**: Avg {np.mean(tiles_seen):.1f} unique tiles mapped per run."
         )
+
+    # Stairs down discovery rate
+    stairs_seen = sum(
+        1
+        for r in runs
+        if r.get("stairs_down_found")
+        or "descend the stairs" in str(r.get("summary_digest", "")).lower()
+    )
+    lines.append(
+        f"- **Down Stairs (`>`) Discovery Rate**: {stairs_seen * 100.0 / len(runs):.1f}% ({stairs_seen}/{len(runs)} runs found or descended stairs)."
+    )
 
     # Sample top 2 Outlier Good Run summaries right in the digest
     if outliers:
@@ -617,15 +629,17 @@ def build_batch_contrast_digest(
 
     # Sample stalled/normal runs for replay & diagnosis
     if normals:
-        stalled_samples = [r for r in normals if r.get("max_depth", 1) <= 1][
-            :2
-        ] or normals[:2]
+        target_d = max(1, int(round(norm_d)))
+        frontier_samples = [
+            r for r in normals if int(r.get("max_depth", 1)) >= target_d
+        ][:2]
+        stalled_samples = frontier_samples or normals[:2]
         lines.append(
-            "\n### Sample Stalled Runs (Dlvl 1 Bottleneck for Prefix Replay / Diagnosis):"
+            f"\n### Sample Frontier Failure/Stall Runs (Dlvl {target_d} Bottleneck for Prefix Replay / Diagnosis):"
         )
         for r in stalled_samples:
             lines.append(
-                f"#### Stalled Run `{r['run_id']}` (Seed={r['seed']}, Steps={r.get('steps', 0)}, End={r.get('end_reason', 'ended')}):\n"
+                f"#### Run `{r['run_id']}` (Seed={r['seed']}, Steps={r.get('steps', 0)}, Depth={r.get('max_depth', 1)}, End={r.get('end_reason', 'ended')}):\n"
                 f"```text\n{r.get('summary_digest', '')}\n```\n"
                 f'*Replay Hint: `dry_run_policy(code=..., replay_run_id="{r["run_id"]}", replay_steps={max(0, int(r.get("steps", 0)) - 25)})`*'
             )

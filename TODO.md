@@ -549,3 +549,268 @@ When `eval_res["avg_depth"] < self.policy_archive["descent"].avg_depth`:
    - A prefix shard in `run_single_episode` with a 300-byte replay prefix and `post_replay_max_steps=20` executes up to 20 post-replay steps instead of truncating at step 1.
    - `MacroHarvester.harvest_from_policy` does not harvest a method that calls an unharvested stateful `self.<method>`, while harvesting a method that accesses `self.passable_mask`.
 
+
+---
+
+# Pass 8: Multi-Week Unattended Ascension & Deep-Horizon Scaling Architecture
+
+All items below enable `LOX` to scale from Dlvl 1 to `avg_depth >= 20` and Ascension over multi-week (2,000–5,000+ generation) unattended runs with twice-daily check-ins, while strictly preserving **"Hard Code Nothing"**:
+
+## Task 1: Adaptive Episode Horizon Scaling & Baseline Step-Tier Refresh (`lox/engine/orchestrator.py`)
+
+**Problem**:
+1. A fixed `max_steps = 5000` is fast for Dlvl 1–4 (`~0.08s/ep`), but reaching Dlvl 20 safely requires `8,000–15,000` steps and a full NetHack ascension requires `20,000–45,000` steps. At `max_steps = 5000`, policies that properly clear floors, rest HP, and identify equipment get truncated by `end_reason == "max_steps"` around Dlvl 10–14.
+2. **Baseline Step-Cap Mismatch**: If `active_max_steps` increases (e.g., from `5,000` to `10,000`) while `baseline_runs` still holds runs truncated at `5,000` steps (`end_reason == "max_steps"`), pairing a 10,000-step candidate against a 5,000-step baseline gives the candidate 5,000 free extra turns on every timeout seed, creating false positive promotions!
+
+**Exact Changes in `lox/engine/orchestrator.py`**:
+1. Add `compute_adaptive_max_steps(self, baseline_runs: list[dict[str, Any]]) -> int` on `CampaignOrchestrator` using discrete step tiers so `max_steps` only steps up at major depth milestones:
+   - If `not baseline_runs`: return `self.max_steps`.
+   - Compute `p90_d = float(np.percentile([r.get("max_depth", 1) for r in baseline_runs if not r.get("is_shard")], 90))` (defaulting to `1.0`).
+   - Discrete tier mapping:
+     - `p90_d < 4.0`: `tier = 5000`
+     - `4.0 <= p90_d < 8.0`: `tier = 10000`
+     - `8.0 <= p90_d < 14.0`: `tier = 18000`
+     - `14.0 <= p90_d < 20.0`: `tier = 30000`
+     - `p90_d >= 20.0`: `tier = 50000`
+   - Return `min(50000, max(self.max_steps, tier))`.
+2. In `CampaignOrchestrator.run`:
+   - Track `active_baseline_max_steps = self.max_steps`.
+   - Before each generation, compute `active_max_steps = self.compute_adaptive_max_steps(baseline_runs)`.
+   - If `active_max_steps > active_baseline_max_steps` and `baseline_runs` and `current_policy`:
+     - Find all timeout seeds in `baseline_runs`: `timeout_seeds = [int(r["seed"]) for r in baseline_runs if not r.get("is_shard") and r.get("end_reason") == "max_steps"]`.
+     - Re-evaluate `current_policy` on `timeout_seeds` with `max_steps=active_max_steps` (`self.pool.evaluate_batch(..., max_steps=active_max_steps)`), update `baseline_by_seed` and `baseline_runs` (and `self.policy_archive`), and set `active_baseline_max_steps = active_max_steps`.
+   - Pass `max_steps=active_max_steps` to `self.pool.evaluate_batch(...)` and `AuthorToolRegistry(..., max_steps=active_max_steps)`.
+
+---
+
+## Task 2: Depth-Stratified Frontier Shard Bank, Full-Run Shard Extraction & Persistent Episode State (`lox/db/shards.py`, `lox/env/state.py`, `lox/runner/pool.py`, `lox/engine/orchestrator.py`, `lox/author/tools.py`)
+
+**Problem**:
+1. Uniformly extracting 20 shards across all baseline runs starves deep floors (`depth >= p90_depth`) of evaluation coverage once `max_depth` reaches 12–25.
+2. In `lox/engine/orchestrator.py:838-848` and `lox/author/tools.py`, `extract_shards_from_runs` was only passed `fail_runs` (`end_reason not in ("ascended", "max_steps")`), which **completely excluded `pre_stall` shards** (from `max_steps` runs) and **excluded `floor_entry` shards on deep runs that ended via `max_steps`**!
+3. When `run_single_episode` replays a shard prefix, `compiled.create_runner()` instantiates a fresh `Policy()` at the cut point, wiping out any episode-long item identification, prayer cooldown, or shop state stored on `self`.
+
+**Exact Changes**:
+1. In `lox/env/state.py` (`WorldMemory`):
+   - Add two episode-scoped attributes in `WorldMemory.__init__` (and `__slots__`, cleared in `reset()`):
+     - `self.kv: dict[str, Any] = {}` (arbitrary episode-persistent key-value storage accessible as `state.mem.kv` or `state.kv`).
+     - `self.recent_messages: collections.deque[tuple[int, int, str]] = collections.deque(maxlen=25)` storing `(turn, dlvl, message)` whenever `state.message` is non-empty.
+   - Expose `@property def kv(self) -> dict[str, Any]: return self.mem.kv` and `@property def recent_messages(self) -> list[tuple[int, int, str]]: return list(self.mem.recent_messages)` on `GameState`.
+   - Add `"kv"` and `"recent_messages"` to `MacroHarvester`'s `state.mem` attribute rewrite tuple in `lox/lang/macros.py`.
+2. In `lox/db/shards.py` (`extract_shards_from_runs`):
+   - Increase default `max_shards: int = 40`.
+   - Compute `depths = [int(r.get("max_depth", r.get("depth", 1))) for r in runs if not r.get("is_shard")]`, `avg_d = float(np.mean(depths)) if depths else 1.0`, and `p90_d = float(np.percentile(depths, 90)) if depths else 1.0`.
+   - Set `horizon_steps = 400 if r_depth >= 5 else 200` for `floor_entry` shards and `250` for `pre_death` / `pre_stall` shards.
+   - Stratify candidate shards into 3 priority tiers before slicing to `max_shards`:
+     - **Frontier Tier (`shard.depth >= p90_d`)**: up to `int(max_shards * 0.55)` shards (prioritizing deepest `floor_entry` and `pre_death` windows).
+     - **Mid-Band Tier (`avg_d <= shard.depth < p90_d`)**: up to `int(max_shards * 0.30)` shards.
+     - **Foundation Tier (`shard.depth < avg_d`)**: remaining budget up to `max_shards`.
+3. In `lox/engine/orchestrator.py` (lines 837–848) and `lox/author/tools.py`:
+   - Pass full `baseline_runs` (not just `fail_runs`) to `extract_shards_from_runs(baseline_runs, max_shards=min(40, max(10, target_eps // 3)), target_functions=target_fns)` so both `pre_stall` and deep `floor_entry` shards from `max_steps` runs are included.
+4. In `lox/runner/pool.py` (`run_single_episode`):
+   - When `is_shard` is `True`, after `state = harness.replay_bytes(seed=seed, recorded_bytes=replay_bytes)`:
+     - Sync any `state.mem.kv` entries onto `runner.instance.__dict__` if matching attribute names exist in `runner.instance.__dict__`, and expose `runner.instance.kv = state.mem.kv` so policies can read/write persistent episode state seamlessly across shard boundaries.
+
+---
+
+## Task 3: 1-to-1 C Symbol Table Terrain & Obstacle Queries for Mid/Late-Game Levels (`lox/env/state.py`)
+
+**Problem**:
+1. In NetHack, **iron bars** (`_CMAP_NAME_BY_GLYPH[g] == "iron bars"`) and **trees** (`_CMAP_NAME_BY_GLYPH[g] == "tree"`) render with the ASCII character `'#'` (colored cyan/green). Because `FloorMemory.passable_mask` checks `(c == ord("#"))` and `WorldMemory.update` stored `chars[mask]` directly into `remembered_chars`, iron bars and trees were marked as **walkable corridor tiles (`'#'`)**, causing policies on Sokoban, Fort Ludios, or the Castle to pathfind into impassable iron bars forever!
+2. Furthermore, to navigate Sokoban boulders, Medusa's Island water, and Castle/Gehennom lava and drawbridges, `GameState` needs 1-to-1 C symbol table queries for water, lava, ice, iron bars, drawbridges, and boulders.
+
+**Exact Changes in `lox/env/state.py`**:
+1. Precompute 1-to-1 C lookup tables from `_CMAP_NAME_BY_GLYPH` and `_OBJ_INFO_BY_GLYPH` at module import (around lines 400–413):
+   - `_IS_IRON_BARS_OR_TREE_LUT`: `_cn in ("iron bars", "tree")`
+   - `_IS_WATER_GLYPH_LUT`: `_cn is not None and ("water" in _cn or "pool" in _cn or "moat" in _cn)`
+   - `_IS_LAVA_GLYPH_LUT`: `_cn is not None and "lava" in _cn`
+   - `_IS_ICE_GLYPH_LUT`: `_cn == "ice"`
+   - `_IS_DRAWBRIDGE_GLYPH_LUT`: `_cn is not None and "drawbridge" in _cn`
+   - `_IS_BOULDER_GLYPH_LUT`: `_OBJ_INFO_BY_GLYPH[_g] is not None and _OBJ_INFO_BY_GLYPH[_g].name == "boulder"`
+2. In `WorldMemory.update` (around lines 615–625):
+   - Normalize iron bars and trees in `floor.remembered_chars` to `ord("|")` (`impassable_cmap = is_cmap & _IS_IRON_BARS_OR_TREE_LUT[glyphs]; floor.remembered_chars[impassable_cmap] = ord("|")`) so they are **never** treated as walkable `'#'` corridors in `floor.passable_mask`!
+   - Normalize `ice` and lowered `drawbridge` (`"lowered drawbridge"`) in `floor.remembered_chars` to `ord(".")` so ice and open drawbridges are walkable in `floor.passable_mask`.
+3. Add 1-to-1 query methods on `GameState`:
+   - `is_water(self, y: int, x: int) -> bool`
+   - `is_lava(self, y: int, x: int) -> bool`
+   - `is_ice(self, y: int, x: int) -> bool`
+   - `is_iron_bars(self, y: int, x: int) -> bool`
+   - `is_boulder(self, y: int, x: int) -> bool`
+   - `@property def boulder_positions(self) -> list[tuple[int, int]]`
+
+---
+
+## Task 4: Deep-Frontier Contrastive Digest & All-Depth Ochiai Attribution (`lox/db/summarizer.py`)
+
+**Problem**:
+1. In `compute_function_stats` (`lox/db/summarizer.py:433`), `for d in range(1, 6):` only computed `depth_progression_gains` across Dlvl 1–5! Any function driving progression on Dlvl 6–30 received `0.0` `prog_bonus` in `ochiai_good_run_score`.
+2. In `build_batch_contrast_digest` (`lox/db/summarizer.py:572, 620-625`), `if max_d <= 1 or max_steps_rate > 0.3:` hid the failure/stall diagnostic block once `max_d >= 2`, and `stalled_samples = [r for r in normals if r.get("max_depth", 1) <= 1][:2]` always sampled Dlvl 1 runs and labeled the header `(Dlvl 1 Bottleneck)` even when the policy was averaging Dlvl 8+!
+
+**Exact Changes in `lox/db/summarizer.py`**:
+1. In `compute_function_stats` (line 433):
+   - Replace `for d in range(1, 6):` with:
+     ```python
+     max_d_seen = max((int(r.get("max_depth", 1)) for r in runs), default=1)
+     for d in range(1, max(6, max_d_seen + 1)):
+     ```
+2. In `build_batch_contrast_digest` (lines 556–632):
+   - Always render `### 📊 Dynamic Failure Telemetry & Frontier Bottleneck Diagnostics:` (not only when `max_d <= 1 or max_steps_rate > 0.3`), including top killers (`Counter(str(r.get("killer_name") or r.get("end_reason", "ended")) for r in runs if r.get("end_reason") == "died").most_common(5)`) and top stall causes.
+   - Sample normal/failed runs near the active frontier (`target_d = max(1, int(round(norm_d)))`; prefer runs with `r.get("max_depth", 1) >= target_d`) and title the header `f"### Sample Frontier Failure/Stall Runs (Dlvl {target_d} Bottleneck for Prefix Replay / Diagnosis):"`.
+
+---
+
+## Task 5: Subgenerator Preemption on Hostiles & Interactive Prompts (`lox/lang/compiler.py`)
+
+**Problem**:
+In `PolicyRunner.next_action` (`lox/lang/compiler.py:269-273`), `self._active_subgen` was only preempted when `hp_ratio < crit_hp` (`0.25`). If a multi-turn exploration or search subgenerator was active and a hostile monster stepped adjacent at `hp_ratio == 0.80` (or an interactive `in_yn_prompt` / `in_text_prompt` appeared), `PolicyRunner` kept stepping the subgenerator instead of returning control to `Policy.run()`!
+
+**Exact Changes in `lox/lang/compiler.py`**:
+1. In `PolicyRunner.next_action` (lines 269–273):
+   - Preempt `self._active_subgen = None` when:
+     - `hp_ratio < crit_hp`, OR
+     - `getattr(state, "in_yn_prompt", False)` or `getattr(state, "in_text_prompt", False)`, OR
+     - `getattr(self.instance, "preempt_on_hostile", True) and hasattr(state, "adjacent_hostiles") and len(state.adjacent_hostiles()) > 0`.
+2. In `CompiledPolicy.__init__` (lines 411–417):
+   - Include all function names from `self.skill_function_names.values()` in `self.policy_function_names` so skill functions are recognized everywhere as valid `target_functions`.
+
+---
+
+## Task 6: Cross-Generation Epistemic Memory (`discoveries` Table & Rejected Hypothesis History) (`lox/db/schema.py`, `lox/db/logger.py`, `lox/author/prompts.py`, `lox/engine/orchestrator.py`)
+
+**Problem**:
+Because the Author Agent is stateless across generations, over a 2,000-generation run:
+1. Verified C mechanics and causal breakthroughs discovered in earlier promoted generations are forgotten unless re-queried from the Wiki.
+2. When a hypothesis fails (`verdict["passed"] == False`), the next stateless generation frequently proposes the exact same failed modification on the same function.
+
+**Exact Changes**:
+1. In `lox/db/schema.py`:
+   - Add table `discoveries`:
+     ```sql
+     CREATE TABLE IF NOT EXISTS discoveries (
+         discovery_id VARCHAR PRIMARY KEY,
+         generation INTEGER,
+         batch_id VARCHAR,
+         mode VARCHAR,
+         target_functions VARCHAR,
+         binding_constraint VARCHAR,
+         verified_c_rule VARCHAR,
+         mechanism VARCHAR,
+         mean_delta DOUBLE,
+         avg_depth DOUBLE,
+         p90_depth DOUBLE,
+         max_depth INTEGER,
+         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+     );
+     ```
+2. In `lox/db/logger.py` (`BatchDatabaseLogger`):
+   - Add `save_discovery(...)` called automatically when `verdict.get("passed")` is `True` and `hypothesis` contains `verified_c_rule` or `mechanism`.
+   - Add `get_recent_discoveries(limit: int = 12) -> list[dict[str, Any]]` and `get_recent_failed_experiments(limit: int = 8) -> list[dict[str, Any]]`.
+3. In `lox/author/prompts.py` (`build_user_prompt`):
+   - Accept optional `recent_discoveries: list[dict[str, Any]] | None = None` and `recent_failures: list[dict[str, Any]] | None = None`.
+   - Render a compact section `### Verified Campaign Discoveries (Do Not Regress)` listing the top promoted `verified_c_rule` -> `mechanism` entries, and `### Recent Rejected Hypotheses (Do NOT Repeat)` listing the last 6 failed attempts (`target_functions`, `mechanism`, and rejection `reason`) so the stateless agent never loops on the same dead-end patch.
+
+---
+
+## Task 7: Automatic Subsystem Modularization in `STRUCTURAL_REFACTOR` (`lox/author/prompts.py`, `lox/engine/scheduler.py`)
+
+**Problem**:
+As the policy approaches Dlvl 15–25+, a single `class Policy` in `policy.py` grows past 600–800 lines, causing context bloat and cross-floor interference.
+
+**Exact Changes**:
+1. In `lox/engine/scheduler.py` (`ModeScheduler.select_mode`):
+   - Add parameter `policy_line_count: int = 0`.
+   - If `policy_line_count >= 550` and `self.gens_since_refactor >= 5`, prioritize `"STRUCTURAL_REFACTOR"` so `policy.py` stays lean (`< 450` lines) over multi-thousand-generation runs.
+2. In `lox/author/prompts.py` (`MODE_INSTRUCTIONS["STRUCTURAL_REFACTOR"]`):
+   - Explicitly instruct the Author Agent that when `policy.py` exceeds 450 lines, it can extract cohesive domain helpers (e.g., corpse/nutrition logic, equipment/AC scoring, or special-level puzzle handlers) into `data/workspace/skills/<skill_module>.py` by specifying `skill_module: "<name>"` in the YAML hypothesis and providing a second `# skill_module: <name>` Python block, or promote stateless helpers into `macros.py`.
+
+---
+
+## Task 8: Multi-Week Unattended Reliability, Rolling DB Pruning & Morning/Night Check-In Dashboard (`lox/db/logger.py`, `lox/runner/pool.py`, `lox/engine/orchestrator.py`, `scripts/status_lox.py`)
+
+**Problem**:
+Running `LOX` continuously for 2–4 weeks (2,000–5,000+ generations) generates tens of millions of `ticks` rows (`40–80 GB` DuckDB file), risks transient API 502/503/429 drops or worker process hangs at 3 AM, and needs an instant morning/evening check-in report (`data/workspace/STATUS.md` + `scripts/status_lox.py`).
+
+**Exact Changes**:
+1. **Rolling Telemetry Pruning in `lox/db/logger.py`**:
+   - Add `prune_old_telemetry(self, current_generation: int, keep_recent_generations: int = 15) -> dict[str, int]`:
+     - Deletes rows from `ticks` where `run_id IN (SELECT r.run_id FROM runs r JOIN batches b ON r.batch_id = b.batch_id WHERE b.generation < ? AND b.hypothesis_passed = FALSE AND r.is_outlier_good = FALSE)`.
+     - Deletes rows from `runs` where `batch_id LIKE 'pilot_%'` and `generation < current_generation - 5`.
+     - Executes `CHECKPOINT` on DuckDB.
+   - Call `self.db_logger.prune_old_telemetry(gen)` every 20 generations in `CampaignOrchestrator.run`.
+2. **Worker Pool Self-Healing & API Outage Resilience (`lox/runner/pool.py`, `lox/author/agent.py`, `lox/engine/orchestrator.py`)**:
+   - In `PersistentEvalPool.evaluate_batch` (`lox/runner/pool.py`), wrap worker pool execution in a `try ... except Exception` block that catches `BrokenProcessPool` / worker crashes, calls `self.close()`, re-initializes `self._start_pool()`, and retries the batch once.
+   - In `CampaignOrchestrator.run`, wrap each generation body inside `for gen in range(...)` in a top-level `try ... except Exception as e:` guard (excluding `KeyboardInterrupt` / `SystemExit`) that logs the exception to `data/workspace/campaign_errors.log`, sleeps 5 seconds, and continues to `gen + 1` so a single transient network or provider failure never kills a multi-week run.
+   - Save milestone backups to `data/workspace/checkpoints/gen_{gen:04d}_d{c_depth:.2f}/` whenever a promoted policy sets a new record `avg_depth` or `max_depth` (or `ascensions > 0`).
+3. **Live `data/workspace/STATUS.md` & `scripts/status_lox.py` Check-In CLI**:
+   - Add `write_status_report(self, gen: int, start_time: float, baseline_runs: list[dict[str, Any]]) -> None` on `CampaignOrchestrator` that atomically writes `data/workspace/STATUS.md` after every generation with:
+     - Campaign Uptime, Current Generation, Total Promotions, Active Max Steps Horizon.
+     - Progression Table: Gen 0 Baseline vs. Current Champion (`avg_depth`, `p90_depth`, `max_depth`, `avg_ac`, `avg_xl`, `ascensions`).
+     - Last 15 Promoted Breakthroughs (Generation, Mode, Target Functions, `Δ` Progression, Depth, `binding_constraint`, `verified_c_rule`).
+     - Deepest Outlier Run Digest (`seed`, `max_depth`, `xp_level`, `final_ac`, `killer_name`, `summary_digest`).
+     - Codebase Health (`policy.py` lines, `macros.py` count, `skills/` modules, archive niches).
+   - Create `scripts/status_lox.py` (`uv run python scripts/status_lox.py [--since-hours 12]`) that opens `data/lox.duckdb` with `read_only=True` (safe while `run_lox.py` is actively running) and prints a formatted morning/evening check-in report covering the last $N$ hours of generations, promotions, depth progression, and deepest runs.
+4. **Verification Test**:
+   - Add `test_pass8_long_horizon_and_unattended_ops` in `tests/test_overhaul_verification.py` verifying:
+     - `compute_adaptive_max_steps` scales from `5000` at `p90_depth=1` up to `50000` at deep `p90_depth`.
+     - `WorldMemory.kv` and `WorldMemory.recent_messages` persist across floor changes and are accessible via `state.kv` and `state.recent_messages`.
+     - Iron bars (`_IS_IRON_BARS_OR_TREE_LUT`) are normalized to `ord("|")` in `remembered_chars` rather than walkable `'#'`, and `state.is_water`, `state.is_lava`, `state.is_iron_bars`, `state.is_boulder` work as expected.
+     - `extract_shards_from_runs` stratifies shards across Frontier (`>= p90`), Mid-Band, and Foundation tiers with `400`-step horizons for `depth >= 5` floor-entry shards.
+     - `PolicyRunner.next_action` preempts `_active_subgen` when a hostile monster steps adjacent or `in_yn_prompt` is active.
+     - `BatchDatabaseLogger.save_discovery`, `get_recent_discoveries`, and `prune_old_telemetry` preserve promoted/outlier telemetry while pruning old rejected pilot/tick bloat.
+     - `STATUS.md` generation and `scripts/status_lox.py` execution in `read_only=True` mode.
+
+
+---
+
+## Task 9: Target Function Reachability Invariant When Shards Are Present & CLI Mode Completeness (`lox/runner/pool.py`, `lox/engine/orchestrator.py`, `scripts/run_lox.py`, `scripts/reset_clean.py`)
+
+**Problem**:
+1. In `lox/runner/pool.py:627-630`, the unreachable function circuit breaker checks:
+   ```python
+   if (
+       target_fns
+       and raw_done >= min(unreachable_abort_after, max_raw_episodes)
+       and len(triggered_runs) == 0
+   ):
+       unreachable_abort = True
+       break
+   ```
+   Because evaluation shards are submitted with `enforce_trigger = False` and appended to `triggered_runs` before raw episodes execute, `len(triggered_runs)` is already non-zero (e.g. 20–40). Consequently, if a candidate function is 100% dead code / unreachable across all raw episodes and all shards, `len(triggered_runs) == 0` is `False`, so `unreachable_abort` never triggers!
+2. In `lox/engine/orchestrator.py:978-994`, there was no invariant check verifying that `target_fns` was actually called at least once across `eval_res["runs"]`. If the 20 shards experienced a positive delta purely by noise, an unreachable function could be promoted!
+3. In `scripts/run_lox.py:128`, `--mode` choices omitted `"STRUCTURAL_REFACTOR"` (`choices=["FULL_WRITE", "MACRO_WRITE", "FUNC_MOD_ADD", "PARAM_TUNE"]`).
+4. In `scripts/reset_clean.py:38-45`, `for table in [...]` omitted `"discoveries"`.
+
+**Exact Changes**:
+1. In `lox/runner/pool.py`:
+   - Track `target_fns_called_count: int = 0` during the episode collection loop.
+   - For every completed episode `res`: if `any(res.get("triggered_functions", {}).get(fn, 0) > 0 for fn in target_fns)`: `target_fns_called_count += 1`.
+   - Update the circuit breaker check:
+     ```python
+     if (
+         target_fns
+         and raw_done >= min(unreachable_abort_after, max_raw_episodes)
+         and target_fns_called_count == 0
+     ):
+         unreachable_abort = True
+         break
+     ```
+2. In `lox/engine/orchestrator.py`:
+   - In promotion evaluation (around line 980), add an absolute safety check:
+     ```python
+     if target_fns:
+         total_target_calls = sum(
+             r.get("triggered_functions", {}).get(fn, 0)
+             for r in eval_res["runs"]
+             for fn in target_fns
+         )
+         if total_target_calls == 0:
+             verdict["passed"] = False
+             verdict["reason"] = (
+                 f"Unreachable Function Abort: {target_fns} was never called in any episode or shard!"
+             )
+     ```
+3. In `scripts/run_lox.py`:
+   - Add `"STRUCTURAL_REFACTOR"` to `--mode` choices:
+     `choices=["FULL_WRITE", "MACRO_WRITE", "FUNC_MOD_ADD", "PARAM_TUNE", "STRUCTURAL_REFACTOR"]`
+4. In `scripts/reset_clean.py`:
+   - Add `"discoveries"` to the tables list so `reset_clean()` also clears the `discoveries` table when resetting a campaign.

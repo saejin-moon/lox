@@ -268,16 +268,29 @@ class PolicyRunner:
 
         crit_hp = getattr(self.instance, "flee_hp_ratio", 0.25)
         hp_ratio = (state.hp / max(1, state.max_hp)) if state.max_hp > 0 else 1.0
-        if self._active_subgen is not None and hp_ratio < crit_hp:
+        should_preempt = (
+            hp_ratio < crit_hp
+            or getattr(state, "in_yn_prompt", False)
+            or getattr(state, "in_text_prompt", False)
+            or (
+                getattr(self.instance, "preempt_on_hostile", True)
+                and hasattr(state, "adjacent_hostiles")
+                and len(state.adjacent_hostiles()) > 0
+            )
+        )
+        if self._active_subgen is not None and should_preempt:
             self._active_subgen = None
 
         if self._active_subgen is not None:
             try:
-                act = (
-                    self._active_subgen.send(state)
-                    if hasattr(self._active_subgen, "send")
-                    else next(self._active_subgen)
-                )
+                try:
+                    act = (
+                        self._active_subgen.send(state)
+                        if hasattr(self._active_subgen, "send")
+                        else next(self._active_subgen)
+                    )
+                except TypeError:
+                    act = next(self._active_subgen)
                 if inspect.isgenerator(act):
                     self._active_subgen = act
                     act = next(self._active_subgen)
@@ -334,11 +347,7 @@ class PolicyRunner:
         if inspect.isgenerator(act):
             self._active_subgen = act
             try:
-                act = (
-                    self._active_subgen.send(state)
-                    if hasattr(self._active_subgen, "send")
-                    else next(self._active_subgen)
-                )
+                act = next(self._active_subgen)
             except StopIteration:
                 self._active_subgen = None
                 act = Action.WAIT
@@ -408,12 +417,16 @@ class CompiledPolicy:
         ast.fix_missing_locations(policy_tree)
         self._policy_code_obj = compile(policy_tree, filename="policy.py", mode="exec")
 
-        # Extract all function names defined in policy and macros
+        # Extract all function names defined in policy, macros, and skills
         self.policy_function_names: list[str] = [
             n.name
             for n in ast.walk(policy_tree)
             if isinstance(n, ast.FunctionDef) and n.name != "__init__"
         ]
+        for skill_fns in self.skill_function_names.values():
+            for sfn in skill_fns:
+                if sfn not in self.policy_function_names:
+                    self.policy_function_names.append(sfn)
 
     def create_runner(
         self,

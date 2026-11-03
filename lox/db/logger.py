@@ -358,5 +358,164 @@ class BatchDatabaseLogger:
                     datetime.datetime.now(),
                 ],
             )
+            if verdict.get("passed") and (
+                hypothesis.get("verified_c_rule") or hypothesis.get("mechanism")
+            ):
+                try:
+                    self.save_discovery(
+                        discovery_id=f"disc_{batch_id}",
+                        generation=generation,
+                        batch_id=batch_id,
+                        mode=mode,
+                        target_functions=target_functions,
+                        binding_constraint=str(
+                            hypothesis.get("binding_constraint") or ""
+                        ),
+                        verified_c_rule=str(hypothesis.get("verified_c_rule") or ""),
+                        mechanism=str(hypothesis.get("mechanism") or ""),
+                        mean_delta=float(verdict.get("mean_delta", 0.0)),
+                        avg_depth=float(verdict.get("avg_depth", 1.0)),
+                        p90_depth=float(verdict.get("p90_depth", 1.0)),
+                        max_depth=int(verdict.get("max_depth", 1)),
+                    )
+                except Exception:
+                    pass
+        finally:
+            con.close()
+
+    def save_discovery(
+        self,
+        discovery_id: str,
+        generation: int,
+        batch_id: str,
+        mode: str,
+        target_functions: list[str],
+        binding_constraint: str,
+        verified_c_rule: str,
+        mechanism: str,
+        mean_delta: float,
+        avg_depth: float = 1.0,
+        p90_depth: float = 1.0,
+        max_depth: int = 1,
+    ) -> None:
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                """
+                INSERT OR REPLACE INTO discoveries (
+                    discovery_id, generation, batch_id, mode, target_functions,
+                    binding_constraint, verified_c_rule, mechanism, mean_delta,
+                    avg_depth, p90_depth, max_depth, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    discovery_id,
+                    generation,
+                    batch_id,
+                    mode,
+                    json.dumps(target_functions),
+                    str(binding_constraint or ""),
+                    str(verified_c_rule or ""),
+                    str(mechanism or ""),
+                    float(mean_delta),
+                    float(avg_depth),
+                    float(p90_depth),
+                    int(max_depth),
+                    datetime.datetime.now(),
+                ],
+            )
+        finally:
+            con.close()
+
+    def get_recent_discoveries(self, limit: int = 12) -> list[dict[str, Any]]:
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            cur = con.execute(
+                """
+                SELECT discovery_id, generation, batch_id, mode, target_functions,
+                       binding_constraint, verified_c_rule, mechanism, mean_delta,
+                       avg_depth, p90_depth, max_depth, created_at
+                FROM discoveries
+                ORDER BY generation DESC, created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception:
+            return []
+        finally:
+            con.close()
+
+    def get_recent_failed_experiments(self, limit: int = 8) -> list[dict[str, Any]]:
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            cur = con.execute(
+                """
+                SELECT experiment_id, generation, batch_id, mode, target_functions,
+                       observation_from_db, mechanism, verdict_reason, mean_delta, created_at
+                FROM experiments
+                WHERE passed = FALSE
+                ORDER BY generation DESC, created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception:
+            return []
+        finally:
+            con.close()
+
+    def prune_old_telemetry(
+        self,
+        current_generation: int,
+        keep_generations: int = 20,
+        keep_recent_generations: int | None = None,
+    ) -> dict[str, int]:
+        keep = (
+            keep_recent_generations
+            if keep_recent_generations is not None
+            else keep_generations
+        )
+        cutoff_gen = current_generation - keep
+        pilot_cutoff_gen = current_generation - 5
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            t_before = con.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+            con.execute(
+                """
+                DELETE FROM ticks
+                WHERE run_id IN (
+                    SELECT r.run_id FROM runs r
+                    JOIN batches b ON r.batch_id = b.batch_id
+                    WHERE b.generation < ?
+                      AND (b.hypothesis_passed = FALSE OR b.hypothesis_passed IS NULL)
+                      AND (r.is_outlier_good = FALSE OR r.is_outlier_good IS NULL)
+                )
+                """,
+                (cutoff_gen,),
+            )
+            t_after = con.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+            ticks_deleted = t_before - t_after
+
+            r_before = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            con.execute(
+                """
+                DELETE FROM runs
+                WHERE batch_id LIKE 'pilot_%'
+                  AND generation < ?
+                """,
+                (pilot_cutoff_gen,),
+            )
+            r_after = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            runs_deleted = r_before - r_after
+
+            con.execute("CHECKPOINT")
+            return {"ticks_pruned": ticks_deleted, "runs_pruned": runs_deleted}
+        except Exception:
+            return {"ticks_pruned": 0, "runs_pruned": 0}
         finally:
             con.close()

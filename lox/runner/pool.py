@@ -9,6 +9,7 @@ Persistent Multi-Core NLE Worker Pool & Conditional Function-Trigger Evaluator.
 
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import signal
 import time
@@ -118,8 +119,15 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         harness.step_count = 0
         harness.max_steps = max_steps
         harness.done = False
+        if hasattr(state, "mem") and hasattr(state.mem, "kv"):
+            for k, v in state.mem.kv.items():
+                if hasattr(runner.instance, k):
+                    setattr(runner.instance, k, v)
+            setattr(runner.instance, "kv", state.mem.kv)
     else:
         state = harness.reset(seed=seed)
+        if hasattr(state, "mem") and hasattr(state.mem, "kv"):
+            setattr(runner.instance, "kv", state.mem.kv)
     curr_d = getattr(state, "depth", len(getattr(state, "achievements", ())) + 1)
     max_depth = max(1, curr_d)
     last_score = getattr(state, "score", len(getattr(state, "achievements", ())) * 100)
@@ -416,6 +424,7 @@ class PersistentEvalPool:
         shards: list[Any] | None = None,
         skills: dict[str, str] | None = None,
         benchmark: str = "nethack",
+        max_steps: int | None = None,
     ) -> dict[str, Any]:
         """
         Runs episodes until collecting `target_episodes` episodes that trigger `target_functions`
@@ -441,6 +450,9 @@ class PersistentEvalPool:
                 "registered_params": {},
             }
 
+        effective_max_steps = int(
+            max_steps if max_steps is not None else self.max_steps
+        )
         target_fns = [f for f in (target_functions or []) if f and f != "__init__"]
         bench = benchmark or self.benchmark
         max_raw_episodes = (
@@ -481,6 +493,7 @@ class PersistentEvalPool:
         discarded_count = 0
         raw_done = 0
         total_steps = 0
+        target_fns_called_count = 0
         registered_params: dict[str, Any] = {}
         early_stopped = False
         unreachable_abort = False
@@ -488,159 +501,208 @@ class PersistentEvalPool:
         t0 = time.perf_counter()
         pool = self._ensure_pool()
 
-        while len(triggered_runs) < target_episodes and raw_done < max_raw_episodes:
-            needed = target_episodes - len(triggered_runs)
-            guaranteed_ready = len(shard_queue) + len(seed_queue)
-            if guaranteed_ready > 0 or not target_fns:
-                batch_capacity = min(
-                    needed,
-                    guaranteed_ready if guaranteed_ready > 0 else needed,
-                    max_raw_episodes - raw_done,
-                )
-            else:
-                batch_capacity = min(
-                    max(needed * 2, self.workers * 2),
-                    max_raw_episodes - raw_done,
-                )
-            if batch_capacity <= 0:
-                break
-
-            tasks: list[dict[str, Any]] = []
-            for _ in range(batch_capacity):
-                raw_idx = raw_done + len(tasks) + 1
-                if shard_queue:
-                    sh = shard_queue.pop(0)
-                    s = int(_shard_val(sh, "seed", 0))
-                    sh_id = str(_shard_val(sh, "shard_id", ""))
-                    sh_bytes = bytes(_shard_val(sh, "action_bytes", b""))
-                    post_steps = int(_shard_val(sh, "post_replay_max_steps", 200))
-                    tasks.append(
-                        {
-                            "seed": s,
-                            "run_id": f"{batch_id}_s{raw_idx:05d}",
-                            "shard_id": sh_id,
-                            "role": self.role,
-                            "max_steps": post_steps,
-                            "policy_code": policy_code,
-                            "macros_code": macros_code,
-                            "target_functions": target_fns,
-                            "param_overrides": param_overrides,
-                            "record_ticks": record_ticks,
-                            "replay_bytes": sh_bytes,
-                            "post_replay_max_steps": post_steps,
-                            "is_priority_seed": True,
-                            "enforce_trigger": False,
-                            "skills": skills,
-                            "benchmark": bench,
-                        }
-                    )
-                else:
-                    if seed_queue:
-                        s = seed_queue.pop(0)
+        for attempt in range(2):
+            try:
+                while (
+                    len(triggered_runs) < target_episodes
+                    and raw_done < max_raw_episodes
+                ):
+                    needed = target_episodes - len(triggered_runs)
+                    guaranteed_ready = len(shard_queue) + len(seed_queue)
+                    if guaranteed_ready > 0 or not target_fns:
+                        batch_capacity = min(
+                            needed,
+                            guaranteed_ready if guaranteed_ready > 0 else needed,
+                            max_raw_episodes - raw_done,
+                        )
                     else:
-                        while next_seed_cursor in used_seeds:
-                            next_seed_cursor += 1
-                        s = next_seed_cursor
-                        used_seeds.add(s)
-                        next_seed_cursor += 1
-
-                    is_pri = s in unconditional_seeds_set
-                    tasks.append(
-                        {
-                            "seed": s,
-                            "run_id": f"{batch_id}_r{raw_idx:05d}",
-                            "role": self.role,
-                            "max_steps": self.max_steps,
-                            "policy_code": policy_code,
-                            "macros_code": macros_code,
-                            "target_functions": target_fns,
-                            "param_overrides": param_overrides,
-                            "record_ticks": record_ticks,
-                            "is_priority_seed": is_pri,
-                            "enforce_trigger": not is_pri and bool(target_fns),
-                            "skills": skills,
-                            "benchmark": bench,
-                        }
-                    )
-
-            # Use chunksize=1 so each episode is an independent work-stealing unit,
-            # eliminating tail-chunk serialization where 15 workers sit idle.
-            chunksize = 1
-            if pool is not None:
-                results_iter = pool.imap_unordered(
-                    run_single_episode, tasks, chunksize=chunksize
-                )
-            else:
-                results_iter = (run_single_episode(tk) for tk in tasks)
-
-            last_prog_time = t0
-            for res in results_iter:
-                raw_done += 1
-                total_steps += int(res.get("steps", 0))
-                if res.get("registered_params") and not registered_params:
-                    registered_params.update(res["registered_params"])
-
-                if res.get("triggered", False):
-                    if len(triggered_runs) < target_episodes:
-                        triggered_runs.append(res)
-                else:
-                    discarded_count += 1
-
-                now = time.perf_counter()
-                is_tail = (target_episodes - len(triggered_runs)) <= self.workers
-                if show_progress and (
-                    is_tail
-                    or raw_done % max(1, min(self.workers, 4)) == 0
-                    or len(triggered_runs) >= target_episodes
-                    or (now - last_prog_time) >= 0.5
-                ):
-                    last_prog_time = now
-                    elapsed = max(1e-6, now - t0)
-                    sps = total_steps / elapsed
-                    curr_avg_d = (
-                        float(np.mean([r["max_depth"] for r in triggered_runs]))
-                        if triggered_runs
-                        else 0.0
-                    )
-                    curr_max_d = (
-                        int(max(r["max_depth"] for r in triggered_runs))
-                        if triggered_runs
-                        else 0
-                    )
-                    ui.progress(
-                        triggered_done=len(triggered_runs),
-                        triggered_target=target_episodes,
-                        raw_done=raw_done,
-                        steps_per_sec=sps,
-                        avg_depth=curr_avg_d,
-                        max_depth=curr_max_d,
-                        outliers=0,
-                    )
-
-                # Check termination conditions immediately as episodes finish
-                if len(triggered_runs) >= target_episodes:
-                    break
-
-                # Unreachable function circuit breaker: if >= unreachable_abort_after raw episodes ran and 0 triggered
-                if (
-                    target_fns
-                    and raw_done >= min(unreachable_abort_after, max_raw_episodes)
-                    and len(triggered_runs) == 0
-                ):
-                    unreachable_abort = True
-                    break
-
-                if early_stop_fn is not None and len(triggered_runs) >= 50:
-                    if early_stop_fn(triggered_runs):
-                        early_stopped = True
+                        batch_capacity = min(
+                            max(needed * 2, self.workers * 2),
+                            max_raw_episodes - raw_done,
+                        )
+                    if batch_capacity <= 0:
                         break
 
-            if (
-                len(triggered_runs) >= target_episodes
-                or unreachable_abort
-                or early_stopped
-            ):
+                    tasks: list[dict[str, Any]] = []
+                    for _ in range(batch_capacity):
+                        raw_idx = raw_done + len(tasks) + 1
+                        if shard_queue:
+                            sh = shard_queue.pop(0)
+                            s = int(_shard_val(sh, "seed", 0))
+                            sh_id = str(_shard_val(sh, "shard_id", ""))
+                            sh_bytes = bytes(_shard_val(sh, "action_bytes", b""))
+                            post_steps = int(
+                                _shard_val(sh, "post_replay_max_steps", 200)
+                            )
+                            tasks.append(
+                                {
+                                    "seed": s,
+                                    "run_id": f"{batch_id}_s{raw_idx:05d}",
+                                    "shard_id": sh_id,
+                                    "role": self.role,
+                                    "max_steps": post_steps,
+                                    "policy_code": policy_code,
+                                    "macros_code": macros_code,
+                                    "target_functions": target_fns,
+                                    "param_overrides": param_overrides,
+                                    "record_ticks": record_ticks,
+                                    "replay_bytes": sh_bytes,
+                                    "post_replay_max_steps": post_steps,
+                                    "is_priority_seed": True,
+                                    "enforce_trigger": False,
+                                    "skills": skills,
+                                    "benchmark": bench,
+                                }
+                            )
+                        else:
+                            if seed_queue:
+                                s = seed_queue.pop(0)
+                            else:
+                                while next_seed_cursor in used_seeds:
+                                    next_seed_cursor += 1
+                                s = next_seed_cursor
+                                used_seeds.add(s)
+                                next_seed_cursor += 1
+
+                            is_pri = s in unconditional_seeds_set
+                            tasks.append(
+                                {
+                                    "seed": s,
+                                    "run_id": f"{batch_id}_r{raw_idx:05d}",
+                                    "role": self.role,
+                                    "max_steps": effective_max_steps,
+                                    "policy_code": policy_code,
+                                    "macros_code": macros_code,
+                                    "target_functions": target_fns,
+                                    "param_overrides": param_overrides,
+                                    "record_ticks": record_ticks,
+                                    "is_priority_seed": is_pri,
+                                    "enforce_trigger": not is_pri and bool(target_fns),
+                                    "skills": skills,
+                                    "benchmark": bench,
+                                }
+                            )
+
+                    # Use chunksize=1 so each episode is an independent work-stealing unit,
+                    # eliminating tail-chunk serialization where 15 workers sit idle.
+                    chunksize = 1
+                    if pool is not None:
+                        results_iter = pool.imap_unordered(
+                            run_single_episode, tasks, chunksize=chunksize
+                        )
+                    else:
+                        results_iter = (run_single_episode(tk) for tk in tasks)
+
+                    last_prog_time = t0
+                    for res in results_iter:
+                        raw_done += 1
+                        total_steps += int(res.get("steps", 0))
+                        if res.get("registered_params") and not registered_params:
+                            registered_params.update(res["registered_params"])
+
+                        if target_fns:
+                            fn_trig = (
+                                res.get("triggered_functions")
+                                or res.get("functions_triggered")
+                                or {}
+                            )
+                            if isinstance(fn_trig, str):
+                                try:
+                                    fn_trig = json.loads(fn_trig)
+                                except Exception:
+                                    fn_trig = {}
+                            if any(int(fn_trig.get(fn, 0)) > 0 for fn in target_fns):
+                                target_fns_called_count += 1
+
+                        if res.get("triggered", False):
+                            if len(triggered_runs) < target_episodes:
+                                triggered_runs.append(res)
+                        else:
+                            discarded_count += 1
+
+                        now = time.perf_counter()
+                        is_tail = (
+                            target_episodes - len(triggered_runs)
+                        ) <= self.workers
+                        if show_progress and (
+                            is_tail
+                            or raw_done % max(1, min(self.workers, 4)) == 0
+                            or len(triggered_runs) >= target_episodes
+                            or (now - last_prog_time) >= 0.5
+                        ):
+                            last_prog_time = now
+                            elapsed = max(1e-6, now - t0)
+                            sps = total_steps / elapsed
+                            curr_avg_d = (
+                                float(np.mean([r["max_depth"] for r in triggered_runs]))
+                                if triggered_runs
+                                else 0.0
+                            )
+                            curr_max_d = (
+                                int(max(r["max_depth"] for r in triggered_runs))
+                                if triggered_runs
+                                else 0
+                            )
+                            ui.progress(
+                                triggered_done=len(triggered_runs),
+                                triggered_target=target_episodes,
+                                raw_done=raw_done,
+                                steps_per_sec=sps,
+                                avg_depth=curr_avg_d,
+                                max_depth=curr_max_d,
+                                outliers=0,
+                            )
+
+                        # Check termination conditions immediately as episodes finish
+                        if len(triggered_runs) >= target_episodes:
+                            break
+
+                        # Unreachable function circuit breaker: if >= unreachable_abort_after raw episodes ran and 0 target calls
+                        if (
+                            target_fns
+                            and raw_done
+                            >= min(unreachable_abort_after, max_raw_episodes)
+                            and target_fns_called_count == 0
+                        ):
+                            unreachable_abort = True
+                            break
+
+                        if early_stop_fn is not None and len(triggered_runs) >= 50:
+                            if early_stop_fn(triggered_runs):
+                                early_stopped = True
+                                break
+
+                    if (
+                        len(triggered_runs) >= target_episodes
+                        or unreachable_abort
+                        or early_stopped
+                    ):
+                        break
                 break
+            except Exception as pool_exc:
+                if attempt == 0 and self.workers > 1:
+                    ui.warn(
+                        f"Worker pool encountered transient error ({pool_exc}); "
+                        "re-initializing pool and retrying batch..."
+                    )
+                    self.close()
+                    self._pool = None
+                    pool = self._ensure_pool()
+                    triggered_runs.clear()
+                    raw_done = 0
+                    total_steps = 0
+                    target_fns_called_count = 0
+                    shard_queue = list(shards) if shards else []
+                    seed_queue = []
+                    if priority_seeds:
+                        for s in priority_seeds:
+                            si = int(s)
+                            if si not in shard_seeds:
+                                seed_queue.append(si)
+                    used_seeds = set(shard_seeds) | set(seed_queue)
+                    next_seed_cursor = int(seed_start)
+                    continue
+                raise
 
         wall_sec = time.perf_counter() - t0
         sps = total_steps / max(1e-6, wall_sec)

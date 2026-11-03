@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from lox.db.schema import connect_db
 
 
@@ -71,7 +73,7 @@ def _find_byte_offset(
 
 def extract_shards_from_runs(
     runs: list[dict[str, Any]],
-    max_shards: int = 60,
+    max_shards: int = 40,
     target_functions: list[str] | None = None,
 ) -> list[PrefixShard]:
     """
@@ -80,8 +82,17 @@ def extract_shards_from_runs(
     2. Pre-Stall Windows (5 steps before detected oscillation/stagnation).
     3. Floor Entry Checkpoints (arrival step on depth >= 2).
     Uses exact byte offsets from recorded ticks when available.
+    Stratifies extracted shards into Frontier (>= p90_depth), Mid-Band, and Foundation tiers.
     """
-    shards: list[PrefixShard] = []
+    clean_depths = [
+        int(r.get("max_depth", r.get("depth", 1)))
+        for r in runs
+        if not r.get("is_shard")
+    ]
+    avg_d = float(np.mean(clean_depths)) if clean_depths else 1.0
+    p90_d = float(np.percentile(clean_depths, 90)) if clean_depths else 1.0
+
+    candidate_shards: list[PrefixShard] = []
     seen_seeds: set[tuple[int, str]] = set()
 
     runs_to_process = list(runs)
@@ -103,9 +114,6 @@ def extract_shards_from_runs(
         runs_to_process.sort(key=lambda r_item: 0 if _has_target(r_item) else 1)
 
     for r in runs_to_process:
-        if len(shards) >= max_shards:
-            break
-
         raw_bytes = r.get("action_bytes")
         if not raw_bytes or len(raw_bytes) < 10:
             continue
@@ -138,7 +146,7 @@ def extract_shards_from_runs(
             key = (seed, ctx)
             if key not in seen_seeds:
                 seen_seeds.add(key)
-                shards.append(
+                candidate_shards.append(
                     PrefixShard(
                         shard_id=f"shard_d_{run_id}_{cut_step}",
                         run_id=run_id,
@@ -147,7 +155,7 @@ def extract_shards_from_runs(
                         action_bytes=b_bytes[:cut_idx],
                         depth_at_cut=depth,
                         trigger_context=ctx,
-                        post_replay_max_steps=200,
+                        post_replay_max_steps=250,
                     )
                 )
 
@@ -167,7 +175,7 @@ def extract_shards_from_runs(
                 key = (seed, ctx)
                 if key not in seen_seeds:
                     seen_seeds.add(key)
-                    shards.append(
+                    candidate_shards.append(
                         PrefixShard(
                             shard_id=f"shard_s_{run_id}_{cut_step}",
                             run_id=run_id,
@@ -176,7 +184,7 @@ def extract_shards_from_runs(
                             action_bytes=b_bytes[:cut_idx],
                             depth_at_cut=depth,
                             trigger_context=ctx,
-                            post_replay_max_steps=200,
+                            post_replay_max_steps=250,
                         )
                     )
 
@@ -217,7 +225,8 @@ def extract_shards_from_runs(
                 key = (seed, ctx)
                 if key not in seen_seeds:
                     seen_seeds.add(key)
-                    shards.append(
+                    horizon_steps = 400 if d_val >= 5 else 200
+                    candidate_shards.append(
                         PrefixShard(
                             shard_id=f"shard_f_{run_id}_d{d_val}",
                             run_id=run_id,
@@ -226,11 +235,48 @@ def extract_shards_from_runs(
                             action_bytes=b_bytes[:cut_idx],
                             depth_at_cut=d_val,
                             trigger_context=ctx,
-                            post_replay_max_steps=200,
+                            post_replay_max_steps=horizon_steps,
                         )
                     )
 
-    return shards[:max_shards]
+    frontier_tier: list[PrefixShard] = []
+    mid_tier: list[PrefixShard] = []
+    foundation_tier: list[PrefixShard] = []
+
+    for sh in candidate_shards:
+        if sh.depth_at_cut >= p90_d:
+            frontier_tier.append(sh)
+        elif sh.depth_at_cut >= avg_d:
+            mid_tier.append(sh)
+        else:
+            foundation_tier.append(sh)
+
+    # Sort frontier prioritizing deepest floor_entry and pre_death
+    frontier_tier.sort(
+        key=lambda s: (s.depth_at_cut, 1 if "floor_entry" in s.trigger_context else 0),
+        reverse=True,
+    )
+    mid_tier.sort(key=lambda s: s.depth_at_cut, reverse=True)
+
+    frontier_budget = int(max_shards * 0.55)
+    mid_budget = int(max_shards * 0.30)
+    foundation_budget = max_shards - frontier_budget - mid_budget
+
+    selected: list[PrefixShard] = []
+    selected.extend(frontier_tier[:frontier_budget])
+    selected.extend(mid_tier[:mid_budget])
+    selected.extend(foundation_tier[:foundation_budget])
+
+    if len(selected) < max_shards:
+        selected_ids = {s.shard_id for s in selected}
+        remaining = [
+            s
+            for s in (frontier_tier + mid_tier + foundation_tier)
+            if s.shard_id not in selected_ids
+        ]
+        selected.extend(remaining[: max_shards - len(selected)])
+
+    return selected[:max_shards]
 
 
 def extract_shards_from_db(

@@ -125,7 +125,13 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         default=None,
-        choices=["FULL_WRITE", "MACRO_WRITE", "FUNC_MOD_ADD", "PARAM_TUNE"],
+        choices=[
+            "FULL_WRITE",
+            "MACRO_WRITE",
+            "FUNC_MOD_ADD",
+            "PARAM_TUNE",
+            "STRUCTURAL_REFACTOR",
+        ],
         help="Optional override to force a specific modification mode",
     )
     parser.add_argument(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import collections
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from nle import nethack as nh
@@ -400,6 +401,14 @@ for _g in range(_MAX_GLYPH):
 _IS_WALL_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_OPEN_DOOR_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_DOORWAY_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_IRON_BARS_OR_TREE_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_WATER_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_LAVA_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_ICE_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_DRAWBRIDGE_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_LOWERED_DRAWBRIDGE_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_BOULDER_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+
 for _g in range(_MAX_GLYPH):
     _cn = _CMAP_NAME_BY_GLYPH[_g]
     if _cn == "wall":
@@ -409,6 +418,20 @@ for _g in range(_MAX_GLYPH):
         _IS_DOORWAY_GLYPH_LUT[_g] = True
     elif _cn == "closed door":
         _IS_DOORWAY_GLYPH_LUT[_g] = True
+    if _cn in ("iron bars", "tree"):
+        _IS_IRON_BARS_OR_TREE_LUT[_g] = True
+    if _cn is not None and ("water" in _cn or "pool" in _cn or "moat" in _cn):
+        _IS_WATER_GLYPH_LUT[_g] = True
+    if _cn is not None and "lava" in _cn:
+        _IS_LAVA_GLYPH_LUT[_g] = True
+    if _cn == "ice":
+        _IS_ICE_GLYPH_LUT[_g] = True
+    if _cn is not None and "drawbridge" in _cn:
+        _IS_DRAWBRIDGE_GLYPH_LUT[_g] = True
+    if _cn == "lowered drawbridge":
+        _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT[_g] = True
+    if _OBJ_INFO_BY_GLYPH[_g] is not None and _OBJ_INFO_BY_GLYPH[_g].name == "boulder":
+        _IS_BOULDER_GLYPH_LUT[_g] = True
 
 
 @dataclass
@@ -489,7 +512,14 @@ class WorldMemory:
     locked door coordinates, position history, and inter-floor stair graph.
     """
 
-    __slots__ = ("floors", "pos_history", "current_floor_key", "stair_graph")
+    __slots__ = (
+        "floors",
+        "pos_history",
+        "current_floor_key",
+        "stair_graph",
+        "kv",
+        "recent_messages",
+    )
 
     def __init__(self) -> None:
         self.floors: dict[tuple[int, int], FloorMemory] = {}
@@ -500,12 +530,18 @@ class WorldMemory:
         self.stair_graph: dict[
             tuple[int, int, int, int], tuple[int, int, int, int]
         ] = {}
+        self.kv: dict[str, Any] = {}
+        self.recent_messages: collections.deque[tuple[int, int, str]] = (
+            collections.deque(maxlen=25)
+        )
 
     def reset(self) -> None:
         self.floors.clear()
         self.pos_history.clear()
         self.current_floor_key = (0, 1)
         self.stair_graph.clear()
+        self.kv.clear()
+        self.recent_messages.clear()
 
     def get_floor(
         self, dnum: int, dlvl: int, shape: tuple[int, int] = (21, 79)
@@ -606,6 +642,13 @@ class WorldMemory:
                 self.stair_graph[prev] = now
                 self.stair_graph[now] = prev
 
+        if hasattr(state, "message") and state.message:
+            msg_str = str(state.message).strip()
+            if msg_str:
+                self.recent_messages.append(
+                    (int(getattr(state, "turns", 0)), int(dlvl), msg_str)
+                )
+
         # Update remembered terrain chars and doorway mask using C engine cmap glyph lookup
         try:
             glyphs = state.glyphs
@@ -619,6 +662,16 @@ class WorldMemory:
             # Normalize open doors to '.' so they are never confused with walls ('-' or '|')
             open_door_mask = is_cmap & _IS_OPEN_DOOR_GLYPH_LUT[glyphs]
             floor.remembered_chars[open_door_mask] = ord(".")
+
+            # Normalize iron bars and trees to '|' so they are NEVER treated as walkable '#' corridors
+            impassable_cmap = is_cmap & _IS_IRON_BARS_OR_TREE_LUT[glyphs]
+            floor.remembered_chars[impassable_cmap] = ord("|")
+
+            # Normalize ice and lowered drawbridge to '.' so they are walkable in passable_mask
+            walkable_special = is_cmap & (
+                _IS_ICE_GLYPH_LUT[glyphs] | _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT[glyphs]
+            )
+            floor.remembered_chars[walkable_special] = ord(".")
 
             # 2. Update door_mask
             doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
@@ -1596,6 +1649,52 @@ class GameState:
             for m in self.visible_monsters()
             if m.is_hostile and max(abs(m.y - self.y), abs(m.x - self.x)) == 1
         ]
+
+    @property
+    def kv(self) -> dict[str, Any]:
+        """Arbitrary episode-persistent key-value storage synced across floor transitions and shards."""
+        return self.mem.kv if self.mem is not None else {}
+
+    @property
+    def recent_messages(self) -> list[tuple[int, int, str]]:
+        """Recent game log messages as (turn, dlvl, message) tuples."""
+        return list(self.mem.recent_messages) if self.mem is not None else []
+
+    def is_water(self, y: int, x: int) -> bool:
+        """Returns True if (y, x) is water, pool, or moat according to the C engine symbol table."""
+        if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
+            return False
+        return bool(_IS_WATER_GLYPH_LUT[int(self.glyphs[y, x])])
+
+    def is_lava(self, y: int, x: int) -> bool:
+        """Returns True if (y, x) is molten lava according to the C engine symbol table."""
+        if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
+            return False
+        return bool(_IS_LAVA_GLYPH_LUT[int(self.glyphs[y, x])])
+
+    def is_ice(self, y: int, x: int) -> bool:
+        """Returns True if (y, x) is ice according to the C engine symbol table."""
+        if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
+            return False
+        return bool(_IS_ICE_GLYPH_LUT[int(self.glyphs[y, x])])
+
+    def is_iron_bars(self, y: int, x: int) -> bool:
+        """Returns True if (y, x) is iron bars or tree according to the C engine symbol table."""
+        if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
+            return False
+        return bool(_IS_IRON_BARS_OR_TREE_LUT[int(self.glyphs[y, x])])
+
+    def is_boulder(self, y: int, x: int) -> bool:
+        """Returns True if (y, x) contains a boulder according to the C engine symbol table."""
+        if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
+            return False
+        return bool(_IS_BOULDER_GLYPH_LUT[int(self.glyphs[y, x])])
+
+    @property
+    def boulder_positions(self) -> list[tuple[int, int]]:
+        """Returns (y, x) coordinates of all visible boulders on the current floor."""
+        ys, xs = np.where(_IS_BOULDER_GLYPH_LUT[self.glyphs])
+        return list(zip(ys.tolist(), xs.tolist()))
 
     @property
     def passable_mask(self) -> np.ndarray:

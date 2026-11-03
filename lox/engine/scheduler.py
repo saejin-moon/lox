@@ -42,6 +42,7 @@ class ModeScheduler:
         self._gens_since_macro = 0
         self._last_tune_gen = 0
         self._last_macro_gen = 0
+        self.gens_since_refactor = 0
 
     def select_mode(
         self,
@@ -50,15 +51,25 @@ class ModeScheduler:
         has_tunable_params: bool = True,
         forced_mode: str | None = None,
         consecutive_failures: int = 0,
+        policy_line_count: int = 0,
     ) -> str:
         if forced_mode:
             return forced_mode.upper()
 
         if generation == 0 or not has_policy:
             self._promoted_since_tune = 1
+            self.gens_since_refactor = 0
             return "FULL_WRITE"
 
+        self.gens_since_refactor += 1
+
+        if policy_line_count >= 550 and self.gens_since_refactor >= 5:
+            self.gens_since_refactor = 0
+            self.counts["STRUCTURAL_REFACTOR"] += 1
+            return "STRUCTURAL_REFACTOR"
+
         if consecutive_failures > 0 and consecutive_failures % 3 == 0:
+            self.gens_since_refactor = 0
             self.counts["STRUCTURAL_REFACTOR"] += 1
             return "STRUCTURAL_REFACTOR"
 

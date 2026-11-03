@@ -483,6 +483,9 @@ class AuthorAgent:
         max_pilot_runs: int = 5,
         pilot_episodes: int = 30,
         skills: dict[str, str] | None = None,
+        recent_discoveries: list[dict[str, Any]] | None = None,
+        recent_failures: list[dict[str, Any]] | None = None,
+        max_steps: int = 5000,
     ) -> SynthesisProposal:
         """
         Runs a fresh, stateless multi-turn tool-calling session for `generation` and `mode`.
@@ -495,6 +498,7 @@ class AuthorAgent:
         self.tools.current_policy_code = current_policy
         self.tools.last_passed_code = ""
         self.tools.skills = dict(skills) if skills else {}
+        self.tools.max_steps = max_steps
         self.tools.configure_generation(
             pool=pool,
             baseline_runs=baseline_runs,
@@ -516,6 +520,8 @@ class AuthorAgent:
             batch_digest=batch_digest,
             recent_experiments=recent_experiments,
             skills=skills,
+            recent_discoveries=recent_discoveries,
+            recent_failures=recent_failures,
         )
 
         messages: list[dict[str, Any]] = [

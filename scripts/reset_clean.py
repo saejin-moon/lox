@@ -42,6 +42,7 @@ def reset_clean(
                 "function_stats",
                 "policies",
                 "experiments",
+                "discoveries",
             ]:
                 con.execute(f"DELETE FROM {table}")
                 print(f"Cleared table `{table}`")

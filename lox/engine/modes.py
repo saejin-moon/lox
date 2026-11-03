@@ -115,6 +115,7 @@ def run_spsa_param_tuning(
     episodes_per_eval: int | None = None,
     skills: dict[str, str] | None = None,
     benchmark: str = "nethack",
+    max_steps: int | None = None,
 ) -> dict[str, Any]:
     """
     Simultaneous Perturbation Stochastic Approximation with Common Random Numbers (CRN-SPSA).
@@ -124,6 +125,7 @@ def run_spsa_param_tuning(
     """
     if episodes_per_eval is not None:
         minibatch_size = int(episodes_per_eval)
+    eff_max_steps = int(max_steps if max_steps is not None else pool.max_steps)
     if not registered_params:
         return {
             "tuned": False,
@@ -296,7 +298,7 @@ def run_spsa_param_tuning(
                     "seed": s,
                     "run_id": f"{batch_id}_spsa_{k}p_r{idx:05d}",
                     "role": pool.role,
-                    "max_steps": pool.max_steps,
+                    "max_steps": eff_max_steps,
                     "policy_code": policy_code,
                     "macros_code": macros_code,
                     "target_functions": [],
@@ -312,7 +314,7 @@ def run_spsa_param_tuning(
                     "seed": s,
                     "run_id": f"{batch_id}_spsa_{k}m_r{idx:05d}",
                     "role": pool.role,
-                    "max_steps": pool.max_steps,
+                    "max_steps": eff_max_steps,
                     "policy_code": policy_code,
                     "macros_code": macros_code,
                     "target_functions": [],
@@ -372,6 +374,7 @@ def run_spsa_param_tuning(
         show_progress=True,
         skills=skills,
         benchmark=benchmark,
+        max_steps=eff_max_steps,
     )
     verdict = evaluate_paired_hypothesis(
         val_result["runs"], baseline_runs, benchmark=benchmark
