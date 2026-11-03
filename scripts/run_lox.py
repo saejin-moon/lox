@@ -151,7 +151,17 @@ def main() -> None:
         default=5,
         help="Max in-turn sandbox repair attempts per generation (default: 5)",
     )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Reset workspace and database tables before starting (preserves wiki & expert runs)",
+    )
     args = parser.parse_args()
+
+    if args.clean:
+        from scripts.reset_clean import reset_clean
+
+        reset_clean()
 
     orchestrator = CampaignOrchestrator(
         provider=args.provider,
