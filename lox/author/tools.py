@@ -66,10 +66,12 @@ class AuthorToolRegistry:
         db_path: str = DEFAULT_DB_PATH,
         wiki_db_path: str = DEFAULT_WIKI_DB,
         macros_path: str = DEFAULT_MACROS_PATH,
+        benchmark: str = "nethack",
     ):
         self.db_path = db_path
         self.wiki = WikiEngine(db_path=wiki_db_path)
         self.macro_lib = MacroLibrary(path=macros_path)
+        self.benchmark = str(benchmark)
         self.current_policy_code: str = ""
         self.last_passed_code: str = ""
         self.pool: Any = None
@@ -79,6 +81,8 @@ class AuthorToolRegistry:
         self.pilot_episodes: int = 30
         self.last_pilot_improved: bool = False
         self.last_pilot_summary: str = ""
+        self.last_cand_depths: list[float] = []
+        self.last_base_depths: list[float] = []
         self.skills: dict[str, str] = {}
         self.generation: int = 0
 
@@ -90,6 +94,7 @@ class AuthorToolRegistry:
         pilot_episodes: int = 30,
         skills: dict[str, str] | None = None,
         generation: int = 0,
+        benchmark: str | None = None,
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
         self.pool = pool
@@ -99,9 +104,13 @@ class AuthorToolRegistry:
         self.pilot_episodes = pilot_episodes
         self.last_pilot_improved = False
         self.last_pilot_summary = ""
+        self.last_cand_depths = []
+        self.last_base_depths = []
         self.generation = int(generation)
         if skills is not None:
             self.skills = dict(skills)
+        if benchmark is not None:
+            self.benchmark = str(benchmark)
 
     def query_db(self, sql: str) -> tuple[str, str]:
         """Executes a read-only SQL query against DuckDB."""
@@ -606,13 +615,25 @@ class AuthorToolRegistry:
                             max_shards=max_sh,
                             target_functions=changed_fns,
                         )
+                    shard_seeds = {int(sh.seed) for sh in pilot_shards}
                     normal_runs = [r for r in self.baseline_runs if r not in fail_runs]
-                    num_fail = min(len(fail_runs), int(target_eps * 2 // 3))
-                    num_norm = min(len(normal_runs), target_eps - num_fail)
-                    strat_runs = fail_runs[:num_fail] + normal_runs[:num_norm]
-                    if len(strat_runs) < target_eps:
-                        rem = [r for r in self.baseline_runs if r not in strat_runs]
-                        strat_runs.extend(rem[: target_eps - len(strat_runs)])
+                    avail_fail = [
+                        r for r in fail_runs if int(r["seed"]) not in shard_seeds
+                    ]
+                    avail_norm = [
+                        r for r in normal_runs if int(r["seed"]) not in shard_seeds
+                    ]
+                    needed_full = max(1, target_eps - len(pilot_shards))
+                    num_fail = min(len(avail_fail), int(needed_full * 2 // 3))
+                    num_norm = min(len(avail_norm), needed_full - num_fail)
+                    strat_runs = avail_fail[:num_fail] + avail_norm[:num_norm]
+                    if len(strat_runs) < needed_full:
+                        rem = [
+                            r
+                            for r in self.baseline_runs
+                            if r not in strat_runs and int(r["seed"]) not in shard_seeds
+                        ]
+                        strat_runs.extend(rem[: needed_full - len(strat_runs)])
                     pilot_seeds = [int(r["seed"]) for r in strat_runs]
                 else:
                     pilot_seeds = list(range(int(seed), int(seed) + target_eps))
@@ -643,6 +664,15 @@ class AuthorToolRegistry:
                     (str(r.get("shard_id") or "") or int(r["seed"])): r
                     for r in base_shard_runs
                 }
+                if not base_shard_by_seed and pilot_shards:
+                    # Fallback mapping to baseline runs when current_policy_code wasn't provided
+                    base_run_by_seed = {int(r["seed"]): r for r in self.baseline_runs}
+                    for sh in pilot_shards:
+                        s = int(sh.seed)
+                        if s in base_run_by_seed:
+                            sh_key = str(sh.shard_id) or s
+                            base_shard_by_seed[sh_key] = base_run_by_seed[s]
+                            base_shard_by_seed[s] = base_run_by_seed[s]
 
                 target_fns = changed_fns if policy_code.strip() else None
 
@@ -663,25 +693,38 @@ class AuthorToolRegistry:
                 wins = 0
                 losses = 0
                 ties = 0
-                cand_depths = [float(r["max_depth"]) for r in p_runs]
-                base_depths: list[float] = []
+
+                bench_name = getattr(self, "benchmark", "nethack")
+                if bench_name != "nethack":
+                    from lox.env import get_adapter
+
+                    metric_fn = get_adapter(bench_name).progression_metric
+                else:
+                    from lox.engine.hypothesis import progression_metric
+
+                    metric_fn = progression_metric
+
+                cand_full_depths: list[float] = []
+                base_full_depths: list[float] = []
+                cand_shard_depths: list[float] = []
+                base_shard_depths: list[float] = []
                 deltas: list[float] = []
 
                 for r in p_runs:
                     s = int(r["seed"])
+                    c_d = float(r.get("max_depth", 1))
                     if r.get("is_shard"):
                         sh_key = str(r.get("shard_id") or "") or s
-                        if sh_key in base_shard_by_seed:
-                            br = base_shard_by_seed[sh_key]
+                        br = base_shard_by_seed.get(sh_key) or base_shard_by_seed.get(s)
+                        if br is not None:
                             b_d = float(br.get("max_depth", 1))
-                            b_s = float(br.get("score", 0))
-                            c_d = float(r.get("max_depth", 1))
-                            c_s = float(r.get("score", 0))
-                            d_val = (c_d - b_d) + (c_s - b_s) / 1000.0
+                            d_val = float(metric_fn(r) - metric_fn(br))
                             deltas.append(d_val)
-                            if c_d > b_d or (c_d == b_d and c_s > b_s):
+                            cand_shard_depths.append(c_d)
+                            base_shard_depths.append(b_d)
+                            if d_val > 1e-6:
                                 wins += 1
-                            elif c_d < b_d or (c_d == b_d and c_s < b_s):
+                            elif d_val < -1e-6:
                                 losses += 1
                             else:
                                 ties += 1
@@ -689,33 +732,51 @@ class AuthorToolRegistry:
                         if s in base_by_seed:
                             br = base_by_seed[s]
                             b_d = float(br.get("max_depth", 1))
-                            b_s = float(br.get("score", 0))
-                            base_depths.append(b_d)
-                            c_d = float(r.get("max_depth", 1))
-                            c_s = float(r.get("score", 0))
-                            d_val = (c_d - b_d) + (c_s - b_s) / 1000.0
+                            d_val = float(metric_fn(r) - metric_fn(br))
                             deltas.append(d_val)
-                            if c_d > b_d or (c_d == b_d and c_s > b_s):
+                            cand_full_depths.append(c_d)
+                            base_full_depths.append(b_d)
+                            if d_val > 1e-6:
                                 wins += 1
-                            elif c_d < b_d or (c_d == b_d and c_s < b_s):
+                            elif d_val < -1e-6:
                                 losses += 1
                             else:
                                 ties += 1
 
+                if cand_full_depths:
+                    cand_depths = cand_full_depths
+                    base_depths = base_full_depths
+                elif cand_shard_depths:
+                    cand_depths = cand_shard_depths
+                    base_depths = base_shard_depths
+                else:
+                    cand_depths = []
+                    base_depths = []
+
+                self.last_cand_depths = list(cand_depths)
+                self.last_base_depths = list(base_depths)
+
                 mean_delta = float(np.mean(deltas)) if deltas else 0.0
 
-                c_avg_depth = float(np.mean(cand_depths)) if cand_depths else 0.0
-                b_avg_depth = (
-                    float(np.mean(base_depths))
-                    if base_depths
-                    else (
+                if cand_depths:
+                    c_avg_depth = float(np.mean(cand_depths))
+                    b_avg_depth = float(np.mean(base_depths))
+                else:
+                    c_avg_depth = (
+                        float(np.mean([float(r["max_depth"]) for r in p_runs]))
+                        if p_runs
+                        else 0.0
+                    )
+                    b_avg_depth = (
                         float(self.baseline_runs[0].get("depth", 1.0))
                         if self.baseline_runs
                         else 1.0
                     )
-                )
+
                 delta_depth = c_avg_depth - b_avg_depth
-                c_max_depth = int(max(cand_depths)) if cand_depths else 0
+                c_max_depth = int(
+                    max((r.get("max_depth", 1) for r in p_runs), default=0)
+                )
 
                 dlvl1_stalls = sum(1 for r in p_runs if r.get("max_depth", 1) <= 1)
                 door_stalls = sum(
@@ -769,10 +830,8 @@ class AuthorToolRegistry:
                     )
 
                 if base_depths:
-                    depth_improved = delta_depth >= 0.05
-                    progression_improved = delta_depth >= 0.0 and mean_delta > 0.02
-                    improved = (wins > losses) and (
-                        depth_improved or progression_improved
+                    improved = (wins > losses and mean_delta > 0.0) or (
+                        delta_depth >= 0.05 and mean_delta >= 0.0
                     )
                     summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f}"
                     paired_line = f"• Paired vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth})\n"

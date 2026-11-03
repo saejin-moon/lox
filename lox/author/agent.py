@@ -61,6 +61,7 @@ class AuthorAgent:
         reasoning_effort: str = "medium",
         routing: str = "floor",
         max_repair_turns: int = 5,
+        benchmark: str = "nethack",
     ):
         self.provider = provider.lower()
         self.model = model
@@ -78,8 +79,11 @@ class AuthorAgent:
         self.reasoning_effort = reasoning_effort
         self.routing = routing
         self.max_repair_turns = max_repair_turns
+        self.benchmark = str(benchmark)
         self.latest_attempted_hyp: dict[str, Any] = {}
-        self.tools = AuthorToolRegistry(db_path=db_path, macros_path=macros_path)
+        self.tools = AuthorToolRegistry(
+            db_path=db_path, macros_path=macros_path, benchmark=benchmark
+        )
 
     @staticmethod
     def extract_yaml_and_python(content: str) -> tuple[dict[str, Any], str]:
@@ -432,6 +436,7 @@ class AuthorAgent:
             pilot_episodes=pilot_episodes,
             skills=skills,
             generation=generation,
+            benchmark=self.benchmark,
         )
         if max_tool_turns is None:
             max_tool_turns = 14 if mode == "FULL_WRITE" else 12

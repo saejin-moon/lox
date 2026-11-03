@@ -112,6 +112,7 @@ class CampaignOrchestrator:
             db_path=db_path,
             macros_path=macros_path,
             max_repair_turns=max_repair_turns,
+            benchmark=benchmark,
         )
         self.scheduler = ModeScheduler(
             param_tune_every=param_tune_every,

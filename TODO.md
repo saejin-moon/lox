@@ -79,11 +79,7 @@ In `lox/engine/orchestrator.py` (lines 933–943):
 1. **Keep `baseline_by_seed` Purely From the Current Promoted Policy (lines 493–495 and 933–943)**:
    - On promotion (`if verdict["passed"]:` at lines 933–943, and in `PARAM_TUNE` at lines 493–495), replace `baseline_by_seed` with the newly promoted policy's full runs:
      ```python
-     full_promoted = {
-         int(r["seed"]): r
-         for r in eval_res["runs"]
-         if not r.get("is_shard")
-     }
+     full_promoted = {int(r["seed"]): r for r in eval_res["runs"] if not r.get("is_shard")}
      if full_promoted:
          baseline_by_seed = full_promoted
          baseline_runs = list(baseline_by_seed.values())

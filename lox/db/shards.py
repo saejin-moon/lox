@@ -102,8 +102,8 @@ def extract_shards_from_runs(
         ticks = r.get("ticks") or []
 
         # 1. Pre-Death Windows (30 steps before fatal encounter)
-        if end_reason not in ("max_steps", "ascended", "ended") and steps >= 35:
-            cut_step = max(5, steps - 30)
+        if end_reason not in ("max_steps", "ascended", "ended") and steps >= 15:
+            cut_step = max(5, steps - 30 if steps >= 35 else steps - 5)
             ratio = cut_step / float(steps)
             default_cut = max(5, min(len(b_bytes) - 5, int(len(b_bytes) * ratio)))
             cut_idx = _find_byte_offset(
