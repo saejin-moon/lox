@@ -103,6 +103,39 @@ class AuthorAgent:
             except Exception:
                 continue
 
+        if yaml_dict:
+            if "target_functions" not in yaml_dict:
+                t_funcs = (
+                    yaml_dict.get("target_function") or yaml_dict.get("functions") or []
+                )
+                if isinstance(t_funcs, str):
+                    t_funcs = [t_funcs]
+                yaml_dict["target_functions"] = list(t_funcs)
+            elif isinstance(yaml_dict["target_functions"], str):
+                yaml_dict["target_functions"] = [yaml_dict["target_functions"]]
+
+            if "binding_constraint" not in yaml_dict:
+                yaml_dict["binding_constraint"] = str(
+                    yaml_dict.get("observation_from_db")
+                    or yaml_dict.get("observation")
+                    or ""
+                )
+
+            if "verified_c_rule" not in yaml_dict:
+                yaml_dict["verified_c_rule"] = str(
+                    yaml_dict.get("c_rule") or yaml_dict.get("wiki_rule") or ""
+                )
+
+            if "mechanism" not in yaml_dict:
+                yaml_dict["mechanism"] = str(
+                    yaml_dict.get("description") or yaml_dict.get("hypothesis") or ""
+                )
+
+            if "state_persistence" not in yaml_dict:
+                yaml_dict["state_persistence"] = str(
+                    yaml_dict.get("persistence") or yaml_dict.get("memory") or ""
+                )
+
         py_blocks = re.findall(
             r"```python\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
         )
@@ -458,6 +491,7 @@ class AuthorAgent:
         ]
 
         total_tool_calls = 0
+        research_tools_called: set[str] = set()
         final_content = ""
         latest_hyp: dict[str, Any] = {}
         last_attempted_code = ""
@@ -480,6 +514,29 @@ class AuthorAgent:
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
                 _, found_code = self.extract_yaml_and_python(msg_text)
+
+                # Turn 1 Mandatory Investigation Enforcement:
+                # In FUNC_MOD_ADD and STRUCTURAL_REFACTOR modes, Turn 1 is strictly reserved for Empirical Research.
+                # If candidate code is output on Turn 1 without having called query_db or query_wiki, block auto-pilot and enforce research.
+                if (
+                    turn_idx == 1
+                    and mode in ("FUNC_MOD_ADD", "STRUCTURAL_REFACTOR")
+                    and found_code
+                    and not ({"query_db", "query_wiki"} & research_tools_called)
+                ):
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "🛑 PHASE 1 ENFORCEMENT: Turn 1 is strictly reserved for Empirical Research.\n"
+                                "DO NOT output code yet. You must first investigate the previous batch's failure modes:\n"
+                                "1. Call `query_db(sql=...)` to compare your failed runs against `expert_runs` or `expert_ticks`.\n"
+                                "2. Call `query_wiki(query=...)` on the exact message strings from the top failure causes.\n"
+                                "Once you have gathered empirical C engine facts, formulate your hypothesis on Turn 2."
+                            ),
+                        }
+                    )
+                    continue
 
                 # Check if candidate code is present and has not yet passed a pilot evaluation
                 is_new_code = bool(
@@ -610,6 +667,8 @@ class AuthorAgent:
                 total_tool_calls += 1
                 fn_Spec = tc.get("function") or {}
                 t_name = fn_Spec.get("name", "")
+                if t_name in ("query_db", "query_wiki"):
+                    research_tools_called.add(t_name)
                 raw_args = fn_Spec.get("arguments", "{}")
                 try:
                     t_args = (

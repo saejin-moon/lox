@@ -19,7 +19,7 @@ from typing import Any
 
 import numpy as np
 
-from lox.author.prompts import POLICY_LANG_DOCS
+from lox.author.prompts import FULL_ACTION_DOCS, POLICY_LANG_DOCS
 from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db
@@ -171,6 +171,8 @@ class AuthorToolRegistry:
             else "\n### Current `macros.py`: (Empty - no custom macros defined yet)"
         )
         t = (topic or "all").lower()
+        if "action" in t:
+            return FULL_ACTION_DOCS, "action docs"
         if "macro" in t:
             return self.macro_lib.format_docs() + macros_section, "macros docs"
         return (

@@ -544,3 +544,144 @@ def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypat
         assert "query_db" in failure_guidance[0]
     finally:
         pool.close()
+
+
+def test_pass4_system_prompt_restructuring_and_turn1_gating(tmp_path, monkeypatch):
+    """
+    Pass 4 Verification:
+    1. System prompt contains Empirical Differential Diagnostics with expert_ticks queries,
+       Pre-Submission Invariant Checklist, and pruned action working set routing to query_policy_docs("actions").
+    2. User prompt enforces Binding Constraint rule and Causal Hypothesis schema across modes.
+    3. extract_yaml_and_python enforces Causal Hypothesis schema fields.
+    4. AuthorAgent.synthesize intercepts Turn-1 code generation when zero tools were called
+       and enforces Phase 1 research without executing auto-pilot.
+    """
+    from lox.author.agent import AuthorAgent
+    from lox.author.prompts import build_system_prompt, build_user_prompt
+    from lox.author.tools import AuthorToolRegistry
+
+    # 1. System Prompt Verification
+    sys_prompt = build_system_prompt(str(tmp_path / "test.duckdb"))
+    assert "Empirical Differential Diagnostics" in sys_prompt
+    assert "expert_ticks" in sys_prompt
+    assert "SELECT 'failed_runs' AS source" in sys_prompt
+    assert "Pre-Submission Invariant Checklist" in sys_prompt
+    assert "Generator Invariant" in sys_prompt
+    assert "Passability Mask" in sys_prompt
+    assert 'query_policy_docs("actions")' in sys_prompt
+
+    # Verify query_policy_docs("actions") tool route
+    tools = AuthorToolRegistry(db_path=str(tmp_path / "test.duckdb"))
+    action_docs, summary = tools.query_policy_docs("actions")
+    assert "Action.SEARCH" in action_docs
+    assert "Action.KICK" in action_docs
+    assert "Action.PRAY" in action_docs
+    assert summary == "action docs"
+
+    # 2. User Prompt Verification across modes
+    for mode in ("FUNC_MOD_ADD", "STRUCTURAL_REFACTOR", "FULL_WRITE"):
+        user_prompt = build_user_prompt(
+            mode=mode,
+            generation=1,
+            current_policy="class Policy:\n    def run(self, state):\n        state = yield Action.WAIT\n",
+            macros_docs="",
+            batch_digest="Batch summary: 75% died to starvation.",
+        )
+        assert (
+            "The Binding Constraint Rule" in user_prompt
+            or "binding_constraint" in user_prompt
+        )
+        assert "binding_constraint:" in user_prompt
+        assert "verified_c_rule:" in user_prompt
+        assert "state_persistence:" in user_prompt
+        assert "mechanism:" in user_prompt
+        assert "target_functions:" in user_prompt
+
+    # 3. Hypothesis Extraction Schema Enforcement
+    sample_llm_output = """
+```yaml
+mode: FUNC_MOD_ADD
+target_functions: [explore_step]
+observation_from_db: "70% died from wall stalling"
+mechanism: "Check get_passable_mask"
+```
+```python
+def explore_step(self, state):
+    state = yield Action.SEARCH
+    return state
+```
+"""
+    hyp, code = AuthorAgent.extract_yaml_and_python(sample_llm_output)
+    assert hyp["target_functions"] == ["explore_step"]
+    assert hyp["binding_constraint"] == "70% died from wall stalling"
+    assert "verified_c_rule" in hyp
+    assert hyp["mechanism"] == "Check get_passable_mask"
+    assert "state_persistence" in hyp
+    assert "def explore_step" in code
+
+    # 4. Turn-1 Mandatory Investigation Gating in AuthorAgent.synthesize
+    agent = AuthorAgent(provider="openrouter", db_path=str(tmp_path / "test.duckdb"))
+    turn_counter = 0
+    received_user_prompts = []
+
+    def mock_call_llm_turn1_gate(messages, allow_tools=True):
+        nonlocal turn_counter
+        turn_counter += 1
+        for m in messages:
+            if m.get("role") == "user":
+                received_user_prompts.append(m.get("content", ""))
+
+        if turn_counter == 1:
+            # Emits code immediately on Turn 1 without calling query_db or query_wiki
+            return {
+                "role": "assistant",
+                "content": """```yaml
+mode: FUNC_MOD_ADD
+target_functions: [run]
+binding_constraint: "Stalling"
+verified_c_rule: "C door rule"
+mechanism: "Kick doors"
+state_persistence: "self.tried"
+```
+```python
+class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.WAIT
+```""",
+                "tool_calls": [],
+            }
+        else:
+            # Turn 2: returns a response after gating
+            return {
+                "role": "assistant",
+                "content": """```yaml
+mode: FUNC_MOD_ADD
+target_functions: [run]
+binding_constraint: "Stalling"
+verified_c_rule: "C door rule"
+mechanism: "Kick doors"
+state_persistence: "self.tried"
+```
+```python
+class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.SEARCH
+```""",
+                "tool_calls": [],
+            }
+
+    monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm_turn1_gate)
+
+    proposal = agent.synthesize(
+        mode="FUNC_MOD_ADD",
+        generation=1,
+        current_policy="class Policy:\n    def run(self, state):\n        state = yield Action.WAIT\n",
+        max_tool_turns=3,
+    )
+
+    # Verify that Turn 1 Phase 1 enforcement intercepted Turn 1 and auto-pilot was blocked on Turn 1
+    assert any("🛑 PHASE 1 ENFORCEMENT" in p for p in received_user_prompts)
+    assert turn_counter >= 2
+    assert "class Policy" in proposal.full_policy_code
