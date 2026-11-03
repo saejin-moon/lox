@@ -11,11 +11,16 @@ import numpy as np
 
 @numba.njit(cache=True)
 def bfs_distance_grid(
-    passable: np.ndarray, sy: int, sx: int, allow_diagonal: bool = True
+    passable: np.ndarray,
+    sy: int,
+    sx: int,
+    allow_diagonal: bool = True,
+    no_diag: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Computes shortest-path step distances from (sy, sx) across any boolean `passable` 2D grid.
     Unreachable tiles have distance -1.
+    If `no_diag` is provided, diagonal transitions into or out of True tiles are skipped.
     """
     h, w = passable.shape
     dist = np.full((h, w), -1, dtype=np.int32)
@@ -48,6 +53,9 @@ def bfs_distance_grid(
             ny = cy + dys[i]
             nx = cx + dxs[i]
             if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] == -1 and passable[ny, nx]:
+                if i >= 4 and no_diag is not None:
+                    if no_diag[cy, cx] or no_diag[ny, nx]:
+                        continue
                 dist[ny, nx] = cd
                 qy[tail] = ny
                 qx[tail] = nx
@@ -63,10 +71,12 @@ def astar_next_step(
     ty: int,
     tx: int,
     allow_diagonal: bool = True,
+    no_diag: np.ndarray | None = None,
 ) -> tuple[int, int]:
     """
     Returns the first step delta `(dy, dx)` along the shortest path from `(sy, sx)` to `(ty, tx)`
     on `passable`. Returns `(0, 0)` if already at target or unreachable.
+    If `no_diag` is provided, diagonal transitions into or out of True tiles are skipped.
     """
     if sy == ty and sx == tx:
         return (0, 0)
@@ -105,6 +115,9 @@ def astar_next_step(
             ny = cy + dys[i]
             nx = cx + dxs[i]
             if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] == -1:
+                if i >= 4 and no_diag is not None:
+                    if no_diag[cy, cx] or no_diag[ny, nx]:
+                        continue
                 if passable[ny, nx] or (ny == sy and nx == sx):
                     dist[ny, nx] = cd
                     qy[tail] = ny
@@ -118,6 +131,9 @@ def astar_next_step(
         ny = sy + dys[i]
         nx = sx + dxs[i]
         if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] != -1:
+            if i >= 4 and no_diag is not None:
+                if no_diag[sy, sx] or no_diag[ny, nx]:
+                    continue
             if dist[ny, nx] < best_d:
                 best_d = dist[ny, nx]
                 best_dy = dys[i]

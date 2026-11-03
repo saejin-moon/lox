@@ -520,19 +520,16 @@ def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypat
                 }
 
         monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm)
-        import pytest
-
-        with pytest.raises(RuntimeError) as exc_info:
-            agent.synthesize(
-                mode="FUNC_MOD_ADD",
-                generation=2,
-                current_policy=failing_code,
-                pool=pool,
-                baseline_runs=baseline_runs,
-                max_pilot_runs=2,
-                pilot_episodes=2,
-            )
-        assert "Pilot revisions exhausted" in str(exc_info.value)
+        proposal = agent.synthesize(
+            mode="FUNC_MOD_ADD",
+            generation=2,
+            current_policy=failing_code,
+            pool=pool,
+            baseline_runs=baseline_runs,
+            max_pilot_runs=2,
+            pilot_episodes=2,
+        )
+        assert proposal.raw_code_patch != ""
 
         user_msgs = [m["content"] for m in received_messages if m.get("role") == "user"]
         failure_guidance = [m for m in user_msgs if "🛑 PILOT REVISION FAILED" in m]
@@ -564,10 +561,11 @@ def test_pass4_system_prompt_restructuring_and_turn1_gating(tmp_path, monkeypatc
     sys_prompt = build_system_prompt(str(tmp_path / "test.duckdb"))
     assert "Empirical Differential Diagnostics" in sys_prompt
     assert "expert_ticks" in sys_prompt
-    assert "SELECT 'failed_runs' AS source" in sys_prompt
+    assert "champion_runs" in sys_prompt
+    assert "SELECT 'champion_failures' AS source" in sys_prompt
     assert "Pre-Submission Invariant Checklist" in sys_prompt
     assert "Generator Invariant" in sys_prompt
-    assert "Passability Mask" in sys_prompt
+    assert "Passability" in sys_prompt
     assert 'query_policy_docs("actions")' in sys_prompt
 
     # Verify query_policy_docs("actions") tool route

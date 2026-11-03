@@ -530,7 +530,7 @@ class AuthorAgent:
                             "content": (
                                 "🛑 PHASE 1 ENFORCEMENT: Turn 1 is strictly reserved for Empirical Research.\n"
                                 "DO NOT output code yet. You must first investigate the previous batch's failure modes:\n"
-                                "1. Call `query_db(sql=...)` to compare your failed runs against `expert_runs` or `expert_ticks`.\n"
+                                "1. Call `query_db(sql=...)` to compare `champion_runs` / `champion_function_stats` against `expert_runs` or `expert_ticks`.\n"
                                 "2. Call `query_wiki(query=...)` on the exact message strings from the top failure causes.\n"
                                 "Once you have gathered empirical C engine facts, formulate your hypothesis on Turn 2."
                             ),
@@ -700,15 +700,19 @@ class AuthorAgent:
                 hyp = latest_hyp
 
             # If the model omitted the code block in its final summary after already passing dry_run_policy in a tool call, use that verified code!
-            if not code_patch and self.tools.last_passed_code:
-                code_patch = self.tools.last_passed_code
+            if not code_patch:
+                code_patch = self.tools.last_passed_code or self.tools.best_pilot_code
 
             if not code_patch:
                 diag = "No ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
                 status = "MISSING_CODE"
             else:
                 diag, status = self.tools.dry_run_policy(
-                    code=code_patch, is_macro=is_macro_mode, seed=42, max_turns=50
+                    code=code_patch,
+                    is_macro=is_macro_mode,
+                    seed=42,
+                    max_turns=50,
+                    smoke_only=True,
                 )
 
             if status.startswith("PASSED") or status.startswith("VALID"):
@@ -753,12 +757,6 @@ class AuthorAgent:
                         tool_calls_made=total_tool_calls,
                         skill_code=skill_code,
                     )
-
-            if status == "PILOT_EXHAUSTED":
-                raise RuntimeError(
-                    f"Pilot revisions exhausted ({self.tools.pilot_runs_used}/{self.tools.max_pilot_runs}) "
-                    f"without beating baseline ({self.tools.last_pilot_summary})."
-                )
 
             if repair_idx < self.max_repair_turns:
                 ui.warn(
@@ -835,9 +833,12 @@ class AuthorAgent:
                     final_content = r_text
 
         # Final fallback: if the model already passed dry_run_policy during the tool phase, use that verified code!
-        if self.tools.last_passed_code:
-            ui.info("Using verified code from earlier passing dry_run_policy call.")
-            code_patch = self.tools.last_passed_code
+        best_code = self.tools.last_passed_code or self.tools.best_pilot_code
+        if best_code:
+            ui.info(
+                "Using verified code from earlier passing/best dry_run_policy call."
+            )
+            code_patch = best_code
             skill_code = self.extract_skill_code(final_content, latest_hyp)
             if is_macro_mode:
                 merged_macros, macro_names = self.tools.macro_lib.merge_macros(

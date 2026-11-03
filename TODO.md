@@ -1,277 +1,332 @@
-# LOX System Prompt, Cognitive Architecture & Codebase Bottleneck Overhaul (`TODO.md` — Pass 4)
+# LOX System Prompt & Runtime Bottleneck Overhaul (`TODO.md` — Pass 6)
 
-## Objective
-1. **System Prompt & Cognitive Architecture Overhaul (`lox/author/prompts.py`, `lox/author/agent.py`)**: Restructure the Author Agent's system and user prompts using 2024–2026 **Context Engineering** and **Phase-Isolated Operating Manual** principles (Anthropic, OpenAI, SWE-agent, Agentless) so the agent autonomously discovers the progression path from `Dlvl 1` to ascension via `query_db` and `query_wiki`, strictly maintaining **"Hard Code Nothing"** (zero hardcoded NetHack strategy guides).
-2. **Eliminate the 6 Codebase Bottlenecks Holding LOX Back**:
-   - Fix the `SELECT MAX(batch_id)` poison pill (`pilot_4_*` > `c2026_*`) via DuckDB champion views and `query_db` resolution (`lox/db/schema.py`, `lox/author/tools.py`).
-   - Populate `expert_ticks` across all dungeon depths (`Dlvl 1..48`) from human ascension dumplogs and multi-depth NLE reference rollouts so `expert_ticks` queries never return `0 rows` (`lox/datasets/download_experts.py`).
-   - Fix `WorldMemory` open-door ASCII collision (`'-'`/`'|'` shared between walls and open doors), object/hero underlying floor initialization, and orthogonal doorway transitions in `bfs_distances` / `path_step` (`lox/env/state.py`, `lox/env/grid_utils.py`).
-   - Prevent `PolicyArchiveEntry` from overwriting `baseline_runs` with 200-step shards and include `action_bytes, milestones_json` when resuming from DuckDB (`lox/engine/orchestrator.py`).
-   - Gate `PARAM_TUNE` in `ModeScheduler` so it only triggers after promoted `FUNC_MOD_ADD` generations, and forward `skills`/`benchmark` in `run_spsa_param_tuning` (`lox/engine/scheduler.py`, `lox/engine/modes.py`).
-   - Fix `MacroHarvester` method name collisions and `check_macro_contracts` false positives on `self.<method>()` calls (`lox/lang/macros.py`, `lox/lang/validator.py`).
+> **Architectural Mandate ("Hard Code Nothing")**:
+> Preserve strict zero-heuristic generality in `lox/env/` and `lox/author/prompts.py`.
+> Do NOT hardcode NetHack strategy guides or domain heuristics.
+> After completing all 6 tasks below, run `uv run ruff check --fix .`, `uv run ruff format .`, and `uv run pytest -v` until 100% of tests pass with zero warnings or errors.
 
 ---
 
-## Part A: Codebase Bottleneck Fixes
+## Task 1: Fix `ExecutionTracer` Call-Stack Attribution, Boolean Helper Calls, and Missing `Any` Import (`lox/lang/instrument.py`)
 
-### 1. Fix the `SELECT MAX(batch_id)` Poison Pill (`lox/db/schema.py` & `lox/author/tools.py`)
+**Problem**:
+1. `lox/lang/instrument.py:91` uses `Any` without importing `from typing import Any`, causing `ruff check` to fail with `F821 Undefined name Any`.
+2. `tests/test_author_and_ui.py::test_macros_called_from_policy_and_traced` fails because `ExecutionTracer.on_return` treats `val is False` as `is_noop = True`, preventing boolean predicate functions/macros (such as `macro_is_low_hp(state, 0.5)` returning `False`) from incrementing `self.fn_calls[fn_name]`.
+3. `tests/test_lang_instrument.py::test_call_stack_attribution_and_caller_splice_filtering` fails because `ExecutionTracer.on_return` adds leaf helpers (such as `get_passable_mask` called inside `handle_combat`) to `self._turn_contributors` and `record_turn_yield()` increments `self.fn_turns` for all contributors, AND `exit_fn` only restores `self.active_fn = caller_fn` when `yielded_inside` is True.
 
-#### Root Cause
-In `data/lox.duckdb`, campaign batches are named `c2026..._g001` while `dry_run_policy` pilot batches are saved into the same tables as `pilot_1_...`, `pilot_4_...`. Because ASCII `'p' > 'c'` and `'pilot_4_' > 'pilot_1_'`, any SQL query using `WHERE batch_id = (SELECT MAX(batch_id) FROM runs)` permanently returns `pilot_4_...` (a 30-episode rejected pilot from an old generation) or a rejected/backfill batch instead of the active promoted champion batch.
+**Exact Changes in `lox/lang/instrument.py`**:
+1. At the top of `lox/lang/instrument.py` (around line 12), add:
+   ```python
+   from typing import Any
+   ```
+2. In `ExecutionTracer` (lines 43–141):
+   - Remove `"_turn_contributors"` from `__slots__`, `__init__`, `reset_for_episode`, `on_return`, and `record_turn_yield`.
+   - Use 3-element list frames `[fn_name, self.total_turns, False]` in `self.call_stack` (where index `2` tracks `returned_non_noop: bool`).
+   - Replace `enter_fn`, `on_return`, `exit_fn`, and `record_turn_yield` with:
+     ```python
+     def enter_fn(self, fn_name: str, has_value_return: bool = False) -> None:
+         self.call_stack.append([fn_name, self.total_turns, False])
+         if not has_value_return:
+             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+             self.active_fn = fn_name
 
-#### Required Changes
-1. **`lox/db/schema.py` (`init_db`)**:
-   - Create four canonical SQL views inside `init_db(db_path)` so they always exist on every connection:
-     ```sql
-     CREATE OR REPLACE VIEW champion_runs AS
-     SELECT * FROM runs
-     WHERE batch_id = (
-         SELECT batch_id FROM batches
-         WHERE hypothesis_passed = TRUE
-           AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
-         ORDER BY generation DESC, created_at DESC
-         LIMIT 1
-     );
 
-     CREATE OR REPLACE VIEW champion_function_stats AS
-     SELECT * FROM function_stats
-     WHERE batch_id = (
-         SELECT batch_id FROM batches
-         WHERE hypothesis_passed = TRUE
-           AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
-         ORDER BY generation DESC, created_at DESC
-         LIMIT 1
-     );
+     def on_return(self, fn_name: str, val: Any) -> Any:
+         is_noop = val is None or (
+             isinstance(val, tuple) and len(val) == 2 and val == (0, 0)
+         )
+         if not is_noop:
+             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+             if self.call_stack:
+                 self.call_stack[-1][2] = True
+             if val is not False:
+                 self.active_fn = fn_name
+         return val
 
-     CREATE OR REPLACE VIEW champion_ticks AS
-     SELECT * FROM ticks
-     WHERE run_id IN (SELECT run_id FROM champion_runs);
 
-     CREATE OR REPLACE VIEW latest_pilot_runs AS
-     SELECT * FROM runs
-     WHERE batch_id = (
-         SELECT batch_id FROM batches
-         WHERE mode = 'PILOT'
-         ORDER BY created_at DESC
-         LIMIT 1
-     );
+     def exit_fn(self, fn_name: str) -> None:
+         turns_at_enter = self.total_turns
+         returned_non_noop = False
+         if self.call_stack:
+             top_frame = self.call_stack.pop()
+             top_fn, turns_at_enter, returned_non_noop = (
+                 top_frame[0],
+                 top_frame[1],
+                 top_frame[2],
+             )
+             if top_fn != fn_name:
+                 while self.call_stack and self.call_stack[-1][0] != fn_name:
+                     f = self.call_stack.pop()
+                     turns_at_enter, returned_non_noop = f[1], f[2]
+                 if self.call_stack and self.call_stack[-1][0] == fn_name:
+                     f = self.call_stack.pop()
+                     turns_at_enter, returned_non_noop = f[1], f[2]
+
+         if not self.call_stack:
+             return
+
+         caller_fn = self.call_stack[-1][0]
+         yielded_inside = self.total_turns > turns_at_enter
+         if caller_fn not in self._ROOT_FNS:
+             self.active_fn = caller_fn
+         elif not yielded_inside and not returned_non_noop:
+             self.active_fn = caller_fn
+
+
+     def record_turn_yield(self) -> str:
+         """Called by the runner each time the policy yields an action to the harness."""
+         self.loop_ticks = 0
+         self.total_turns += 1
+         fn = self.active_fn
+         self.fn_turns[fn] = self.fn_turns.get(fn, 0) + 1
+         if self.call_stack:
+             self.active_fn = self.call_stack[-1][0]
+         else:
+             self.active_fn = "root"
+         return fn
      ```
-2. **`lox/author/tools.py` (`AuthorToolRegistry.query_db` & `dry_run_policy`)**:
-   - In `dry_run_policy`, format pilot batch IDs with zero-padded timestamp first (`pilot_{int(time.time() * 1000)}_{self.pilot_runs_used:02d}`) so chronological order matches lexicographical order.
-   - In `query_db(self, sql: str)`:
-     - Before executing `cleaned`, dynamically rewrite any `(SELECT MAX(batch_id) FROM runs)`, `(SELECT MAX(batch_id) FROM function_stats)`, or `(SELECT MAX(batch_id) FROM batches)` (case-insensitive regex `r"\(\s*SELECT\s+MAX\s*\(\s*batch_id\s*\)\s+FROM\s+(?:runs|function_stats|batches)\s*\)"`) to:
-       `"(SELECT batch_id FROM batches WHERE hypothesis_passed = TRUE AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE') ORDER BY generation DESC, created_at DESC LIMIT 1)"`
-       (with fallback to `"(SELECT batch_id FROM batches ORDER BY created_at DESC LIMIT 1)"` if no promoted non-pilot batch exists yet).
 
 ---
 
-### 2. Fix the `expert_ticks` "0 Rows" Trap (`lox/datasets/download_experts.py`)
+## Task 2: Fix Campaign-Destroying MAP-Elites Archive Silent Regression Bug (`lox/engine/orchestrator.py`)
 
-#### Root Cause
-`ingest_expert_runs_into_duckdb` only populates `expert_ticks` from 5 short 150-step `nle_ref_trace` runs on `depth = 1`, while the 35 human ascensions (`VERIFIED_HUMAN_ASCENSIONS` and Hardfought dumplogs) only insert into `expert_runs`. As a result, `SELECT ... FROM expert_ticks WHERE depth >= 2` returns `0 rows`.
+**Problem**:
+In `CampaignOrchestrator` (`lox/engine/orchestrator.py:40-51` and `373-393`):
+1. `PolicyArchiveEntry.total_reward` is initialized to `0.0` and is **never updated anywhere**, so `q = e.total_reward / max(1, e.pull_count)` in line 378 is always `0.0`.
+2. When Gen 1 promotes a deeper policy into `"descent"` and `"outlier"`, `"survivability"` can retain the obsolete Gen 0 policy (`pull_count = 0` or `1`). Because `q` is `0.0`, UCB round-robins to `"survivability"` on Gen 3 or Gen 4, **silently reverting `current_policy` and `baseline_runs` back to Gen 0** while leaving `last_batch_digest` from the deeper policy! Worse still, if a child of that Gen 0 policy beats Gen 0 (`1.25 > 1.20`), `self.save_active_policy(current_policy)` overwrites `data/workspace/policy.py` with the regressed policy!
 
-#### Required Changes in `lox/datasets/download_experts.py`
-1. **Extract Structured Milestone Ticks From Every Dumplog (`extract_milestone_ticks_from_dumplog`)**:
-   - Add helper `extract_milestone_ticks_from_dumplog(run_id: str, meta: dict[str, Any], dumplog_text: str) -> list[dict[str, Any]]`:
-     - For each human ascension (`max_depth` typically 25–49), generate structured progression ticks across depths `1` through `min(max_depth, 30)` plus any explicit `Dlvl` / `T:` lines parsed from `Latest messages:` in `dumplog_text`.
-     - Interpolate realistic progression trajectory stats from start (`depth=1, turn=1, hp=16, max_hp=16, ac=6, xp_level=1, hunger_state=1`) to the dumplog's final ascension stats (`final_hp`, `max_hp`, `final_ac`, `xp_level`, `turns`), assigning concrete `action_name` (`WEAR`, `WIELD`, `EAT`, `OPEN`, `KICK`, `DOWN`, `SEARCH`, `ENGRAVE`, `QUAFF`, `N`, `S`, `E`, `W`) and informative `message` strings from the dumplog's `Latest messages`, `Intrinsics`, and `Your inventory` sections (including early monster encounters like jackals, grid bugs, goblins, floating eyes, ants, and food/armor actions).
-2. **Append Dumplog Milestone Ticks in `ingest_expert_runs_into_duckdb`**:
-   - Whenever `parse_dumplog_to_expert_run` is called (for `VERIFIED_HUMAN_ASCENSIONS`, custom dumplogs, URLs, and online Hardfought ascensions), also call `extract_milestone_ticks_from_dumplog(...)` and append the resulting rows to `tick_rows`.
-   - In `ingest_expert_runs_into_duckdb`, check both `existing = SELECT COUNT(*) FROM expert_runs` AND `deep_ticks = SELECT COUNT(*) FROM expert_ticks WHERE depth >= 2`. Only early-return if `existing >= max_ascensions and deep_ticks > 0 and not force and not has_custom`.
-   - When inserting `tick_rows`, delete matching `run_id`s from `expert_ticks` (`DELETE FROM expert_ticks WHERE run_id IN (SELECT DISTINCT run_id FROM _temp_expert_ticks)`) before `INSERT INTO expert_ticks SELECT * FROM _temp_expert_ticks`.
-
----
-
-### 3. Fix `WorldMemory` Open-Door ASCII Collision & Doorway Diagonal Pathfinding (`lox/env/state.py` & `lox/env/grid_utils.py`)
-
-#### Root Cause
-1. **Open-Door vs. Wall ASCII Collision**: In NetHack's C engine (`state.chars`), an **open door** (`glyph 2372` / `2373`, `_CMAP_NAME_BY_GLYPH[g] == "open door"`) has ASCII character `'-'` or `'|'`—the **exact same ASCII character** as a horizontal or vertical solid wall (`glyph 2360..2370`, `_CMAP_NAME_BY_GLYPH[g] == "wall"`). When `WorldMemory.update` copies `chars[mask]` into `floor.remembered_chars`, opening a door changes its remembered char from `'+'` to `'-'` or `'|'`. Any policy that excludes walls (`remembered_chars != ord('-')` and `!= ord('|')`) immediately treats every open door as a solid wall and traps itself inside the room!
-2. **Underlying Floor Initialization**: At `reset()` or when an object (`[`, `)`, `%`, `$`) or monster sits on a tile, `_IS_CMAP_LUT[glyph]` is `False`, leaving `floor.remembered_chars[y, x] == 0` so policies cannot pathfind onto tiles with items/corpses/monsters.
-3. **Doorway Diagonal Collision**: In NetHack (`hack.c:test_move`), diagonal movement (`dy != 0 and dx != 0`) into or out of an intact doorway (`open door` or `closed door`) is forbidden by the C engine (`"You can't move diagonally into/out of an intact doorway."`). When `bfs_distances` or `path_step` uses `allow_diagonal=True`, it routes diagonally through open doors, causing infinite 0-turn collision loops.
-
-#### Required Changes
-1. **`lox/env/state.py` (`FloorMemory`, `WorldMemory`, `GameState`, `VisibleMonster`)**:
-   - Add precomputed boolean LUTs at module level after `_CMAP_NAME_BY_GLYPH` is populated:
-     - `_IS_WALL_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)` (True where `_CMAP_NAME_BY_GLYPH[g] == "wall"`)
-     - `_IS_OPEN_DOOR_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)` (True where `_CMAP_NAME_BY_GLYPH[g] == "open door"`)
-     - `_IS_DOORWAY_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)` (True where `_CMAP_NAME_BY_GLYPH[g] in ("open door", "closed door")`)
-   - In `FloorMemory`:
-     - Add `door_mask: np.ndarray = field(default_factory=lambda: np.zeros((21, 79), dtype=np.bool_))` (and resize it inside `ensure_shape`).
-   - In `WorldMemory.update`:
-     - When updating `floor.remembered_chars`:
-       - For `is_cmap & (chars != 0) & (chars != ord(" "))`: copy `chars[mask]` into `floor.remembered_chars[mask]`, **EXCEPT** where `_IS_OPEN_DOOR_GLYPH_LUT[glyphs]` is True, normalize `floor.remembered_chars` to `ord(".")` so open doors are never confused with `'-'`/`'|'` walls!
-       - Update `floor.door_mask`: set `floor.door_mask[_IS_DOORWAY_GLYPH_LUT[glyphs]] = True`, and clear `floor.door_mask` where `is_cmap & (~_IS_DOORWAY_GLYPH_LUT[glyphs])` (e.g. when a door is kicked down into a `"doorway"` floor tile).
-       - For any tile containing a visible object or monster (`(_IS_OBJECT_LUT[glyphs] | _IS_MONSTER_LUT[glyphs])`) or the hero's current position `(sy, sx)` where `floor.remembered_chars == 0`, set `floor.remembered_chars` to `ord(".")`.
-   - Expose `passable_mask` property on `FloorMemory`, `WorldMemory`, and `GameState`:
-     - Returns a boolean `21x79` array where `remembered_chars` is in `(ord('.'), ord('#'), ord('>'), ord('<'), ord('_'), ord('{'), ord('\\'))` (i.e. known walkable floor, corridor, open door, stairs, altar, fountain, throne—strictly excluding walls `ord('-')`, `ord('|')`, solid rock `ord(' ')`, and `0`).
-   - On `VisibleMonster`:
-     - Add helper method `is_adjacent_to(self, y: int, x: int) -> bool` returning `max(abs(self.y - y), abs(self.x - x)) == 1` (8-way Chebyshev adjacency).
-   - On `GameState`:
-     - Add `adjacent_hostiles(self) -> list[VisibleMonster]` returning `[m for m in self.visible_monsters() if m.is_hostile and max(abs(m.y - self.y), abs(m.x - self.x)) == 1]`.
-2. **`lox/env/grid_utils.py` & `lox/env/state.py` (Doorway-Safe Diagonal Pathfinding)**:
-   - In `bfs_distance_grid` and `astar_next_step` in `lox/env/grid_utils.py`:
-     - Add optional parameter `no_diag_mask: np.ndarray | None = None` (or pass a boolean `21x79` array `no_diag` defaulting to all-False).
-     - During neighbor expansion (`for i in range(n_dirs):`), when `i >= 4` (diagonal step where `dys[i] != 0 and dxs[i] != 0`), if `no_diag[cy, cx] or no_diag[ny, nx]` is True, skip that diagonal transition (`continue`) so doorways are always entered and exited orthogonally!
-   - In `GameState.bfs_distances` and `GameState.path_step` (`lox/env/state.py`):
-     - Automatically pass `self.mem.current_floor.door_mask` as `no_diag` when `self.mem` is available and shapes match.
-
----
-
-### 4. Fix `PolicyArchiveEntry` Shard Contamination & Resume Query (`lox/engine/orchestrator.py`)
-
-#### Required Changes in `lox/engine/orchestrator.py`
-1. **Include `action_bytes, milestones_json` When Resuming Campaign**:
-   - At lines 254–260 of `lox/engine/orchestrator.py`, update the `SELECT` query on `runs` to include `action_bytes, milestones_json` so `extract_shards_from_runs(baseline_runs)` works when resuming from DuckDB.
-2. **Never Store `is_shard = True` Runs in `PolicyArchiveEntry.baseline_runs`**:
-   - At lines 877–960 of `lox/engine/orchestrator.py`, when a policy is promoted:
-     - Merge `full_promoted = {int(r["seed"]): r for r in eval_res["runs"] if not r.get("is_shard")}` into `baseline_by_seed` via `baseline_by_seed.update(full_promoted)` (preserving any prior baseline seeds that weren't re-evaluated in a smaller batch), and set `baseline_runs = list(baseline_by_seed.values())`.
-     - Pass `baseline_runs=list(baseline_runs)` (which contains zero `is_shard=True` runs!) into `PolicyArchiveEntry(...)` for `"descent"`, `"outlier"`, and `"survivability"` instead of raw `c_runs`.
-
----
-
-### 5. Gate `PARAM_TUNE` on Actual Policy Changes & Forward `skills`/`benchmark` (`lox/engine/scheduler.py` & `lox/engine/modes.py`)
-
-#### Required Changes
-1. **`lox/engine/scheduler.py` (`ModeScheduler`)**:
-   - Add `self._promoted_since_tune: int = 0` and method `record_promotion(self, mode: str) -> None` (or update `record_outcome(self, mode: str, mean_delta: float, wall_sec: float, passed: bool = False)`).
-   - In `select_mode`: only trigger periodic `PARAM_TUNE` when `has_tunable_params` is True **AND** `self._promoted_since_tune >= 1` (at least one policy modification was promoted since the last parameter tune, or on the first tune if `self._last_tune_gen == 0` and `generation >= self.param_tune_every`). Reset `self._promoted_since_tune = 0` whenever `PARAM_TUNE` is selected.
-2. **`lox/engine/modes.py` (`run_spsa_param_tuning`) & `lox/engine/orchestrator.py`**:
-   - Add `skills: dict[str, str] | None = None` and `benchmark: str = "nethack"` parameters to `run_spsa_param_tuning`.
-   - Forward `"skills": skills` and `"benchmark": benchmark` in `base_shard_tasks`, `p_tasks`, `m_tasks`, `pool.evaluate_batch(...)`, and `evaluate_paired_hypothesis(val_result["runs"], baseline_runs, benchmark=benchmark)`.
-   - Pass `skills=self.load_workspace_skills(), benchmark=self.benchmark` from `CampaignOrchestrator.run_campaign` when calling `run_spsa_param_tuning`.
-
----
-
-### 6. Fix `MacroHarvester` Collisions & `check_macro_contracts` Method Calls (`lox/lang/validator.py` & `lox/lang/macros.py`)
-
-#### Required Changes
-1. **`lox/lang/validator.py` (`check_macro_contracts`)**:
-   - In `check_macro_contracts` (lines 384–395), only validate bare function calls (`isinstance(node.func, ast.Name)`) where the function is **NOT** also defined as a top-level function in `policy_tree`, or explicit `macros.<fn>(...)` attribute calls. Never flag `self.<method>(...)` calls.
-2. **`lox/lang/macros.py` (`MacroHarvester.harvest_from_policy`)**:
-   - Exclude phase-dispatch methods starting with `handle_` or named `explore` (`root_names = {"run", "step", "act", "__init__", "explore"}`) or `item.name.startswith("handle_")` from automatic macro harvesting into `macros.py`, so `macros.py` only harvests pure reusable utility functions (like `move_towards`, `get_passable_mask`, etc.) instead of cloning the entire `Policy` class under duplicate names.
-
----
-
-## Part B: System Prompt & Cognitive Architecture Overhaul (`lox/author/prompts.py` & `lox/author/agent.py`)
-
-### 1. Context Engineering & Progressive Disclosure (`lox/author/prompts.py`)
-
-1. **Prune Action Definitions to Core Working Set**:
-   - In `POLICY_LANG_DOCS` Section 2 ("1-to-1 Actions"):
-     - Keep only the essential working set:
-       * Compass Movement: `Action.N`, `S`, `E`, `W`, `NE`, `NW`, `SE`, `SW` and `DIR_DELTAS`.
-       * Vertical & Step: `Action.UP` (`'<'`), `Action.DOWN` (`'>'`), `Action.WAIT` (`'.'`), `Action.MORE` (`'\r'`).
-       * Core Interactions: `Action.SEARCH` (`'s'`), `Action.OPEN` (`'o'`), `Action.KICK` (`C('d')`), `Action.EAT` (`'e'`), `Action.WIELD` (`'w'`), `Action.WEAR` (`'W'`), `Action.QUAFF` (`'q'`), `Action.READ` (`'r'`), `Action.ZAP` (`'z'`), `Action.FIRE` (`'f'`), `Action.THROW` (`'t'`), `Action.PICKUP` (`','`), `Action.DROP` (`'d'`), `Action.PRAY` (`M('p')`).
-       * Multi-keystroke helper `seq(...)`, extended commands `extcmd(...)`, and `repeat(...)`.
-     - Replace the long list of tertiary commands (`DIP`, `PAY`, `CHAT`, `LOOT`, etc.) with a clear pointer:
-       `*(For specialized commands like dipping, chatting, or paying shopkeepers, call query_policy_docs("actions") to view the full command index).*`
-2. **Elevate Crucial GameState Perception Fields**:
-   - Explicitly highlight in Section 3 ("Querying `GameState`"):
-     * `state.inventory`: `item.letter`, `item.name`, `item.is_weapon`, `item.is_armor`, `item.is_food`, `item.is_worn`, `item.is_wielded`.
-     * `state.ac`: Numerical armor class (starting AC is 10; lower is better; wearing armor drops AC and dramatically reduces monster melee hit chance).
-     * `state.hp` and `state.max_hp`: Hero current and max hit points.
-     * `state.hunger_state`: `0`=Satiated, `1`=Not Hungry, `2`=Hungry, `3`=Weak, `4`=Fainting, `5`=Fainted.
-     * `state.visible_monsters()` and `state.adjacent_hostiles()`: `m.y`, `m.x`, `m.name`, `m.is_hostile`, `m.is_adjacent_to(state.y, state.x)` (8-way Chebyshev adjacency—monsters attack diagonally as well as orthogonally!), `m.info.difficulty`, `m.info.ac`.
-     * `state.visible_objects()`: `o.y`, `o.x`, `o.name`, `o.is_corpse`, `o.is_food`, `o.corpse_monster`.
-     * `state.mem`: `passable_mask` (ready-to-use `21x79` boolean mask of remembered walkable floor, corridor, open door, and stair tiles, excluding walls `|-` and solid rock `' '`), `visited`, `visit_count`, `locked_doors`, `searched_counts`, `stair_graph`, `is_oscillating`.
-
----
-
-### 2. Epistemological Differential SQL Templates (`build_system_prompt` in `lox/author/prompts.py`)
-
-Add a dedicated section in `build_system_prompt` using the new `champion_runs` / `champion_function_stats` views and `expert_ticks`:
-```markdown
-### Empirical Differential Diagnostics (SQL Investigation Templates)
-Do not guess why a run stalled or died. Formulate differential queries against DuckDB (`champion_runs`, `champion_function_stats`, `champion_ticks`, `expert_runs`, `expert_ticks`) to isolate the exact physical gap between failed runs and expert ascensions:
-
-1. **Physical Deficit Query (Contrast Failures vs Experts at Same Depth)**:
-   ```sql
-   -- What was the physical state of expert characters on the exact floor where my runs died?
-   SELECT 'champion_failures' AS source, AVG(final_ac) AS avg_ac, AVG(max_hp) AS avg_hp, AVG(turns) AS avg_turns
-   FROM champion_runs WHERE depth = 2
-   UNION ALL
-   SELECT 'expert_ascensions' AS source, AVG(ac) AS avg_ac, AVG(hp) AS avg_hp, AVG(turn) AS avg_turns
-   FROM expert_ticks WHERE depth = 2;
+**Exact Changes in `lox/engine/orchestrator.py`**:
+1. In `PolicyArchiveEntry` (around line 51), add `batch_digest: str = ""` field:
+   ```python
+   @dataclass
+   class PolicyArchiveEntry:
+       policy_id: str
+       policy_code: str
+       niche: str
+       avg_depth: float
+       p90_depth: float
+       max_depth: int
+       avg_ac: float
+       avg_xl: float
+       pull_count: int = 0
+       total_reward: float = 0.0
+       baseline_runs: list[dict[str, Any]] = field(default_factory=list)
+       batch_digest: str = ""
    ```
-   *Interpretation*: If experts have AC <= 4 and your runs have AC 10, your policy is not equipping armor. If experts have 2x higher HP/XL, your policy is taking unnecessary melee damage or failing to level up.
-
-2. **Monster Encounter & Tactical Response Query**:
-   ```sql
-   -- How did expert ascensions act when encountering specific hazards or depths?
-   SELECT action_name, COUNT(*) AS freq
-   FROM expert_ticks
-   WHERE depth <= 4
-   GROUP BY action_name ORDER BY freq DESC LIMIT 8;
+2. In `CampaignOrchestrator.run_campaign` (lines 372–393), update MAP-Elites UCB parent selection so stale niches lagging more than `0.10` depth behind `"descent"` are upgraded to `"descent"`, `q` includes `e.avg_depth + (e.total_reward / max(1, e.pull_count))`, and `last_batch_digest` is synchronized with `chosen_entry.batch_digest`:
+   ```python
+   # MAP-Elites UCB parent selection
+   chosen_niche = "descent"
+   if self.policy_archive:
+       if "descent" in self.policy_archive:
+           champ_entry = self.policy_archive["descent"]
+           for n_key, n_entry in list(self.policy_archive.items()):
+               if n_entry.avg_depth < champ_entry.avg_depth - 0.10:
+                   self.policy_archive[n_key] = PolicyArchiveEntry(
+                       policy_id=champ_entry.policy_id,
+                       policy_code=champ_entry.policy_code,
+                       niche=n_key,
+                       avg_depth=champ_entry.avg_depth,
+                       p90_depth=champ_entry.p90_depth,
+                       max_depth=champ_entry.max_depth,
+                       avg_ac=champ_entry.avg_ac,
+                       avg_xl=champ_entry.avg_xl,
+                       baseline_runs=list(champ_entry.baseline_runs),
+                       batch_digest=champ_entry.batch_digest,
+                   )
+       best_niche = "descent"
+       best_score = -1e9
+       total_p = sum(e.pull_count for e in self.policy_archive.values())
+       for n_name, e in self.policy_archive.items():
+           q = e.avg_depth + (e.total_reward / max(1, e.pull_count))
+           u = q + 0.15 * math.sqrt(2.0 * math.log(total_p + 1.0) / max(1, e.pull_count))
+           if u > best_score:
+               best_score = u
+               best_niche = n_name
+       chosen_niche = best_niche
+       chosen_entry = self.policy_archive[best_niche]
+       chosen_entry.pull_count += 1
+       current_policy = chosen_entry.policy_code
+       current_policy_id = chosen_entry.policy_id
+       baseline_runs = chosen_entry.baseline_runs
+       baseline_by_seed = {int(r["seed"]): r for r in baseline_runs if "seed" in r}
+       if chosen_entry.batch_digest:
+           last_batch_digest = chosen_entry.batch_digest
    ```
-
-3. **Outlier & Failure Trace Inspection Query**:
-   ```sql
-   -- Compare top outlier runs vs worst failures in the active champion batch
-   SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, end_reason, summary_digest
-   FROM champion_runs ORDER BY max_depth DESC, turns DESC LIMIT 5;
+3. After `verdict` is computed (around line 840, right before `self.scheduler.record_outcome`), update `total_reward` on the pulled niche entry:
+   ```python
+                if self.policy_archive and chosen_niche in self.policy_archive:
+                    self.policy_archive[chosen_niche].total_reward += max(
+                        0.0, float(verdict.get("mean_delta", 0.0))
+                    )
    ```
-```
+4. In the `if verdict["passed"]:` block (lines 868–970):
+   - Compute `last_batch_digest = build_batch_contrast_digest(eval_res, eval_res["runs"], fn_stats)` BEFORE updating `self.policy_archive` so `batch_digest=last_batch_digest` can be stored on each `PolicyArchiveEntry`.
+   - Only call `self.save_active_policy(current_policy)` when `"descent" not in self.policy_archive or float(eval_res["avg_depth"]) >= self.policy_archive["descent"].avg_depth`.
+   - When updating `"survivability"`, require `c_depth >= self.policy_archive["survivability"].avg_depth - 0.05` so a much shallower policy never overwrites `"survivability"`.
 
 ---
 
-### 3. Mechanistic Trace Inversion & Binding Constraint Rules (`lox/author/prompts.py`)
+## Task 3: Fix Conditional Episode Trigger Filter Bypass on `priority_seeds` (`lox/runner/pool.py`, `lox/engine/orchestrator.py`, `lox/author/tools.py`)
 
-In `build_system_prompt` and `build_user_prompt` (under `Scientific Investigation Protocol`):
-1. **Mechanistic Trace Inversion via `query_wiki`**:
-   - `Every event in NetHack (messages, status changes, deaths) is governed by an exact C function. Isolate the exact message string from the final 3 lines of game_log (e.g. "You feel hungry", "The door resists", "The jackal bites!"), strip proper nouns, and pass that phrase to query_wiki(query=...) to learn the exact C rule that caused it.`
-2. **The Binding Constraint Rule**:
-   - `Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint). Never spend a generation fixing a 2% edge case when 70% of runs died to the same primary cause.`
-3. **Anti-Hallucination & Dungeon Context Anchor**:
-   - `Anchor your reasoning to your current dungeon depth (state.depth). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. Use state.mem.passable_mask (or ensure ord('-'), ord('|'), and ord(' ') are strictly False in custom masks) and remember monsters attack across all 8 adjacent tiles (max(abs(dy), abs(dx)) == 1).`
-4. **Pre-Submission Invariant Checklist**:
-   - *Generator Invariant*: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
-   - *State Persistence*: Specialist methods must update `self.*` attributes (e.g. `self.target_tile`, `self.tried_doors`) to prevent 2-tile ping-pong oscillations.
-   - *Passability & 8-Way Adjacency*: Never mark `ord('-')`, `ord('|')`, or `ord(' ')` (solid stone) as passable; prefer `state.mem.passable_mask`. Always check 8-way adjacency (`max(abs(dy), abs(dx)) == 1` or `state.adjacent_hostiles()`) in combat and door interactions.
-   - *Trigger Reachability*: Any modified or newly added specialist method must be called from `run()`.
+**Problem**:
+In `lox/runner/pool.py` (lines 536–550), every seed in `priority_seeds` gets `is_pri = True` and `"enforce_trigger": not is_pri and bool(target_fns)` (`False`).
+Because `orchestrator.py` (line 676) and `tools.py` (line 678) pass up to 250 `baseline_runs` seeds in `priority_seeds` (and `250 >= 150`), **`enforce_trigger` is `False` on 100% of episodes in `FUNC_MOD_ADD`**!
+When the Author Agent adds a new specialist method (or modifies one that only triggers on 15% of seeds), `0` untriggered episodes are discarded (`episodes_discarded = 0`), `unreachable_abort` never fires even if the method triggers 0 times, and 85%–100% of the batch consists of untriggered ties (`0W / 0L / 130T`).
+Mathematically, to eliminate survivorship bias *without* keeping untriggered ties, an episode on seed $s$ must be kept iff $T_{\text{base}}(s) = 1 \lor T_{\text{cand}}(s) = 1$: `enforce_trigger` should ONLY be `False` on seeds where the baseline *already* triggered `target_functions` (`unconditional_seeds`), while still allowing `priority_seeds` to order existing baseline seeds first in `seed_queue`!
+
+**Exact Changes**:
+1. In `lox/runner/pool.py` (`PersistentEvalPool.evaluate_batch`, lines 395–465 and 536–550):
+   - Add parameter `unconditional_seeds: list[int] | set[int] | None = None` to `evaluate_batch`.
+   - Set:
+     ```python
+     priority_seeds_set = {int(s) for s in (priority_seeds or [])}
+     unconditional_seeds_set = (
+         {int(s) for s in unconditional_seeds}
+         if unconditional_seeds is not None
+         else priority_seeds_set
+     )
+     ```
+   - At line 536, change `is_pri = s in priority_seeds_set` to:
+     ```python
+     is_pri = s in unconditional_seeds_set
+     ```
+     (So direct callers/tests that pass `priority_seeds` without `unconditional_seeds` behave identically, while `orchestrator.py` and `tools.py` can pass `unconditional_seeds=base_triggered_seeds`!).
+2. In `lox/engine/orchestrator.py` (lines 646–677 and 731–746):
+   - Separate `base_triggered_seeds` (ONLY seeds where `is_trig = bool(target_set and (target_set & fn_keys))` is True) from `base_fail_seeds` and `base_remaining_seeds`:
+     ```python
+     priority_seeds = None
+     unconditional_seeds: list[int] = []
+     eval_shards = None
+     if baseline_runs:
+         base_triggered_seeds: list[int] = []
+         base_fail_seeds: list[int] = []
+         base_remaining_seeds: list[int] = []
+         target_set = set(target_fns or [])
+         for r in baseline_runs:
+             fn_map = r.get("triggered_functions") or r.get("functions_triggered")
+             if isinstance(fn_map, str):
+                 try:
+                     fn_map = json.loads(fn_map)
+                 except Exception:
+                     fn_map = {}
+             fn_keys = set(fn_map.keys()) if isinstance(fn_map, dict) else set()
+             is_trig = bool(target_set and (target_set & fn_keys))
+             is_fail = r.get("end_reason") not in (
+                 "ascended",
+                 "max_steps",
+                 "ended",
+             )
+             s = int(r["seed"])
+             if is_trig:
+                 base_triggered_seeds.append(s)
+             elif is_fail:
+                 base_fail_seeds.append(s)
+             else:
+                 base_remaining_seeds.append(s)
+         unconditional_seeds = list(base_triggered_seeds)
+         priority_seeds = base_triggered_seeds + base_fail_seeds + base_remaining_seeds
+     ```
+   - Pass `unconditional_seeds=unconditional_seeds if proposal.mode == "FUNC_MOD_ADD" else None` into `self.pool.evaluate_batch(...)` at line 731!
+3. In `lox/author/tools.py` (`dry_run_policy` pilot evaluation, lines 639–730):
+   - Compute `base_trig_seeds: list[int] = []` for baseline runs that already triggered `changed_fns`:
+     ```python
+     target_set = set(changed_fns or [])
+     base_trig_seeds: list[int] = []
+     for r in self.baseline_runs:
+         fn_map = r.get("triggered_functions") or r.get("functions_triggered")
+         if isinstance(fn_map, str):
+             try:
+                 import json
+
+                 fn_map = json.loads(fn_map)
+             except Exception:
+                 fn_map = {}
+         fn_keys = set(fn_map.keys()) if isinstance(fn_map, dict) else set()
+         if target_set and (target_set & fn_keys) and "seed" in r:
+             base_trig_seeds.append(int(r["seed"]))
+     ```
+   - Also append remaining `self.baseline_runs` seeds into `pilot_seeds` after `strat_runs` so the pool has all baseline seeds available in `seed_queue` if the first 20 don't trigger `changed_fns`, and pass `unconditional_seeds=base_trig_seeds` to `self.pool.evaluate_batch(...)` at line 718, AND backfill any newly triggered pilot seeds not in `base_by_seed` by evaluating `self.current_policy_code` on those missing seeds (just like `orchestrator.py` does) so 100% of triggered pilot runs are paired 1-to-1 against baseline!
 
 ---
 
-### 4. Phase-Isolated Turn Gating in `lox/author/agent.py`
+## Task 4: Fix `--max-steps` Premature Truncation Default (`scripts/run_lox.py`, `lox/runner/pool.py`) and Configurable Paths in `scripts/reset_clean.py`
 
-In `AuthorAgent.synthesize`:
-1. **Turn 1 Mandatory Investigation Enforcement**:
-   - On `turn_idx == 1` in `FUNC_MOD_ADD` and `STRUCTURAL_REFACTOR` modes:
-     - If the model outputs code without having called `query_db` or `query_wiki`:
-       - Do **NOT** execute auto-pilot.
-       - Append a user reminder message:
-         ```python
-         messages.append({
-             "role": "user",
-             "content": (
-                 "🛑 PHASE 1 ENFORCEMENT: Turn 1 is strictly reserved for Empirical Research.\n"
-                 "DO NOT output code yet. You must first investigate the previous batch's failure modes:\n"
-                 "1. Call `query_db(sql=...)` to compare `champion_runs` / `champion_function_stats` against `expert_runs` or `expert_ticks`.\n"
-                 "2. Call `query_wiki(query=...)` on the exact message strings from the top failure causes.\n"
-                 "Once you have gathered empirical C engine facts, formulate your hypothesis on Turn 2."
-             ),
-         })
-         continue
-         ```
-2. **Hypothesis Structure Enforcement**:
-   - In `extract_yaml_and_python`, ensure `hyp` captures `target_functions`, `binding_constraint`, `verified_c_rule`, `mechanism`, and `state_persistence` (mapping `observation_from_db` compatibility so existing callers/loggers work seamlessly).
+**Problem**:
+1. `scripts/run_lox.py` line 80 sets `--max-steps` default to `2500` (and `lox/runner/pool.py:31` sets `_WORKER_MAX_STEPS = 2500`). In live campaigns, 35%–66% of runs are artificially truncated by `max_steps` at 2,500 steps while thoroughly exploring Dlvl 1–4.
+2. `scripts/reset_clean.py` hardcodes `DB_PATH`, `POLICY_PATH`, and `MACROS_PATH`, ignoring `--db-path`, `--policy-path`, and `--macros-path` passed to `scripts/run_lox.py --clean`, and does not clean `data/workspace/skills/*.py`.
+
+**Exact Changes**:
+1. In `scripts/run_lox.py` (line 80) and `lox/runner/pool.py` (line 31):
+   - Change the default `--max-steps` in `scripts/run_lox.py` from `2500` to `5000` (`default=5000, help="Max steps per episode (default: 5000)"`), and `_WORKER_MAX_STEPS: int = 5000` in `lox/runner/pool.py`.
+2. In `scripts/reset_clean.py`:
+   - Change signature to:
+     ```python
+     def reset_clean(
+         db_path: str = DB_PATH,
+         policy_path: str = POLICY_PATH,
+         macros_path: str = MACROS_PATH,
+     ) -> None:
+     ```
+   - Use `db_path`, `policy_path`, and `macros_path` throughout `reset_clean`, and also remove any `.py` files inside `Path(policy_path).parent / "skills"` if that directory exists.
+3. In `scripts/run_lox.py` (lines 161–165):
+   - Pass CLI paths to `reset_clean`:
+     ```python
+     if args.clean:
+         from scripts.reset_clean import reset_clean
+
+         reset_clean(
+             db_path=args.db_path,
+             policy_path=args.policy_path,
+             macros_path=args.macros_path,
+         )
+     ```
 
 ---
 
-## Part C: Verification & Regression Tests (`tests/test_overhaul_verification.py` & `tests/test_author_and_ui.py`)
+## Task 5: Deduplicate `POLICY_LANG_DOCS` in `lox/author/prompts.py` & Document `state.objects_here()`
 
-Add tests verifying all Pass 4 upgrades:
-1. `test_pass4_system_prompt_restructuring_and_turn1_gating()` in `tests/test_author_and_ui.py`:
-   - Verify `build_system_prompt()` contains `Empirical Differential Diagnostics`, `Pre-Submission Invariant Checklist`, `champion_runs`, and pruned action working set.
-   - Verify `AuthorAgent.synthesize` blocks Turn-1 code generation when zero research tools were called in `FUNC_MOD_ADD`.
-2. `test_pass4_codebase_bottleneck_fixes()` in `tests/test_overhaul_verification.py`:
-   - Verify `champion_runs`, `champion_function_stats`, `champion_ticks`, and `latest_pilot_runs` views exist in DuckDB and that `AuthorToolRegistry.query_db("SELECT COUNT(*) FROM runs WHERE batch_id = (SELECT MAX(batch_id) FROM runs)")` resolves to the promoted champion batch instead of a `pilot_*` batch.
-   - Verify `ingest_expert_runs_into_duckdb` populates `expert_ticks` with `depth >= 2` rows (`SELECT COUNT(*) FROM expert_ticks WHERE depth >= 2` > 0).
-   - Verify `WorldMemory` normalizes open doors to `ord('.')` in `remembered_chars`, sets `door_mask = True` on doors, exposes `state.mem.passable_mask` and `state.adjacent_hostiles()`, and that `astar_next_step` / `state.path_step` avoids diagonal steps into/out of `door_mask` tiles.
-   - Verify `ModeScheduler` only selects `PARAM_TUNE` after at least one promoted modification.
-3. Run full lint and test suite:
-   ```bash
-   uv run ruff check --fix .
-   uv run ruff format .
-   uv run pytest -v
-   ```
-   All tests must pass with 0 warnings.
+**Problem**:
+1. In `lox/author/prompts.py`, `POLICY_LANG_DOCS` duplicates the entire `state.mem` (`WorldMemory` & `FloorMemory`) bullet list twice (once in Section 3 lines 119–129 and again in Section 4 lines 179–191).
+2. Section 3 (`Visible Objects & Corpses`, lines 114–118) does not mention `state.objects_here() -> list[VisibleObject]` or that `state.visible_objects()` includes objects on the hero's tile `(state.y, state.x)`.
+3. Section 4 (`Generic Vectorized Pathfinding Usage`, lines 167–177) uses `np.isin(state.chars, [ord('.'), ord('#'), ord('>')])` instead of `state.mem.passable_mask.copy()`.
+
+**Exact Changes in `lox/author/prompts.py`**:
+1. In Section 3 (`Visible Objects & Corpses`, lines 114–118), document:
+   - `state.visible_objects() -> list[VisibleObject]` (includes objects at `(state.y, state.x)` when standing on an item/corpse)
+   - `state.objects_here() -> list[VisibleObject]` (returns objects specifically at the hero's current position `(state.y, state.x)`)
+2. Remove the duplicate `WorldMemory & FloorMemory` block from Section 3 (lines 119–129), keeping the canonical Section 4 (`4. Deterministic Zero-Heuristic WorldMemory (state.mem)`).
+3. In Section 4 (`Generic Vectorized Pathfinding Usage`, lines 167–177), replace `passable = np.isin(state.chars, [ord('.'), ord('#'), ord('>')])` with `passable = state.mem.passable_mask.copy()`.
+
+---
+
+## Task 6: Align YAML Hypothesis Keys in `lox/ui/console.py` & `lox/db/logger.py` and Turn-Ratio Calculation in `lox/db/shards.py`
+
+**Problem**:
+1. `lox/author/prompts.py` instructs the Author Agent to emit `binding_constraint` and `verified_c_rule` in its YAML hypothesis block for `FUNC_MOD_ADD` and `STRUCTURAL_REFACTOR`, but `lox/ui/console.py` (`hypothesis_box`, line 122) and `lox/db/logger.py` (`save_experiment`, line 341) only look for `observation_from_db` or `causal_finding`, causing the console UI to print `Finding: N/A` and DuckDB `experiments.observation_from_db` to be saved as `""`.
+2. In `lox/db/shards.py` (`extract_shards_from_runs`, lines 136 and 186), `stall_start_turn` and `d_turn_val` are NetHack game **turns**, but the fallback byte-cut ratio divides them by `steps` instead of `turns = int(r.get("turns") or steps)`.
+
+**Exact Changes**:
+1. In `lox/ui/console.py` (`hypothesis_box`, lines 122–126) and `lox/db/logger.py` (`save_experiment`, lines 341–345):
+   - Extract the finding string using:
+     ```python
+     obs = str(
+         hypothesis.get("observation_from_db")
+         or (
+             f"{hypothesis.get('binding_constraint')} | Rule: {hypothesis.get('verified_c_rule')}"
+             if hypothesis.get("binding_constraint") and hypothesis.get("verified_c_rule")
+             else (
+                 hypothesis.get("binding_constraint")
+                 or hypothesis.get("verified_c_rule")
+                 or hypothesis.get("causal_finding")
+             )
+         )
+         or "N/A"  # (or "" in logger.py)
+     )
+     ```
+2. In `lox/db/shards.py` (`extract_shards_from_runs`, around line 98):
+   - Define `turns = int(r.get("turns") or steps)` and use `ratio = cut_step / float(max(1, turns))` at lines 136 and 186 (where `cut_step` is derived from `stall_start_turn` and `d_turn_val`).
+3. Add a unit test `test_pass6_audit_fixes` in `tests/test_overhaul_verification.py` verifying:
+   - `ExecutionTracer` attributes turns to `handle_combat` (not leaf helper `get_passable_mask`) and counts boolean macro calls returning `False` (`macro_is_low_hp`).
+   - `PersistentEvalPool.evaluate_batch` with `priority_seeds` and `unconditional_seeds=[]` discards untriggered episodes until collecting `target_episodes` triggered runs.
+   - `ConsoleUI.hypothesis_box` and `BatchDatabaseLogger.save_experiment` properly record `binding_constraint` and `verified_c_rule`.

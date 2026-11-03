@@ -114,6 +114,8 @@ def run_spsa_param_tuning(
     validation_episodes: int = 100,
     seed: int = 777,
     episodes_per_eval: int | None = None,
+    skills: dict[str, str] | None = None,
+    benchmark: str = "nethack",
 ) -> dict[str, Any]:
     """
     Simultaneous Perturbation Stochastic Approximation with Common Random Numbers (CRN-SPSA).
@@ -205,6 +207,8 @@ def run_spsa_param_tuning(
                 "post_replay_max_steps": 150,
                 "is_priority_seed": True,
                 "enforce_trigger": False,
+                "skills": skills,
+                "benchmark": benchmark,
             }
             for idx, sh in enumerate(shards[:minibatch_size], 1)
         ]
@@ -262,6 +266,8 @@ def run_spsa_param_tuning(
                     "post_replay_max_steps": 150,
                     "is_priority_seed": True,
                     "enforce_trigger": False,
+                    "skills": skills,
+                    "benchmark": benchmark,
                 }
                 for idx, sh in enumerate(eval_shards, 1)
             ]
@@ -280,6 +286,8 @@ def run_spsa_param_tuning(
                     "post_replay_max_steps": 150,
                     "is_priority_seed": True,
                     "enforce_trigger": False,
+                    "skills": skills,
+                    "benchmark": benchmark,
                 }
                 for idx, sh in enumerate(eval_shards, 1)
             ]
@@ -295,6 +303,8 @@ def run_spsa_param_tuning(
                     "target_functions": [],
                     "param_overrides": p_overrides,
                     "record_ticks": False,
+                    "skills": skills,
+                    "benchmark": benchmark,
                 }
                 for idx, s in enumerate(mb_seeds, 1)
             ]
@@ -309,6 +319,8 @@ def run_spsa_param_tuning(
                     "target_functions": [],
                     "param_overrides": m_overrides,
                     "record_ticks": False,
+                    "skills": skills,
+                    "benchmark": benchmark,
                 }
                 for idx, s in enumerate(mb_seeds, 1)
             ]
@@ -359,8 +371,12 @@ def run_spsa_param_tuning(
         param_overrides=cand_params,
         record_ticks=True,
         show_progress=True,
+        skills=skills,
+        benchmark=benchmark,
     )
-    verdict = evaluate_paired_hypothesis(val_result["runs"], baseline_runs)
+    verdict = evaluate_paired_hypothesis(
+        val_result["runs"], baseline_runs, benchmark=benchmark
+    )
 
     return {
         "tuned": True,

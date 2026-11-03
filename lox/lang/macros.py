@@ -234,12 +234,16 @@ class MacroHarvester:
                     fs.get("ochiai_good_run_score", 0.0)
                 )
 
-        root_names = {"run", "step", "act", "__init__"}
+        root_names = {"run", "step", "act", "__init__", "explore"}
         harvested_code_snippets: list[str] = []
         harvested_names: list[str] = []
 
         for item in target_cls.body:
-            if not isinstance(item, ast.FunctionDef) or item.name in root_names:
+            if (
+                not isinstance(item, ast.FunctionDef)
+                or item.name in root_names
+                or item.name.startswith("handle_")
+            ):
                 continue
 
             # Check if function name had poor statistical correlation

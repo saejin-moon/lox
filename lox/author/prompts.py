@@ -105,11 +105,12 @@ Every turn, `state` exposes 100% of NetHack's observation arrays, terminal scree
   - `item.letter` (`'a'..'z'`), `item.name` (full description string, e.g. `'a +1 long sword (weapon in hand)'`, `'2 food rations'`), `item.quantity` (`int`).
   - Helper properties: `item.is_weapon`, `item.is_armor`, `item.is_food`, `item.is_worn`, `item.is_wielded`, `item.is_potion`, `item.is_scroll`, `item.is_wand`, `item.is_ring`, `item.is_amulet`, `item.is_tool`.
   - Status: `item.is_blessed`, `item.is_uncursed`, `item.is_cursed`.
-- **Visible Monsters (`state.visible_monsters() -> list[VisibleMonster]`)**:
+- **Visible Monsters (`state.visible_monsters() -> list[VisibleMonster]`) and Adjacent Hostiles (`state.adjacent_hostiles() -> list[VisibleMonster]`)**:
   Each `m` in `state.visible_monsters()` has:
   - `m.y`, `m.x`, `m.name`, `m.char`, `m.color`.
-  - `m.is_hostile` (`not (is_pet or is_peaceful)`), `m.is_pet`, `m.is_peaceful`, `m.is_statue`, `m.is_invisible`.
+  - `m.is_hostile` (`not (is_pet or is_peaceful)`), `m.is_adjacent_to(state.y, state.x)` (8-way Chebyshev adjacency—monsters attack diagonally as well as orthogonally!), `m.is_pet`, `m.is_peaceful`, `m.is_statue`, `m.is_invisible`.
   - `m.info`: `m.info.difficulty`, `m.info.ac`, `m.info.speed`, `m.info.level`, `m.info.nutrition`, `m.info.attacks` tuple.
+  `state.adjacent_hostiles()` returns all visible hostile monsters in the 8 Chebyshev adjacent squares around the hero.
 - **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`)**:
   Each `o` in `state.visible_objects()` has:
   - `o.y`, `o.x`, `o.name`, `o.char`, `o.color`.
@@ -117,13 +118,15 @@ Every turn, `state` exposes 100% of NetHack's observation arrays, terminal scree
   - `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`): inspect nutrition, safe/poisonous flags.
 - **Deterministic Zero-Heuristic WorldMemory (`state.mem`)**:
   The harness automatically maintains deterministic, zero-heuristic spatial and episodic bookkeeping on `state.mem`:
+  - `state.mem.passable_mask`: ready-to-use `21x79` boolean mask of remembered walkable floor, corridor, open door, and stair tiles, strictly excluding walls `|-` and solid rock `' '`.
   - `state.mem.visited`: `bool[21, 79]` mask of tiles the hero has physically visited on the current floor.
   - `state.mem.visit_count`: `int32[21, 79]` array of visit frequencies for each tile on the current floor.
+  - `state.mem.door_mask`: `bool[21, 79]` mask of doorway tiles (doors must be entered/exited orthogonally; diagonal movement into/out of intact doorways is forbidden by the C engine).
   - `state.mem.locked_doors`: `set[tuple[int, int]]` containing coordinates `(y, x)` on the current floor confirmed to be locked doors.
   - `state.mem.searched_counts`: `int16[21, 79]` count of how many times each tile has been searched via `Action.SEARCH` (crucial to know which walls/corridors have been searched for secret doors).
   - `state.mem.stair_graph`: `dict[tuple[int, int, int, int], tuple[int, int, int, int]]` inter-floor transition graph.
   - `state.mem.is_oscillating`: `bool`, `True` if <= 3 unique tiles were visited in the last 12 steps on the same floor (useful for anti-stall escape triggers).
-  - `state.mem.remembered_chars`: `uint8[21, 79]` ASCII array of static terrain characters observed on the current floor.
+  - `state.mem.remembered_chars`: `uint8[21, 79]` ASCII array of static terrain characters observed on the current floor (open doors are normalized to `.` so they are never confused with `|-` walls).
 - **Status Flags**:
   `state.is_blind`, `state.is_confused`, `state.is_stunned`, `state.is_hallucinating`, `state.is_levitating`,
   `state.is_food_poisoned`, `state.is_terminally_ill`, `state.is_stoning`, `state.is_slimed`, `state.is_strangled`, `state.condition_mask`.
@@ -199,39 +202,39 @@ Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigati
 {schema_md}
 
 ### Empirical Differential Diagnostics (SQL Investigation Templates)
-Do not guess why a run stalled or died. Formulate differential queries against DuckDB to isolate the exact physical gap between failed runs and expert ascensions:
+Do not guess why a run stalled or died. Formulate differential queries against DuckDB (`champion_runs`, `champion_function_stats`, `champion_ticks`, `expert_runs`, `expert_ticks`) to isolate the exact physical gap between failed runs and expert ascensions:
 
 1. **Physical Deficit Query (Contrast Failures vs Experts at Same Depth)**:
    ```sql
    -- What was the physical state of expert characters on the exact floor where my runs died?
-   SELECT 'failed_runs' AS source, AVG(final_ac) AS avg_ac, AVG(max_hp) AS avg_hp, AVG(turns) AS avg_turns
-   FROM runs WHERE depth = 2 AND batch_id = 'latest_batch'
+   SELECT 'champion_failures' AS source, AVG(final_ac) AS avg_ac, AVG(max_hp) AS avg_hp, AVG(turns) AS avg_turns
+   FROM champion_runs WHERE depth = 2
    UNION ALL
    SELECT 'expert_ascensions' AS source, AVG(ac) AS avg_ac, AVG(hp) AS avg_hp, AVG(turn) AS avg_turns
    FROM expert_ticks WHERE depth = 2;
    ```
-   *Interpretation*: If experts have AC 4 and your runs have AC 10, your policy is not equipping armor. If experts have 2x higher HP, your policy is taking unnecessary melee damage.
+   *Interpretation*: If experts have AC <= 4 and your runs have AC 10, your policy is not equipping armor. If experts have 2x higher HP/XL, your policy is taking unnecessary melee damage or failing to level up.
 
 2. **Monster Encounter & Tactical Response Query**:
    ```sql
-   -- How did expert ascensions act when encountering the monster that killed your runs?
+   -- How did expert ascensions act when encountering specific hazards or depths?
    SELECT action_name, COUNT(*) AS freq
    FROM expert_ticks
-   WHERE message ILIKE '%jackal%' OR message ILIKE '%orc%'
-   GROUP BY action_name ORDER BY freq DESC LIMIT 5;
+   WHERE depth <= 4
+   GROUP BY action_name ORDER BY freq DESC LIMIT 8;
    ```
 
-3. **Floor Navigation & Stair Milestone Query**:
+3. **Outlier & Failure Trace Inspection Query**:
    ```sql
-   -- At what turn did outlier runs discover downstairs '>' and transition to the next depth?
-   SELECT run_id, seed, depth, max_depth, turns, summary_digest
-   FROM runs WHERE is_outlier_good = TRUE ORDER BY max_depth DESC LIMIT 3;
+   -- Compare top outlier runs vs worst failures in the active champion batch
+   SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, end_reason, summary_digest
+   FROM champion_runs ORDER BY max_depth DESC, turns DESC LIMIT 5;
    ```
 
 ### Available Investigation & Verification Tools
-1. `query_db(sql)`: Run read-only SQL queries on DuckDB (`runs`, `ticks`, `batches`, `function_stats`, `experiments`, `expert_runs`, `expert_ticks`).
-   - Query `runs WHERE is_outlier_good = TRUE` to inspect what happened in your best statistical outlier runs (`summary_digest`, `game_log`, `triggered_functions`).
-   - Query `expert_runs` and `expert_ticks` to study how successful human ascensions and reference runs progress, what intrinsics/kit they acquire, and how they act.
+1. `query_db(sql)`: Run read-only SQL queries on DuckDB (`champion_runs`, `champion_function_stats`, `champion_ticks`, `latest_pilot_runs`, `runs`, `ticks`, `batches`, `function_stats`, `experiments`, `expert_runs`, `expert_ticks`).
+   - Query `champion_runs` to inspect what happened in the active champion policy's episodes (`summary_digest`, `game_log`, `triggered_functions`).
+   - Query `expert_runs` and `expert_ticks` to study how successful human ascensions and reference runs progress, what intrinsics/kit they acquire, and how they act across depths.
 2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact monster mechanics, corpse effects, item properties, intrinsics, and dungeon branches.
 3. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py` (or call `query_policy_docs("actions")` for the complete command index).
 4. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
@@ -246,12 +249,12 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 3. **The Binding Constraint Rule**:
    Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint). Never spend a generation fixing a 2% edge case when 70% of runs died to the same primary cause.
 4. **Anti-Hallucination & Dungeon Context Anchor**:
-   Anchor your reasoning to your current dungeon depth (`state.depth`). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. If the hero is bumping into walls, inspect `get_passable_mask` and verify `ord('-')` and `ord('|')` are strictly marked False.
+   Anchor your reasoning to your current dungeon depth (`state.depth`). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. Use `state.mem.passable_mask` (or ensure `ord('-')`, `ord('|')`, and `ord(' ')` are strictly False in custom masks) and remember monsters attack across all 8 adjacent tiles (`max(abs(dy), abs(dx)) == 1`).
 5. **Pre-Submission Invariant Checklist**:
    Before outputting code, mentally verify all 4 invariants:
    - *Generator Invariant*: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
    - *State Persistence*: Specialist methods must update `self.*` attributes (e.g. `self.target_tile`, `self.tried_doors`) to prevent 2-tile ping-pong oscillations.
-   - *Passability Mask*: `get_passable_mask` must never mark `ord('-')` (horizontal wall) or `ord('|')` (vertical wall) as passable.
+   - *Passability & 8-Way Adjacency*: Never mark `ord('-')`, `ord('|')`, or `ord(' ')` (solid stone) as passable; prefer `state.mem.passable_mask`. Always check 8-way adjacency (`max(abs(dy), abs(dx)) == 1` or `state.adjacent_hostiles()`) in combat and door interactions.
    - *Trigger Reachability*: Any modified or newly added specialist method must be called from `run()`.
 """
 

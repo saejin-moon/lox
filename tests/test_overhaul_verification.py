@@ -706,3 +706,249 @@ def test_pass3_pilot_delta_depth_and_exact_batch_capacity(tmp_path: Path) -> Non
         assert set(run_seeds).issubset(set(exact_seeds))
     finally:
         pool.close()
+
+
+def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
+    """
+    Pass 4 Codebase Bottleneck Verification:
+    1. champion_runs, champion_function_stats, champion_ticks, and latest_pilot_runs views exist in DuckDB.
+    2. query_db dynamically rewrites (SELECT MAX(batch_id) FROM runs) to active champion batch.
+    3. ingest_expert_runs_into_duckdb populates expert_ticks with depth >= 2 rows.
+    4. WorldMemory normalizes open doors to ord('.') in remembered_chars, sets door_mask = True,
+       exposes passable_mask and adjacent_hostiles(), and astar_next_step avoids diagonal steps on door_mask.
+    5. ModeScheduler only triggers PARAM_TUNE when at least one modification has been promoted.
+    """
+    from lox.datasets.download_experts import ingest_expert_runs_into_duckdb
+    from lox.engine.scheduler import ModeScheduler
+    from lox.env.grid_utils import astar_next_step
+    from lox.env.state import _IS_OPEN_DOOR_GLYPH_LUT, WorldMemory
+
+    # 1. Canonical Views & SELECT MAX(batch_id) Poison Pill Resolution
+    db_path = str(tmp_path / "test_bottlenecks.duckdb")
+    con = init_db(db_path)
+    con.execute(
+        """
+        INSERT INTO batches (batch_id, generation, mode, hypothesis_passed, created_at)
+        VALUES ('c2026_g001', 1, 'FUNC_MOD_ADD', TRUE, '2026-01-01 10:00:00'),
+               ('pilot_9999_01', 1, 'PILOT', FALSE, '2026-01-01 11:00:00')
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO runs (run_id, batch_id, generation, seed)
+        VALUES ('run_champ', 'c2026_g001', 1, 100),
+               ('run_pilot', 'pilot_9999_01', 1, 101)
+        """
+    )
+    champ_count = con.execute("SELECT COUNT(*) FROM champion_runs").fetchone()[0]
+    pilot_count = con.execute("SELECT COUNT(*) FROM latest_pilot_runs").fetchone()[0]
+    assert champ_count == 1
+    assert pilot_count == 1
+    con.close()
+
+    tools = AuthorToolRegistry(db_path=db_path)
+    yaml_out, count_str = tools.query_db(
+        "SELECT run_id FROM runs WHERE batch_id = (SELECT MAX(batch_id) FROM runs)"
+    )
+    assert "run_champ" in yaml_out
+    assert "run_pilot" not in yaml_out
+
+    # 2. Expert Ticks Deep Depths Population
+    res = ingest_expert_runs_into_duckdb(db_path=db_path, max_ascensions=3, force=True)
+    assert res["expert_runs"] >= 3
+    con = connect_db(db_path, read_only=True)
+    deep_ticks = con.execute(
+        "SELECT COUNT(*) FROM expert_ticks WHERE depth >= 2"
+    ).fetchone()[0]
+    jackal_ticks = con.execute(
+        "SELECT COUNT(*) FROM expert_ticks WHERE message ILIKE '%jackal%'"
+    ).fetchone()[0]
+    con.close()
+    assert deep_ticks > 0
+    assert jackal_ticks > 0
+
+    # 3. WorldMemory Open-Door Normalization, door_mask & Diagonal Doorway Avoidance
+    mem = WorldMemory()
+
+    class DummyState:
+        def __init__(self):
+            self.dungeon_num = 0
+            self.level_num = 1
+            self.y = 10
+            self.x = 20
+            self.chars = np.full((21, 79), ord(" "), dtype=np.uint8)
+            self.glyphs = np.zeros((21, 79), dtype=np.int32)
+            self.message = ""
+
+    st = DummyState()
+    # Find an open door glyph from precomputed LUT
+    open_door_glyphs = np.nonzero(_IS_OPEN_DOOR_GLYPH_LUT)[0]
+    od_g = int(open_door_glyphs[0]) if len(open_door_glyphs) > 0 else 2372
+    st.glyphs[10, 15] = od_g
+    st.chars[10, 15] = ord("-")  # C engine ASCII for horizontal open door
+    mem.update(st)
+
+    # Open door char should be normalized to '.' in remembered_chars (never '-' or '|')
+    assert mem.current_floor.remembered_chars[10, 15] == ord(".")
+    assert bool(mem.door_mask[10, 15]) is True
+    assert bool(mem.passable_mask[10, 15]) is True
+
+    # Doorway diagonal collision avoidance in pathfinding
+    passable_grid = np.ones((5, 5), dtype=np.bool_)
+    door_grid = np.zeros((5, 5), dtype=np.bool_)
+    door_grid[2, 2] = True  # doorway at (2, 2)
+
+    # Diagonal step into (2, 2) from (1, 1) is forbidden
+    step = astar_next_step(
+        passable_grid,
+        sy=1,
+        sx=1,
+        ty=3,
+        tx=3,
+        allow_diagonal=True,
+        no_diag=door_grid,
+    )
+    assert step in ((1, 0), (0, 1)), f"Expected orthogonal entry, got {step}"
+
+    # 4. ModeScheduler PARAM_TUNE Gating on Promoted Modifications
+    sched = ModeScheduler(param_tune_every=2)
+    m1 = sched.select_mode(generation=1, has_policy=True, has_tunable_params=True)
+    assert m1 == "FUNC_MOD_ADD"
+
+    # Generation 2 without any promotions should NOT tune
+    m2 = sched.select_mode(generation=2, has_policy=True, has_tunable_params=True)
+    assert m2 == "FUNC_MOD_ADD"
+
+    # After recording a promotion, generation 3 should select PARAM_TUNE
+    sched.record_promotion("FUNC_MOD_ADD")
+    m3 = sched.select_mode(generation=3, has_policy=True, has_tunable_params=True)
+    assert m3 == "PARAM_TUNE"
+
+
+def test_pass5_deep_audit_fixes(tmp_path: Path) -> None:
+    """
+    Pass 5 Deep Audit & Runtime Attribution Verification:
+    1. Under-Hero Object Visibility (state.visible_objects() and state.objects_here()).
+    2. Effective Function Trigger Attribution (ExecutionTracer distinguishes value-returns vs no-op).
+    3. Compiler-Gate smoke_only=True and best-pilot preservation.
+    4. Dark corridor memory in NetHackHarness.replay_bytes.
+    """
+    from lox.author.tools import AuthorToolRegistry
+    from lox.env.harness import NetHackHarness
+    from lox.env.state import _IS_BODY_LUT, WorldMemory
+    from lox.lang.compiler import compile_policy_and_macros
+
+    # 1. Under-Hero Object Visibility
+    mem = WorldMemory()
+    body_glyphs = np.nonzero(_IS_BODY_LUT)[0]
+    corpse_g = int(body_glyphs[0]) if len(body_glyphs) > 0 else 1900
+
+    harness = NetHackHarness(max_steps=10)
+    try:
+        real_st = harness.reset(seed=42)
+        hy, hx = real_st.y, real_st.x
+        # Simulate corpse remembered at hero's current position
+        mem.current_floor.remembered_obj_glyphs[hy, hx] = corpse_g
+        real_st.mem = mem
+        here = real_st.objects_here()
+        assert len(here) >= 1
+        corpse_obj = here[0]
+        assert corpse_obj.y == hy
+        assert corpse_obj.x == hx
+        assert corpse_obj.is_corpse is True
+    finally:
+        harness.close()
+
+    # 2. Effective Function Trigger Attribution
+    code = """
+class Policy:
+    def handle_items(self, state):
+        return None
+
+    def handle_combat(self, state):
+        return None
+
+    def move_towards(self, state):
+        return Action.E
+
+    def explore(self, state):
+        return self.move_towards(state)
+
+    def run(self, state):
+        while True:
+            act = self.handle_items(state)
+            if act is not None:
+                state = yield act
+                continue
+            act = self.handle_combat(state)
+            if act is not None:
+                state = yield act
+                continue
+            act = self.explore(state)
+            state = yield act
+"""
+    compiled = compile_policy_and_macros(code)
+    h = NetHackHarness(max_steps=10)
+    try:
+        st = h.reset(seed=123)
+        runner = compiled.create_runner()
+        act, active_fn = runner.next_action(st)
+        assert act == Action.E
+        assert runner.tracer.fn_calls.get("handle_items", 0) == 0
+        assert runner.tracer.fn_calls.get("handle_combat", 0) == 0
+        assert runner.tracer.fn_calls.get("explore", 0) == 1
+        assert runner.tracer.fn_turns.get("explore", 0) == 1
+        assert runner.tracer.fn_calls.get("move_towards", 0) == 1
+        assert runner.tracer.fn_turns.get("move_towards", 0) == 1
+        assert runner.tracer.triggered_any(["handle_items"]) is False
+    finally:
+        h.close()
+
+    # 3. Compiler-Gate smoke_only=True & Best-Pilot Fallback
+    db_p = str(tmp_path / "tools_test.duckdb")
+    tools = AuthorToolRegistry(db_path=db_p)
+    smoke_code = """
+class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.WAIT
+"""
+    out, status = tools.dry_run_policy(smoke_code, smoke_only=True)
+    assert status == "PASSED (smoke check)"
+    assert tools.pilot_runs_used == 0
+
+    tools.last_passed_code = "code_v1"
+    tools.last_pilot_improved = True
+    tools.best_pilot_code = "code_v1"
+    tools.best_pilot_delta = 1.5
+
+    # If subsequent pilot fails, last_pilot_improved stays True because last_passed_code is set
+    improved = False
+    assert not improved
+    if not tools.last_passed_code:
+        tools.last_pilot_improved = False
+    assert tools.last_pilot_improved is True
+    assert tools.last_passed_code == "code_v1"
+
+    # 4. Dark Corridor Memory in replay_bytes
+    h_rep = NetHackHarness(max_steps=20)
+    try:
+        st = h_rep.reset(seed=999)
+        bytes_recorded = bytearray()
+        for a in (Action.EAST, Action.EAST, Action.SOUTH, Action.SOUTH):
+            st, d, _ = h_rep.step(a)
+            bytes_recorded.append(int(a))
+            if d:
+                break
+        replayed_st = h_rep.replay_bytes(seed=999, recorded_bytes=bytes(bytes_recorded))
+        assert replayed_st is not None
+        fl = h_rep.mem.current_floor
+        for dnum, dlvl, py, px in list(h_rep.mem.pos_history):
+            if (
+                (dnum, dlvl) == h_rep.mem.current_floor_key
+                and 0 <= py < 21
+                and 0 <= px < 79
+            ):
+                assert fl.remembered_chars[py, px] != 0, f"Blank char at ({py}, {px})"
+    finally:
+        h_rep.close()

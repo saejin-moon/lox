@@ -38,6 +38,7 @@ class ModeScheduler:
             "STRUCTURAL_REFACTOR": 0,
         }
         self._func_mods_since_tune = 0
+        self._promoted_since_tune = 0
         self._gens_since_macro = 0
         self._last_tune_gen = 0
         self._last_macro_gen = 0
@@ -54,6 +55,7 @@ class ModeScheduler:
             return forced_mode.upper()
 
         if generation == 0 or not has_policy:
+            self._promoted_since_tune = 1
             return "FULL_WRITE"
 
         if consecutive_failures >= 3:
@@ -76,8 +78,10 @@ class ModeScheduler:
             self.counts["MACRO_WRITE"] += 1
             return "MACRO_WRITE"
 
-        # Periodic Parameter Finetuning every `param_tune_every` function modifications
-        if has_tunable_params and (
+        can_tune = has_tunable_params and self._promoted_since_tune >= 1
+
+        # Periodic Parameter Finetuning every `param_tune_every` function modifications (only if promoted changes occurred)
+        if can_tune and (
             (
                 generation > 0
                 and generation % self.param_tune_every == 0
@@ -86,6 +90,7 @@ class ModeScheduler:
             or self._func_mods_since_tune >= self.param_tune_every
         ):
             self._func_mods_since_tune = 0
+            self._promoted_since_tune = 0
             self._last_tune_gen = generation
             self.counts["PARAM_TUNE"] += 1
             return "PARAM_TUNE"
@@ -100,10 +105,7 @@ class ModeScheduler:
                 and (generation - self._last_macro_gen) >= 6
             ):
                 candidates.append("MACRO_WRITE")
-            if (
-                has_tunable_params
-                and (generation - self._last_tune_gen) >= self.param_tune_every
-            ):
+            if can_tune and (generation - self._last_tune_gen) >= self.param_tune_every:
                 candidates.append("PARAM_TUNE")
             max_credit = max(
                 (max(self.history[m]) if self.history[m] else 0.0) for m in candidates
@@ -125,6 +127,7 @@ class ModeScheduler:
                 self._func_mods_since_tune += 1
             elif best_m == "PARAM_TUNE":
                 self._func_mods_since_tune = 0
+                self._promoted_since_tune = 0
                 self._last_tune_gen = generation
             elif best_m == "MACRO_WRITE":
                 self._gens_since_macro = 0
@@ -135,7 +138,19 @@ class ModeScheduler:
         self.counts["FUNC_MOD_ADD"] += 1
         return "FUNC_MOD_ADD"
 
-    def record_outcome(self, mode: str, mean_delta: float, wall_sec: float) -> None:
+    def record_promotion(self, mode: str = "FUNC_MOD_ADD") -> None:
+        """Records that a candidate policy was promoted, enabling PARAM_TUNE."""
+        self._promoted_since_tune += 1
+
+    def record_outcome(
+        self,
+        mode: str,
+        mean_delta: float,
+        wall_sec: float,
+        passed: bool = False,
+    ) -> None:
+        if passed and mode in ("FUNC_MOD_ADD", "STRUCTURAL_REFACTOR", "FULL_WRITE"):
+            self._promoted_since_tune += 1
         if mode in self.history:
             minutes = max(0.05, wall_sec / 60.0)
             credit = max(0.0, float(mean_delta)) / minutes

@@ -74,6 +74,8 @@ class AuthorToolRegistry:
         self.benchmark = str(benchmark)
         self.current_policy_code: str = ""
         self.last_passed_code: str = ""
+        self.best_pilot_code: str = ""
+        self.best_pilot_delta: float = -1e9
         self.pool: Any = None
         self.baseline_runs: list[dict[str, Any]] = []
         self.pilot_runs_used: int = 0
@@ -104,6 +106,8 @@ class AuthorToolRegistry:
         self.pilot_episodes = pilot_episodes
         self.last_pilot_improved = False
         self.last_pilot_summary = ""
+        self.best_pilot_code = ""
+        self.best_pilot_delta = -1e9
         self.last_cand_depths = []
         self.last_base_depths = []
         self.generation = int(generation)
@@ -142,6 +146,37 @@ class AuthorToolRegistry:
                 "Error: Mutative keyword 'REPLACE' is forbidden. Use SELECT only.",
                 "error",
             )
+
+        # Dynamically rewrite SELECT MAX(batch_id) poison pill to target the active champion batch
+        max_batch_pattern = re.compile(
+            r"\(\s*SELECT\s+MAX\s*\(\s*batch_id\s*\)\s+FROM\s+(?:runs|function_stats|batches)\s*\)",
+            re.IGNORECASE,
+        )
+        if max_batch_pattern.search(clean):
+            con_temp = connect_db(self.db_path, read_only=True)
+            try:
+                row = con_temp.execute(
+                    "SELECT batch_id FROM batches WHERE hypothesis_passed = TRUE "
+                    "AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE') "
+                    "ORDER BY generation DESC, created_at DESC LIMIT 1"
+                ).fetchone()
+                if row and row[0]:
+                    target_batch_sql = (
+                        "(SELECT batch_id FROM batches WHERE hypothesis_passed = TRUE "
+                        "AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE') "
+                        "ORDER BY generation DESC, created_at DESC LIMIT 1)"
+                    )
+                else:
+                    target_batch_sql = "(SELECT batch_id FROM batches ORDER BY created_at DESC LIMIT 1)"
+            except Exception:
+                target_batch_sql = (
+                    "(SELECT batch_id FROM batches WHERE hypothesis_passed = TRUE "
+                    "AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE') "
+                    "ORDER BY generation DESC, created_at DESC LIMIT 1)"
+                )
+            finally:
+                con_temp.close()
+            clean = max_batch_pattern.sub(target_batch_sql, clean)
 
         if "limit" not in low_no_literals:
             clean += " LIMIT 30"
@@ -412,6 +447,7 @@ class AuthorToolRegistry:
         max_turns: int = 150,
         replay_run_id: str = "",
         replay_steps: int = 0,
+        smoke_only: bool = False,
     ) -> tuple[str, str]:
         """
         Compiles and tests candidate `code` in a live NetHack sandbox:
@@ -500,16 +536,18 @@ class AuthorToolRegistry:
                     con.close()
                 if row:
                     r_seed, r_bytes = int(row[0]), bytes(row[1] or b"")
-                    state = harness.reset(seed=r_seed)
                     cut = (
                         min(len(r_bytes), int(replay_steps))
                         if int(replay_steps) > 0
                         else max(0, len(r_bytes) - 25)
                     )
-                    for b in r_bytes[:cut]:
-                        state, done, _ = harness.step(b)
-                        if done:
-                            break
+                    state = harness.replay_bytes(
+                        seed=r_seed,
+                        recorded_bytes=r_bytes,
+                        stop_at_byte_idx=cut,
+                    )
+                    harness.step_count = 0
+                    harness.done = False
                 else:
                     state = harness.reset(seed=int(seed))
             else:
@@ -589,6 +627,7 @@ class AuthorToolRegistry:
             # Step 2: 20-Episode Parallel Pilot Evaluation (if pool is attached and pilot budget remains)
             if (
                 not is_macro
+                and not smoke_only
                 and self.pool is not None
                 and self.pilot_runs_used < self.max_pilot_runs
             ):
@@ -646,7 +685,9 @@ class AuthorToolRegistry:
                     if "seed" in r and not r.get("is_shard")
                 }
 
-                pilot_batch_id = f"pilot_{rev_idx}_{int(time.time())}"
+                pilot_batch_id = (
+                    f"pilot_{int(time.time() * 1000)}_{self.pilot_runs_used:02d}"
+                )
 
                 # Evaluate baseline policy on the exact pilot shards for 100% apples-to-apples comparison
                 base_shard_runs: list[dict[str, Any]] = []
@@ -857,7 +898,21 @@ class AuthorToolRegistry:
                         else ">>> PILOT VERDICT: INITIAL POLICY CRASHED. Please fix the runtime error."
                     )
 
-                self.last_pilot_improved = improved
+                score_key = float(mean_delta) if deltas else float(delta_depth)
+                if (
+                    not self.best_pilot_code
+                    or score_key >= self.best_pilot_delta
+                    or improved
+                ):
+                    self.best_pilot_delta = max(self.best_pilot_delta, score_key)
+                    self.best_pilot_code = code
+
+                if improved:
+                    self.last_pilot_improved = True
+                    self.last_passed_code = code
+                else:
+                    if not self.last_passed_code:
+                        self.last_pilot_improved = False
                 self.last_pilot_summary = summary_short
 
                 try:
@@ -989,11 +1044,21 @@ class AuthorToolRegistry:
                         f"PILOT_FAILED ({summary_short})",
                     )
 
-            if self.pilot_runs_used > 0 and not self.last_pilot_improved:
+            if (
+                not smoke_only
+                and self.pilot_runs_used > 0
+                and not self.last_pilot_improved
+            ):
                 return (
                     f"Pilot revisions exhausted ({self.pilot_runs_used}/{self.max_pilot_runs}). "
                     f"Candidate code never beat baseline ({self.last_pilot_summary}).",
                     "PILOT_EXHAUSTED",
+                )
+
+            if smoke_only:
+                return (
+                    f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}",
+                    "PASSED (smoke check)",
                 )
 
             self.last_passed_code = code

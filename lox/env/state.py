@@ -217,6 +217,10 @@ class VisibleMonster:
     def is_hostile(self) -> bool:
         return not (self.is_pet or self.is_peaceful)
 
+    def is_adjacent_to(self, y: int, x: int) -> bool:
+        """Returns True if this monster is Chebyshev adjacent (within 1 tile in any of 8 directions) to (y, x)."""
+        return max(abs(self.y - y), abs(self.x - x)) == 1
+
 
 @dataclass(frozen=True, slots=True)
 class VisibleObject:
@@ -393,6 +397,19 @@ for _g in range(_MAX_GLYPH):
         except Exception:
             _TRAP_NAME_BY_GLYPH[_g] = "trap"
 
+_IS_WALL_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_OPEN_DOOR_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_DOORWAY_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+for _g in range(_MAX_GLYPH):
+    _cn = _CMAP_NAME_BY_GLYPH[_g]
+    if _cn == "wall":
+        _IS_WALL_GLYPH_LUT[_g] = True
+    elif _cn == "open door":
+        _IS_OPEN_DOOR_GLYPH_LUT[_g] = True
+        _IS_DOORWAY_GLYPH_LUT[_g] = True
+    elif _cn == "closed door":
+        _IS_DOORWAY_GLYPH_LUT[_g] = True
+
 
 @dataclass
 class FloorMemory:
@@ -410,7 +427,27 @@ class FloorMemory:
     searched_counts: np.ndarray = field(
         default_factory=lambda: np.zeros((21, 79), dtype=np.int16)
     )
+    door_mask: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.bool_)
+    )
+    remembered_obj_glyphs: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.int32)
+    )
     locked_doors: set[tuple[int, int]] = field(default_factory=set)
+
+    @property
+    def passable_mask(self) -> np.ndarray:
+        """Returns boolean mask of known walkable tiles (floor, corridor, open door, stairs, altar, fountain, throne)."""
+        c = self.remembered_chars
+        return (
+            (c == ord("."))
+            | (c == ord("#"))
+            | (c == ord(">"))
+            | (c == ord("<"))
+            | (c == ord("_"))
+            | (c == ord("{"))
+            | (c == ord("\\"))
+        )
 
     def ensure_shape(self, min_h: int, min_w: int) -> None:
         """Dynamically resizes spatial grids if game coordinates exceed initial bounds (e.g. Craftax 48x48)."""
@@ -434,6 +471,14 @@ class FloorMemory:
             new_searched = np.zeros((new_h, new_w), dtype=np.int16)
             new_searched[:cur_h, :cur_w] = self.searched_counts
             self.searched_counts = new_searched
+
+            new_door_mask = np.zeros((new_h, new_w), dtype=np.bool_)
+            new_door_mask[:cur_h, :cur_w] = self.door_mask
+            self.door_mask = new_door_mask
+
+            new_obj_glyphs = np.zeros((new_h, new_w), dtype=np.int32)
+            new_obj_glyphs[:cur_h, :cur_w] = self.remembered_obj_glyphs
+            self.remembered_obj_glyphs = new_obj_glyphs
 
 
 class WorldMemory:
@@ -472,6 +517,8 @@ class WorldMemory:
                 visit_count=np.zeros(shape, dtype=np.int32),
                 remembered_chars=np.zeros(shape, dtype=np.uint8),
                 searched_counts=np.zeros(shape, dtype=np.int16),
+                door_mask=np.zeros(shape, dtype=np.bool_),
+                remembered_obj_glyphs=np.zeros(shape, dtype=np.int32),
             )
         return self.floors[key]
 
@@ -490,6 +537,14 @@ class WorldMemory:
     @property
     def remembered_chars(self) -> np.ndarray:
         return self.current_floor.remembered_chars
+
+    @property
+    def door_mask(self) -> np.ndarray:
+        return self.current_floor.door_mask
+
+    @property
+    def passable_mask(self) -> np.ndarray:
+        return self.current_floor.passable_mask
 
     @property
     def locked_doors(self) -> set[tuple[int, int]]:
@@ -551,13 +606,66 @@ class WorldMemory:
                 self.stair_graph[prev] = now
                 self.stair_graph[now] = prev
 
-        # Update remembered terrain chars using C engine cmap glyph lookup
+        # Update remembered terrain chars and doorway mask using C engine cmap glyph lookup
         try:
             glyphs = state.glyphs
             chars = state.chars
             is_cmap = _IS_CMAP_LUT[glyphs]
+
+            # 1. Update remembered_chars for cmap terrain
             mask = is_cmap & (chars != 0) & (chars != ord(" "))
             floor.remembered_chars[mask] = chars[mask]
+
+            # Normalize open doors to '.' so they are never confused with walls ('-' or '|')
+            open_door_mask = is_cmap & _IS_OPEN_DOOR_GLYPH_LUT[glyphs]
+            floor.remembered_chars[open_door_mask] = ord(".")
+
+            # 2. Update door_mask
+            doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
+            floor.door_mask[doorway_mask] = True
+            # Clear doorway mask where cmap is visible but no longer an intact doorway
+            floor.door_mask[is_cmap & (~_IS_DOORWAY_GLYPH_LUT[glyphs])] = False
+
+            # 3. For tiles with visible objects, monsters, or hero where remembered_chars == 0, mark as floor '.'
+            h_curr, w_curr = floor.remembered_chars.shape
+            grid_y, grid_x = np.ogrid[:h_curr, :w_curr]
+            hero_mask = (grid_y == sy) & (grid_x == sx)
+            non_cmap_floor = (
+                _IS_OBJECT_LUT[glyphs] | _IS_MONSTER_LUT[glyphs]
+            ) | hero_mask
+            uninit_occupied = non_cmap_floor & (floor.remembered_chars == 0)
+            floor.remembered_chars[uninit_occupied] = ord(".")
+
+            # 4. Update remembered_obj_glyphs
+            floor.remembered_obj_glyphs[is_cmap] = 0
+            obj_mask = _IS_OBJECT_LUT[glyphs]
+            floor.remembered_obj_glyphs[obj_mask] = glyphs[obj_mask]
+
+            if (
+                0 <= sy < floor.remembered_obj_glyphs.shape[0]
+                and 0 <= sx < floor.remembered_obj_glyphs.shape[1]
+            ):
+                act_upper = action_name.upper() if action_name else ""
+                if any(tok in act_upper for tok in ("PICKUP", "EAT", "COMMA")):
+                    floor.remembered_obj_glyphs[sy, sx] = 0
+
+                msg_low = (
+                    str(state.message).lower() if hasattr(state, "message") else ""
+                )
+                if (
+                    len(self.pos_history) >= 2
+                    and self.pos_history[-1] != self.pos_history[-2]
+                ):
+                    if not any(
+                        tok in msg_low
+                        for tok in (
+                            "you see here",
+                            "objects here",
+                            "things that are here",
+                            "you feel here",
+                        )
+                    ):
+                        floor.remembered_obj_glyphs[sy, sx] = 0
         except Exception:
             pass
 
@@ -1301,8 +1409,109 @@ class GameState:
                         info=o_info,
                     )
                 )
+
+            # Include under-hero objects/corpses if hero stepped onto an object tile
+            hy, hx = int(self.y), int(self.x)
+            if not any(o.y == hy and o.x == hx for o in objs):
+                has_mem_obj = (
+                    self.mem is not None
+                    and 0 <= hy < self.mem.current_floor.remembered_obj_glyphs.shape[0]
+                    and 0 <= hx < self.mem.current_floor.remembered_obj_glyphs.shape[1]
+                    and int(self.mem.current_floor.remembered_obj_glyphs[hy, hx]) > 0
+                )
+                msg_low = str(self.message).lower() if hasattr(self, "message") else ""
+                if has_mem_obj:
+                    rem_g = int(self.mem.current_floor.remembered_obj_glyphs[hy, hx])
+                    if _IS_OBJECT_LUT[rem_g]:
+                        is_corpse = bool(_IS_BODY_LUT[rem_g])
+                        corpse_mon = _CORPSE_MON_BY_GLYPH[rem_g] if is_corpse else None
+                        o_info = _OBJ_INFO_BY_GLYPH[rem_g]
+                        if is_corpse and corpse_mon:
+                            name = f"corpse of {corpse_mon.name}"
+                        elif o_info and o_info.name:
+                            name = o_info.name
+                        else:
+                            name = "corpse" if is_corpse else "?"
+                        ch = "%" if is_corpse else (o_info.char if o_info else "?")
+                        col = o_info.color if o_info else 7
+                        objs.append(
+                            VisibleObject(
+                                y=hy,
+                                x=hx,
+                                glyph=rem_g,
+                                char=ch,
+                                color=col,
+                                is_corpse=is_corpse,
+                                corpse_monster=corpse_mon,
+                                name=name,
+                                info=o_info,
+                            )
+                        )
+                elif any(
+                    tok in msg_low
+                    for tok in (
+                        "you see here",
+                        "objects here",
+                        "things that are here",
+                    )
+                ):
+                    is_corpse = "corpse" in msg_low
+                    parsed_name = ""
+                    for prefix in (
+                        "you see here ",
+                        "objects here: ",
+                        "things that are here: ",
+                    ):
+                        if prefix in msg_low:
+                            idx = msg_low.find(prefix) + len(prefix)
+                            parsed_name = str(self.message)[idx:].split(".")[0].strip()
+                            break
+                    if not parsed_name:
+                        parsed_name = "corpse" if is_corpse else "item"
+                    objs.append(
+                        VisibleObject(
+                            y=hy,
+                            x=hx,
+                            glyph=0,
+                            char="%" if is_corpse else "?",
+                            color=7,
+                            is_corpse=is_corpse,
+                            corpse_monster=None,
+                            name=parsed_name,
+                            info=None,
+                        )
+                    )
+
             self._objects_cache = objs
         return self._objects_cache
+
+    def objects_here(self) -> list[VisibleObject]:
+        """Returns all visible objects on the hero's current tile."""
+        return [o for o in self.visible_objects() if o.y == self.y and o.x == self.x]
+
+    def adjacent_hostiles(self) -> list[VisibleMonster]:
+        """Returns all visible hostile monsters in the 8 Chebyshev adjacent squares around the hero."""
+        return [
+            m
+            for m in self.visible_monsters()
+            if m.is_hostile and max(abs(m.y - self.y), abs(m.x - self.x)) == 1
+        ]
+
+    @property
+    def passable_mask(self) -> np.ndarray:
+        """Returns boolean mask of known walkable tiles (floor, corridor, open door, stairs, altar, fountain, throne)."""
+        if self.mem is not None:
+            return self.mem.passable_mask
+        c = self.chars
+        return (
+            (c == ord("."))
+            | (c == ord("#"))
+            | (c == ord(">"))
+            | (c == ord("<"))
+            | (c == ord("_"))
+            | (c == ord("{"))
+            | (c == ord("\\"))
+        )
 
     def ascii_map(self) -> str:
         """Renders the current 21x79 `chars` grid as a 21-line ASCII string."""
@@ -1322,6 +1531,7 @@ class GameState:
         passable_mask: np.ndarray,
         start: tuple[int, int] | None = None,
         allow_diagonal: bool = True,
+        no_diag: np.ndarray | None = None,
     ) -> np.ndarray:
         """Runs Numba-accelerated BFS distance calculation from `start` (defaults to `(self.y, self.x)`)."""
         sy, sx = start if start is not None else (self.y, self.x)
@@ -1330,11 +1540,21 @@ class GameState:
             if isinstance(passable_mask, np.ndarray) and passable_mask.dtype == np.bool_
             else np.asarray(passable_mask, dtype=np.bool_)
         )
+        if no_diag is None and self.mem is not None:
+            cur_f = getattr(self.mem, "current_floor", None)
+            if (
+                cur_f is not None
+                and hasattr(cur_f, "door_mask")
+                and cur_f.door_mask.shape == p.shape
+            ):
+                no_diag = cur_f.door_mask
+
         return bfs_distance_grid(
             p,
             int(sy),
             int(sx),
             bool(allow_diagonal),
+            no_diag=no_diag,
         )
 
     def path_step(
@@ -1343,6 +1563,7 @@ class GameState:
         target: tuple[int, int],
         start: tuple[int, int] | None = None,
         allow_diagonal: bool = True,
+        no_diag: np.ndarray | None = None,
     ) -> tuple[int, int]:
         """Returns the next `(dy, dx)` step from `start` toward `target` across `passable_mask`."""
         sy, sx = start if start is not None else (self.y, self.x)
@@ -1351,6 +1572,15 @@ class GameState:
             if isinstance(passable_mask, np.ndarray) and passable_mask.dtype == np.bool_
             else np.asarray(passable_mask, dtype=np.bool_)
         )
+        if no_diag is None and self.mem is not None:
+            cur_f = getattr(self.mem, "current_floor", None)
+            if (
+                cur_f is not None
+                and hasattr(cur_f, "door_mask")
+                and cur_f.door_mask.shape == p.shape
+            ):
+                no_diag = cur_f.door_mask
+
         return astar_next_step(
             p,
             int(sy),
@@ -1358,4 +1588,5 @@ class GameState:
             int(target[0]),
             int(target[1]),
             bool(allow_diagonal),
+            no_diag=no_diag,
         )

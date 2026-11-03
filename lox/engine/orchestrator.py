@@ -256,7 +256,8 @@ class CampaignOrchestrator:
                             SELECT run_id, seed, depth, max_depth, score, turns, xp_level,
                                    final_hp, max_hp, final_ac, gold, end_reason,
                                    is_outlier_good, outlier_z_score, batch_percentile,
-                                   summary_digest, game_log, triggered_functions, last_active_function
+                                   summary_digest, game_log, triggered_functions, last_active_function,
+                                   action_bytes, milestones_json
                             FROM runs WHERE batch_id = ?
                             """,
                             (prom_batch_id,),
@@ -430,6 +431,8 @@ class CampaignOrchestrator:
                         baseline_runs=baseline_runs,
                         validation_episodes=self.param_tune_episodes,
                         seed=seed_base + gen * 100,
+                        skills=self.load_workspace_skills(),
+                        benchmark=self.benchmark,
                     )
                     verdict = spsa_res["verdict"]
                     val_batch = spsa_res["val_result"]
@@ -839,6 +842,7 @@ class CampaignOrchestrator:
                     proposal.mode,
                     verdict.get("mean_delta", 0.0),
                     eval_res.get("wall_sec", 1.0),
+                    passed=bool(verdict.get("passed", False)),
                 )
                 self.db_logger.save_experiment(
                     experiment_id=f"exp_{batch_id}",
@@ -874,7 +878,18 @@ class CampaignOrchestrator:
                             proposal.skill_code,
                         )
 
-                    # Update Quality-Diversity (MAP-Elites) policy archive
+                    # Update baseline runs by merging newly evaluated non-shard runs into existing baseline seeds
+                    full_promoted = {
+                        int(r["seed"]): r
+                        for r in eval_res["runs"]
+                        if not r.get("is_shard")
+                    }
+                    if full_promoted:
+                        baseline_by_seed.update(full_promoted)
+                        baseline_runs = list(baseline_by_seed.values())
+
+                    # Update Quality-Diversity (MAP-Elites) policy archive using clean non-shard baseline runs
+                    clean_archive_runs = list(baseline_runs)
                     c_runs = eval_res["runs"]
                     c_depth = float(eval_res["avg_depth"])
                     c_p90 = float(eval_res["p90_depth"])
@@ -903,7 +918,7 @@ class CampaignOrchestrator:
                             max_depth=c_max,
                             avg_ac=c_ac,
                             avg_xl=c_xl,
-                            baseline_runs=c_runs,
+                            baseline_runs=clean_archive_runs,
                         )
                     if (
                         "outlier" not in self.policy_archive
@@ -919,7 +934,7 @@ class CampaignOrchestrator:
                             max_depth=c_max,
                             avg_ac=c_ac,
                             avg_xl=c_xl,
-                            baseline_runs=c_runs,
+                            baseline_runs=clean_archive_runs,
                         )
                     if (
                         "survivability" not in self.policy_archive
@@ -935,7 +950,7 @@ class CampaignOrchestrator:
                             max_depth=c_max,
                             avg_ac=c_ac,
                             avg_xl=c_xl,
-                            baseline_runs=c_runs,
+                            baseline_runs=clean_archive_runs,
                         )
 
                     # Trigger bottom-up macro harvesting (DreamCoder/Voyager style)
@@ -949,14 +964,6 @@ class CampaignOrchestrator:
                             f"Bottom-Up Library Learning: Harvested verified macro(s) {harvested} into `{self.macros_path}`."
                         )
 
-                    full_promoted = {
-                        int(r["seed"]): r
-                        for r in eval_res["runs"]
-                        if not r.get("is_shard")
-                    }
-                    if full_promoted:
-                        baseline_by_seed = full_promoted
-                        baseline_runs = list(baseline_by_seed.values())
                     last_batch_digest = build_batch_contrast_digest(
                         eval_res, eval_res["runs"], fn_stats
                     )

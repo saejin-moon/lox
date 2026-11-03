@@ -381,17 +381,28 @@ def check_macro_contracts(policy_code: str, macros_code: str) -> list[str]:
         for child in ast.iter_child_nodes(parent):
             parent_map[child] = parent
 
+    top_level_fns = {
+        n.name
+        for n in policy_tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
     for node in ast.walk(policy_tree):
         if isinstance(node, ast.Call):
             fn_name: str | None = None
-            if isinstance(node.func, ast.Name) and node.func.id in macro_specs:
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in macro_specs
+                and node.func.id not in top_level_fns
+            ):
                 fn_name = node.func.id
-            elif isinstance(node.func, ast.Attribute) and node.func.attr in macro_specs:
-                if isinstance(node.func.value, ast.Name) and node.func.value.id in (
-                    "macros",
-                    "m",
-                ):
-                    fn_name = node.func.attr
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in macro_specs
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in ("macros", "m")
+            ):
+                fn_name = node.func.attr
 
             if fn_name:
                 spec = macro_specs[fn_name]

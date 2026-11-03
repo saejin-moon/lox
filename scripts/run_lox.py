@@ -113,14 +113,14 @@ def main() -> None:
     parser.add_argument(
         "--param-tune-every",
         type=int,
-        default=3,
-        help="Run PARAM_TUNE every N generations (default: 3)",
+        default=4,
+        help="Run PARAM_TUNE every N generations (default: 4)",
     )
     parser.add_argument(
         "--macro-every",
         type=int,
-        default=5,
-        help="Run MACRO_WRITE every N generations (default: 5)",
+        default=0,
+        help="Run MACRO_WRITE every N generations (default: 0)",
     )
     parser.add_argument(
         "--mode",

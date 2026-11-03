@@ -206,6 +206,39 @@ CREATE TABLE IF NOT EXISTS expert_ticks (
     message VARCHAR,
     screen_ascii TEXT
 );
+
+CREATE OR REPLACE VIEW champion_runs AS
+SELECT * FROM runs
+WHERE batch_id = (
+    SELECT batch_id FROM batches
+    WHERE hypothesis_passed = TRUE
+      AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
+    ORDER BY generation DESC, created_at DESC
+    LIMIT 1
+);
+
+CREATE OR REPLACE VIEW champion_function_stats AS
+SELECT * FROM function_stats
+WHERE batch_id = (
+    SELECT batch_id FROM batches
+    WHERE hypothesis_passed = TRUE
+      AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
+    ORDER BY generation DESC, created_at DESC
+    LIMIT 1
+);
+
+CREATE OR REPLACE VIEW champion_ticks AS
+SELECT * FROM ticks
+WHERE run_id IN (SELECT run_id FROM champion_runs);
+
+CREATE OR REPLACE VIEW latest_pilot_runs AS
+SELECT * FROM runs
+WHERE batch_id = (
+    SELECT batch_id FROM batches
+    WHERE mode = 'PILOT'
+    ORDER BY created_at DESC
+    LIMIT 1
+);
 """
 
 
@@ -219,6 +252,11 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
 def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:
     """Returns a concise, exact DuckDB schema reference for the Author Agent's system prompt."""
     return """### DuckDB Database Schema (`query_db(sql)`):
+- **Canonical Champion & Pilot Views**:
+  - `champion_runs`: All episodes from the latest promoted policy batch (`hypothesis_passed = TRUE`).
+  - `champion_function_stats`: Function stats from the latest promoted policy batch.
+  - `champion_ticks`: Tick-by-tick logs linked to `champion_runs`.
+  - `latest_pilot_runs`: All episodes from the most recent pilot batch.
 - **`runs`** (Every evaluated episode):
   `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR).
 - **`ticks`** (Granular tick-by-tick log linked via `run_id` for outlier good runs, exemplars, and sampled runs):

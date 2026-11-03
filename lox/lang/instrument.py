@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+from typing import Any
 
 
 class PolicyLoopError(RuntimeError):
@@ -50,6 +51,8 @@ class ExecutionTracer:
         "active_fn",
         "registered_params",
         "param_overrides",
+        "_turn_contributors",
+        "_recent_returns",
     )
 
     _ROOT_FNS = frozenset({"run", "step", "act", "root"})
@@ -66,6 +69,8 @@ class ExecutionTracer:
         self.fn_turns: dict[str, int] = {}
         self.call_stack: list[tuple[str, int]] = []
         self.active_fn: str = "root"
+        self._turn_contributors: set[str] = set()
+        self._recent_returns: list[tuple[str, Any]] = []
         self.registered_params: dict[str, TunableParam] = {}
         self.param_overrides: dict[str, float] = (
             dict(param_overrides) if param_overrides else {}
@@ -78,11 +83,56 @@ class ExecutionTracer:
         self.fn_turns.clear()
         self.call_stack.clear()
         self.active_fn = "root"
+        self._turn_contributors.clear()
+        self._recent_returns.clear()
 
-    def enter_fn(self, fn_name: str) -> None:
-        self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+    def enter_fn(self, fn_name: str, has_value_return: bool = False) -> None:
         self.call_stack.append((fn_name, self.total_turns))
-        self.active_fn = fn_name
+        if not has_value_return:
+            self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+            self.active_fn = fn_name
+
+    def on_return(self, fn_name: str, val: Any) -> Any:
+        is_noop = False
+        if val is None:
+            is_noop = True
+        elif isinstance(val, tuple) and len(val) == 2 and val == (0, 0):
+            is_noop = True
+
+        if not is_noop:
+            self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+            self.active_fn = fn_name
+
+            # The function returning is at the top of the call stack (index -1),
+            # so its caller is at index -2 (or 'root' if top-level).
+            if len(self.call_stack) >= 2:
+                caller_fn = self.call_stack[-2][0]
+            else:
+                caller_fn = "root"
+
+            def _same_val(v1: Any, v2: Any) -> bool:
+                if v1 is v2:
+                    return True
+                try:
+                    if isinstance(v1, (int, str, bytes, tuple)) and isinstance(
+                        v2, (int, str, bytes, tuple)
+                    ):
+                        return bool(v1 == v2)
+                except Exception:
+                    pass
+                return False
+
+            if fn_name not in self._ROOT_FNS:
+                if caller_fn in self._ROOT_FNS:
+                    contributors = {fn_name}
+                    for child_fn, child_val in self._recent_returns:
+                        if _same_val(child_val, val):
+                            contributors.add(child_fn)
+                    self._turn_contributors = contributors
+                    self._recent_returns.clear()
+                else:
+                    self._recent_returns.append((fn_name, val))
+        return val
 
     def exit_fn(self, fn_name: str) -> None:
         turns_at_enter = self.total_turns
@@ -100,7 +150,7 @@ class ExecutionTracer:
 
         caller_fn = self.call_stack[-1][0]
         yielded_inside = self.total_turns > turns_at_enter
-        if caller_fn not in self._ROOT_FNS or yielded_inside:
+        if caller_fn not in self._ROOT_FNS and yielded_inside:
             self.active_fn = caller_fn
 
     def record_turn_yield(self) -> str:
@@ -108,9 +158,18 @@ class ExecutionTracer:
         self.loop_ticks = 0
         self.total_turns += 1
         fn = self.active_fn
+        if fn in self._ROOT_FNS and self._turn_contributors:
+            fn = next(iter(self._turn_contributors))
         self.fn_turns[fn] = self.fn_turns.get(fn, 0) + 1
+        for c_fn in list(self._turn_contributors):
+            if c_fn != fn:
+                self.fn_turns[c_fn] = self.fn_turns.get(c_fn, 0) + 1
+        self._turn_contributors.clear()
+        self._recent_returns.clear()
         if self.call_stack:
             self.active_fn = self.call_stack[-1][0]
+        else:
+            self.active_fn = "root"
         return fn
 
     def tick_loop(self) -> None:
@@ -188,7 +247,7 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
         self.is_macro_module = is_macro_module
         self._current_fn_stack: list[str] = []
 
-    def _make_enter_stmt(self, fn_name: str) -> ast.stmt:
+    def _make_enter_stmt(self, fn_name: str, has_val_ret: bool = False) -> ast.stmt:
         return ast.Expr(
             value=ast.Call(
                 func=ast.Attribute(
@@ -196,7 +255,10 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                     attr="enter_fn",
                     ctx=ast.Load(),
                 ),
-                args=[ast.Constant(value=fn_name)],
+                args=[
+                    ast.Constant(value=fn_name),
+                    ast.Constant(value=has_val_ret),
+                ],
                 keywords=[],
             )
         )
@@ -227,14 +289,36 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
             )
         )
 
+    def visit_Return(self, node: ast.Return) -> ast.Return:
+        self.generic_visit(node)
+        if self._current_fn_stack and self._current_fn_stack[-1] != "__init__":
+            fn_name = self._current_fn_stack[-1]
+            ret_val = node.value if node.value is not None else ast.Constant(value=None)
+            node.value = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
+                    attr="on_return",
+                    ctx=ast.Load(),
+                ),
+                args=[ast.Constant(value=fn_name), ret_val],
+                keywords=[],
+            )
+        return node
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
         fn_name = node.name
+        is_gen = any(
+            isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in ast.walk(node)
+        )
+        has_val_ret = (not is_gen) and any(
+            isinstance(sub, ast.Return) for sub in ast.walk(node)
+        )
         self._current_fn_stack.append(fn_name)
         self.generic_visit(node)
         self._current_fn_stack.pop()
 
         if fn_name != "__init__":
-            enter_stmt = self._make_enter_stmt(fn_name)
+            enter_stmt = self._make_enter_stmt(fn_name, has_val_ret)
             exit_stmt = self._make_exit_stmt(fn_name)
             # Keep docstring at index 0 if present
             if (
