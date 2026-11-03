@@ -14,7 +14,6 @@ from typing import Any
 
 import numpy as np
 
-from lox.db.shards import extract_shards_from_runs
 from lox.engine.hypothesis import evaluate_paired_hypothesis, progression_metric
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
@@ -181,7 +180,7 @@ def run_spsa_param_tuning(
         if baseline_runs
         else list(range(10000, 10200))
     )
-    shards = extract_shards_from_runs(baseline_runs, max_shards=minibatch_size * 2)
+    shards: list[Any] = []
 
     # Spall SPSA standard gain schedule
     c0 = 0.12

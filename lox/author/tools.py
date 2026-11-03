@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import os
 import re
 import time
@@ -206,6 +207,12 @@ class AuthorToolRegistry:
             else "\n### Current `macros.py`: (Empty - no custom macros defined yet)"
         )
         t = (topic or "all").lower()
+        if "policy" in t:
+            pol_src = self.current_policy_code or "(Empty policy)"
+            return (
+                f"### Current `policy.py` Full Source:\n```python\n{pol_src}\n```",
+                "policy source",
+            )
         if "action" in t:
             return FULL_ACTION_DOCS, "action docs"
         if "macro" in t:
@@ -638,7 +645,24 @@ class AuthorToolRegistry:
 
                 pilot_seeds: list[int] = []
                 pilot_shards = []
+                base_trig_seeds: list[int] = []
                 if self.baseline_runs:
+                    target_set = set(changed_fns or [])
+                    for r in self.baseline_runs:
+                        fn_map = r.get("triggered_functions") or r.get(
+                            "functions_triggered"
+                        )
+                        if isinstance(fn_map, str):
+                            try:
+                                fn_map = json.loads(fn_map)
+                            except Exception:
+                                fn_map = {}
+                        fn_keys = (
+                            set(fn_map.keys()) if isinstance(fn_map, dict) else set()
+                        )
+                        if target_set and (target_set & fn_keys):
+                            base_trig_seeds.append(int(r["seed"]))
+
                     fail_runs = [
                         r
                         for r in self.baseline_runs
@@ -676,6 +700,10 @@ class AuthorToolRegistry:
                         ]
                         strat_runs.extend(rem[: needed_full - len(strat_runs)])
                     pilot_seeds = [int(r["seed"]) for r in strat_runs]
+                    for r in self.baseline_runs:
+                        s_val = int(r["seed"])
+                        if s_val not in shard_seeds and s_val not in pilot_seeds:
+                            pilot_seeds.append(s_val)
                 else:
                     pilot_seeds = list(range(int(seed), int(seed) + target_eps))
 
@@ -726,6 +754,7 @@ class AuthorToolRegistry:
                     target_episodes=target_eps,
                     target_functions=target_fns,
                     priority_seeds=pilot_seeds,
+                    unconditional_seeds=base_trig_seeds if base_trig_seeds else None,
                     shards=pilot_shards if pilot_shards else None,
                     skills=self.skills,
                     record_ticks=True,
@@ -733,6 +762,27 @@ class AuthorToolRegistry:
                 )
 
                 p_runs = pilot_res.get("runs", [])
+
+                # Backfill any newly triggered pilot seeds not in base_by_seed
+                missing_seeds = [
+                    int(r["seed"])
+                    for r in p_runs
+                    if not r.get("is_shard") and int(r["seed"]) not in base_by_seed
+                ]
+                if missing_seeds and self.current_policy_code:
+                    backfill_res = self.pool.evaluate_batch(
+                        batch_id=f"{pilot_batch_id}_base_backfill",
+                        policy_code=self.current_policy_code,
+                        macros_code=macros_code,
+                        target_episodes=len(missing_seeds),
+                        priority_seeds=missing_seeds,
+                        record_ticks=False,
+                        show_progress=False,
+                        skills=self.skills,
+                    )
+                    for br in backfill_res.get("runs", []):
+                        base_by_seed[int(br["seed"])] = br
+
                 wins = 0
                 losses = 0
                 ties = 0
@@ -953,7 +1003,9 @@ class AuthorToolRegistry:
                         parent_policy_id="none",
                         candidate_policy_id=pilot_cand_id,
                         target_functions=target_fns or [],
-                        runs=p_runs,
+                        runs=[
+                            {k: v for k, v in r.items() if k != "ticks"} for r in p_runs
+                        ],
                         episodes_discarded=pilot_res.get("episodes_discarded", 0),
                         batch_metrics=pilot_res,
                         verdict=pilot_verdict,

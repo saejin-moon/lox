@@ -268,7 +268,9 @@ class AuthorAgent:
             raise PermissionError(
                 "Missing or placeholder API key. Set a valid OPENROUTER_API_KEY in `.env` or pass `--api-key`."
             )
-        for attempt in range(3):
+        for attempt in range(5):
+            if attempt >= 2 and payload.get("model", "").endswith(":floor"):
+                payload["model"] = payload["model"][:-6]
             try:
                 with httpx.Client(timeout=180.0) as client:
                     resp = client.post(url, headers=headers, json=payload)
@@ -291,13 +293,44 @@ class AuthorAgent:
                         resp = client.post(url, headers=headers, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
-                    return data["choices"][0]["message"]
+                    if isinstance(data, dict) and "error" in data:
+                        err_obj = data["error"]
+                        err_code = (
+                            err_obj.get("code") if isinstance(err_obj, dict) else None
+                        )
+                        err_msg = (
+                            err_obj.get("message", str(err_obj))
+                            if isinstance(err_obj, dict)
+                            else str(err_obj)
+                        )
+                        if err_code in (401, 402, 403):
+                            raise PermissionError(
+                                f"LLM API Error {err_code}: {err_msg}"
+                            )
+                        raise ValueError(f"Upstream provider error in JSON: {err_msg}")
+                    choices = data.get("choices") if isinstance(data, dict) else None
+                    if not choices:
+                        raise ValueError(
+                            f"Empty choices in LLM response: {str(data)[:200]}"
+                        )
+                    msg_obj = choices[0].get("message") or {}
+                    if not msg_obj.get("content") and not msg_obj.get("tool_calls"):
+                        raise ValueError(
+                            "LLM returned empty message content and empty tool_calls"
+                        )
+                    return msg_obj
             except PermissionError:
                 raise
-            except (httpx.RequestError, httpx.HTTPStatusError):
-                if attempt == 2:
+            except (
+                httpx.RequestError,
+                httpx.HTTPStatusError,
+                ValueError,
+                KeyError,
+                IndexError,
+            ):
+                if attempt == 4:
                     raise
-                time.sleep(2.0 * (attempt + 1))
+                time.sleep(min(16.0, 2.0 * (2**attempt)))
         raise RuntimeError("Failed to obtain response from LLM API after retries.")
 
     def _synthesize_mock(
@@ -502,9 +535,14 @@ class AuthorAgent:
                 f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
             )
             msg = self._call_llm_api(messages, allow_tools=allow_tools)
-            messages.append(msg)
-
             msg_text = msg.get("content") or ""
+            clean_text = re.sub(
+                r"<think>.*?</think>", "", msg_text, flags=re.DOTALL
+            ).strip()
+            clean_msg: dict[str, Any] = {"role": "assistant", "content": clean_text}
+            if msg.get("tool_calls"):
+                clean_msg["tool_calls"] = msg["tool_calls"]
+            messages.append(clean_msg)
             if msg_text:
                 inter_hyp, _ = self.extract_yaml_and_python(msg_text)
                 if inter_hyp:
@@ -700,8 +738,14 @@ class AuthorAgent:
                 hyp = latest_hyp
 
             # If the model omitted the code block in its final summary after already passing dry_run_policy in a tool call, use that verified code!
-            if not code_patch:
-                code_patch = self.tools.last_passed_code or self.tools.best_pilot_code
+            if not code_patch or (
+                not self.tools.last_pilot_improved and self.tools.last_passed_code
+            ):
+                code_patch = (
+                    self.tools.last_passed_code
+                    or self.tools.best_pilot_code
+                    or code_patch
+                )
 
             if not code_patch:
                 diag = "No ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
@@ -735,10 +779,7 @@ class AuthorAgent:
                         skill_code=skill_code,
                     )
                 else:
-                    if (
-                        mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
-                        or not current_policy.strip()
-                    ):
+                    if mode == "FULL_WRITE" or not current_policy.strip():
                         spliced_policy = code_patch
                         changed_fns = hyp.get("target_functions") or ["run"]
                     else:
@@ -854,10 +895,7 @@ class AuthorAgent:
                     tool_calls_made=total_tool_calls,
                     skill_code=skill_code,
                 )
-            if (
-                mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
-                or not current_policy.strip()
-            ):
+            if mode == "FULL_WRITE" or not current_policy.strip():
                 spliced_policy = code_patch
                 changed_fns = latest_hyp.get("target_functions") or ["run"]
             else:

@@ -8,6 +8,7 @@ while sandboxing OS, filesystem, subprocess, and dynamic code execution escapes.
 from __future__ import annotations
 
 import ast
+import copy
 import textwrap
 from typing import Any
 
@@ -276,6 +277,54 @@ def splice_functions_into_policy(
     existing_methods: dict[str, ast.FunctionDef] = {
         m.name: m for m in target_class.body if isinstance(m, ast.FunctionDef)
     }
+
+    if "__init__" in existing_methods and "__init__" in patch_methods:
+        patch_init = patch_methods["__init__"]
+        exist_init = existing_methods["__init__"]
+
+        def _get_self_attrs(stmt: ast.stmt) -> set[str]:
+            attrs: set[str] = set()
+            if isinstance(stmt, ast.Assign):
+                for t in stmt.targets:
+                    if (
+                        isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == "self"
+                    ):
+                        attrs.add(t.attr)
+            elif isinstance(stmt, ast.AnnAssign):
+                t = stmt.target
+                if (
+                    isinstance(t, ast.Attribute)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == "self"
+                ):
+                    attrs.add(t.attr)
+            return attrs
+
+        patch_assigned: set[str] = set()
+        for stmt in patch_init.body:
+            patch_assigned.update(_get_self_attrs(stmt))
+
+        missing_stmts: list[ast.stmt] = []
+        for stmt in exist_init.body:
+            stmt_attrs = _get_self_attrs(stmt)
+            if stmt_attrs and not (stmt_attrs & patch_assigned):
+                missing_stmts.append(copy.deepcopy(stmt))
+                patch_assigned.update(stmt_attrs)
+
+        insert_idx = 0
+        if (
+            patch_init.body
+            and isinstance(patch_init.body[0], ast.Expr)
+            and isinstance(patch_init.body[0].value, ast.Constant)
+            and isinstance(patch_init.body[0].value.value, str)
+        ):
+            insert_idx = 1
+        for s in missing_stmts:
+            patch_init.body.insert(insert_idx, s)
+            insert_idx += 1
+
     changed_names: list[str] = []
 
     for name, new_fn in list(patch_methods.items()):

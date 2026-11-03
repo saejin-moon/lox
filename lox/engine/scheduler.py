@@ -58,7 +58,7 @@ class ModeScheduler:
             self._promoted_since_tune = 1
             return "FULL_WRITE"
 
-        if consecutive_failures >= 3:
+        if consecutive_failures > 0 and consecutive_failures % 3 == 0:
             self.counts["STRUCTURAL_REFACTOR"] += 1
             return "STRUCTURAL_REFACTOR"
 

@@ -899,7 +899,7 @@ class Policy:
         assert runner.tracer.fn_calls.get("explore", 0) == 1
         assert runner.tracer.fn_turns.get("explore", 0) == 1
         assert runner.tracer.fn_calls.get("move_towards", 0) == 1
-        assert runner.tracer.fn_turns.get("move_towards", 0) == 1
+        assert runner.tracer.fn_turns.get("move_towards", 0) == 0
         assert runner.tracer.triggered_any(["handle_items"]) is False
     finally:
         h.close()
@@ -952,3 +952,176 @@ class Policy:
                 assert fl.remembered_chars[py, px] != 0, f"Blank char at ({py}, {px})"
     finally:
         h_rep.close()
+
+
+def test_pass6_overnight_audit_fixes(tmp_path: Path) -> None:
+    """Pass 6: Overnight Campaign & Runtime Audit Overhaul Verification."""
+    from lox.engine.scheduler import ModeScheduler
+    from lox.lang.compiler import compile_policy_and_macros
+    from lox.lang.validator import splice_functions_into_policy
+    from lox.ui.console import ConsoleUI
+
+    # 1. ExecutionTracer attributes turns to handle_combat (not leaf helper get_passable_mask)
+    #    and counts boolean macro calls returning False
+    macro_src = """
+def macro_is_low_hp(state):
+    return False
+"""
+    pol_src = """
+class Policy:
+    def get_passable_mask(self, state):
+        return state.mem.passable_mask
+
+    def handle_combat(self, state):
+        if macro_is_low_hp(state):
+            return Action.WAIT
+        mask = self.get_passable_mask(state)
+        return Action.E
+
+    def run(self, state):
+        while True:
+            act = self.handle_combat(state)
+            state = yield act
+"""
+    compiled = compile_policy_and_macros(pol_src, macros_code=macro_src)
+    h = NetHackHarness(max_steps=10)
+    try:
+        st = h.reset(seed=42)
+        runner = compiled.create_runner()
+        act, active_fn = runner.next_action(st)
+        assert act == Action.E
+        assert active_fn == "handle_combat"
+        assert runner.tracer.fn_turns.get("handle_combat", 0) == 1
+        assert runner.tracer.fn_turns.get("get_passable_mask", 0) == 0
+        assert runner.tracer.fn_calls.get("macro_is_low_hp", 0) >= 1
+    finally:
+        h.close()
+
+    # 2. PersistentEvalPool.evaluate_batch with priority_seeds and unconditional_seeds=[]
+    #    discards untriggered episodes instead of treating all priority seeds as unconditional
+    pool = PersistentEvalPool(workers=2, max_steps=20)
+    try:
+        pol_dummy = """
+class Policy:
+    def run(self, state):
+        while True:
+            yield Action.WAIT
+"""
+        # When unconditional_seeds=[], seed 100 is NOT unconditional, so enforce_trigger is True
+        res_filtered = pool.evaluate_batch(
+            batch_id="test_filter_bypass",
+            policy_code=pol_dummy,
+            target_episodes=1,
+            target_functions=["nonexistent_fn"],
+            priority_seeds=[100, 101],
+            unconditional_seeds=[],
+            unreachable_abort_after=3,
+            show_progress=False,
+        )
+        assert res_filtered["unreachable_abort"] is True
+        assert res_filtered["episodes_recorded"] == 0
+        assert res_filtered["episodes_discarded"] >= 3
+
+        # When unconditional_seeds=[100], seed 100 is kept even without triggering
+        res_kept = pool.evaluate_batch(
+            batch_id="test_filter_uncond",
+            policy_code=pol_dummy,
+            target_episodes=1,
+            target_functions=["nonexistent_fn"],
+            priority_seeds=[100],
+            unconditional_seeds=[100],
+            show_progress=False,
+        )
+        assert res_kept["episodes_recorded"] == 1
+        assert res_kept["runs"][0]["seed"] == 100
+    finally:
+        pool.close()
+
+    # 3. splice_functions_into_policy preserves existing self.<attr> in __init__
+    base_code = """
+class Policy:
+    def __init__(self):
+        self.old_attr1 = 10
+        self.old_attr2 = 20
+        self.overwrite_me = "old"
+
+    def run(self, state):
+        return Action.WAIT
+"""
+    patch_code = """
+    def __init__(self):
+        \"\"\"Patch docstring.\"\"\"
+        self.overwrite_me = "new"
+        self.new_attr = 30
+"""
+    spliced, changed = splice_functions_into_policy(base_code, patch_code)
+    assert "__init__" in changed
+    assert "self.old_attr1 = 10" in spliced
+    assert "self.old_attr2 = 20" in spliced
+    assert (
+        "self.overwrite_me = 'new'" in spliced or 'self.overwrite_me = "new"' in spliced
+    )
+    assert "self.new_attr = 30" in spliced
+
+    # 4. ModeScheduler does not lock into STRUCTURAL_REFACTOR on consecutive_failures == 4
+    sched = ModeScheduler(macro_every=0)
+    mode_at_3 = sched.select_mode(generation=3, has_policy=True, consecutive_failures=3)
+    assert mode_at_3 == "STRUCTURAL_REFACTOR"
+    mode_at_4 = sched.select_mode(generation=4, has_policy=True, consecutive_failures=4)
+    assert mode_at_4 != "STRUCTURAL_REFACTOR"
+
+    # 5. AuthorToolRegistry.query_policy_docs("policy") returns current_policy_code
+    db_p = str(tmp_path / "pass6_tools.duckdb")
+    tools = AuthorToolRegistry(db_path=db_p)
+    tools.current_policy_code = "class Policy:\n    pass"
+    doc_text, topic_tag = tools.query_policy_docs("policy")
+    assert "class Policy:" in doc_text
+    assert topic_tag == "policy source"
+
+    # 6. ConsoleUI.hypothesis_box and BatchDatabaseLogger.save_experiment record
+    #    binding_constraint and verified_c_rule
+    c_ui = ConsoleUI(enabled=True)
+    c_ui.hypothesis_box(
+        {
+            "binding_constraint": "Hunger clock forces exploration",
+            "mechanism": "Eat corpses before descending",
+            "target_functions": ["eat"],
+        }
+    )
+    c_ui.hypothesis_box(
+        {
+            "verified_c_rule": "Doors cannot be entered diagonally",
+            "mechanism": "Orthogonal alignment",
+            "target_functions": ["move"],
+        }
+    )
+
+    db_logger = BatchDatabaseLogger(db_p)
+    db_logger.save_experiment(
+        experiment_id="exp_test_binding",
+        generation=1,
+        batch_id="b1",
+        mode="FUNC_MOD_ADD",
+        target_functions=["eat"],
+        hypothesis={"binding_constraint": "Hunger clock forces exploration"},
+        verdict={"passed": True},
+    )
+    db_logger.save_experiment(
+        experiment_id="exp_test_verified",
+        generation=2,
+        batch_id="b2",
+        mode="FUNC_MOD_ADD",
+        target_functions=["move"],
+        hypothesis={"verified_c_rule": "Doors cannot be entered diagonally"},
+        verdict={"passed": True},
+    )
+    con = connect_db(db_p)
+    try:
+        rows = con.execute(
+            "SELECT experiment_id, observation_from_db FROM experiments ORDER BY generation"
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0][1] == "Hunger clock forces exploration"
+        assert rows[1][1] == "Doors cannot be entered diagonally"
+    finally:
+        con.close()

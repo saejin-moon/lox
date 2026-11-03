@@ -28,7 +28,7 @@ from lox.ui.console import ui
 # Process-local persistent state inside worker processes
 _WORKER_HARNESS: EnvHarness | None = None
 _WORKER_ROLE: str = "val-hum-law-fem"
-_WORKER_MAX_STEPS: int = 2500
+_WORKER_MAX_STEPS: int = 5000
 _WORKER_BENCHMARK: str = "nethack"
 _WORKER_COMPILED_CACHE: tuple[tuple[int, int, int], CompiledPolicy] | None = None
 
@@ -400,6 +400,7 @@ class PersistentEvalPool:
         target_episodes: int = 30,
         target_functions: list[str] | None = None,
         priority_seeds: list[int] | None = None,
+        unconditional_seeds: list[int] | set[int] | None = None,
         seed_start: int = 10000,
         max_raw_multiplier: int = 8,
         param_overrides: dict[str, float] | None = None,
@@ -444,6 +445,11 @@ class PersistentEvalPool:
         )
 
         priority_seeds_set = {int(s) for s in (priority_seeds or [])}
+        unconditional_seeds_set = (
+            {int(s) for s in unconditional_seeds}
+            if unconditional_seeds is not None
+            else priority_seeds_set
+        )
         shard_queue = list(shards) if shards else []
 
         def _shard_val(sh: Any, attr: str, default: Any) -> Any:
@@ -533,7 +539,7 @@ class PersistentEvalPool:
                         used_seeds.add(s)
                         next_seed_cursor += 1
 
-                    is_pri = s in priority_seeds_set
+                    is_pri = s in unconditional_seeds_set
                     tasks.append(
                         {
                             "seed": s,

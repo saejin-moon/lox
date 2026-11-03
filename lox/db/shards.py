@@ -84,7 +84,25 @@ def extract_shards_from_runs(
     shards: list[PrefixShard] = []
     seen_seeds: set[tuple[int, str]] = set()
 
-    for r in runs:
+    runs_to_process = list(runs)
+    if target_functions:
+        target_set = set(target_functions)
+
+        def _has_target(r_item: dict[str, Any]) -> bool:
+            fn_map = r_item.get("triggered_functions") or r_item.get(
+                "functions_triggered"
+            )
+            if isinstance(fn_map, str):
+                try:
+                    fn_map = json.loads(fn_map)
+                except Exception:
+                    fn_map = {}
+            fn_keys = set(fn_map.keys()) if isinstance(fn_map, dict) else set()
+            return bool(target_set & fn_keys)
+
+        runs_to_process.sort(key=lambda r_item: 0 if _has_target(r_item) else 1)
+
+    for r in runs_to_process:
         if len(shards) >= max_shards:
             break
 
@@ -96,13 +114,19 @@ def extract_shards_from_runs(
         run_id = str(r.get("run_id", "run"))
         seed = int(r.get("seed", 0))
         steps = int(r.get("steps") or r.get("turns") or len(b_bytes))
+        turns = int(r.get("turns") or steps)
         end_reason = str(r.get("end_reason", "ended"))
         summary = str(r.get("summary_digest", ""))
         depth = int(r.get("max_depth", r.get("depth", 1)))
         ticks = r.get("ticks") or []
 
         # 1. Pre-Death Windows (30 steps before fatal encounter)
-        if end_reason not in ("max_steps", "ascended", "ended") and steps >= 15:
+        is_starv = "starv" in end_reason.lower()
+        if (
+            end_reason not in ("max_steps", "ascended", "ended")
+            and steps >= 15
+            and (not is_starv or len(runs) <= 5)
+        ):
             cut_step = max(5, steps - 30 if steps >= 35 else steps - 5)
             ratio = cut_step / float(steps)
             default_cut = max(5, min(len(b_bytes) - 5, int(len(b_bytes) * ratio)))
@@ -133,7 +157,7 @@ def extract_shards_from_runs(
             if m:
                 stall_start_turn = int(m.group(1))
                 cut_step = max(5, stall_start_turn - 5)
-                ratio = cut_step / float(max(1, steps))
+                ratio = cut_step / float(max(1, turns))
                 default_cut = max(5, min(len(b_bytes) - 5, int(len(b_bytes) * ratio)))
                 cut_idx = _find_byte_offset(
                     ticks, pred_turn=cut_step, default_offset=default_cut
@@ -183,7 +207,7 @@ def extract_shards_from_runs(
                 continue
             if d_val >= 2 and d_turn_val > 0:
                 cut_step = d_turn_val
-                ratio = cut_step / float(max(1, steps))
+                ratio = cut_step / float(max(1, turns))
                 default_cut = max(5, min(len(b_bytes), int(len(b_bytes) * ratio)))
                 cut_idx = _find_byte_offset(
                     ticks, pred_depth=d_val, default_offset=default_cut

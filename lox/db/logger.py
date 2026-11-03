@@ -13,7 +13,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from lox.db.schema import DEFAULT_DB_PATH, init_db
+from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
 from lox.db.summarizer import compute_function_stats, mark_outlier_good_runs
 from lox.ui.console import ui
 
@@ -54,7 +54,7 @@ class BatchDatabaseLogger:
         outlier_count = sum(1 for r in runs if r.get("is_outlier_good"))
         batch_metrics["outlier_count"] = outlier_count
 
-        con = init_db(self.db_path)
+        con = connect_db(self.db_path, read_only=False)
         now = datetime.datetime.now()
 
         try:
@@ -289,7 +289,7 @@ class BatchDatabaseLogger:
         max_depth: int,
         is_promoted: bool,
     ) -> None:
-        con = init_db(self.db_path)
+        con = connect_db(self.db_path, read_only=False)
         try:
             con.execute(
                 """
@@ -323,7 +323,7 @@ class BatchDatabaseLogger:
     ) -> None:
         import yaml
 
-        con = init_db(self.db_path)
+        con = connect_db(self.db_path, read_only=False)
         try:
             con.execute(
                 """
@@ -341,6 +341,8 @@ class BatchDatabaseLogger:
                     str(
                         hypothesis.get("observation_from_db")
                         or hypothesis.get("causal_finding")
+                        or hypothesis.get("binding_constraint")
+                        or hypothesis.get("verified_c_rule")
                         or ""
                     ),
                     str(hypothesis.get("mechanism") or ""),

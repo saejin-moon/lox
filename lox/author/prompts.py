@@ -111,22 +111,13 @@ Every turn, `state` exposes 100% of NetHack's observation arrays, terminal scree
   - `m.is_hostile` (`not (is_pet or is_peaceful)`), `m.is_adjacent_to(state.y, state.x)` (8-way Chebyshev adjacency—monsters attack diagonally as well as orthogonally!), `m.is_pet`, `m.is_peaceful`, `m.is_statue`, `m.is_invisible`.
   - `m.info`: `m.info.difficulty`, `m.info.ac`, `m.info.speed`, `m.info.level`, `m.info.nutrition`, `m.info.attacks` tuple.
   `state.adjacent_hostiles()` returns all visible hostile monsters in the 8 Chebyshev adjacent squares around the hero.
-- **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`)**:
-  Each `o` in `state.visible_objects()` has:
+- **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`) and Objects Here (`state.objects_here() -> list[VisibleObject]`)**:
+  `state.visible_objects()` returns all visible items on the floor (including items on the hero's tile `(state.y, state.x)`).
+  `state.objects_here()` returns only items directly on the hero's tile `(state.y, state.x)` (e.g. to inspect before pickup or eating).
+  Each `o` in `state.visible_objects()` / `state.objects_here()` has:
   - `o.y`, `o.x`, `o.name`, `o.char`, `o.color`.
   - `o.is_corpse`, `o.is_food`, `o.is_weapon`, `o.is_armor`.
   - `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`): inspect nutrition, safe/poisonous flags.
-- **Deterministic Zero-Heuristic WorldMemory (`state.mem`)**:
-  The harness automatically maintains deterministic, zero-heuristic spatial and episodic bookkeeping on `state.mem`:
-  - `state.mem.passable_mask`: ready-to-use `21x79` boolean mask of remembered walkable floor, corridor, open door, and stair tiles, strictly excluding walls `|-` and solid rock `' '`.
-  - `state.mem.visited`: `bool[21, 79]` mask of tiles the hero has physically visited on the current floor.
-  - `state.mem.visit_count`: `int32[21, 79]` array of visit frequencies for each tile on the current floor.
-  - `state.mem.door_mask`: `bool[21, 79]` mask of doorway tiles (doors must be entered/exited orthogonally; diagonal movement into/out of intact doorways is forbidden by the C engine).
-  - `state.mem.locked_doors`: `set[tuple[int, int]]` containing coordinates `(y, x)` on the current floor confirmed to be locked doors.
-  - `state.mem.searched_counts`: `int16[21, 79]` count of how many times each tile has been searched via `Action.SEARCH` (crucial to know which walls/corridors have been searched for secret doors).
-  - `state.mem.stair_graph`: `dict[tuple[int, int, int, int], tuple[int, int, int, int]]` inter-floor transition graph.
-  - `state.mem.is_oscillating`: `bool`, `True` if <= 3 unique tiles were visited in the last 12 steps on the same floor (useful for anti-stall escape triggers).
-  - `state.mem.remembered_chars`: `uint8[21, 79]` ASCII array of static terrain characters observed on the current floor (open doors are normalized to `.` so they are never confused with `|-` walls).
 - **Status Flags**:
   `state.is_blind`, `state.is_confused`, `state.is_stunned`, `state.is_hallucinating`, `state.is_levitating`,
   `state.is_food_poisoned`, `state.is_terminally_ill`, `state.is_stoning`, `state.is_slimed`, `state.is_strangled`, `state.condition_mask`.
@@ -165,8 +156,8 @@ Every turn, `state` exposes 100% of NetHack's observation arrays, terminal scree
   - `state.path_step(passable_mask, target=(ty, tx), start=(y, x), allow_diagonal=True) -> (dy, dx)`: Returns the first step delta `(dy, dx)` along the shortest path from `start` to `target` (`(0, 0)` if unreachable).
   - **Generic Vectorized Pathfinding Usage**:
     ```python
-    # Construct a boolean passable mask (e.g. from state.chars or state.mem.remembered_chars):
-    passable = np.isin(state.chars, [ord('.'), ord('#'), ord('>')])
+    # Use the pre-computed passable mask or construct one:
+    passable = state.mem.passable_mask.copy()
     # Exclude obstacles or hazardous positions:
     for m in state.visible_monsters():
         passable[m.y, m.x] = False

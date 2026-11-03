@@ -51,8 +51,6 @@ class ExecutionTracer:
         "active_fn",
         "registered_params",
         "param_overrides",
-        "_turn_contributors",
-        "_recent_returns",
     )
 
     _ROOT_FNS = frozenset({"run", "step", "act", "root"})
@@ -67,10 +65,8 @@ class ExecutionTracer:
         self.total_turns: int = 0
         self.fn_calls: dict[str, int] = {}
         self.fn_turns: dict[str, int] = {}
-        self.call_stack: list[tuple[str, int]] = []
+        self.call_stack: list[list[Any]] = []
         self.active_fn: str = "root"
-        self._turn_contributors: set[str] = set()
-        self._recent_returns: list[tuple[str, Any]] = []
         self.registered_params: dict[str, TunableParam] = {}
         self.param_overrides: dict[str, float] = (
             dict(param_overrides) if param_overrides else {}
@@ -83,74 +79,51 @@ class ExecutionTracer:
         self.fn_turns.clear()
         self.call_stack.clear()
         self.active_fn = "root"
-        self._turn_contributors.clear()
-        self._recent_returns.clear()
 
     def enter_fn(self, fn_name: str, has_value_return: bool = False) -> None:
-        self.call_stack.append((fn_name, self.total_turns))
+        self.call_stack.append([fn_name, self.total_turns, False])
         if not has_value_return:
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
             self.active_fn = fn_name
 
     def on_return(self, fn_name: str, val: Any) -> Any:
-        is_noop = False
-        if val is None:
-            is_noop = True
-        elif isinstance(val, tuple) and len(val) == 2 and val == (0, 0):
-            is_noop = True
-
+        is_noop = val is None or (
+            isinstance(val, tuple) and len(val) == 2 and val == (0, 0)
+        )
         if not is_noop:
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
-            self.active_fn = fn_name
-
-            # The function returning is at the top of the call stack (index -1),
-            # so its caller is at index -2 (or 'root' if top-level).
-            if len(self.call_stack) >= 2:
-                caller_fn = self.call_stack[-2][0]
-            else:
-                caller_fn = "root"
-
-            def _same_val(v1: Any, v2: Any) -> bool:
-                if v1 is v2:
-                    return True
-                try:
-                    if isinstance(v1, (int, str, bytes, tuple)) and isinstance(
-                        v2, (int, str, bytes, tuple)
-                    ):
-                        return bool(v1 == v2)
-                except Exception:
-                    pass
-                return False
-
-            if fn_name not in self._ROOT_FNS:
-                if caller_fn in self._ROOT_FNS:
-                    contributors = {fn_name}
-                    for child_fn, child_val in self._recent_returns:
-                        if _same_val(child_val, val):
-                            contributors.add(child_fn)
-                    self._turn_contributors = contributors
-                    self._recent_returns.clear()
-                else:
-                    self._recent_returns.append((fn_name, val))
+            if self.call_stack:
+                self.call_stack[-1][2] = True
+            if val is not False:
+                self.active_fn = fn_name
         return val
 
     def exit_fn(self, fn_name: str) -> None:
         turns_at_enter = self.total_turns
+        returned_non_noop = False
         if self.call_stack:
-            top_fn, turns_at_enter = self.call_stack.pop()
+            top_frame = self.call_stack.pop()
+            top_fn, turns_at_enter, returned_non_noop = (
+                top_frame[0],
+                top_frame[1],
+                top_frame[2],
+            )
             if top_fn != fn_name:
-                # Re-sync if stack was unwound out of order
                 while self.call_stack and self.call_stack[-1][0] != fn_name:
-                    _, turns_at_enter = self.call_stack.pop()
+                    f = self.call_stack.pop()
+                    turns_at_enter, returned_non_noop = f[1], f[2]
                 if self.call_stack and self.call_stack[-1][0] == fn_name:
-                    _, turns_at_enter = self.call_stack.pop()
+                    f = self.call_stack.pop()
+                    turns_at_enter, returned_non_noop = f[1], f[2]
 
         if not self.call_stack:
             return
 
         caller_fn = self.call_stack[-1][0]
         yielded_inside = self.total_turns > turns_at_enter
-        if caller_fn not in self._ROOT_FNS and yielded_inside:
+        if caller_fn not in self._ROOT_FNS:
+            self.active_fn = caller_fn
+        elif not yielded_inside and not returned_non_noop:
             self.active_fn = caller_fn
 
     def record_turn_yield(self) -> str:
@@ -158,14 +131,7 @@ class ExecutionTracer:
         self.loop_ticks = 0
         self.total_turns += 1
         fn = self.active_fn
-        if fn in self._ROOT_FNS and self._turn_contributors:
-            fn = next(iter(self._turn_contributors))
         self.fn_turns[fn] = self.fn_turns.get(fn, 0) + 1
-        for c_fn in list(self._turn_contributors):
-            if c_fn != fn:
-                self.fn_turns[c_fn] = self.fn_turns.get(c_fn, 0) + 1
-        self._turn_contributors.clear()
-        self._recent_returns.clear()
         if self.call_stack:
             self.active_fn = self.call_stack[-1][0]
         else:

@@ -122,6 +122,8 @@ class ConsoleUI:
         obs = str(
             hypothesis.get("observation_from_db")
             or hypothesis.get("causal_finding")
+            or hypothesis.get("binding_constraint")
+            or hypothesis.get("verified_c_rule")
             or "N/A"
         )
         mech = str(hypothesis.get("mechanism") or "N/A")

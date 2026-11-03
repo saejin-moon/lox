@@ -77,8 +77,8 @@ def main() -> None:
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=2500,
-        help="Max steps per episode (default: 2500)",
+        default=5000,
+        help="Max steps per episode (default: 5000)",
     )
     parser.add_argument(
         "--generations",
@@ -161,7 +161,11 @@ def main() -> None:
     if args.clean:
         from scripts.reset_clean import reset_clean
 
-        reset_clean()
+        reset_clean(
+            db_path=args.db_path,
+            policy_path=args.policy_path,
+            macros_path=args.macros_path,
+        )
 
     orchestrator = CampaignOrchestrator(
         provider=args.provider,

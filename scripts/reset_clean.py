@@ -12,23 +12,28 @@ POLICY_PATH = "data/workspace/policy.py"
 MACROS_PATH = "data/workspace/macros.py"
 
 
-def reset_clean():
-    if os.path.exists(POLICY_PATH):
-        os.remove(POLICY_PATH)
-        print(f"Removed {POLICY_PATH}")
-    if os.path.exists(MACROS_PATH):
-        os.remove(MACROS_PATH)
-        print(f"Removed {MACROS_PATH}")
-    skills_dir = "data/workspace/skills"
-    if os.path.exists(skills_dir):
-        import shutil
+def reset_clean(
+    db_path: str = DB_PATH,
+    policy_path: str = POLICY_PATH,
+    macros_path: str = MACROS_PATH,
+):
+    import shutil
+    from pathlib import Path
 
+    if os.path.exists(policy_path):
+        os.remove(policy_path)
+        print(f"Removed {policy_path}")
+    if os.path.exists(macros_path):
+        os.remove(macros_path)
+        print(f"Removed {macros_path}")
+    skills_dir = Path(policy_path).parent / "skills"
+    if skills_dir.exists():
         shutil.rmtree(skills_dir)
-        os.makedirs(skills_dir, exist_ok=True)
+        skills_dir.mkdir(parents=True, exist_ok=True)
         print(f"Cleared {skills_dir}")
 
-    if os.path.exists(DB_PATH):
-        con = duckdb.connect(DB_PATH)
+    if os.path.exists(db_path):
+        con = duckdb.connect(db_path)
         try:
             for table in [
                 "batches",

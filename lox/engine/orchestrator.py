@@ -49,6 +49,7 @@ class PolicyArchiveEntry:
     pull_count: int = 0
     total_reward: float = 0.0
     baseline_runs: list[dict[str, Any]] = field(default_factory=list)
+    batch_digest: str = ""
 
 
 class CampaignOrchestrator:
@@ -235,11 +236,12 @@ class CampaignOrchestrator:
                     # Load the most recent promoted policy's baseline runs from DuckDB
                     prom_row = con.execute(
                         """
-                        SELECT p.candidate_policy_id, p.params_json, b.batch_id
+                        SELECT p.policy_id, p.params_json, b.batch_id
                         FROM policies p
-                        JOIN batches b ON b.candidate_policy_id = p.candidate_policy_id
+                        JOIN batches b ON b.candidate_policy_id = p.policy_id
                         WHERE p.is_promoted = TRUE
-                        ORDER BY p.generation DESC LIMIT 1
+                          AND b.mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
+                        ORDER BY b.generation DESC, b.created_at DESC LIMIT 1
                         """
                     ).fetchone()
                     if prom_row:
@@ -370,18 +372,36 @@ class CampaignOrchestrator:
             consecutive_failures = 0
             for gen in range(start_gen, start_gen + max_generations):
                 # MAP-Elites UCB parent selection
+                chosen_niche = "descent"
                 if self.policy_archive:
+                    if "descent" in self.policy_archive:
+                        champ_entry = self.policy_archive["descent"]
+                        for n_key, n_entry in list(self.policy_archive.items()):
+                            if n_entry.avg_depth < champ_entry.avg_depth - 0.10:
+                                self.policy_archive[n_key] = PolicyArchiveEntry(
+                                    policy_id=champ_entry.policy_id,
+                                    policy_code=champ_entry.policy_code,
+                                    niche=n_key,
+                                    avg_depth=champ_entry.avg_depth,
+                                    p90_depth=champ_entry.p90_depth,
+                                    max_depth=champ_entry.max_depth,
+                                    avg_ac=champ_entry.avg_ac,
+                                    avg_xl=champ_entry.avg_xl,
+                                    baseline_runs=list(champ_entry.baseline_runs),
+                                    batch_digest=champ_entry.batch_digest,
+                                )
                     best_niche = "descent"
                     best_score = -1e9
                     total_p = sum(e.pull_count for e in self.policy_archive.values())
                     for n_name, e in self.policy_archive.items():
-                        q = e.total_reward / max(1, e.pull_count)
-                        u = q + 0.5 * math.sqrt(
+                        q = e.avg_depth + (e.total_reward / max(1, e.pull_count))
+                        u = q + 0.15 * math.sqrt(
                             2.0 * math.log(total_p + 1.0) / max(1, e.pull_count)
                         )
                         if u > best_score:
                             best_score = u
                             best_niche = n_name
+                    chosen_niche = best_niche
                     chosen_entry = self.policy_archive[best_niche]
                     chosen_entry.pull_count += 1
                     current_policy = chosen_entry.policy_code
@@ -390,6 +410,8 @@ class CampaignOrchestrator:
                     baseline_by_seed = {
                         int(r["seed"]): r for r in baseline_runs if "seed" in r
                     }
+                    if chosen_entry.batch_digest:
+                        last_batch_digest = chosen_entry.batch_digest
 
                 mode = self.scheduler.select_mode(
                     generation=gen,
@@ -485,7 +507,12 @@ class CampaignOrchestrator:
                         if verdict["passed"]:
                             current_policy = spsa_res["new_policy_code"]
                             current_policy_id = cand_id
-                            self.save_active_policy(current_policy)
+                            if (
+                                "descent" not in self.policy_archive
+                                or float(val_batch["avg_depth"])
+                                >= self.policy_archive["descent"].avg_depth
+                            ):
+                                self.save_active_policy(current_policy)
                             if spsa_res.get("new_macros_code"):
                                 self.macro_lib.save_code(spsa_res["new_macros_code"])
                             for pk, pval in spsa_res["optimized_params"].items():
@@ -500,11 +527,62 @@ class CampaignOrchestrator:
                                 if not r.get("is_shard")
                             }
                             if full_promoted:
-                                baseline_by_seed = full_promoted
+                                baseline_by_seed.update(full_promoted)
                                 baseline_runs = list(baseline_by_seed.values())
                             last_batch_digest = build_batch_contrast_digest(
                                 val_batch, val_batch["runs"], fn_stats
                             )
+                            # Update policy_archive with tuned parameters so next gen doesn't revert them
+                            if self.policy_archive:
+                                tuned_entry = PolicyArchiveEntry(
+                                    policy_id=cand_id,
+                                    policy_code=current_policy,
+                                    niche=chosen_niche,
+                                    avg_depth=float(val_batch["avg_depth"]),
+                                    p90_depth=float(val_batch["p90_depth"]),
+                                    max_depth=int(val_batch["max_depth"]),
+                                    avg_ac=float(
+                                        np.mean(
+                                            [
+                                                r.get("final_ac", 10)
+                                                for r in val_batch["runs"]
+                                            ]
+                                        )
+                                    )
+                                    if val_batch["runs"]
+                                    else 10.0,
+                                    avg_xl=float(
+                                        np.mean(
+                                            [
+                                                r.get("xp_level", 1)
+                                                for r in val_batch["runs"]
+                                            ]
+                                        )
+                                    )
+                                    if val_batch["runs"]
+                                    else 1.0,
+                                    baseline_runs=list(baseline_runs),
+                                    batch_digest=last_batch_digest,
+                                )
+                                if chosen_niche in self.policy_archive:
+                                    self.policy_archive[chosen_niche] = tuned_entry
+                                if (
+                                    "descent" in self.policy_archive
+                                    and float(val_batch["avg_depth"])
+                                    >= self.policy_archive["descent"].avg_depth
+                                ):
+                                    self.policy_archive["descent"] = PolicyArchiveEntry(
+                                        policy_id=cand_id,
+                                        policy_code=current_policy,
+                                        niche="descent",
+                                        avg_depth=float(val_batch["avg_depth"]),
+                                        p90_depth=float(val_batch["p90_depth"]),
+                                        max_depth=int(val_batch["max_depth"]),
+                                        avg_ac=tuned_entry.avg_ac,
+                                        avg_xl=tuned_entry.avg_xl,
+                                        baseline_runs=list(baseline_runs),
+                                        batch_digest=last_batch_digest,
+                                    )
                     else:
                         ui.warn(verdict["reason"])
                     continue
@@ -645,9 +723,11 @@ class CampaignOrchestrator:
 
                 # Prioritize seeds from baseline_runs so paired comparison is 1-to-1 on identical seeds
                 priority_seeds = None
+                unconditional_seeds = None
                 eval_shards = None
                 if baseline_runs:
                     base_triggered_seeds: list[int] = []
+                    base_fail_seeds: list[int] = []
                     base_remaining_seeds: list[int] = []
                     target_set = set(target_fns or [])
                     for r in baseline_runs:
@@ -669,11 +749,16 @@ class CampaignOrchestrator:
                             "ended",
                         )
                         s = int(r["seed"])
-                        if is_trig or is_fail:
+                        if is_trig:
                             base_triggered_seeds.append(s)
+                        elif is_fail:
+                            base_fail_seeds.append(s)
                         else:
                             base_remaining_seeds.append(s)
-                    priority_seeds = base_triggered_seeds + base_remaining_seeds
+                    unconditional_seeds = list(base_triggered_seeds)
+                    priority_seeds = (
+                        base_triggered_seeds + base_fail_seeds + base_remaining_seeds
+                    )
 
                     if proposal.mode == "FUNC_MOD_ADD":
                         fail_runs = [
@@ -691,6 +776,12 @@ class CampaignOrchestrator:
                             priority_seeds = [
                                 s for s in priority_seeds if s not in shard_seeds
                             ]
+                            if unconditional_seeds:
+                                unconditional_seeds = [
+                                    s
+                                    for s in unconditional_seeds
+                                    if s not in shard_seeds
+                                ]
 
                 # Evaluate baseline policy on exact evaluation shards for apples-to-apples pairing
                 base_shard_runs: list[dict[str, Any]] = []
@@ -737,6 +828,9 @@ class CampaignOrchestrator:
                     if proposal.mode == "FUNC_MOD_ADD"
                     else None,
                     priority_seeds=priority_seeds,
+                    unconditional_seeds=unconditional_seeds
+                    if proposal.mode == "FUNC_MOD_ADD"
+                    else None,
                     seed_start=seed_base + gen * 10000,
                     record_ticks=True,
                     show_progress=True,
@@ -838,6 +932,11 @@ class CampaignOrchestrator:
                 )
                 ui.batch_summary(eval_res, verdict)
 
+                if self.policy_archive and chosen_niche in self.policy_archive:
+                    self.policy_archive[chosen_niche].total_reward += max(
+                        0.0, float(verdict.get("mean_delta", 0.0))
+                    )
+
                 self.scheduler.record_outcome(
                     proposal.mode,
                     verdict.get("mean_delta", 0.0),
@@ -869,7 +968,12 @@ class CampaignOrchestrator:
                     consecutive_failures = 0
                     current_policy = proposal.full_policy_code
                     current_policy_id = cand_id
-                    self.save_active_policy(current_policy)
+                    if (
+                        "descent" not in self.policy_archive
+                        or float(eval_res["avg_depth"])
+                        >= self.policy_archive["descent"].avg_depth
+                    ):
+                        self.save_active_policy(current_policy)
                     if proposal.hypothesis.get("skill_module") and getattr(
                         proposal, "skill_code", ""
                     ):
@@ -887,6 +991,10 @@ class CampaignOrchestrator:
                     if full_promoted:
                         baseline_by_seed.update(full_promoted)
                         baseline_runs = list(baseline_by_seed.values())
+
+                    last_batch_digest = build_batch_contrast_digest(
+                        eval_res, eval_res["runs"], fn_stats
+                    )
 
                     # Update Quality-Diversity (MAP-Elites) policy archive using clean non-shard baseline runs
                     clean_archive_runs = list(baseline_runs)
@@ -919,6 +1027,7 @@ class CampaignOrchestrator:
                             avg_ac=c_ac,
                             avg_xl=c_xl,
                             baseline_runs=clean_archive_runs,
+                            batch_digest=last_batch_digest,
                         )
                     if (
                         "outlier" not in self.policy_archive
@@ -935,11 +1044,15 @@ class CampaignOrchestrator:
                             avg_ac=c_ac,
                             avg_xl=c_xl,
                             baseline_runs=clean_archive_runs,
+                            batch_digest=last_batch_digest,
                         )
-                    if (
-                        "survivability" not in self.policy_archive
-                        or c_ac <= self.policy_archive["survivability"].avg_ac
-                        or c_xl >= self.policy_archive["survivability"].avg_xl
+                    if "survivability" not in self.policy_archive or (
+                        (
+                            c_ac <= self.policy_archive["survivability"].avg_ac
+                            or c_xl >= self.policy_archive["survivability"].avg_xl
+                        )
+                        and c_depth
+                        >= self.policy_archive["survivability"].avg_depth - 0.05
                     ):
                         self.policy_archive["survivability"] = PolicyArchiveEntry(
                             policy_id=cand_id,
@@ -951,6 +1064,7 @@ class CampaignOrchestrator:
                             avg_ac=c_ac,
                             avg_xl=c_xl,
                             baseline_runs=clean_archive_runs,
+                            batch_digest=last_batch_digest,
                         )
 
                     # Trigger bottom-up macro harvesting (DreamCoder/Voyager style)
@@ -963,10 +1077,6 @@ class CampaignOrchestrator:
                         ui.info(
                             f"Bottom-Up Library Learning: Harvested verified macro(s) {harvested} into `{self.macros_path}`."
                         )
-
-                    last_batch_digest = build_batch_contrast_digest(
-                        eval_res, eval_res["runs"], fn_stats
-                    )
                 else:
                     consecutive_failures += 1
                     if not last_batch_digest and eval_res["runs"]:
