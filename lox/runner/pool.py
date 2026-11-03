@@ -479,10 +479,18 @@ class PersistentEvalPool:
 
         while len(triggered_runs) < target_episodes and raw_done < max_raw_episodes:
             needed = target_episodes - len(triggered_runs)
-            batch_capacity = min(
-                max(needed * 2 if target_fns else needed, self.workers * 8),
-                max_raw_episodes - raw_done,
-            )
+            guaranteed_ready = len(shard_queue) + len(seed_queue)
+            if guaranteed_ready > 0 or not target_fns:
+                batch_capacity = min(
+                    needed,
+                    guaranteed_ready if guaranteed_ready > 0 else needed,
+                    max_raw_episodes - raw_done,
+                )
+            else:
+                batch_capacity = min(
+                    max(needed * 2, self.workers * 2),
+                    max_raw_episodes - raw_done,
+                )
             if batch_capacity <= 0:
                 break
 
@@ -625,9 +633,11 @@ class PersistentEvalPool:
 
         wall_sec = time.perf_counter() - t0
         sps = total_steps / max(1e-6, wall_sec)
-        depths = [r["max_depth"] for r in triggered_runs]
-        scores = [r["score"] for r in triggered_runs]
-        turns = [r["turns"] for r in triggered_runs]
+        full_runs = [r for r in triggered_runs if not r.get("is_shard")]
+        stat_runs = full_runs if full_runs else triggered_runs
+        depths = [r["max_depth"] for r in stat_runs]
+        scores = [r["score"] for r in stat_runs]
+        turns = [r["turns"] for r in stat_runs]
 
         return {
             "batch_id": batch_id,
@@ -637,9 +647,17 @@ class PersistentEvalPool:
             "raw_episodes_run": raw_done,
             "avg_depth": float(np.mean(depths)) if depths else 0.0,
             "p90_depth": float(np.percentile(depths, 90)) if depths else 0.0,
-            "max_depth": int(np.max(depths)) if depths else 0,
+            "max_depth": (
+                int(np.max([r["max_depth"] for r in triggered_runs]))
+                if triggered_runs
+                else 0
+            ),
             "avg_score": float(np.mean(scores)) if scores else 0.0,
-            "max_score": int(np.max(scores)) if scores else 0,
+            "max_score": (
+                int(np.max([r["score"] for r in triggered_runs]))
+                if triggered_runs
+                else 0
+            ),
             "avg_turns": float(np.mean(turns)) if turns else 0.0,
             "steps_per_sec": round(sps, 1),
             "wall_sec": round(wall_sec, 2),
