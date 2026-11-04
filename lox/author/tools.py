@@ -556,7 +556,6 @@ class AuthorToolRegistry:
                         stop_at_byte_idx=cut,
                     )
                     harness.step_count = 0
-                    harness.done = False
                 else:
                     state = harness.reset(seed=int(seed))
             else:

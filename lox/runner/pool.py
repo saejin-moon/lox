@@ -118,6 +118,30 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         max_steps = int(post_replay_max_steps or 200)
         harness.step_count = 0
         harness.max_steps = max_steps
+        if harness.done:
+            msg = getattr(state, "message", "")
+            return {
+                "triggered": True,
+                "is_shard": True,
+                "shard_id": task.get("shard_id"),
+                "run_id": run_id,
+                "seed": seed,
+                "steps": 0,
+                "turns": getattr(state, "turn", 0),
+                "score": getattr(state, "score", 0),
+                "gold": getattr(state, "gold", 0),
+                "max_depth": getattr(state, "depth", 1),
+                "hp": getattr(state, "hp", 0),
+                "max_hp": getattr(state, "max_hp", 0),
+                "ac": getattr(state, "ac", 10),
+                "xp_level": getattr(state, "xp_level", 1),
+                "end_reason": msg.split(".")[0][:60] if msg else "died",
+                "death_message": msg[:160],
+                "action_bytes": bytes(harness.action_bytes),
+                "ticks": [],
+                "function_stats": {},
+                "registered_params": {},
+            }
         harness.done = False
         if hasattr(state, "mem") and hasattr(state.mem, "kv"):
             for k, v in state.mem.kv.items():

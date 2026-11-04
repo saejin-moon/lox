@@ -213,3 +213,30 @@ def test_auto_dismiss_more_stairs_descent_and_replay():
                 assert replay_st.depth == 2
     finally:
         harness.close()
+
+
+def test_fatal_replay_bytes_and_step_guard():
+    """Verify that replaying bytes that end in death cleanly handles finished NetHack without raising RuntimeError."""
+    harness = NetHackHarness(max_steps=500)
+    try:
+        harness.reset(seed=123)
+        for _ in range(20):
+            st, done, _ = harness.step(seq("#", "p", "r", "a", "y", "\r", "y"))
+            if done:
+                break
+        assert harness.done is True
+        fatal_bytes = bytes(harness.action_bytes)
+
+        harness2 = NetHackHarness(max_steps=500)
+        try:
+            st2 = harness2.replay_bytes(seed=123, recorded_bytes=fatal_bytes)
+            assert st2.hp <= 0 or harness2.done is True
+            assert harness2.done is True
+
+            st3, done3, info3 = harness2.step(Action.WAIT)
+            assert done3 is True
+            assert info3["action_name"] == "DONE"
+        finally:
+            harness2.close()
+    finally:
+        harness.close()

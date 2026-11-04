@@ -141,7 +141,7 @@ def extract_shards_from_runs(
             cut_idx = _find_byte_offset(
                 ticks, pred_step=cut_step, default_offset=default_cut
             )
-            cut_idx = max(1, min(len(b_bytes), cut_idx))
+            cut_idx = max(1, min(len(b_bytes) - 2, cut_idx))
             ctx = f"pre_death:{end_reason[:30]}"
             key = (seed, ctx)
             if key not in seen_seeds:
@@ -170,7 +170,7 @@ def extract_shards_from_runs(
                 cut_idx = _find_byte_offset(
                     ticks, pred_turn=cut_step, default_offset=default_cut
                 )
-                cut_idx = max(1, min(len(b_bytes), cut_idx))
+                cut_idx = max(1, min(len(b_bytes) - 2, cut_idx))
                 ctx = "pre_stall"
                 key = (seed, ctx)
                 if key not in seen_seeds:
@@ -220,7 +220,7 @@ def extract_shards_from_runs(
                 cut_idx = _find_byte_offset(
                     ticks, pred_depth=d_val, default_offset=default_cut
                 )
-                cut_idx = max(1, min(len(b_bytes), cut_idx))
+                cut_idx = max(1, min(len(b_bytes) - 2, cut_idx))
                 ctx = f"floor_entry:{d_val}"
                 key = (seed, ctx)
                 if key not in seen_seeds:

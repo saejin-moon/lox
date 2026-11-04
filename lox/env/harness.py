@@ -157,7 +157,12 @@ class NetHackHarness:
                 else:
                     b = ASCII_SPACE
             self.action_bytes.append(b)
-            obs_tuple, done = self.nh.step(b)
+            try:
+                obs_tuple, done = self.nh.step(b)
+            except RuntimeError as err:
+                if "Called step on finished NetHack" in str(err):
+                    return obs_tuple, True
+                raise
             if messages is not None:
                 raw_m = self._extract_raw_message(obs_tuple)
                 if raw_m and (not messages or messages[-1] != raw_m):
@@ -180,7 +185,13 @@ class NetHackHarness:
             if self._in_moveloop(obs_tuple) and not self._waiting_for_space(obs_tuple):
                 break
             self.action_bytes.append(ASCII_SPACE)
-            obs_tuple, self.done = self.nh.step(ASCII_SPACE)
+            try:
+                obs_tuple, self.done = self.nh.step(ASCII_SPACE)
+            except RuntimeError as err:
+                if "Called step on finished NetHack" in str(err):
+                    self.done = True
+                    break
+                raise
             if self.done:
                 break
 
@@ -212,7 +223,14 @@ class NetHackHarness:
 
         for idx, b in enumerate(bytes_seq):
             self.action_bytes.append(b)
-            obs_tuple, done = self.nh.step(b)
+            try:
+                obs_tuple, done = self.nh.step(b)
+            except RuntimeError as err:
+                if "Called step on finished NetHack" in str(err):
+                    self.done = True
+                    done = True
+                    break
+                raise
             raw_m = self._extract_raw_message(obs_tuple)
             if raw_m and (not messages or messages[-1] != raw_m):
                 messages.append(raw_m)
@@ -227,7 +245,14 @@ class NetHackHarness:
                 ):
                     more_safety += 1
                     self.action_bytes.append(ASCII_SPACE)
-                    obs_tuple, done = self.nh.step(ASCII_SPACE)
+                    try:
+                        obs_tuple, done = self.nh.step(ASCII_SPACE)
+                    except RuntimeError as err:
+                        if "Called step on finished NetHack" in str(err):
+                            self.done = True
+                            done = True
+                            break
+                        raise
                     raw_m = self._extract_raw_message(obs_tuple)
                     if raw_m and (not messages or messages[-1] != raw_m):
                         messages.append(raw_m)
@@ -301,7 +326,15 @@ class NetHackHarness:
         for i in range(limit):
             b = int(buf[i])
             self.action_bytes.append(b)
-            obs_tuple, self.done = self.nh.step(b)
+            try:
+                obs_tuple, self.done = self.nh.step(b)
+            except RuntimeError as err:
+                if "Called step on finished NetHack" in str(err):
+                    self.done = True
+                    break
+                raise
+            if self.done:
+                break
             bl = obs_tuple[bl_idx]
             dnum, dlvl, by, bx = int(bl[23]), int(bl[24]), int(bl[1]), int(bl[0])
             self.mem.pos_history.append((dnum, dlvl, by, bx))
