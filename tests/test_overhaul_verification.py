@@ -1456,6 +1456,20 @@ class Policy:
     # Prune telemetry
     logger.prune_old_telemetry(current_generation=25, keep_generations=20)
 
+    # Stale 17-column ticks table auto-migration
+    stale_db_path = str(tmp_path / "stale_test.duckdb")
+    con_stale = connect_db(stale_db_path)
+    con_stale.execute(
+        "CREATE TABLE ticks (" + ", ".join([f"col_{i} INT" for i in range(17)]) + ")"
+    )
+    con_stale.close()
+    con_migrated = init_db(stale_db_path)
+    migrated_cols = [
+        r[1] for r in con_migrated.execute("PRAGMA table_info('ticks')").fetchall()
+    ]
+    assert len(migrated_cols) == 20
+    con_migrated.close()
+
     # 6. write_status_report and scripts/status_lox.py
     ws_dir = str(tmp_path / "workspace")
     Path(ws_dir).mkdir(parents=True, exist_ok=True)

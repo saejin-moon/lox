@@ -259,8 +259,20 @@ WHERE batch_id = (
 
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
-    """Initializes all DuckDB tables for LOX."""
+    """Initializes all DuckDB tables for LOX and automatically migrates outdated schemas."""
     con = connect_db(db_path, read_only=False)
+    try:
+        tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
+        if "ticks" in tables:
+            cols = [r[1] for r in con.execute("PRAGMA table_info('ticks')").fetchall()]
+            if len(cols) != 20:
+                con.execute("DROP TABLE ticks")
+        if "runs" in tables:
+            cols = [r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()]
+            if len(cols) != 27:
+                con.execute("DROP TABLE runs")
+    except Exception:
+        pass
     con.execute(SCHEMA_SQL)
     return con
 

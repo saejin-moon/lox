@@ -50,6 +50,12 @@ def reset_clean(
             print(f"Preserved `expert_runs` ({exp_count} expert runs ready)")
         finally:
             con.close()
+
+        from lox.db.schema import init_db
+
+        con_init = init_db(db_path)
+        con_init.close()
+        print("Verified DuckDB table schemas and views.")
     print("LOX workspace and database successfully reset to clean state.")
 
 
