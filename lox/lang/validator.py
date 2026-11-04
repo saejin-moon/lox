@@ -156,6 +156,20 @@ def validate_python_code(code: str, filename: str = "<policy>") -> ast.Module:
     return tree
 
 
+def is_ast_equivalent(code1: str, code2: str) -> bool:
+    """Returns True if code1 and code2 parse to structurally equivalent ASTs (ignoring comments/whitespace)."""
+    if not code1 or not code2:
+        return False
+    if code1.strip() == code2.strip():
+        return True
+    try:
+        t1 = ast.dump(ast.parse(textwrap.dedent(code1).strip()))
+        t2 = ast.dump(ast.parse(textwrap.dedent(code2).strip()))
+        return t1 == t2
+    except Exception:
+        return False
+
+
 def splice_functions_into_policy(
     base_policy_code: str,
     patch_code: str,

@@ -28,7 +28,7 @@ from lox.db.shards import extract_shards_from_runs
 from lox.env.harness import NetHackHarness
 from lox.lang.compiler import compile_policy_package
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
-from lox.lang.validator import splice_functions_into_policy
+from lox.lang.validator import is_ast_equivalent, splice_functions_into_policy
 
 
 def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
@@ -470,12 +470,29 @@ class AuthorToolRegistry:
         if (
             not is_macro
             and self.last_passed_code
-            and code.strip() == self.last_passed_code.strip()
+            and self.last_pilot_improved
+            and (
+                code.strip() == self.last_passed_code.strip()
+                or is_ast_equivalent(code, self.last_passed_code)
+            )
+        ):
+            return (
+                f"Candidate code already verified in passing pilot batch ({self.last_pilot_summary}). "
+                "DO NOT run more pilots. Conclude your turn immediately and output your final hypothesis.",
+                f"PASSED (cached: {self.last_pilot_summary})",
+            )
+
+        if (
+            not is_macro
+            and not smoke_only
+            and self.last_passed_code
             and self.last_pilot_improved
         ):
             return (
-                f"Candidate code already verified in pilot batch ({self.last_pilot_summary}).",
-                f"PASSED (cached: {self.last_pilot_summary})",
+                f"Pilot verification ALREADY PASSED in this generation ({self.last_pilot_summary})! "
+                "The engine has already recorded your passing candidate code. "
+                "DO NOT run further pilot tests. Conclude your turn immediately and output your final ```yaml ... ``` hypothesis and ```python ... ``` code block.",
+                f"PASSED (verified: {self.last_pilot_summary})",
             )
 
         if is_macro:
@@ -1114,8 +1131,21 @@ class AuthorToolRegistry:
                 )
                 if improved:
                     self.last_passed_code = code
+                    self.last_pilot_improved = True
+                    pass_msg = (
+                        f"\n\n═══════════════════════════════════════════════════════════════════\n"
+                        f"PILOT BATCH {rev_idx}/{max_rev} REPORT ({len(p_runs)} episodes across workers in {pilot_res.get('wall_sec', 0.0)}s):\n"
+                        f"{paired_line}"
+                        f"• End Reasons: {{{end_reasons_str}}}\n"
+                        f"• Best Pilot Run: {best_log_str}\n"
+                        f"{verdict_line}\n"
+                        f"• Status: PILOT PASSED ✓ (Statistically significant improvement verified over baseline).\n"
+                        f"• ACTION REQUIRED: STOP CALLING TOOLS. You have successfully verified your candidate code.\n"
+                        f"  Conclude your turn immediately and output your final ```yaml ... ``` hypothesis and ```python ... ``` code block!\n"
+                        f"═══════════════════════════════════════════════════════════════════"
+                    )
                     return (
-                        f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}{pilot_diag}",
+                        f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}{pass_msg}",
                         f"PASSED (Pilot {rev_idx}/{max_rev}: {summary_short})",
                     )
                 else:

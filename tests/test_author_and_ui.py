@@ -683,3 +683,36 @@ class Policy:
     assert any("🛑 PHASE 1 ENFORCEMENT" in p for p in received_user_prompts)
     assert turn_counter >= 2
     assert "class Policy" in proposal.full_policy_code
+
+
+def test_pilot_stops_immediately_after_pass(tmp_path):
+    """Verify that dry_run_policy returns cached pass without burning extra pilot runs."""
+    from lox.author.tools import AuthorToolRegistry
+    from lox.lang.validator import is_ast_equivalent
+    from lox.runner.pool import PersistentEvalPool
+
+    c1 = "class Policy:\n    def run(self, state):\n        while True:\n            state = yield Action.WAIT\n"
+    c2 = "class Policy:\n    def run(self, state):\n        # Added comment\n        while True:\n            state = yield Action.WAIT\n"
+    assert is_ast_equivalent(c1, c2)
+
+    pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=10)
+    try:
+        tools = AuthorToolRegistry(db_path=str(tmp_path / "stop_after_pass.duckdb"))
+        tools.configure_generation(
+            pool=pool,
+            baseline_runs=[],
+            max_pilot_runs=3,
+            pilot_episodes=2,
+        )
+
+        msg, status = tools.dry_run_policy(c1)
+        assert status.startswith("PASSED")
+        assert tools.last_pilot_improved is True
+        assert tools.pilot_runs_used == 1
+
+        # Calling again with AST-equivalent code must return cached pass without burning worker runs
+        msg2, status2 = tools.dry_run_policy(c2)
+        assert status2.startswith("PASSED (cached")
+        assert tools.pilot_runs_used == 1
+    finally:
+        pool.close()

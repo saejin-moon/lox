@@ -21,7 +21,7 @@ from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.tools import OPENAI_TOOL_SPECS, AuthorToolRegistry
 from lox.db.schema import DEFAULT_DB_PATH
 from lox.lang.macros import DEFAULT_MACROS_PATH
-from lox.lang.validator import splice_functions_into_policy
+from lox.lang.validator import is_ast_equivalent, splice_functions_into_policy
 from lox.ui.console import ui
 
 load_dotenv()
@@ -536,7 +536,9 @@ class AuthorAgent:
         last_attempted_code = ""
 
         for turn_idx in range(1, max_tool_turns + 2):
-            allow_tools = turn_idx <= max_tool_turns
+            allow_tools = turn_idx <= max_tool_turns and not getattr(
+                self.tools, "last_pilot_improved", False
+            )
             ui.status(
                 f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
             )
@@ -583,14 +585,20 @@ class AuthorAgent:
                     continue
 
                 # Check if candidate code is present and has not yet passed a pilot evaluation
-                is_new_code = bool(
-                    found_code
-                    and (
-                        not self.tools.last_passed_code
-                        or found_code.strip() != self.tools.last_passed_code.strip()
+                if getattr(self.tools, "last_pilot_improved", False):
+                    # Pilot has already passed in this generation; do NOT dispatch further pilots
+                    needs_pilot = False
+                else:
+                    is_new_code = bool(
+                        found_code
+                        and (
+                            not self.tools.last_passed_code
+                            or not is_ast_equivalent(
+                                found_code, self.tools.last_passed_code
+                            )
+                        )
                     )
-                )
-                needs_pilot = is_new_code or not self.tools.last_pilot_improved
+                    needs_pilot = is_new_code
 
                 # Auto-pilot dispatch: if candidate code was emitted in text without running dry_run_policy
                 if (
@@ -743,10 +751,15 @@ class AuthorAgent:
             elif latest_hyp:
                 hyp = latest_hyp
 
-            # If the model omitted the code block in its final summary after already passing dry_run_policy in a tool call, use that verified code!
-            if not code_patch or (
-                not self.tools.last_pilot_improved and self.tools.last_passed_code
-            ):
+            # If the model passed a pilot, ensure we use that verified code (avoiding slight markdown re-formatting errors)
+            if self.tools.last_pilot_improved and self.tools.last_passed_code:
+                if not code_patch or is_ast_equivalent(
+                    code_patch, self.tools.last_passed_code
+                ):
+                    code_patch = self.tools.last_passed_code
+            elif not code_patch and self.tools.last_passed_code:
+                code_patch = self.tools.last_passed_code
+            elif not code_patch:
                 code_patch = (
                     self.tools.last_passed_code
                     or self.tools.best_pilot_code
