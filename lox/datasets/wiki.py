@@ -7,12 +7,69 @@ alias redirect resolution, and exact article lookups against data/wiki_index.db.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 from typing import Any
 
 DEFAULT_WIKI_DB = "data/wiki_index.db"
+
+STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "he",
+    "in",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "that",
+    "the",
+    "to",
+    "was",
+    "were",
+    "will",
+    "with",
+    "you",
+    "your",
+    "dont",
+    "have",
+    "go",
+    "get",
+    "got",
+    "can",
+    "cant",
+    "cannot",
+    "do",
+    "does",
+    "did",
+}
+
+VARIANT_KEYWORDS = (
+    "slash'em",
+    "slashem",
+    "dnethack",
+    "unnethack",
+    "fiqhack",
+    "sporkhack",
+    "grunthack",
+    "xnethack",
+    "evilhack",
+    "dynahack",
+    "nh4",
+    "fourk",
+)
 
 
 def ensure_wiki_ready(db_path: str = DEFAULT_WIKI_DB) -> bool:
@@ -80,22 +137,32 @@ class WikiEngine:
         con = sqlite3.connect(self.db_path)
         cur = con.cursor()
         results: list[dict[str, Any]] = []
+        seen_titles: set[str] = set()
 
+        # 1. Exact title lookup or alias redirect
         exact_hit = self.exact_title_lookup(cur, query.strip())
         if exact_hit:
             results.append(exact_hit)
+            seen_titles.add(exact_hit["title"].lower())
             if len(results) >= top_k:
                 con.close()
                 return results
 
-        clean_query = query.replace('"', '""')
-        tokens = [t for t in clean_query.split() if t.isalnum()]
-        if not tokens:
+        # 2. Tokenize and filter low-information stopwords
+        raw_tokens = [re.sub(r"[^a-zA-Z0-9]", "", t) for t in query.split()]
+        tokens = [t for t in raw_tokens if len(t) >= 2]
+        content_tokens = [t for t in tokens if t.lower() not in STOP_WORDS]
+        if not content_tokens:
+            content_tokens = tokens
+        if not content_tokens:
             con.close()
             return results
 
-        fts_query = f'"{clean_query}" OR (' + " AND ".join(tokens) + ")"
+        # Deduplicate content tokens while preserving order
+        unique_tokens = list(dict.fromkeys(content_tokens))
 
+        # Strategy A: Exact phrase match
+        clean_phrase = " ".join(content_tokens)
         try:
             cur.execute(
                 """
@@ -112,50 +179,68 @@ class WikiEngine:
                 ORDER BY score ASC
                 LIMIT ?;
                 """,
-                (fts_query, top_k + 3),
+                (f'"{clean_phrase}"', top_k),
             )
             for r in cur.fetchall():
-                if exact_hit and r[0].lower() == exact_hit["title"].lower():
-                    continue
-                results.append(
-                    {
-                        "title": r[0],
-                        "snippet": r[1],
-                        "score": r[2],
-                        "preview": r[3],
-                        "is_exact": False,
-                    }
-                )
-                if len(results) >= top_k:
-                    break
+                if r[0].lower() not in seen_titles:
+                    results.append(
+                        {
+                            "title": r[0],
+                            "snippet": r[1],
+                            "score": r[2],
+                            "preview": r[3],
+                            "is_exact": False,
+                        }
+                    )
+                    seen_titles.add(r[0].lower())
         except sqlite3.OperationalError:
-            prefix_query = " ".join(f"{t}*" for t in tokens)
-            cur.execute(
-                """
-                SELECT
-                    a.title,
-                    snippet(wiki_fts, 1, '«', '»', '...', 25) AS match_snippet,
-                    bm25(wiki_fts, 10.0, 1.0) AS score,
-                    substr(a.content, 1, 1400) AS preview
-                FROM wiki_fts
-                JOIN articles a ON a.id = wiki_fts.rowid
-                WHERE wiki_fts MATCH ?
-                  AND a.title NOT LIKE '%/%'
-                ORDER BY score ASC
-                LIMIT ?;
-                """,
-                (prefix_query, top_k),
-            )
-            for r in cur.fetchall():
-                results.append(
-                    {
-                        "title": r[0],
-                        "snippet": r[1],
-                        "score": r[2],
-                        "preview": r[3],
-                        "is_exact": False,
-                    }
+            pass
+
+        # Strategy B: BM25 ranked OR search with prefix wildcards (scores by term relevance across all articles)
+        if len(results) < top_k and unique_tokens:
+            or_query = " OR ".join(f"{t}*" for t in unique_tokens)
+            try:
+                cur.execute(
+                    """
+                    SELECT
+                        a.title,
+                        snippet(wiki_fts, 1, '«', '»', '...', 25) AS match_snippet,
+                        bm25(wiki_fts, 10.0, 1.0) AS score,
+                        substr(a.content, 1, 1400) AS preview
+                    FROM wiki_fts
+                    JOIN articles a ON a.id = wiki_fts.rowid
+                    WHERE wiki_fts MATCH ?
+                      AND a.title NOT LIKE 'Forum:%'
+                      AND a.title NOT LIKE '%/%'
+                    ORDER BY score ASC
+                    LIMIT ?;
+                    """,
+                    (or_query, top_k * 8),
                 )
+                rows = cur.fetchall()
+                # Prioritize canonical vanilla articles over variant forks
+                rows.sort(
+                    key=lambda r: (
+                        1 if any(v in r[0].lower() for v in VARIANT_KEYWORDS) else 0,
+                        r[2],
+                    )
+                )
+                for r in rows:
+                    if r[0].lower() not in seen_titles:
+                        results.append(
+                            {
+                                "title": r[0],
+                                "snippet": r[1],
+                                "score": r[2],
+                                "preview": r[3],
+                                "is_exact": False,
+                            }
+                        )
+                        seen_titles.add(r[0].lower())
+                        if len(results) >= top_k:
+                            break
+            except sqlite3.OperationalError:
+                pass
 
         con.close()
         return results
