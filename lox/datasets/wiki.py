@@ -8,9 +8,40 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
+import sys
 from typing import Any
 
 DEFAULT_WIKI_DB = "data/wiki_index.db"
+
+
+def ensure_wiki_ready(db_path: str = DEFAULT_WIKI_DB) -> bool:
+    """
+    Ensures that data/wiki_index.db exists and is populated.
+    If missing, automatically builds it using scripts/build_wiki_db.py
+    and scripts/build_strategy_wiki.py.
+    """
+    if os.path.exists(db_path) and os.path.getsize(db_path) > 100000:
+        return True
+
+    repo_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    build_script = os.path.join(repo_root, "scripts", "build_wiki_db.py")
+    strategy_script = os.path.join(repo_root, "scripts", "build_strategy_wiki.py")
+
+    if os.path.exists(build_script) and os.path.exists(strategy_script):
+        try:
+            print(
+                "[LOX] `data/wiki_index.db` not found. Automatically building offline NetHack Wiki database..."
+            )
+            subprocess.run([sys.executable, build_script], check=True, cwd=repo_root)
+            subprocess.run([sys.executable, strategy_script], check=True, cwd=repo_root)
+            return True
+        except Exception as exc:
+            print(f"[LOX] Warning: Could not auto-build full wiki index ({exc}).")
+            return False
+    return False
 
 
 class WikiEngine:
@@ -18,6 +49,8 @@ class WikiEngine:
 
     def __init__(self, db_path: str = DEFAULT_WIKI_DB):
         self.db_path = db_path
+        if not os.path.exists(self.db_path) or os.path.getsize(self.db_path) < 10000:
+            ensure_wiki_ready(self.db_path)
 
     def _resolve_redirect(self, cur: sqlite3.Cursor, query: str) -> str:
         cur.execute(

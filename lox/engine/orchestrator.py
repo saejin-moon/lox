@@ -446,6 +446,12 @@ class CampaignOrchestrator:
             role=self.role,
         )
 
+        # Ensure offline wiki database is ready for the Author Agent to query
+        if self.benchmark == "nethack":
+            from lox.datasets.wiki import ensure_wiki_ready
+
+            ensure_wiki_ready()
+
         # Ensure expert_runs table is populated for the Author Agent to query
         exp_info = ingest_expert_runs_into_duckdb(
             self.db_path, max_ascensions=30, fetch_dumplogs=5
