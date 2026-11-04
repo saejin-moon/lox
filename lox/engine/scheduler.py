@@ -110,9 +110,10 @@ class ModeScheduler:
         total_pulls = sum(self.counts.values())
         if generation >= self.use_bandit_after_gen and total_pulls >= 6:
             candidates = ["FUNC_MOD_ADD"]
-            # Enforce anti-starvation cooldown for MACRO_WRITE (never consecutive, min 6 gens cooldown)
+            # Enforce anti-starvation cooldown for MACRO_WRITE (never consecutive, min 6 gens cooldown, only if enabled)
             if (
-                self._gens_since_macro >= max(6, self.macro_every)
+                self.macro_every > 0
+                and self._gens_since_macro >= max(6, self.macro_every)
                 and (generation - self._last_macro_gen) >= 6
             ):
                 candidates.append("MACRO_WRITE")
