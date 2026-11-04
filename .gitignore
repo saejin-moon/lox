@@ -20,6 +20,7 @@ htmlcov/
 
 # Telemetry data & ephemeral databases (consolidated locally)
 data/*
+forest/
 logs/
 *.log
 

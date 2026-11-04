@@ -52,14 +52,14 @@ class AuthorAgent:
     def __init__(
         self,
         provider: str = "openrouter",
-        model: str = "google/gemma-4-31b-it",
+        model: str = "z-ai/glm-5.3-flash:nitro",
         api_key: str | None = None,
         base_url: str | None = None,
         db_path: str = DEFAULT_DB_PATH,
         macros_path: str = DEFAULT_MACROS_PATH,
         max_tokens: int = 16384,
         reasoning_effort: str = "medium",
-        routing: str = "floor",
+        routing: str = "nitro",
         max_repair_turns: int = 5,
         benchmark: str = "nethack",
     ):
@@ -241,12 +241,9 @@ class AuthorAgent:
             url = self.base_url or "https://api.openai.com/v1/chat/completions"
 
         model_id = self.model
-        if (
-            self.provider == "openrouter"
-            and self.routing == "floor"
-            and ":" not in model_id
-        ):
-            model_id = f"{model_id}:floor"
+        if self.provider == "openrouter" and ":" not in model_id:
+            if self.routing in ("nitro", "floor"):
+                model_id = f"{model_id}:{self.routing}"
 
         payload: dict[str, Any] = {
             "model": model_id,
@@ -269,8 +266,11 @@ class AuthorAgent:
                 "Missing or placeholder API key. Set a valid OPENROUTER_API_KEY in `.env` or pass `--api-key`."
             )
         for attempt in range(5):
-            if attempt >= 2 and payload.get("model", "").endswith(":floor"):
-                payload["model"] = payload["model"][:-6]
+            if attempt >= 2:
+                for suffix in (":nitro", ":floor"):
+                    if payload.get("model", "").endswith(suffix):
+                        payload["model"] = payload["model"][: -len(suffix)]
+                        break
             try:
                 with httpx.Client(timeout=180.0) as client:
                     resp = client.post(url, headers=headers, json=payload)

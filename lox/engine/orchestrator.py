@@ -278,7 +278,8 @@ class CampaignOrchestrator:
     def __init__(
         self,
         provider: str = "openrouter",
-        model: str = "google/gemma-4-31b-it",
+        model: str = "z-ai/glm-5.3-flash:nitro",
+        routing: str = "nitro",
         api_key: str | None = None,
         db_path: str = DEFAULT_DB_PATH,
         policy_path: str = DEFAULT_POLICY_PATH,
@@ -293,12 +294,13 @@ class CampaignOrchestrator:
         macro_every: int = 0,
         early_stopping: bool = True,
         max_repair_turns: int = 5,
-        pilot_revisions: int = 5,
+        pilot_revisions: int = 2,
         pilot_episodes: int = 30,
         benchmark: str = "nethack",
     ):
         self.provider = provider
         self.model = model
+        self.routing = routing
         self.db_path = db_path
         self.policy_path = policy_path
         self.macros_path = macros_path
@@ -329,6 +331,7 @@ class CampaignOrchestrator:
         self.author = AuthorAgent(
             provider=provider,
             model=model,
+            routing=routing,
             api_key=api_key,
             db_path=db_path,
             macros_path=macros_path,

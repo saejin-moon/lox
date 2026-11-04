@@ -341,7 +341,7 @@ Ensure `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`) is configured in `.env` or exp
 ```bash
 uv run python scripts/run_lox.py \
   --provider openrouter \
-  --model google/gemma-4-31b-it \
+  --model z-ai/glm-5.3-flash:nitro \
   --benchmark nethack \
   --workers 16 \
   --generations 50
@@ -357,7 +357,7 @@ tmux new -s lox
 # 2. Launch 5,000 generations targeting full dungeon depth
 uv run python scripts/run_lox.py \
   --provider openrouter \
-  --model google/gemma-4-31b-it \
+  --model z-ai/glm-5.3-flash:nitro \
   --generations 5000 \
   --target-depth 50.0 \
   --workers 16

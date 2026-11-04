@@ -93,10 +93,10 @@ uv run python scripts/download_experts.py --max-ascensions 50
 # Add local .txt dumplogs, .ttyrec/.ttyrec.bz2 files (e.g. NLD-AA), or direct URLs:
 uv run python scripts/download_experts.py --dumplog path/to/dumplogs/ --ttyrec path/to/ttyrecs/
 
-# 4. Launch a synthesis campaign (e.g. with Gemma 4 31B or GLM-5 via OpenRouter)
+# 4. Launch a synthesis campaign (e.g. with GLM 5.3 Flash Nitro via OpenRouter)
 uv run python scripts/run_lox.py \
   --provider openrouter \
-  --model google/gemma-4-31b-it \
+  --model z-ai/glm-5.3-flash:nitro \
   --workers 16 \
   --generations 50
 ```

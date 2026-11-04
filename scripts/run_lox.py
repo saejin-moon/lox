@@ -34,8 +34,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="google/gemma-4-31b-it",
-        help="Target LLM model identifier (default: google/gemma-4-31b-it)",
+        default="z-ai/glm-5.3-flash:nitro",
+        help="Target LLM model identifier (default: z-ai/glm-5.3-flash:nitro)",
+    )
+    parser.add_argument(
+        "--routing",
+        default="nitro",
+        choices=["nitro", "floor", "default"],
+        help="OpenRouter provider routing strategy (default: nitro)",
     )
     parser.add_argument(
         "--api-key",
@@ -142,8 +148,8 @@ def main() -> None:
     parser.add_argument(
         "--pilot-revisions",
         type=int,
-        default=5,
-        help="Max self-iterative pilot revision runs per generation (default: 5)",
+        default=2,
+        help="Max self-iterative pilot revision runs per generation (default: 2)",
     )
     parser.add_argument(
         "--pilot-episodes",
@@ -176,6 +182,7 @@ def main() -> None:
     orchestrator = CampaignOrchestrator(
         provider=args.provider,
         model=args.model,
+        routing=args.routing,
         api_key=args.api_key,
         db_path=args.db_path,
         policy_path=args.policy_path,
