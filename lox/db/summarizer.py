@@ -44,11 +44,32 @@ def summarize_episode_ticks(
     last_msg = ""
     msg_repeat = 0
 
+    # Domain-agnostic progress expansion & stagnation tracking
+    visited_positions: set[tuple[int, int]] = set()
+    max_composite_progress = -1.0
+    last_progress_turn = 0
+
     for t in ticks:
         d = int(t.get("depth", 1))
         turn = int(t.get("turn", 0))
         ac = int(t.get("ac", 10))
         xl = int(t.get("xp_level", 1))
+        sc = float(t.get("score", 0))
+        ach = float(t.get("achievements", 0))
+        pos = (int(t.get("y", 0)), int(t.get("x", 0)))
+
+        # Universal composite progress monotonic evaluation
+        prog = d * 10.0 + xl * 2.0 + sc * 0.01 + ach * 100.0
+        is_expansion = False
+        if prog > max_composite_progress:
+            max_composite_progress = prog
+            is_expansion = True
+        if pos not in visited_positions:
+            visited_positions.add(pos)
+            is_expansion = True
+        if is_expansion:
+            last_progress_turn = turn
+
         if d not in depth_first_turn:
             depth_first_turn[d] = turn
             depths_seen.append(d)
@@ -258,6 +279,34 @@ def summarize_episode_ticks(
         or "descend the stairs" in str(t.get("message", "")).lower()
         for t in ticks
     )
+
+    t_end = int(ticks[-1].get("turn", len(ticks))) if ticks else 0
+    stagnation_turns = max(0, t_end - last_progress_turn)
+    stagnation_ratio = float(stagnation_turns / max(1, t_end))
+
+    # Recurrence rate and active function attribution over stagnation window
+    stagnant_ticks = [t for t in ticks if int(t.get("turn", 0)) >= last_progress_turn]
+    stagnation_positions = {
+        (int(t.get("y", 0)), int(t.get("x", 0))) for t in stagnant_ticks
+    }
+    if len(stagnant_ticks) >= 40:
+        recurrence_rate = float(
+            1.0 - (len(stagnation_positions) / max(1, len(stagnant_ticks)))
+        )
+    else:
+        recurrence_rate = 0.0
+
+    stagnation_fn_turns: dict[str, int] = {}
+    for t in stagnant_ticks:
+        fn = str(t.get("active_function", "root") or "root")
+        stagnation_fn_turns[fn] = stagnation_fn_turns.get(fn, 0) + 1
+
+    top_stagnation_fn = (
+        max(stagnation_fn_turns.items(), key=lambda kv: kv[1])[0]
+        if stagnation_fn_turns
+        else ""
+    )
+
     milestones = {
         "max_depth": max(depths_seen) if depths_seen else 1,
         "depths_visited": depths_seen,
@@ -272,6 +321,12 @@ def summarize_episode_ticks(
             len({(t.get("y", 0), t.get("x", 0)) for t in d1_ticks}) if d1_ticks else 0
         ),
         "stairs_down_found": stairs_found,
+        "stagnation_ratio": round(stagnation_ratio, 4),
+        "recurrence_rate": round(recurrence_rate, 4),
+        "last_progress_turn": last_progress_turn,
+        "stagnation_turns": stagnation_turns,
+        "top_stagnation_fn": top_stagnation_fn,
+        "stagnation_fn_turns": stagnation_fn_turns,
     }
     return summary_digest, game_log, milestones
 
@@ -364,6 +419,9 @@ def compute_function_stats(
     parsed_trig: list[dict[str, int]] = []
     parsed_turns: list[dict[str, int]] = []
 
+    batch_total_stagnation_turns = 0
+    fn_stagnation_turns_map: Counter[str] = Counter()
+
     for r in runs:
         raw_t = r.get("triggered_functions") or r.get("functions_triggered") or "{}"
         t_dict = json.loads(raw_t) if isinstance(raw_t, str) else dict(raw_t or {})
@@ -373,6 +431,17 @@ def compute_function_stats(
         parsed_trig.append(t_dict)
         parsed_turns.append(u_dict)
         all_fns.update(t_dict.keys())
+
+        ms = r.get("milestones") or {}
+        if isinstance(ms, str):
+            try:
+                ms = json.loads(ms)
+            except Exception:
+                ms = {}
+        s_dict = ms.get("stagnation_fn_turns") or {}
+        for f_name, t_cnt in s_dict.items():
+            fn_stagnation_turns_map[f_name] += int(t_cnt)
+            batch_total_stagnation_turns += int(t_cnt)
 
     stats_rows: list[dict[str, Any]] = []
     for fn in sorted(all_fns):
@@ -408,21 +477,30 @@ def compute_function_stats(
                 )
                 st_fns = r.get("stall_functions") or ms.get("stall_functions") or []
                 last_fn = r.get("last_active_function")
-                is_failed = r.get("end_reason") not in (
-                    "ascended",
-                    "max_steps",
-                ) and not r.get("is_outlier_good")
+                end_clean = str(r.get("end_reason", "")).strip().lower()
+                is_success = bool(
+                    r.get("is_success")
+                    or r.get("is_outlier_good")
+                    or end_clean in ("ascended", "success", "completed", "won")
+                )
+                is_failed = not is_success
                 if is_failed:
-                    if (
-                        fn == pre_inf
-                        or fn in st_fns
-                        or (
-                            not pre_inf
-                            and not st_fns
-                            and (last_fn == fn or last_fn is None)
-                        )
-                    ):
-                        deaths_while_active += 1
+                    stag_ratio = float(ms.get("stagnation_ratio", 0.0))
+                    top_stag_fn = str(ms.get("top_stagnation_fn", ""))
+                    if stag_ratio >= 0.50 and top_stag_fn:
+                        if fn == top_stag_fn:
+                            deaths_while_active += 1
+                    else:
+                        if (
+                            fn == pre_inf
+                            or fn in st_fns
+                            or (
+                                not pre_inf
+                                and not st_fns
+                                and (last_fn == fn or last_fn is None)
+                            )
+                        ):
+                            deaths_while_active += 1
 
         trig_rate = eps_trig / float(total_runs)
         avg_d = float(np.mean(depths_when_trig)) if depths_when_trig else 0.0
@@ -476,6 +554,18 @@ def compute_function_stats(
             / math.log(total_runs + 1.0)
         )
 
+        fn_stag_turns = fn_stagnation_turns_map.get(fn, 0)
+        stag_share = (
+            fn_stag_turns / float(max(1, batch_total_stagnation_turns))
+            if batch_total_stagnation_turns > 0
+            else 0.0
+        )
+        livelock_score = (
+            (fn_stag_turns / float(max(1, total_turns))) * trig_rate
+            if total_turns > 0
+            else 0.0
+        )
+
         stats_rows.append(
             {
                 "batch_id": batch_id,
@@ -491,6 +581,9 @@ def compute_function_stats(
                 "ochiai_good_score": round(ochiai_good, 4),
                 "liblit_failure_score": round(liblit_fail, 4),
                 "liblit_fail_importance": round(liblit_fail, 4),
+                "stagnation_turns": fn_stag_turns,
+                "stagnation_share": round(stag_share, 4),
+                "livelock_score": round(livelock_score, 4),
             }
         )
 
@@ -612,6 +705,52 @@ def build_batch_contrast_digest(
     lines.append(
         f"- **Down Stairs (`>`) Discovery Rate**: {stairs_seen * 100.0 / len(runs):.1f}% ({stairs_seen}/{len(runs)} runs found or descended stairs)."
     )
+
+    # Domain-agnostic chronic stagnation & livelock sink telemetry
+    chronic_runs = 0
+    recurrence_values: list[float] = []
+    for r in runs:
+        ms = r.get("milestones") or {}
+        if isinstance(ms, str):
+            try:
+                ms = json.loads(ms)
+            except Exception:
+                ms = {}
+        s_ratio = float(ms.get("stagnation_ratio", 0.0))
+        rec_r = float(ms.get("recurrence_rate", 0.0))
+        if s_ratio >= 0.50:
+            chronic_runs += 1
+        if rec_r > 0.0:
+            recurrence_values.append(rec_r)
+
+    chronic_rate = chronic_runs / float(max(1, len(runs)))
+    top_livelock_fns = sorted(
+        [fs for fs in fn_stats if fs.get("stagnation_turns", 0) > 0],
+        key=lambda x: x.get("stagnation_turns", 0),
+        reverse=True,
+    )[:3]
+
+    if chronic_rate >= 0.20 or top_livelock_fns:
+        avg_rec = float(np.mean(recurrence_values)) if recurrence_values else 0.0
+        lines.append(
+            "\n### 🚨 Frontier Bottleneck & Root-Cause Telemetry:\n"
+            f"- **Chronic Stagnation Rate**: {chronic_rate * 100:.1f}% ({chronic_runs}/{len(runs)} runs spent >50% of runtime stalled after their last milestone).\n"
+            f"- **State Recurrence Rate during Stagnation**: {avg_rec:.2f} (values > 0.85 indicate compact limit cycles / oscillation)."
+        )
+        if top_livelock_fns:
+            lines.append(
+                "- **Livelock Sinks (Functions consuming turns during zero-progress stagnation)**:"
+            )
+            for l_fs in top_livelock_fns:
+                lines.append(
+                    f"  * `{l_fs['function_name']}`: {l_fs.get('stagnation_turns', 0):,} stagnation turns "
+                    f"({l_fs.get('stagnation_share', 0.0) * 100:.1f}% of stalled time in batch, livelock_score={l_fs.get('livelock_score', 0.0):.3f})"
+                )
+            lines.append(
+                "- **Universal Causal Invariant for Author Agent**:\n"
+                "  * Chronic failures (high stagnation ratio) are CAUSED by the Livelock Sink above, NOT by the final death message.\n"
+                "  * Do NOT patch secondary resource consumers (e.g. food/health regeneration). You MUST modify the Livelock Sink to break the zero-progress cycle!"
+            )
 
     # Sample top 2 Outlier Good Run summaries right in the digest
     if outliers:

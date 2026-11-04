@@ -167,7 +167,9 @@ def write_status_report(
 
     discoveries = []
     try:
-        cur = con.execute("SELECT * FROM discoveries ORDER BY created_at DESC LIMIT 15")
+        cur = con.execute(
+            "SELECT * FROM discoveries WHERE mode != 'PILOT' ORDER BY created_at DESC LIMIT 15"
+        )
         d_cols = [d[0] for d in cur.description]
         discoveries = [dict(zip(d_cols, r)) for r in cur.fetchall()]
     except Exception:

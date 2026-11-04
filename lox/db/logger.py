@@ -262,6 +262,15 @@ class BatchDatabaseLogger:
                     "liblit_failure_score": [
                         float(fs["liblit_failure_score"]) for fs in fn_stats
                     ],
+                    "stagnation_turns": [
+                        int(fs.get("stagnation_turns", 0)) for fs in fn_stats
+                    ],
+                    "stagnation_share": [
+                        float(fs.get("stagnation_share", 0.0)) for fs in fn_stats
+                    ],
+                    "livelock_score": [
+                        float(fs.get("livelock_score", 0.0)) for fs in fn_stats
+                    ],
                 }
                 fn_tbl = pa.Table.from_pydict(fn_cols)
                 con.register("_temp_fn_stats", fn_tbl)
@@ -358,8 +367,10 @@ class BatchDatabaseLogger:
                     datetime.datetime.now(),
                 ],
             )
-            if verdict.get("passed") and (
-                hypothesis.get("verified_c_rule") or hypothesis.get("mechanism")
+            if (
+                verdict.get("passed")
+                and mode != "PILOT"
+                and (hypothesis.get("verified_c_rule") or hypothesis.get("mechanism"))
             ):
                 try:
                     self.save_discovery(

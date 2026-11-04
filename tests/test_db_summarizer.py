@@ -457,3 +457,125 @@ def test_dynamic_failure_telemetry_digest():
     assert "Cyclic Positional Oscillations (Ping-Pong Loops)" not in digest
     assert "Stuck Detector Blindness" not in digest
     assert "Use a ring buffer of recent positions" not in digest
+
+
+def test_domain_agnostic_stagnation_ratio():
+    """Verify that Tail Stagnation Ratio correctly measures post-progress stalls."""
+    # Run progresses up to turn 20, then stalls from turn 21 to 100 on existing coordinates
+    ticks = []
+    for t in range(1, 22):
+        ticks.append(
+            {
+                "turn": t,
+                "depth": 1,
+                "xp_level": 1,
+                "score": t * 10,
+                "y": 10,
+                "x": t,
+                "active_function": "explore",
+                "action_name": "E",
+            }
+        )
+    for t in range(22, 101):
+        ticks.append(
+            {
+                "turn": t,
+                "depth": 1,
+                "xp_level": 1,
+                "score": 210,
+                "y": 10,
+                "x": 20 if t % 2 == 0 else 21,
+                "active_function": "explore",
+                "action_name": "E",
+            }
+        )
+    digest, glog, milestones = summarize_episode_ticks(ticks)
+    assert milestones["last_progress_turn"] == 21
+    assert milestones["stagnation_turns"] == 79
+    assert milestones["stagnation_ratio"] == 0.79
+    assert milestones["top_stagnation_fn"] == "explore"
+
+
+def test_state_recurrence_limit_cycle():
+    """Verify that Recurrence Rate identifies compact limit cycles (oscillations)."""
+    # 50 ticks oscillating between 2 coordinates
+    cycling_ticks = [
+        {
+            "turn": t,
+            "depth": 1,
+            "score": 10,
+            "y": 5,
+            "x": 5 if t % 2 == 0 else 6,
+            "active_function": "wander",
+        }
+        for t in range(1, 51)
+    ]
+    _, _, ms_cycling = summarize_episode_ticks(cycling_ticks)
+    # Recurrence = 1 - 2/50 = 0.96
+    assert ms_cycling["recurrence_rate"] >= 0.90
+
+    # 50 ticks visiting 40 unique coordinates
+    exploring_ticks = [
+        {
+            "turn": t,
+            "depth": 1,
+            "score": t * 10,
+            "y": t,
+            "x": t,
+            "active_function": "wander",
+        }
+        for t in range(1, 51)
+    ]
+    _, _, ms_exploring = summarize_episode_ticks(exploring_ticks)
+    # With continuous discovery, last_progress_turn is 50, so stagnant ticks is 1 (< 40) => 0.0
+    assert ms_exploring["recurrence_rate"] == 0.0
+
+
+def test_livelock_failure_attribution():
+    """Verify that timeout/max_steps failures attribute blame to the livelock sink function."""
+    runs = [
+        {
+            "run_id": f"r_{i}",
+            "seed": i,
+            "max_depth": 1,
+            "end_reason": "max_steps",
+            "triggered_functions": '{"explore_level": 10, "handle_nutrition": 2}',
+            "fn_turns": '{"explore_level": 900, "handle_nutrition": 10}',
+            "milestones": {
+                "stagnation_ratio": 0.85,
+                "top_stagnation_fn": "explore_level",
+                "stagnation_fn_turns": {"explore_level": 850, "handle_nutrition": 5},
+            },
+            "last_active_function": "handle_nutrition",
+        }
+        for i in range(10)
+    ]
+    fn_stats = compute_function_stats("b_livelock_test", runs)
+    explore_stat = next(fs for fs in fn_stats if fs["function_name"] == "explore_level")
+    nutrition_stat = next(
+        fs for fs in fn_stats if fs["function_name"] == "handle_nutrition"
+    )
+
+    # explore_level was the livelock sink (850/855 stagnant turns), so it must absorb the failures!
+    assert explore_stat["death_rate_while_active"] == 1.0
+    assert explore_stat["liblit_failure_score"] > 0.5
+    assert explore_stat["stagnation_turns"] == 8500
+    assert explore_stat["stagnation_share"] > 0.95
+    assert explore_stat["livelock_score"] > 0.80
+
+    # handle_nutrition only took 5 stagnant turns and was NOT the livelock sink
+    assert nutrition_stat["death_rate_while_active"] == 0.0
+    assert nutrition_stat["liblit_failure_score"] == 0.0
+
+
+def test_two_stage_pilot_sign_test():
+    """Verify that Exact Sign Test filters out noisy 10W/9L coin flips while passing decisive 12W/5L."""
+    import scipy.stats as sp_stats
+
+    # Coin flip: 10 wins, 9 losses (n=19) -> p ~ 0.50 -> must fail
+    p_coin = float(sp_stats.binom.sf(10 - 1, 19, 0.5))
+    assert p_coin > 0.15
+
+    # Decisive: 12 wins, 5 losses (n=17) -> p ~ 0.07 -> passes alpha=0.15 hurdle
+    p_decisive = float(sp_stats.binom.sf(12 - 1, 17, 0.5))
+    assert p_decisive <= 0.15

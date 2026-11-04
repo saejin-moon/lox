@@ -129,7 +129,10 @@ CREATE TABLE IF NOT EXISTS function_stats (
     avg_depth_when_triggered DOUBLE,
     death_rate_while_active DOUBLE,
     ochiai_good_run_score DOUBLE,
-    liblit_failure_score DOUBLE
+    liblit_failure_score DOUBLE,
+    stagnation_turns BIGINT,
+    stagnation_share DOUBLE,
+    livelock_score DOUBLE
 );
 
 CREATE TABLE IF NOT EXISTS policies (
@@ -271,6 +274,23 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
             cols = [r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()]
             if len(cols) != 27:
                 con.execute("DROP TABLE runs")
+        if "function_stats" in tables:
+            cols_fs = [
+                r[1]
+                for r in con.execute("PRAGMA table_info('function_stats')").fetchall()
+            ]
+            for c_name, c_typ in [
+                ("stagnation_turns", "BIGINT"),
+                ("stagnation_share", "DOUBLE"),
+                ("livelock_score", "DOUBLE"),
+            ]:
+                if c_name not in cols_fs:
+                    try:
+                        con.execute(
+                            f"ALTER TABLE function_stats ADD COLUMN {c_name} {c_typ}"
+                        )
+                    except Exception:
+                        pass
     except Exception:
         pass
     con.execute(SCHEMA_SQL)
@@ -292,7 +312,7 @@ def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:
 - **`batches`** (Per-generation batch overview):
   `batch_id`, `generation`, `mode`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`.
 - **`function_stats`** (Per-function execution & statistical debugging metrics per batch):
-  `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, **`ochiai_good_run_score` (DOUBLE: correlation with `is_outlier_good=TRUE`)**, **`liblit_failure_score` (DOUBLE: correlation with dying while function is active)**.
+  `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, **`ochiai_good_run_score` (DOUBLE: correlation with `is_outlier_good=TRUE`)**, **`liblit_failure_score` (DOUBLE: correlation with failure)**, **`stagnation_turns` (BIGINT: turns spent stalled after last progress)**, **`stagnation_share` (DOUBLE: fraction of all stagnant turns in batch consumed by this function)**, **`livelock_score` (DOUBLE: livelock sink severity)**.
 - **`experiments`** (Historical hypothesis outcomes):
   `experiment_id`, `generation`, `mode`, `target_functions`, `observation_from_db`, `mechanism`, `passed`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`, `wins`, `losses`, `ties`, `verdict_reason`.
 - **`expert_runs`** (Consolidated successful human & championship-bot NetHack runs using the **same summary/log/stats columns as `runs`**):

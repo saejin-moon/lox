@@ -935,15 +935,31 @@ class AuthorToolRegistry:
                         "Loosen its entry condition in `run()` so it triggers on current dungeon levels!"
                     )
                 elif base_depths:
-                    improved = (wins > losses and mean_delta > 0.0) or (
-                        delta_depth >= 0.05 and mean_delta >= 0.0
+                    decisive = wins + losses
+                    if decisive > 0:
+                        import scipy.stats as sp_stats
+
+                        # Exact one-sided binomial sign test under H0: p=0.5
+                        p_sign = float(sp_stats.binom.sf(wins - 1, decisive, 0.5))
+                    else:
+                        p_sign = 1.0
+
+                    improved = (p_sign <= 0.15 and mean_delta >= 0.04) or (
+                        delta_depth >= 0.10 and wins > losses
                     )
-                    summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f}"
-                    paired_line = f"• Paired vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth})\n"
+                    summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f} (p_sign={p_sign:.3f})"
+                    paired_line = (
+                        f"• Paired vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | "
+                        f"Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth}) | "
+                        f"Sign-Test p: {p_sign:.4f}\n"
+                    )
                     verdict_line = (
-                        ">>> PILOT VERDICT: IMPROVEMENT DETECTED over baseline."
+                        ">>> PILOT VERDICT: STATISTICALLY SIGNIFICANT PILOT SIGNAL over baseline."
                         if improved
-                        else ">>> PILOT VERDICT: FLAT OR REGRESSED VS BASELINE. STOP! Do NOT blindly guess. Call query_wiki or query_db to investigate before submitting revised code!"
+                        else (
+                            f">>> PILOT VERDICT: INSUFFICIENT OR FLAT SIGNAL VS BASELINE ({wins}W/{losses}L, p_sign={p_sign:.3f} > 0.15). "
+                            "STOP! Do NOT submit noisy code. Refine your code or call query_db/query_wiki before submitting!"
+                        )
                     )
                 else:
                     # In FULL_WRITE (Gen 0) or without existing baseline runs:

@@ -241,9 +241,14 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    Every event in NetHack (messages, status changes, deaths) is governed by an exact C function. Isolate the exact message string from the final 3 lines of `game_log` (e.g. "You feel hungry", "The door resists", "The jackal bites!"), strip proper nouns, and pass that phrase to `query_wiki(query=...)` to learn the exact C rule that caused it.
 3. **The Binding Constraint Rule**:
    Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint). Never spend a generation fixing a 2% edge case when 70% of runs died to the same primary cause.
-4. **Anti-Hallucination & Dungeon Context Anchor**:
+4. **Universal Root-Cause Diagnostic Protocol (Chronic vs. Acute Failures)**:
+   In any sequential decision process with budgets or resource clocks (step limits, operational budgets, health, energy, food):
+   - **Acute Failure (Direct Lethality)**: If `stagnation_ratio < 0.35`, the agent died while actively making progress. Repair the immediate tactical responder (e.g. combat, hazard evasion).
+   - **Chronic Failure (Resource Depletion / Livelock)**: If `stagnation_ratio >= 0.50`, terminal events (such as timeouts, starvation, or budget exhaustion) are secondary symptoms. The causal disease is the **Livelock Sink** identified in the telemetry.
+   - **Invariant**: When modifying policies under `FUNC_MOD_ADD`, target the function with the highest `stagnation_share` / `livelock_score`, NOT the secondary resource consumer.
+5. **Anti-Hallucination & Dungeon Context Anchor**:
    Anchor your reasoning to your current dungeon depth (`state.depth`). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. Use `state.mem.passable_mask` (or ensure `ord('-')`, `ord('|')`, and `ord(' ')` are strictly False in custom masks) and remember monsters attack across all 8 adjacent tiles (`max(abs(dy), abs(dx)) == 1`).
-5. **Pre-Submission Invariant Checklist**:
+6. **Pre-Submission Invariant Checklist**:
    Before outputting code, mentally verify all 4 invariants:
    - *Generator Invariant*: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
    - *State Persistence*: Specialist methods must update `self.*` attributes (e.g. `self.target_tile`, `self.tried_doors`) to prevent 2-tile ping-pong oscillations.
