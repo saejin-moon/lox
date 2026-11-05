@@ -776,30 +776,6 @@ class AuthorAgent:
                     }
                 )
 
-        # Pilot Gate Abort: If pilots were run during the tool phase and none improved over baseline,
-        # abort immediately instead of falling through to smoke check and running 150-seed rollout.
-        if (
-            self.tools.pilot_runs_used > 0
-            and not self.tools.last_pilot_improved
-            and mode not in ("MACRO_WRITE", "FULL_WRITE")
-        ):
-            summary = self.tools.last_pilot_summary or "insufficient signal"
-            ui.warn(
-                f"Pilot Gate: Candidate failed all {self.tools.pilot_runs_used} pilot revisions ({summary}). Aborting rollout."
-            )
-            return SynthesisProposal(
-                mode=mode,
-                hypothesis=latest_hyp,
-                raw_code_patch="",
-                full_policy_code=current_policy,
-                full_macros_code=self.tools.macro_lib.load_code(),
-                target_functions=[],
-                tool_calls_made=total_tool_calls,
-                skill_code="",
-                aborted=True,
-                abort_reason=f"PILOT_GATE_ABORT: {summary}",
-            )
-
         # Compiler-in-the-loop verification & sliding-window self-repair
         is_macro_mode = mode == "MACRO_WRITE"
         base_msg_count = len(messages)

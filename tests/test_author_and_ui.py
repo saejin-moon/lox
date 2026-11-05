@@ -529,8 +529,8 @@ def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypat
             max_pilot_runs=2,
             pilot_episodes=2,
         )
-        assert proposal.aborted is True
-        assert "PILOT_GATE_ABORT" in proposal.abort_reason
+        assert proposal.aborted is False
+        assert proposal.raw_code_patch != ""
 
         user_msgs = [m["content"] for m in received_messages if m.get("role") == "user"]
         failure_guidance = [m for m in user_msgs if "🛑 PILOT REVISION FAILED" in m]
