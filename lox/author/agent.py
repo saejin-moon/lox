@@ -39,6 +39,8 @@ class SynthesisProposal:
     target_functions: list[str]
     tool_calls_made: int = 0
     skill_code: str = ""
+    aborted: bool = False
+    abort_reason: str = ""
 
 
 class AuthorAgent:
@@ -143,15 +145,31 @@ class AuthorAgent:
             py_blocks = re.findall(r"```\s*\n(.*?)```", text, flags=re.DOTALL)
             py_blocks = [b for b in py_blocks if "def " in b or "class " in b]
 
-        code_str = py_blocks[-1].strip() if py_blocks else ""
+        code_str = ""
+        if py_blocks:
+            policy_candidates = [
+                b for b in py_blocks if "class Policy" in b or "class Agent" in b
+            ]
+            if policy_candidates:
+                code_str = policy_candidates[-1].strip()
+            else:
+                code_str = py_blocks[-1].strip()
         return yaml_dict, code_str
 
     @staticmethod
-    def extract_skill_code(content: str, hyp: dict[str, Any]) -> str:
+    def extract_skill_code(
+        content: str,
+        hyp: dict[str, Any],
+        fallback_skill_code: str = "",
+        fallback_skill_name: str | None = None,
+    ) -> str:
         """Extracts external skill module code if specified in hypothesis or markdown."""
-        skill_mod = hyp.get("skill_module")
+        skill_mod = hyp.get("skill_module") or fallback_skill_name
+        if skill_mod and "skill_module" not in hyp:
+            hyp["skill_module"] = skill_mod
         if not skill_mod:
-            return ""
+            return fallback_skill_code
+
         if hyp.get("skill_code"):
             return str(hyp["skill_code"]).strip()
 
@@ -169,10 +187,16 @@ class AuthorAgent:
         )
         if len(py_blocks) >= 2:
             for b in py_blocks:
+                if (
+                    f"module: {skill_mod}" in b.lower()
+                    or f"skills/{skill_mod}" in b.lower()
+                ):
+                    return b.strip()
+            for b in py_blocks:
                 if "class Policy" not in b and ("def " in b or "class " in b):
                     return b.strip()
 
-        return ""
+        return fallback_skill_code
 
     def _execute_tool_call(self, turn_idx: int, name: str, args: dict[str, Any]) -> str:
         t0 = time.perf_counter()
@@ -195,8 +219,12 @@ class AuthorAgent:
             arg_disp = skill_name
         elif name == "dry_run_policy":
             code = str(args.get("code", "")).strip()
-            if not code:
-                out = "Error: `dry_run_policy` requires a non-empty `code` string containing Python code."
+            s_name = args.get("skill_name")
+            s_code = args.get("skill_code")
+            if not code and not (s_name and s_code):
+                out = (
+                    "Error: `dry_run_policy` requires non-empty `code` or `skill_code`."
+                )
                 summary = "MISSING_CODE"
                 arg_disp = "empty code"
             else:
@@ -212,8 +240,12 @@ class AuthorAgent:
                     max_turns=mt,
                     replay_run_id=replay_id,
                     replay_steps=replay_steps,
+                    skill_name=str(s_name) if s_name else None,
+                    skill_code=str(s_code) if s_code else None,
                 )
                 arg_disp = f"{len(code.splitlines())} lines, seed={seed}"
+                if s_name:
+                    arg_disp += f", skill={s_name}"
                 if replay_id:
                     arg_disp += f", replay={replay_id[:10]}..."
         else:
@@ -624,6 +656,21 @@ class AuthorAgent:
                     )
 
                     if (
+                        "COMPILE_ERROR" in pilot_res
+                        or "RUNTIME_ERROR" in pilot_res
+                        or "UNREACHABLE_ERROR" in pilot_res
+                    ):
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Your candidate code resulted in an error:\n{pilot_res}\n"
+                                    "Please fix the error and test with `dry_run_policy`."
+                                ),
+                            }
+                        )
+                        continue
+                    elif (
                         not self.tools.last_pilot_improved
                         and self.tools.pilot_runs_used < self.tools.max_pilot_runs
                     ):
@@ -642,17 +689,6 @@ class AuthorAgent:
                                     "   - Call `query_wiki(query=...)` to check C engine mechanics for the failure cause (e.g. monster attacks, locked doors, trap effects, hunger).\n"
                                     "   - Call `query_db(sql=...)` to inspect expert runs (`expert_runs` / `expert_ticks`) to see how human ascensions handled this scenario.\n"
                                     "3. Once you have identified the concrete mechanism from the wiki/DB, revise your method and test again with `dry_run_policy(code=...)`."
-                                ),
-                            }
-                        )
-                        continue
-                    elif "COMPILE_ERROR" in pilot_res or "RUNTIME_ERROR" in pilot_res:
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"Your candidate code resulted in an error:\n{pilot_res}\n"
-                                    "Please fix the error and test with `dry_run_policy`."
                                 ),
                             }
                         )
@@ -740,6 +776,30 @@ class AuthorAgent:
                     }
                 )
 
+        # Pilot Gate Abort: If pilots were run during the tool phase and none improved over baseline,
+        # abort immediately instead of falling through to smoke check and running 150-seed rollout.
+        if (
+            self.tools.pilot_runs_used > 0
+            and not self.tools.last_pilot_improved
+            and mode not in ("MACRO_WRITE", "FULL_WRITE")
+        ):
+            summary = self.tools.last_pilot_summary or "insufficient signal"
+            ui.warn(
+                f"Pilot Gate: Candidate failed all {self.tools.pilot_runs_used} pilot revisions ({summary}). Aborting rollout."
+            )
+            return SynthesisProposal(
+                mode=mode,
+                hypothesis=latest_hyp,
+                raw_code_patch="",
+                full_policy_code=current_policy,
+                full_macros_code=self.tools.macro_lib.load_code(),
+                target_functions=[],
+                tool_calls_made=total_tool_calls,
+                skill_code="",
+                aborted=True,
+                abort_reason=f"PILOT_GATE_ABORT: {summary}",
+            )
+
         # Compiler-in-the-loop verification & sliding-window self-repair
         is_macro_mode = mode == "MACRO_WRITE"
         base_msg_count = len(messages)
@@ -770,16 +830,32 @@ class AuthorAgent:
                 diag = "No ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
                 status = "MISSING_CODE"
             else:
+                s_name = (hyp or latest_hyp).get("skill_module") or getattr(
+                    self.tools, "last_passed_skill_name", None
+                )
+                s_code = getattr(self.tools, "last_passed_skill_code", None)
                 diag, status = self.tools.dry_run_policy(
                     code=code_patch,
                     is_macro=is_macro_mode,
                     seed=42,
                     max_turns=50,
                     smoke_only=True,
+                    skill_name=s_name,
+                    skill_code=s_code,
                 )
 
             if status.startswith("PASSED") or status.startswith("VALID"):
-                skill_code = self.extract_skill_code(final_content, hyp)
+                skill_code = self.extract_skill_code(
+                    final_content,
+                    hyp,
+                    fallback_skill_code=getattr(
+                        self.tools, "last_passed_skill_code", ""
+                    )
+                    or "",
+                    fallback_skill_name=getattr(
+                        self.tools, "last_passed_skill_name", None
+                    ),
+                )
                 if is_macro_mode:
                     merged_macros, macro_names = self.tools.macro_lib.merge_macros(
                         code_patch
@@ -899,7 +975,13 @@ class AuthorAgent:
                 "Using verified code from earlier passing/best dry_run_policy call."
             )
             code_patch = best_code
-            skill_code = self.extract_skill_code(final_content, latest_hyp)
+            skill_code = self.extract_skill_code(
+                final_content,
+                latest_hyp,
+                fallback_skill_code=getattr(self.tools, "last_passed_skill_code", "")
+                or "",
+                fallback_skill_name=getattr(self.tools, "last_passed_skill_name", None),
+            )
             if is_macro_mode:
                 merged_macros, macro_names = self.tools.macro_lib.merge_macros(
                     code_patch

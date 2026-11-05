@@ -683,6 +683,7 @@ class CampaignOrchestrator:
             record_max_depth = 0
 
             for gen in range(start_gen, start_gen + max_generations):
+                t0_gen = time.perf_counter()
                 try:
                     active_max_steps = self.compute_adaptive_max_steps(baseline_runs)
                     batch_id = f"{campaign_id}_g{gen:03d}"
@@ -974,6 +975,23 @@ class CampaignOrchestrator:
                                     )
                         else:
                             ui.warn(verdict["reason"])
+                            self.scheduler.record_outcome(
+                                "PARAM_TUNE", 0.0, 1.0, passed=False
+                            )
+                            self.db_logger.save_experiment(
+                                experiment_id=f"exp_{batch_id}_noop",
+                                generation=gen,
+                                batch_id=batch_id,
+                                mode="PARAM_TUNE",
+                                target_functions=list(registered_params.keys()),
+                                hypothesis={
+                                    "mode": "PARAM_TUNE",
+                                    "target_functions": list(registered_params.keys()),
+                                    "observation_from_db": "CRN-SPSA parameter optimization",
+                                    "mechanism": verdict["reason"],
+                                },
+                                verdict=verdict,
+                            )
                         continue
 
                     # --- MODES 1, 2, 3: STATELESS AUTHOR AGENT SYNTHESIS ---
@@ -1043,6 +1061,41 @@ class CampaignOrchestrator:
                             },
                         )
                         continue
+
+                    if getattr(proposal, "aborted", False):
+                        reason = getattr(
+                            proposal,
+                            "abort_reason",
+                            "Pilot gate rejected candidate code",
+                        )
+                        ui.warn(
+                            f"Gen {gen:03d} {reason}. Skipping rollout to save compute."
+                        )
+                        consecutive_failures += 1
+                        wall_sec = time.perf_counter() - t0_gen
+                        self.scheduler.record_outcome(mode, 0.0, wall_sec, passed=False)
+                        self.db_logger.save_experiment(
+                            experiment_id=f"exp_{batch_id}_pilot_abort",
+                            generation=gen,
+                            batch_id=batch_id,
+                            mode=mode,
+                            target_functions=proposal.target_functions
+                            or ["pilot_aborted"],
+                            hypothesis=proposal.hypothesis,
+                            verdict={
+                                "passed": False,
+                                "mean_delta": 0.0,
+                                "ci_lower": 0.0,
+                                "ci_upper": 0.0,
+                                "wilcoxon_p": 1.0,
+                                "wins": 0,
+                                "losses": 0,
+                                "ties": 0,
+                                "reason": reason,
+                            },
+                        )
+                        continue
+
                     ui.hypothesis_box(proposal.hypothesis)
 
                     # --- MODE 2: MACRO_WRITE (Skip Rollout & Advance Immediately) ---
@@ -1214,6 +1267,13 @@ class CampaignOrchestrator:
 
                         early_stop_cb = _check_futility
 
+                    candidate_skills = self.load_workspace_skills()
+                    if proposal.skill_code:
+                        skill_mod_name = str(
+                            proposal.hypothesis.get("skill_module") or "skill"
+                        )
+                        candidate_skills[skill_mod_name] = proposal.skill_code
+
                     eval_res = self.pool.evaluate_batch(
                         batch_id=batch_id,
                         policy_code=proposal.full_policy_code,
@@ -1230,7 +1290,7 @@ class CampaignOrchestrator:
                         record_ticks=True,
                         show_progress=True,
                         early_stop_fn=early_stop_cb,
-                        skills=self.load_workspace_skills(),
+                        skills=candidate_skills,
                         shards=eval_shards if eval_shards else None,
                         max_steps=active_max_steps,
                     )

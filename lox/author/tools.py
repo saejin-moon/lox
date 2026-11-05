@@ -77,7 +77,11 @@ class AuthorToolRegistry:
         self.max_steps = max_steps
         self.current_policy_code: str = ""
         self.last_passed_code: str = ""
+        self.last_passed_skill_name: str | None = None
+        self.last_passed_skill_code: str | None = None
         self.best_pilot_code: str = ""
+        self.best_pilot_skill_name: str | None = None
+        self.best_pilot_skill_code: str | None = None
         self.best_pilot_delta: float = -1e9
         self.pool: Any = None
         self.baseline_runs: list[dict[str, Any]] = []
@@ -109,7 +113,12 @@ class AuthorToolRegistry:
         self.pilot_episodes = pilot_episodes
         self.last_pilot_improved = False
         self.last_pilot_summary = ""
+        self.last_passed_code = ""
+        self.last_passed_skill_name = None
+        self.last_passed_skill_code = None
         self.best_pilot_code = ""
+        self.best_pilot_skill_name = None
+        self.best_pilot_skill_code = None
         self.best_pilot_delta = -1e9
         self.last_cand_depths = []
         self.last_base_depths = []
@@ -457,6 +466,8 @@ class AuthorToolRegistry:
         replay_run_id: str = "",
         replay_steps: int = 0,
         smoke_only: bool = False,
+        skill_name: str | None = None,
+        skill_code: str | None = None,
     ) -> tuple[str, str]:
         """
         Compiles and tests candidate `code` in a live NetHack sandbox:
@@ -467,6 +478,15 @@ class AuthorToolRegistry:
         macros_code = self.macro_lib.load_code()
         policy_code = self.current_policy_code
 
+        cand_skills = dict(self.skills)
+        if skill_name and skill_code:
+            cand_skills[str(skill_name)] = skill_code
+
+        skill_matches = skill_code is None or (
+            self.last_passed_skill_code is not None
+            and skill_code.strip() == self.last_passed_skill_code.strip()
+        )
+
         if (
             not is_macro
             and self.last_passed_code
@@ -475,6 +495,7 @@ class AuthorToolRegistry:
                 code.strip() == self.last_passed_code.strip()
                 or is_ast_equivalent(code, self.last_passed_code)
             )
+            and skill_matches
         ):
             return (
                 f"Candidate code already verified in passing pilot batch ({self.last_pilot_summary}). "
@@ -487,6 +508,7 @@ class AuthorToolRegistry:
             and not smoke_only
             and self.last_passed_code
             and self.last_pilot_improved
+            and skill_matches
         ):
             return (
                 f"Pilot verification ALREADY PASSED in this generation ({self.last_pilot_summary})! "
@@ -500,37 +522,42 @@ class AuthorToolRegistry:
 
         try:
             if policy_code.strip():
-                spliced_policy, changed_fns = splice_functions_into_policy(
-                    policy_code, code
-                )
-                # Static reachability check: ensure any non-root method in changed_fns is referenced in spliced_policy
-                spliced_tree = ast.parse(spliced_policy)
-                called_attrs: set[str] = set()
-                for node in ast.walk(spliced_tree):
-                    if isinstance(node, ast.Call):
-                        if isinstance(node.func, ast.Attribute):
-                            called_attrs.add(node.func.attr)
-                        elif isinstance(node.func, ast.Name):
-                            called_attrs.add(node.func.id)
-                unreferenced = [
-                    fn
-                    for fn in changed_fns
-                    if fn not in ("run", "step", "act", "__init__")
-                    and fn not in called_attrs
-                ]
-                if unreferenced:
-                    return (
-                        f"Unreachable Function Error: Method(s) {unreferenced} were spliced into `class Policy`, "
-                        f"but are NEVER called by `run` or any other method in `policy.py`! "
-                        f"Please include the updated caller method (e.g. `def run(self, state):` or dispatcher) "
-                        f"in your code block so {unreferenced} is actually wired in and called.",
-                        "UNREACHABLE_ERROR",
+                if code.strip():
+                    spliced_policy, changed_fns = splice_functions_into_policy(
+                        policy_code, code
                     )
+                else:
+                    spliced_policy = policy_code
+                    changed_fns = []
+                # Static reachability check: ensure any non-root method in changed_fns is referenced in spliced_policy
+                if changed_fns:
+                    spliced_tree = ast.parse(spliced_policy)
+                    called_attrs: set[str] = set()
+                    for node in ast.walk(spliced_tree):
+                        if isinstance(node, ast.Call):
+                            if isinstance(node.func, ast.Attribute):
+                                called_attrs.add(node.func.attr)
+                            elif isinstance(node.func, ast.Name):
+                                called_attrs.add(node.func.id)
+                    unreferenced = [
+                        fn
+                        for fn in changed_fns
+                        if fn not in ("run", "step", "act", "__init__")
+                        and fn not in called_attrs
+                    ]
+                    if unreferenced:
+                        return (
+                            f"Unreachable Function Error: Method(s) {unreferenced} were spliced into `class Policy`, "
+                            f"but are NEVER called by `run` or any other method in `policy.py`! "
+                            f"Please include the updated caller method (e.g. `def run(self, state):` or dispatcher) "
+                            f"in your code block so {unreferenced} is actually wired in and called.",
+                            "UNREACHABLE_ERROR",
+                        )
             else:
                 spliced_policy = code
                 changed_fns = ["run"]
             compiled = compile_policy_package(
-                spliced_policy, macros_code, skills=self.skills
+                spliced_policy, macros_code, skills=cand_skills
             )
         except Exception as exc:
             return (
@@ -764,7 +791,12 @@ class AuthorToolRegistry:
                             base_shard_by_seed[sh_key] = base_run_by_seed[s]
                             base_shard_by_seed[s] = base_run_by_seed[s]
 
-                target_fns = changed_fns if policy_code.strip() else None
+                if policy_code.strip() and changed_fns:
+                    target_fns = changed_fns
+                elif skill_name and skill_name in compiled.skill_function_names:
+                    target_fns = compiled.skill_function_names[skill_name]
+                else:
+                    target_fns = None
 
                 pilot_res = self.pool.evaluate_batch(
                     batch_id=pilot_batch_id,
@@ -775,8 +807,10 @@ class AuthorToolRegistry:
                     priority_seeds=pilot_seeds,
                     unconditional_seeds=base_trig_seeds if base_trig_seeds else None,
                     shards=pilot_shards if pilot_shards else None,
-                    skills=self.skills,
+                    skills=cand_skills,
                     max_steps=self.max_steps,
+                    max_raw_multiplier=3,
+                    unreachable_abort_after=min(60, target_eps * 2),
                     record_ticks=True,
                     show_progress=False,
                 )
@@ -796,6 +830,7 @@ class AuthorToolRegistry:
                         macros_code=macros_code,
                         target_episodes=len(missing_seeds),
                         priority_seeds=missing_seeds,
+                        max_steps=self.max_steps,
                         record_ticks=False,
                         show_progress=False,
                         skills=self.skills,
@@ -1001,10 +1036,16 @@ class AuthorToolRegistry:
                 ):
                     self.best_pilot_delta = max(self.best_pilot_delta, score_key)
                     self.best_pilot_code = code
+                    if skill_name and skill_code:
+                        self.best_pilot_skill_name = str(skill_name)
+                        self.best_pilot_skill_code = skill_code
 
                 if improved:
                     self.last_pilot_improved = True
                     self.last_passed_code = code
+                    if skill_name and skill_code:
+                        self.last_passed_skill_name = str(skill_name)
+                        self.last_passed_skill_code = skill_code
                 else:
                     if not self.last_passed_code:
                         self.last_pilot_improved = False
@@ -1314,6 +1355,14 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                         "type": "integer",
                         "description": "Number of initial actions from replay_run_id to fast-forward (0 defaults to 25 steps before run end).",
                         "default": 0,
+                    },
+                    "skill_name": {
+                        "type": "string",
+                        "description": "Optional name of a skill module (e.g., 'combat', 'nutrition', 'navigation') to test or update alongside the policy.",
+                    },
+                    "skill_code": {
+                        "type": "string",
+                        "description": "Optional Python source code for the skill module identified by skill_name.",
                     },
                 },
                 "required": ["code"],

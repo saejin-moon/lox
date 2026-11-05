@@ -160,3 +160,102 @@ def test_context_scoped_user_prompt_includes_skill_registry():
     assert "# Module: combat" in prompt
     assert "def attack(state):" in prompt
     assert "read_skill" in prompt
+
+
+def test_skill_import_forms_and_macro_integration():
+    macro_code = """
+def helper_search(state):
+    return Action.SEARCH
+"""
+    combat_skill_code = """
+from lox.env.actions import Action
+
+def defend(self, state):
+    return helper_search(state)
+"""
+    router_code_1 = """
+from skills.combat import defend
+from lox.env.actions import Action
+
+class Policy:
+    def run(self, state):
+        while True:
+            act = defend(self, state)
+            state = yield act
+"""
+    router_code_2 = """
+import skills.combat
+from lox.env.actions import Action
+
+class Policy:
+    def run(self, state):
+        while True:
+            act = skills.combat.defend(self, state)
+            state = yield act
+"""
+
+    skills = {"combat": combat_skill_code}
+
+    # Test 'from skills.combat import defend'
+    compiled_1 = compile_policy_package(
+        policy_code=router_code_1,
+        macros_code=macro_code,
+        skills=skills,
+    )
+    runner_1 = compiled_1.create_runner()
+    harness = NetHackHarness(max_steps=10)
+    state = harness.reset(seed=42)
+    act1, _ = runner_1.next_action(state)
+    assert act1 == Action.SEARCH
+
+    # Test 'import skills.combat; skills.combat.defend'
+    compiled_2 = compile_policy_package(
+        policy_code=router_code_2,
+        macros_code=macro_code,
+        skills=skills,
+    )
+    runner_2 = compiled_2.create_runner()
+    act2, _ = runner_2.next_action(state)
+    assert act2 == Action.SEARCH
+
+
+def test_dry_run_policy_with_candidate_skill(tmp_path):
+    tools = AuthorToolRegistry(db_path=":memory:")
+    policy_code = """
+from skills.combat import defend
+from lox.env.actions import Action
+
+class Policy:
+    def run(self, state):
+        while True:
+            state = yield defend(self, state)
+"""
+    combat_code = """
+from lox.env.actions import Action
+
+def defend(self, state):
+    return Action.SEARCH
+"""
+    diag, status = tools.dry_run_policy(
+        code=policy_code,
+        skill_name="combat",
+        skill_code=combat_code,
+        smoke_only=True,
+    )
+    assert "PASSED" in status or "VALID" in status
+
+
+def test_spsa_keyword_args_and_zero_gain_short_circuit():
+    from lox.engine.modes import bake_params_into_policy_ast
+
+    policy_code = """
+class Policy:
+    def __init__(self):
+        self.flee_hp = self.param("flee_hp", default=0.25, min_val=0.10, max_val=0.70)
+        self.wait_steps = self.param("wait_steps", 5, 1, 20)
+"""
+    updated = bake_params_into_policy_ast(
+        policy_code, {"flee_hp": 0.45, "wait_steps": 10}
+    )
+    assert "0.45" in updated
+    assert "10" in updated

@@ -480,7 +480,7 @@ class PersistentEvalPool:
         target_fns = [f for f in (target_functions or []) if f and f != "__init__"]
         bench = benchmark or self.benchmark
         max_raw_episodes = (
-            max(target_episodes * max_raw_multiplier, 2000)
+            max(target_episodes * max_raw_multiplier, target_episodes)
             if target_fns
             else target_episodes
         )

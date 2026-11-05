@@ -149,13 +149,19 @@ def _safe_import(name: str, globals_dict=None, locals_dict=None, fromlist=(), le
         "bisect": bisect,
         "copy": copy,
     }
-    if root in allowed_map:
+    if root in allowed_map and root == name:
         return allowed_map[root]
-    if root in ("skills", "lox"):
-        if name in sys.modules:
-            return sys.modules[name]
-        if root in sys.modules:
-            return sys.modules[root]
+    if root in allowed_map or root in ("skills", "lox"):
+        if not fromlist:
+            if root in sys.modules:
+                return sys.modules[root]
+            if name in sys.modules:
+                return sys.modules[name]
+        else:
+            if name in sys.modules:
+                return sys.modules[name]
+            if root in sys.modules:
+                return sys.modules[root]
     raise ImportError(f"Import of '{name}' is not permitted in policy sandbox.")
 
 
@@ -444,6 +450,10 @@ class CompiledPolicy:
             sys.modules["lox_policy"] = mod_obj
         mod_obj.__dict__.update(ns)
 
+        if self._macro_code_obj is not None:
+            exec(self._macro_code_obj, ns)
+            mod_obj.__dict__.update(ns)
+
         # Register and execute skills modules
         skills_pkg = types.ModuleType("skills")
         sys.modules["skills"] = skills_pkg
@@ -457,9 +467,6 @@ class CompiledPolicy:
             setattr(skills_pkg, s_name, s_mod)
             ns[s_name] = s_mod
 
-        if self._macro_code_obj is not None:
-            exec(self._macro_code_obj, ns)
-            mod_obj.__dict__.update(ns)
         exec(self._policy_code_obj, ns)
         mod_obj.__dict__.update(ns)
 

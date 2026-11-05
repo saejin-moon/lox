@@ -62,7 +62,22 @@ POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
 - **Tunable Parameters (`self.param`)**:
   Declare numeric thresholds/weights via `self.param("name", default, min_val, max_val)` (e.g. `self.param("heal_hp_ratio", 0.35, 0.10, 0.80)`). During `PARAM_TUNE` generations, the engine optimizes all registered parameters automatically via SPSA!
 
-#### 2. Core 1-to-1 Action Working Set (`Action`, `key`, `seq`, `DIR_DELTAS`)
+#### 2. Modular Subsystems & Skill Modules (`skills/<module>.py`)
+- **Hierarchical Modularization**: Monolithic policy classes with dozens of methods become fragile and difficult to maintain. You can modularize domain capabilities into external skill files under `data/workspace/skills/<module>.py` (e.g. `skills/combat.py`, `skills/nutrition.py`, `skills/navigation.py`, `skills/identification.py`).
+- **Importing in Policy**:
+  In `policy.py` or helper methods, import routines or classes directly:
+  ```python
+  from skills.combat import melee_strike, tactical_retreat
+  from skills.nutrition import handle_nutrition
+  import skills.navigation as nav
+  ```
+- **Authoring Skills**:
+  - In `FUNC_MOD_ADD` or `STRUCTURAL_REFACTOR`, you can create or update a modular skill module by specifying `skill_module: "mod_name"` in your YAML hypothesis and providing the skill code.
+  - When testing with `dry_run_policy(code=..., skill_name="mod_name", skill_code="...")`, the engine validates both together.
+  - Skill modules have access to the same sandboxed stdlib, macros, and NetHack primitives (`Action`, `seq`, `DIR_DELTAS`, `GameState`, `bfs_distance_grid`, `astar_next_step`, etc.).
+  - Methods in `class Policy` can delegate cleanly to skill functions: `act = melee_strike(self, state)` or `act = nav.step_frontier(state, self.visited)`.
+
+#### 3. Core 1-to-1 Action Working Set (`Action`, `key`, `seq`, `DIR_DELTAS`)
 Nothing is hardcoded in the harness: whatever you `yield` (or `return` from `step`) maps 1-to-1 to the exact keystroke(s) sent to NetHack:
 - **Compass Movement (`Action` or `(dy, dx)` via `DIR_DELTAS`)**:
   `Action.N` (`'k'`, `(-1, 0)`), `Action.S` (`'j'`, `(1, 0)`), `Action.E` (`'l'`, `(0, 1)`), `Action.W` (`'h'`, `(0, -1)`),
@@ -91,7 +106,7 @@ Nothing is hardcoded in the harness: whatever you `yield` (or `return` from `ste
   - Throw item `'b'` in direction `(dy, dx)`: `yield seq(Action.THROW, 'b', DIR_DELTAS[(dy, dx)])`
   - Zap directional wand `'i'` in direction `(dy, dx)`: `yield seq(Action.ZAP, 'i', DIR_DELTAS[(dy, dx)])`
 
-#### 3. Querying `GameState` (`state`)
+#### 4. Querying `GameState` (`state`)
 Every turn, `state` exposes 100% of NetHack's observation arrays, terminal screens, and C symbol tables. Pay special attention to these crucial perception fields:
 - **Hero Vitals, Armor & Hunger**:
   - `state.hp` and `state.max_hp`: Hero current and max hit points.
@@ -169,7 +184,7 @@ Every turn, `state` exposes 100% of NetHack's observation arrays, terminal scree
         return DIR_DELTAS[(dy, dx)]
     ```
 
-#### 4. Deterministic Zero-Heuristic WorldMemory (`state.mem`)
+#### 5. Deterministic Zero-Heuristic WorldMemory (`state.mem`)
 
 The harness automatically maintains deterministic, zero-heuristic spatial and episodic bookkeeping on `state.mem` across steps and replays:
 - `state.mem.visited`: `bool[21, 79]` mask of tiles the hero has physically visited on the current `(state.dungeon_num, state.level_num)` floor.
@@ -462,13 +477,13 @@ Single-skill targeted patches have stalled or reached a local optimum. You have 
    - **The Binding Constraint Rule**: Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint).
    - Query DuckDB (`runs`, `experiments`, `expert_runs`) to identify why the previous architecture stalled (e.g. state management bottlenecks, lack of multi-turn goal commitment, unhandled traps or hunger states).
    - Use `query_wiki` to confirm the C engine mechanics governing the bottleneck.
-2. **Stage 2: Full Class Synthesis & Automatic Subsystem Modularization**:
-   - Rewrite `class Policy:` from scratch or restructure its methods, attributes on `self`, and dispatch loop to break the plateau.
-   - You can freely use verified macros from `macros.py` (see above) and `state.mem` for zero-heuristic spatial/episodic memory.
-   - **Modular Subsystems**: When `policy.py` exceeds 450 lines, extract cohesive domain helpers (e.g., corpse/nutrition logic, equipment/AC scoring, or special-level puzzle handlers) into `data/workspace/skills/<skill_module>.py` by specifying `skill_module: "<name>"` in the YAML hypothesis and providing a second `# skill_module: <name>` Python block, or promote stateless helpers into `macros.py`.
+2. **Stage 2: Restructuring & Subsystem Modularization**:
+   - You can rewrite `class Policy:` from scratch OR provide only the restructured methods (the engine's surgical splicer will splice them in without requiring you to re-type unchanged methods).
+   - You can freely use verified macros from `macros.py` and `state.mem` for zero-heuristic spatial/episodic memory.
+   - **Modular Subsystems (`skills/<module>.py`)**: When `policy.py` exceeds 400 lines or has many methods, extract cohesive domain logic (e.g. `skills/combat.py`, `skills/nutrition.py`, `skills/navigation.py`) out of `policy.py`. Specify `skill_module: "<name>"` in your YAML hypothesis.
 3. **Stage 3: Verification & Pre-Submission Invariants**:
    - Mentally verify all 4 invariants (Generator Invariant, State Persistence, Passability Mask, Trigger Reachability).
-   - Test your candidate class using `dry_run_policy(code=...)`.
+   - Test your candidate code using `dry_run_policy(code=..., skill_name="<name>", skill_code="...")`.
 4. **Stage 4: Commit Output**:
    - Output a `yaml` block detailing your hypothesis:
      ```yaml
@@ -478,8 +493,9 @@ Single-skill targeted patches have stalled or reached a local optimum. You have 
      verified_c_rule: "C engine rule or expert progression pattern identified via query_wiki/query_db"
      mechanism: "How the refactored class Policy resolves the architectural bottleneck"
      state_persistence: "What self.* fields manage state and prevent oscillations"
+     skill_module: "optional_skill_name"
      ```
-   - Output your full `class Policy:` in a single ```python ... ``` block.
+   - Output your restructured method(s) (or full `class Policy:`) in a ```python ... ``` block. If creating or modifying a skill, provide its code in a second ```python ... ``` block labeled with `# skill_module: <name>`.
 """
 
     # Default: FUNC_MOD_ADD
@@ -499,16 +515,17 @@ Single-skill targeted patches have stalled or reached a local optimum. You have 
      * Call `query_db(sql=...)` to inspect the failed runs, stall causes, or death reasons from the previous batch (`runs` table), or compare with how experts handled this stage in `expert_runs` / `expert_ticks`.
    - Ground your hypothesis in empirical game facts, not blind intuition.
 
-2. **Stage 2: Focus on 1 Primary Skill & Anti-Hallucination Anchor**:
-   - Target **1 primary skill** (1 specialist method, plus the caller e.g. `run` if wiring a new method) per generation.
+2. **Stage 2: Focus on 1 Primary Skill or Modular Subsystem**:
+   - Target **1 primary skill** (1 specialist method in `Policy`, OR an external module under `skills/<skill_module>.py`).
+   - If adding or updating a modular skill module, specify `skill_module: "<name>"` in your YAML hypothesis and import it in `policy.py` (e.g. `from skills.combat import melee_strike`).
    - Modifying 1 method costs only 150 triggered episodes and isolates causal attribution; modifying multiple unrelated methods inflates rollout budgets and couples unrelated bugs.
    - **Anti-Hallucination & Dungeon Context Anchor**: Anchor your reasoning to your current dungeon depth (`state.depth`). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. If the hero is bumping into walls, inspect `get_passable_mask` and verify `ord('-')` and `ord('|')` are strictly marked False.
    - NetHack is an interrupt-driven survival loop: specialist methods (`explore_step`, `handle_combat`, `handle_nutrition`, etc.) must return an action or `None` on each tick and rely on persistent attributes on `self` (`self.target_tile`, `self.pos_history = collections.deque(maxlen=8)`) to avoid 2-tile ping-pong oscillations.
 
 3. **Stage 3: 30-Episode Pilot Verification (`dry_run_policy`)**:
-   - Test your candidate code using `dry_run_policy(code=...)`.
+   - Test your candidate code using `dry_run_policy(code=..., skill_name="<name>", skill_code="...")`.
    - It runs a **30-episode parallel pilot test** against the current baseline on 16 workers in ~1s, reporting paired Wins/Losses/Ties and the exact logs of the worst stalled runs.
-   - Any episode that does NOT call your modified/added method is immediately discarded (`triggered == False`). Ensure your method is called by `run()`.
+   - Any episode that does NOT call your modified/added method or skill is immediately discarded (`triggered == False`). Ensure your method is called by `run()`.
 
 4. **Stage 4: Pilot Failure Protocol (If Pilot Fails)**:
    - If `dry_run_policy` returns `PILOT_FAILED`, **STOP! Do NOT blindly guess another code variation.**
@@ -531,6 +548,7 @@ Single-skill targeted patches have stalled or reached a local optimum. You have 
      verified_c_rule: "Exact C engine rule discovered via query_wiki/query_db"
      mechanism: "Exact behavioral change introduced by your skill modification"
      state_persistence: "What self.* attributes prevent oscillation and track targets"
+     skill_module: "optional_skill_name"
      ```
-   - Output ONLY the modified and/or newly added method(s) (or `class Policy:` containing them) in a single ```python ... ``` block.
+   - Output your modified and/or newly added method(s) (or `class Policy:`) in a ```python ... ``` block. If providing an external skill module, provide its code in a second ```python ... ``` block labeled with `# skill_module: <name>`.
 """

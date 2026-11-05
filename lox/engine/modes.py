@@ -74,14 +74,20 @@ class _ParamConstantUpdater(ast.NodeTransformer):
 
         if (
             is_param_call
-            and len(node.args) >= 2
+            and node.args
             and isinstance(node.args[0], ast.Constant)
             and isinstance(node.args[0].value, str)
         ):
             p_name = node.args[0].value
             if p_name in self.new_defaults:
                 val = self.new_defaults[p_name]
-                node.args[1] = ast.Constant(value=val)
+                if len(node.args) >= 2:
+                    node.args[1] = ast.Constant(value=val)
+                else:
+                    for kw in node.keywords:
+                        if kw.arg == "default":
+                            kw.value = ast.Constant(value=val)
+                            break
         return node
 
 
@@ -226,7 +232,15 @@ def run_spsa_param_tuning(
         )
         ck = c0 / ((k + 1.0) ** gamma_exp)
         ak = a0 / ((k + 1.0 + A) ** alpha_exp)
-        delta_vec = rng.choice([-1.0, 1.0], size=p_dim)
+        # Random Subspace SPSA (Spall, 1992): if parameter dimension > 6,
+        # perturb a random subset of 4 parameters per iteration to prevent high-variance divergence
+        if p_dim > 6:
+            subspace_k = min(4, p_dim)
+            active_indices = rng.choice(p_dim, size=subspace_k, replace=False)
+            delta_vec = np.zeros(p_dim, dtype=np.float64)
+            delta_vec[active_indices] = rng.choice([-1.0, 1.0], size=subspace_k)
+        else:
+            delta_vec = rng.choice([-1.0, 1.0], size=p_dim)
 
         theta_plus = np.clip(theta + ck * delta_vec, 0.0, 1.0)
         theta_minus = np.clip(theta - ck * delta_vec, 0.0, 1.0)
@@ -351,10 +365,35 @@ def run_spsa_param_tuning(
             best_gain = gain_minus
             best_theta = theta_minus.copy()
 
-        grad = ((j_plus - j_minus) / (2.0 * ck)) * (1.0 / delta_vec)
+        grad = np.zeros_like(theta)
+        active_mask = delta_vec != 0.0
+        if np.any(active_mask):
+            grad[active_mask] = ((j_plus - j_minus) / (2.0 * ck)) * (
+                1.0 / delta_vec[active_mask]
+            )
         theta = np.clip(theta + ak * grad, 0.0, 1.0)
 
-    cand_params = _denorm(best_theta if best_gain > 0.0 else theta)
+    if best_gain <= 0.0:
+        return {
+            "tuned": False,
+            "optimized_params": _denorm(theta),
+            "new_policy_code": policy_code,
+            "new_macros_code": macros_code,
+            "val_result": None,
+            "verdict": {
+                "passed": False,
+                "mean_delta": 0.0,
+                "ci_lower": 0.0,
+                "ci_upper": 0.0,
+                "wilcoxon_p": 1.0,
+                "wins": 0,
+                "losses": 0,
+                "ties": len(baseline_runs),
+                "reason": "CRN-SPSA found zero positive gradient over mini-batches (best_gain <= 0.0). Skipped validation rollout to save compute.",
+            },
+        }
+
+    cand_params = _denorm(best_theta)
     new_policy_code = bake_params_into_policy_ast(policy_code, cand_params)
     new_macros_code = (
         bake_params_into_policy_ast(macros_code, cand_params)
