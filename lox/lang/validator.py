@@ -139,6 +139,40 @@ class SandboxASTVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def format_code_with_line_numbers(
+    code: str,
+    highlight_line: int | None = None,
+    col_offset: int | None = None,
+    window: int = 4,
+) -> str:
+    """
+    Formats code lines with 1-based line numbers, highlighting the specified line and column with a caret.
+    Provides clear visual context for compiler and syntax diagnostics sent to the Author Agent.
+    """
+    lines = code.splitlines()
+    if not lines:
+        return "(empty)"
+    total_lines = len(lines)
+
+    if highlight_line is not None and 1 <= highlight_line <= total_lines:
+        start = max(1, highlight_line - window)
+        end = min(total_lines, highlight_line + window)
+    else:
+        start = 1
+        end = min(total_lines, window * 2 + 1)
+
+    num_digits = max(2, len(str(end)))
+    out: list[str] = []
+    for ln in range(start, end + 1):
+        line_content = lines[ln - 1]
+        is_hl = ln == highlight_line
+        marker = "> " if is_hl else "  "
+        out.append(f"{marker}{str(ln).rjust(num_digits)} | {line_content}")
+        if is_hl and col_offset is not None and col_offset > 0:
+            out.append(" " * (2 + num_digits + 3) + " " * (col_offset - 1) + "^")
+    return "\n".join(out)
+
+
 def validate_python_code(code: str, filename: str = "<policy>") -> ast.Module:
     """Parses and validates Python source code, returning the parsed AST Module."""
     if not code or not code.strip():
@@ -147,8 +181,13 @@ def validate_python_code(code: str, filename: str = "<policy>") -> ast.Module:
     try:
         tree = ast.parse(cleaned, filename=filename)
     except SyntaxError as exc:
+        snippet = format_code_with_line_numbers(
+            cleaned,
+            highlight_line=exc.lineno,
+            col_offset=exc.offset,
+        )
         raise PolicyValidationError(
-            f"SyntaxError in {filename} at line {exc.lineno}: {exc.msg}"
+            f"SyntaxError in {filename} at line {exc.lineno}: {exc.msg}\n\n{snippet}"
         ) from exc
 
     visitor = SandboxASTVisitor()

@@ -735,9 +735,26 @@ def build_batch_contrast_digest(
         lines.append(
             "\n### 🚨 Frontier Bottleneck & Root-Cause Telemetry:\n"
             f"- **Chronic Stagnation Rate**: {chronic_rate * 100:.1f}% ({chronic_runs}/{len(runs)} runs spent >50% of runtime stalled after their last milestone).\n"
-            f"- **State Recurrence Rate during Stagnation**: {avg_rec:.2f} (values > 0.85 indicate compact limit cycles / oscillation)."
+            f"- **State Recurrence Rate during Stagnation**: {avg_rec:.2f} (values > 0.85 indicate compact limit cycles / oscillation; lower values indicate wandering across level without advancing depth)."
         )
-        if top_livelock_fns:
+
+        if max_steps_rate >= 0.20 and avg_rec < 0.85:
+            lines.append(
+                "- **PRIMARY BOTTLENECK: LEVEL EXPLORATION & STAIRCASE DESCENT FAILURE**:\n"
+                f"  * {max_steps_rate * 100:.1f}% of episodes timed out at step limit with low recurrence ({avg_rec:.2f}), meaning the hero mapped accessible rooms but failed to descend.\n"
+                "  * **Crucial Guidance for Author Agent**:\n"
+                "    - Passive handlers (`handle_prompt`, `handle_emergency`, `handle_nutrition`) ran frequently ONLY because the hero was wandering without finding an exit.\n"
+                "    - Do NOT waste generations modifying prompt replies, pray timers, or emergency handlers!\n"
+                "    - You MUST improve **staircase location & descent** (`state.stairs_down_pos`, stepping onto `>` and yielding `Action.DOWN`) and **secret door searching** (searching adjacent wall/corridor tiles with `Action.SEARCH` when unvisited areas cannot be reached)."
+            )
+        elif avg_rec >= 0.85 and top_livelock_fns:
+            lines.append(
+                "- **PRIMARY BOTTLENECK: COMPACT LIMIT CYCLE / OSCILLATION LIVELOCK**:\n"
+                f"  * High recurrence ({avg_rec:.2f}) indicates the hero is ping-ponging between 2–3 tiles or blocked against an obstacle.\n"
+                f"  * Primary Livelock Sink: `{top_livelock_fns[0]['function_name']}` ({top_livelock_fns[0].get('stagnation_turns', 0):,} stalled turns).\n"
+                "  * You MUST update this function's state persistence (`self.*` target tracking, dead-end blacklists, or displacement wait) to break the cycle."
+            )
+        elif top_livelock_fns:
             lines.append(
                 "- **Livelock Sinks (Functions consuming turns during zero-progress stagnation)**:"
             )
@@ -746,11 +763,6 @@ def build_batch_contrast_digest(
                     f"  * `{l_fs['function_name']}`: {l_fs.get('stagnation_turns', 0):,} stagnation turns "
                     f"({l_fs.get('stagnation_share', 0.0) * 100:.1f}% of stalled time in batch, livelock_score={l_fs.get('livelock_score', 0.0):.3f})"
                 )
-            lines.append(
-                "- **Universal Causal Invariant for Author Agent**:\n"
-                "  * Chronic failures (high stagnation ratio) are CAUSED by the Livelock Sink above, NOT by the final death message.\n"
-                "  * Do NOT patch secondary resource consumers (e.g. food/health regeneration). You MUST modify the Livelock Sink to break the zero-progress cycle!"
-            )
 
     # Sample top 2 Outlier Good Run summaries right in the digest
     if outliers:

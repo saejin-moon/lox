@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.tools import OPENAI_TOOL_SPECS, AuthorToolRegistry
+from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH
 from lox.lang.macros import DEFAULT_MACROS_PATH
 from lox.lang.validator import is_ast_equivalent, splice_functions_into_policy
@@ -85,6 +86,79 @@ class AuthorAgent:
         self.latest_attempted_hyp: dict[str, Any] = {}
         self.tools = AuthorToolRegistry(
             db_path=db_path, macros_path=macros_path, benchmark=benchmark
+        )
+        self.db_logger = BatchDatabaseLogger(db_path=db_path)
+
+    def build_repair_prompt(
+        self,
+        status: str,
+        diag: str,
+        mode: str,
+        repair_idx: int,
+        max_repair_turns: int,
+        candidate_code: str = "",
+    ) -> str:
+        """Builds a precise, category-specific, actionable repair prompt for the Author Agent."""
+        hdr = (
+            f"Your candidate code failed the compiler/sandbox verification gate "
+            f"(Attempt {repair_idx}/{max_repair_turns}):"
+        )
+        if "UNREACHABLE" in status or "Unreachable Function" in diag:
+            guidance = (
+                "🚨 PROBLEM: UNREACHABLE METHOD IN POLICY\n"
+                "LOX's static reachability analysis found that your newly added/modified method is NEVER invoked "
+                "by `run(self, state)` or any other active method in `policy.py`.\n"
+                "NetHack policy execution enters via `def run(self, state):` which yields actions.\n\n"
+                "REQUIRED FIX:\n"
+                "In your ```python ... ``` block, you MUST provide BOTH:\n"
+                "1. Your helper method definition (e.g. `def your_method(self, state): ...`)\n"
+                "2. The updated caller method (e.g. `def run(self, state): ...` or parent dispatcher) "
+                "that explicitly invokes `self.your_method(state)`.\n"
+                "Both methods must be included in the SAME ```python ... ``` block."
+            )
+        elif "COMPILE" in status or "SyntaxError" in diag or "IndentationError" in diag:
+            guidance = (
+                "🚨 PROBLEM: PYTHON SYNTAX OR INDENTATION ERROR\n"
+                "Your code could not be compiled into Python bytecode.\n"
+                "REQUIRED FIX:\n"
+                "1. Look at the line pointer `>` and column caret `^` in the snippet below.\n"
+                "2. Ensure all opening brackets `(`, `[`, `{` have matching closing brackets.\n"
+                "3. Ensure strictly 4 spaces per indentation level.\n"
+                "4. Use only permitted modules and builtins (e.g. `Action`, `DIR_DELTAS`, `key`, `seq`, `GameState`, `np`).\n"
+                "5. Output the complete, self-contained method/class in a single ```python ... ``` block."
+            )
+        elif "MISSING_CODE" in status:
+            guidance = (
+                "🚨 PROBLEM: NO PYTHON CODE BLOCK FOUND\n"
+                "Your previous response did not contain a valid ```python ... ``` block.\n"
+                "REQUIRED FIX:\n"
+                "1. Emit your hypothesis in a ```yaml ... ``` block.\n"
+                "2. Emit your Python implementation in a ```python ... ``` block.\n"
+                "Ensure standard triple backticks (```python) are used."
+            )
+        elif "RUNTIME" in status:
+            guidance = (
+                "🚨 PROBLEM: RUNTIME EXCEPTION IN SMOKE TEST\n"
+                "Your code crashed during the initial single-episode NetHack smoke test:\n"
+                "REQUIRED FIX:\n"
+                "1. Guard against unexpected state or empty collections (check `if monsters:`, `if (dy, dx) != (0, 0):`, etc.).\n"
+                "2. Ensure you only call valid attributes/methods on `state` (e.g. `state.y`, `state.x`, `state.char_at(y, x)`, `state.visible_monsters()`, `state.path_step(...)`).\n"
+                "3. If using `yield`, ensure the generator yields valid `Action` or `seq(...)` actions.\n"
+                "4. Output the complete corrected ```python ... ``` block."
+            )
+        else:
+            guidance = (
+                "🚨 PROBLEM: VERIFICATION FAILURE\n"
+                "Your candidate code did not pass the sandbox compiler verification check.\n"
+                "REQUIRED FIX:\n"
+                "Review the error diagnostic below, fix the issue, and output the corrected ```python ... ``` block."
+            )
+
+        return (
+            f"{hdr}\n\n"
+            f"```\n{diag.strip()}\n```\n\n"
+            f"{guidance}\n\n"
+            "Please fix the error and output the corrected ```yaml ... ``` and ```python ... ``` blocks directly in your response."
         )
 
     @staticmethod
@@ -346,10 +420,29 @@ class AuthorAgent:
                             f"Empty choices in LLM response: {str(data)[:200]}"
                         )
                     msg_obj = choices[0].get("message") or {}
-                    if not msg_obj.get("content") and not msg_obj.get("tool_calls"):
-                        raise ValueError(
-                            "LLM returned empty message content and empty tool_calls"
+                    usage = data.get("usage") or {}
+                    msg_obj["_usage"] = usage
+                    reasoning = (
+                        msg_obj.get("reasoning")
+                        or msg_obj.get("reasoning_content")
+                        or ""
+                    )
+                    content = msg_obj.get("content") or ""
+                    if not reasoning and content:
+                        m_think = re.findall(
+                            r"<think>(.*?)</think>", content, flags=re.DOTALL
                         )
+                        if m_think:
+                            reasoning = "\n\n".join(t.strip() for t in m_think)
+                    msg_obj["_reasoning"] = reasoning
+
+                    if not content and not msg_obj.get("tool_calls"):
+                        if reasoning:
+                            msg_obj["content"] = reasoning
+                        else:
+                            raise ValueError(
+                                "LLM returned empty message content and empty tool_calls"
+                            )
                     return msg_obj
             except PermissionError:
                 raise
@@ -432,6 +525,34 @@ class AuthorAgent:
                 "observation_from_db": "Initial baseline synthesis from expert_runs and wiki.",
                 "mechanism": "Builds modular Policy with explore_step and handle_combat.",
             }
+            try:
+                self.db_logger.save_synthesis_log(
+                    log_id=f"syn_mock_{int(time.time() * 1000)}",
+                    generation=0,
+                    batch_id="batch_mock",
+                    mode=mode,
+                    turn_index=1,
+                    turn_type="MOCK_SYNTHESIS",
+                    repair_idx=0,
+                    model="mock",
+                    thinking_content="Mock reasoning step for testing telemetry persistence.",
+                    message_content="Mock proposal content",
+                    tool_calls_json="[]",
+                    tool_results_json="[]",
+                    candidate_code=code,
+                    skill_name="",
+                    skill_code="",
+                    hypothesis_yaml=yaml.dump(hyp),
+                    status="PASSED",
+                    error_diagnostic="",
+                    prompt_sent="Mock prompt",
+                    prompt_tokens=100,
+                    completion_tokens=200,
+                    reasoning_tokens=50,
+                    wall_ms=1.5,
+                )
+            except Exception:
+                pass
             return SynthesisProposal(
                 mode="FULL_WRITE",
                 hypothesis=hyp,
@@ -566,6 +687,7 @@ class AuthorAgent:
         final_content = ""
         latest_hyp: dict[str, Any] = {}
         last_attempted_code = ""
+        batch_id = f"gen_{generation:03d}_{mode.lower()}"
 
         for turn_idx in range(1, max_tool_turns + 2):
             allow_tools = turn_idx <= max_tool_turns and not getattr(
@@ -574,8 +696,18 @@ class AuthorAgent:
             ui.status(
                 f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
             )
+            t0_turn = time.perf_counter()
             msg = self._call_llm_api(messages, allow_tools=allow_tools)
+            turn_ms = (time.perf_counter() - t0_turn) * 1000.0
             msg_text = msg.get("content") or ""
+            reasoning_text = msg.get("_reasoning") or ""
+            usage = msg.get("_usage") or {}
+            prompt_toks = int(usage.get("prompt_tokens", 0))
+            comp_toks = int(usage.get("completion_tokens", 0))
+            reasoning_toks = int(
+                usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+            )
+
             clean_text = re.sub(
                 r"<think>.*?</think>", "", msg_text, flags=re.DOTALL
             ).strip()
@@ -645,6 +777,55 @@ class AuthorAgent:
                     pilot_res, pilot_summary = self.tools.dry_run_policy(
                         code=found_code
                     )
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                    arg_disp = f"auto-pilot ({len(found_code.splitlines())} lines)"
+                    ui.tool_call(
+                        turn_idx,
+                        "dry_run_policy",
+                        arg_disp,
+                        pilot_summary,
+                        elapsed_ms,
+                    )
+                    try:
+                        self.db_logger.save_synthesis_log(
+                            log_id=f"syn_{generation}_{turn_idx}_autopilot_{int(time.time() * 1000)}",
+                            generation=generation,
+                            batch_id=batch_id,
+                            mode=mode,
+                            turn_index=turn_idx,
+                            turn_type="PILOT_EXECUTION",
+                            repair_idx=0,
+                            model=self.model,
+                            thinking_content=reasoning_text,
+                            message_content=clean_text,
+                            tool_calls_json="[]",
+                            tool_results_json=json.dumps(
+                                [{"pilot_summary": pilot_summary}]
+                            ),
+                            candidate_code=found_code,
+                            skill_name=str((latest_hyp or {}).get("skill_module", "")),
+                            skill_code=self.extract_skill_code(clean_text, latest_hyp),
+                            hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
+                            status="PILOT_IMPROVED"
+                            if self.tools.last_pilot_improved
+                            else (
+                                "COMPILE_ERROR"
+                                if "COMPILE_ERROR" in pilot_res
+                                else (
+                                    "RUNTIME_ERROR"
+                                    if "RUNTIME_ERROR" in pilot_res
+                                    else "PILOT_FAILED"
+                                )
+                            ),
+                            error_diagnostic=pilot_res[:4000],
+                            prompt_sent="",
+                            prompt_tokens=prompt_toks,
+                            completion_tokens=comp_toks,
+                            reasoning_tokens=reasoning_toks,
+                            wall_ms=turn_ms,
+                        )
+                    except Exception:
+                        pass
                     elapsed_ms = (time.perf_counter() - t0) * 1000.0
                     arg_disp = f"auto-pilot ({len(found_code.splitlines())} lines)"
                     ui.tool_call(
@@ -751,6 +932,7 @@ class AuthorAgent:
                 final_content = msg_text
                 break
 
+            tool_results_list: list[dict[str, Any]] = []
             for tc in tool_calls:
                 total_tool_calls += 1
                 fn_Spec = tc.get("function") or {}
@@ -767,6 +949,9 @@ class AuthorAgent:
                 except Exception:
                     t_args = {}
                 tool_out = self._execute_tool_call(turn_idx, t_name, t_args)
+                tool_results_list.append(
+                    {"name": t_name, "args": t_args, "output": str(tool_out)[:2000]}
+                )
                 messages.append(
                     {
                         "role": "tool",
@@ -776,9 +961,103 @@ class AuthorAgent:
                     }
                 )
 
-        # Compiler-in-the-loop verification & sliding-window self-repair
+            try:
+                has_pilot = any(
+                    (tc.get("function") or {}).get("name") == "dry_run_policy"
+                    for tc in tool_calls
+                )
+                t_type = "PILOT_EXECUTION" if has_pilot else "RESEARCH_TOOL"
+                t_stat = (
+                    "PILOT_IMPROVED"
+                    if getattr(self.tools, "last_pilot_improved", False)
+                    else ("PILOT_FAILED" if has_pilot else "TOOL_CALLS")
+                )
+                _, cand_code_turn = self.extract_yaml_and_python(msg_text)
+                self.db_logger.save_synthesis_log(
+                    log_id=f"syn_{generation}_{turn_idx}_0_{int(time.time() * 1000)}",
+                    generation=generation,
+                    batch_id=batch_id,
+                    mode=mode,
+                    turn_index=turn_idx,
+                    turn_type=t_type,
+                    repair_idx=0,
+                    model=self.model,
+                    thinking_content=reasoning_text,
+                    message_content=clean_text,
+                    tool_calls_json=json.dumps(tool_calls),
+                    tool_results_json=json.dumps(tool_results_list),
+                    candidate_code=cand_code_turn,
+                    skill_name=str((latest_hyp or {}).get("skill_module", "")),
+                    skill_code=self.extract_skill_code(clean_text, latest_hyp),
+                    hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
+                    status=t_stat,
+                    error_diagnostic=getattr(self.tools, "last_pilot_summary", ""),
+                    prompt_sent=str(messages[-len(tool_calls) - 2].get("content", ""))
+                    if len(messages) >= len(tool_calls) + 2
+                    else "",
+                    prompt_tokens=prompt_toks,
+                    completion_tokens=comp_toks,
+                    reasoning_tokens=reasoning_toks,
+                    wall_ms=turn_ms,
+                )
+            except Exception:
+                pass
+
+        # Pilot Gate Abort: If pilots were run during the tool phase and none improved over baseline,
+        # abort immediately instead of falling through to smoke check and running 150-seed rollout.
+        if (
+            self.tools.pilot_runs_used > 0
+            and not self.tools.last_pilot_improved
+            and mode not in ("MACRO_WRITE", "FULL_WRITE")
+        ):
+            summary = self.tools.last_pilot_summary or "insufficient signal"
+            ui.warn(
+                f"Pilot Gate: Candidate failed all {self.tools.pilot_runs_used} pilot revisions ({summary}). Aborting rollout."
+            )
+            try:
+                self.db_logger.save_synthesis_log(
+                    log_id=f"syn_{generation}_{total_tool_calls}_pilot_abort_{int(time.time() * 1000)}",
+                    generation=generation,
+                    batch_id=batch_id,
+                    mode=mode,
+                    turn_index=total_tool_calls,
+                    turn_type="PILOT_ABORT",
+                    repair_idx=0,
+                    model=self.model,
+                    thinking_content="",
+                    message_content=summary,
+                    tool_calls_json="[]",
+                    tool_results_json="[]",
+                    candidate_code=self.tools.last_attempted_pilot_code or "",
+                    skill_name=str((latest_hyp or {}).get("skill_module", "")),
+                    skill_code=getattr(self.tools, "last_passed_skill_code", ""),
+                    hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
+                    status="PILOT_FAILED",
+                    error_diagnostic=summary,
+                    prompt_sent="",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    reasoning_tokens=0,
+                    wall_ms=0.0,
+                )
+            except Exception:
+                pass
+
+            return SynthesisProposal(
+                mode=mode,
+                hypothesis=latest_hyp,
+                raw_code_patch="",
+                full_policy_code=current_policy,
+                full_macros_code=self.tools.macro_lib.load_code(),
+                target_functions=[],
+                tool_calls_made=total_tool_calls,
+                skill_code="",
+                aborted=True,
+                abort_reason=f"PILOT_GATE_ABORT: {summary}",
+            )
+
+        # Compiler-in-the-loop verification & sequential self-repair
         is_macro_mode = mode == "MACRO_WRITE"
-        base_msg_count = len(messages)
 
         for repair_idx in range(self.max_repair_turns + 1):
             hyp, code_patch = self.extract_yaml_and_python(final_content)
@@ -819,6 +1098,38 @@ class AuthorAgent:
                     skill_name=s_name,
                     skill_code=s_code,
                 )
+
+            # Persist verification check to synthesis_logs
+            try:
+                self.db_logger.save_synthesis_log(
+                    log_id=f"syn_{generation}_{max_tool_turns + repair_idx}_{repair_idx}_{int(time.time() * 1000)}",
+                    generation=generation,
+                    batch_id=batch_id,
+                    mode=mode,
+                    turn_index=max_tool_turns + repair_idx,
+                    turn_type="SMOKE_CHECK" if repair_idx == 0 else "REPAIR_VERIFY",
+                    repair_idx=repair_idx,
+                    model=self.model,
+                    thinking_content="",
+                    message_content=final_content[:2000],
+                    tool_calls_json="[]",
+                    tool_results_json="[]",
+                    candidate_code=code_patch,
+                    skill_name=str(s_name or ""),
+                    skill_code=str(s_code or ""),
+                    hypothesis_yaml=yaml.dump(hyp or latest_hyp)
+                    if (hyp or latest_hyp)
+                    else "",
+                    status=status,
+                    error_diagnostic=diag,
+                    prompt_sent="",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    reasoning_tokens=0,
+                    wall_ms=0.0,
+                )
+            except Exception:
+                pass
 
             if status.startswith("PASSED") or status.startswith("VALID"):
                 skill_code = self.extract_skill_code(
@@ -874,75 +1185,88 @@ class AuthorAgent:
                 ui.warn(
                     f"Sandbox compiler gate caught {status}; requesting in-turn repair ({repair_idx + 1}/{self.max_repair_turns})..."
                 )
-                # Sliding-window repair context: keep only the latest attempt + traceback so failed attempts don't poison context
-                messages = messages[:base_msg_count] + [
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Your submitted Python code failed the sandbox dry-run check:\n\n{diag}\n\n"
-                            "Please fix the error and output the corrected ```yaml ... ``` and ```python ... ``` blocks directly in your response."
+                repair_prompt = self.build_repair_prompt(
+                    status=status,
+                    diag=diag,
+                    mode=mode,
+                    repair_idx=repair_idx + 1,
+                    max_repair_turns=self.max_repair_turns,
+                    candidate_code=code_patch,
+                )
+
+                # Ensure previous proposal is present in history before the repair prompt
+                if not messages or messages[-1].get("role") != "assistant":
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": final_content
+                            or (
+                                f"```python\n{code_patch}\n```"
+                                if code_patch
+                                else "I will implement the policy changes."
+                            ),
+                        }
+                    )
+                messages.append({"role": "user", "content": repair_prompt})
+
+                t0_rep = time.perf_counter()
+                repair_msg = self._call_llm_api(messages, allow_tools=False)
+                rep_ms = (time.perf_counter() - t0_rep) * 1000.0
+
+                rep_text = repair_msg.get("content") or ""
+                rep_reasoning = repair_msg.get("_reasoning") or ""
+                rep_usage = repair_msg.get("_usage") or {}
+                clean_rep = re.sub(
+                    r"<think>.*?</think>", "", rep_text, flags=re.DOTALL
+                ).strip()
+                messages.append({"role": "assistant", "content": clean_rep})
+
+                r_hyp, r_code = self.extract_yaml_and_python(clean_rep)
+                if r_hyp:
+                    latest_hyp = r_hyp
+                if r_code:
+                    code_patch = r_code
+                    final_content = clean_rep
+                elif clean_rep:
+                    final_content = clean_rep
+
+                # Persist repair turn to synthesis_logs
+                try:
+                    self.db_logger.save_synthesis_log(
+                        log_id=f"syn_{generation}_{max_tool_turns + repair_idx + 1}_rep_{repair_idx + 1}_{int(time.time() * 1000)}",
+                        generation=generation,
+                        batch_id=batch_id,
+                        mode=mode,
+                        turn_index=max_tool_turns + repair_idx + 1,
+                        turn_type="REPAIR_TURN",
+                        repair_idx=repair_idx + 1,
+                        model=self.model,
+                        thinking_content=rep_reasoning,
+                        message_content=clean_rep,
+                        tool_calls_json="[]",
+                        tool_results_json="[]",
+                        candidate_code=r_code or code_patch,
+                        skill_name=str((r_hyp or latest_hyp).get("skill_module", "")),
+                        skill_code=self.extract_skill_code(
+                            clean_rep, r_hyp or latest_hyp
                         ),
-                    }
-                ]
-                repair_msg = self._call_llm_api(messages, allow_tools=True)
-                messages.append(repair_msg)
-                r_text = repair_msg.get("content") or ""
-                if r_text:
-                    r_hyp, _ = self.extract_yaml_and_python(r_text)
-                    if r_hyp:
-                        latest_hyp = r_hyp
-                r_tools = repair_msg.get("tool_calls") or []
-                if r_tools:
-                    updated_via_dry_run = False
-                    for tc in r_tools:
-                        total_tool_calls += 1
-                        fn_spec = tc.get("function") or {}
-                        t_name = fn_spec.get("name", "")
-                        raw_args = fn_spec.get("arguments", "{}")
-                        try:
-                            t_args = (
-                                json.loads(raw_args)
-                                if isinstance(raw_args, str)
-                                else dict(raw_args)
+                        hypothesis_yaml=yaml.dump(r_hyp or latest_hyp)
+                        if (r_hyp or latest_hyp)
+                        else "",
+                        status="REPAIR_SUBMITTED",
+                        error_diagnostic="",
+                        prompt_sent=repair_prompt,
+                        prompt_tokens=int(rep_usage.get("prompt_tokens", 0)),
+                        completion_tokens=int(rep_usage.get("completion_tokens", 0)),
+                        reasoning_tokens=int(
+                            rep_usage.get("completion_tokens_details", {}).get(
+                                "reasoning_tokens", 0
                             )
-                        except Exception:
-                            t_args = {}
-                        tool_out = self._execute_tool_call(
-                            max_tool_turns + repair_idx + 1, t_name, t_args
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc.get(
-                                    "id", f"call_{total_tool_calls}"
-                                ),
-                                "name": t_name,
-                                "content": tool_out,
-                            }
-                        )
-                        if t_name == "dry_run_policy" and t_args.get("code"):
-                            final_content = f"```python\n{t_args['code']}\n```"
-                            updated_via_dry_run = True
-                    if not updated_via_dry_run:
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": "Now that you have consulted your research tools, please provide your revised implementation in a single ```python ... ``` block.",
-                            }
-                        )
-                        follow_msg = self._call_llm_api(messages, allow_tools=False)
-                        messages.append(follow_msg)
-                        f_text = follow_msg.get("content") or ""
-                        _, f_code = self.extract_yaml_and_python(f_text)
-                        _, r_code = self.extract_yaml_and_python(r_text)
-                        if f_code:
-                            final_content = f_text
-                        elif r_code:
-                            final_content = r_text
-                        else:
-                            final_content = f_text
-                else:
-                    final_content = r_text
+                        ),
+                        wall_ms=rep_ms,
+                    )
+                except Exception:
+                    pass
 
         # Final fallback: if the model already passed dry_run_policy during the tool phase, use that verified code!
         best_code = self.tools.last_passed_code or self.tools.best_pilot_code

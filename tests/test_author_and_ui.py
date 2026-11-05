@@ -529,8 +529,8 @@ def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypat
             max_pilot_runs=2,
             pilot_episodes=2,
         )
-        assert proposal.aborted is False
-        assert proposal.raw_code_patch != ""
+        assert proposal.aborted is True
+        assert "PILOT_GATE_ABORT" in proposal.abort_reason
 
         user_msgs = [m["content"] for m in received_messages if m.get("role") == "user"]
         failure_guidance = [m for m in user_msgs if "🛑 PILOT REVISION FAILED" in m]
@@ -717,3 +717,132 @@ def test_pilot_stops_immediately_after_pass(tmp_path):
         assert tools.pilot_runs_used == 1
     finally:
         pool.close()
+
+
+def test_synthesis_logs_persistence(tmp_path):
+    """Verify that BatchDatabaseLogger persists and retrieves synthesis_logs with reasoning and diagnostics."""
+    from lox.db.logger import BatchDatabaseLogger
+
+    db_p = str(tmp_path / "test_syn.duckdb")
+    logger = BatchDatabaseLogger(db_path=db_p)
+
+    logger.save_synthesis_log(
+        log_id="syn_001_1_0_test",
+        generation=1,
+        batch_id="gen_001_func_mod_add",
+        mode="FUNC_MOD_ADD",
+        turn_index=1,
+        turn_type="RESEARCH_TOOL",
+        repair_idx=0,
+        model="test-model",
+        thinking_content="I should check expert runs for staircase descent.",
+        message_content="Querying expert runs.",
+        tool_calls_json='[{"name": "query_db", "args": {"sql": "SELECT 1"}}]',
+        tool_results_json='[{"name": "query_db", "output": "1"}]',
+        candidate_code="def explore(self, state):\n    return Action.WAIT\n",
+        skill_name="navigation",
+        skill_code="",
+        hypothesis_yaml="mode: FUNC_MOD_ADD\ntarget_functions: [explore]\n",
+        status="TOOL_CALLS",
+        error_diagnostic="",
+        prompt_sent="Investigate the failure causes.",
+        prompt_tokens=150,
+        completion_tokens=50,
+        reasoning_tokens=25,
+        wall_ms=120.5,
+    )
+
+    logs = logger.get_recent_synthesis_logs(generation=1)
+    assert len(logs) == 1
+    row = logs[0]
+    assert row["log_id"] == "syn_001_1_0_test"
+    assert row["generation"] == 1
+    assert row["mode"] == "FUNC_MOD_ADD"
+    assert row["turn_type"] == "RESEARCH_TOOL"
+    assert (
+        row["thinking_content"] == "I should check expert runs for staircase descent."
+    )
+    assert row["reasoning_tokens"] == 25
+    assert row["wall_ms"] == 120.5
+
+
+def test_in_turn_repair_caret_and_prompts():
+    """Verify that format_code_with_line_numbers formats caret pointers and build_repair_prompt provides category guidance."""
+    from lox.author.agent import AuthorAgent
+    from lox.lang.validator import format_code_with_line_numbers
+
+    code = "def explore(self, state):\n    if state.hp < 5\n        return Action.WAIT"
+    formatted = format_code_with_line_numbers(code, highlight_line=2, col_offset=20)
+    assert ">  2 |     if state.hp < 5" in formatted
+    assert "^" in formatted
+
+    agent = AuthorAgent(provider="openrouter")
+    unreach_p = agent.build_repair_prompt(
+        status="UNREACHABLE_ERROR",
+        diag="Method ['stealth_step'] was never called by run",
+        mode="FUNC_MOD_ADD",
+        repair_idx=1,
+        max_repair_turns=5,
+    )
+    assert "UNREACHABLE METHOD IN POLICY" in unreach_p
+    assert "The updated caller method" in unreach_p
+    assert "def run(self, state):" in unreach_p
+
+    syntax_p = agent.build_repair_prompt(
+        status="COMPILE_ERROR",
+        diag="SyntaxError: invalid syntax",
+        mode="FUNC_MOD_ADD",
+        repair_idx=1,
+        max_repair_turns=5,
+    )
+    assert "PYTHON SYNTAX OR INDENTATION ERROR" in syntax_p
+    assert "4 spaces per indentation level" in syntax_p
+
+
+def test_summarizer_level_stall_vs_livelock():
+    """Verify that build_batch_contrast_digest attributes level stalls to stair descent rather than innocent prompt handlers."""
+    from lox.db.summarizer import build_batch_contrast_digest
+
+    batch_stats = {
+        "batch_id": "gen_018_champ",
+        "avg_depth": 1.1,
+        "p90_depth": 2.0,
+        "max_depth": 6,
+        "episodes_recorded": 100,
+    }
+    # 50 runs end in max_steps, but explored multiple tiles (recurrence < 0.85)
+    runs = [
+        {
+            "run_id": f"r_{i}",
+            "seed": i,
+            "max_depth": 1,
+            "steps": 5000,
+            "turns": 5000,
+            "score": 100,
+            "end_reason": "max_steps",
+            "milestones": {
+                "stagnation_ratio": 0.8,
+                "recurrence_rate": 0.35,  # Low recurrence = wandering across level
+            },
+        }
+        for i in range(50)
+    ]
+    fn_stats = [
+        {
+            "function_name": "handle_prompt",
+            "trigger_rate": 0.9,
+            "total_turns_active": 30000,
+            "avg_depth_when_triggered": 1.0,
+            "death_rate_while_active": 0.0,
+            "ochiai_good_run_score": 0.1,
+            "liblit_failure_score": 0.0,
+            "stagnation_turns": 25000,
+            "stagnation_share": 0.5,
+            "livelock_score": 0.45,
+        }
+    ]
+
+    digest = build_batch_contrast_digest(batch_stats, runs, fn_stats)
+    assert "PRIMARY BOTTLENECK: LEVEL EXPLORATION & STAIRCASE DESCENT FAILURE" in digest
+    assert "staircase location & descent" in digest
+    assert "Do NOT waste generations modifying prompt replies" in digest

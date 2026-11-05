@@ -226,6 +226,33 @@ CREATE TABLE IF NOT EXISTS expert_ticks (
     screen_ascii TEXT
 );
 
+CREATE TABLE IF NOT EXISTS synthesis_logs (
+    log_id VARCHAR PRIMARY KEY,
+    generation INTEGER,
+    batch_id VARCHAR,
+    mode VARCHAR,
+    turn_index INTEGER,
+    turn_type VARCHAR,
+    repair_idx INTEGER,
+    model VARCHAR,
+    thinking_content TEXT,
+    message_content TEXT,
+    tool_calls_json TEXT,
+    tool_results_json TEXT,
+    candidate_code TEXT,
+    skill_name VARCHAR,
+    skill_code TEXT,
+    hypothesis_yaml TEXT,
+    status VARCHAR,
+    error_diagnostic TEXT,
+    prompt_sent TEXT,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    reasoning_tokens INTEGER,
+    wall_ms DOUBLE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE OR REPLACE VIEW champion_runs AS
 SELECT * FROM runs
 WHERE batch_id = (
@@ -319,4 +346,6 @@ def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:
   `run_id`, `source` ('nao_human' | 'autoascend'), `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason` ('ascended' | 'deep_run'), **`summary_digest` (TEXT)**, **`game_log` (TEXT)**, `milestones_json` (VARCHAR), `dumplog_text` (TEXT).
 - **`expert_ticks`** (Tick-by-tick trajectories of expert runs linked via `run_id`):
   `run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `message`, `screen_ascii`.
+- **`synthesis_logs`** (Turn-by-turn LLM reasoning tokens, candidate code, compiler/sandbox errors, and tool telemetry):
+  `log_id`, `generation`, `batch_id`, `mode`, `turn_index`, `turn_type`, `repair_idx`, `model`, `thinking_content`, `message_content`, `tool_calls_json`, `tool_results_json`, `candidate_code`, `skill_name`, `skill_code`, `hypothesis_yaml`, `status`, `error_diagnostic`, `prompt_sent`, `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `wall_ms`, `created_at`.
 """

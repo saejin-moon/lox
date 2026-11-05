@@ -274,7 +274,7 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 
 def _format_context_scoped_policy(current_policy: str, batch_digest: str = "") -> str:
     lines = current_policy.splitlines()
-    if len(lines) <= 350:
+    if len(lines) <= 650:
         return f"### Current `policy.py`:\n```python\n{current_policy}\n```"
 
     from lox.lang.validator import extract_module_outline

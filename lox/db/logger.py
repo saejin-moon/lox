@@ -480,6 +480,121 @@ class BatchDatabaseLogger:
         finally:
             con.close()
 
+    def save_synthesis_log(
+        self,
+        log_id: str,
+        generation: int,
+        batch_id: str,
+        mode: str,
+        turn_index: int,
+        turn_type: str,
+        repair_idx: int = 0,
+        model: str = "",
+        thinking_content: str = "",
+        message_content: str = "",
+        tool_calls_json: str = "",
+        tool_results_json: str = "",
+        candidate_code: str = "",
+        skill_name: str = "",
+        skill_code: str = "",
+        hypothesis_yaml: str = "",
+        status: str = "",
+        error_diagnostic: str = "",
+        prompt_sent: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        wall_ms: float = 0.0,
+    ) -> None:
+        """Saves a rich turn-level synthesis record (reasoning tokens, candidate code, errors, tools) to DuckDB."""
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                """
+                INSERT OR REPLACE INTO synthesis_logs (
+                    log_id, generation, batch_id, mode, turn_index, turn_type, repair_idx,
+                    model, thinking_content, message_content, tool_calls_json, tool_results_json,
+                    candidate_code, skill_name, skill_code, hypothesis_yaml, status,
+                    error_diagnostic, prompt_sent, prompt_tokens, completion_tokens,
+                    reasoning_tokens, wall_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(log_id),
+                    int(generation),
+                    str(batch_id or ""),
+                    str(mode or ""),
+                    int(turn_index),
+                    str(turn_type or ""),
+                    int(repair_idx),
+                    str(model or ""),
+                    str(thinking_content or ""),
+                    str(message_content or ""),
+                    str(tool_calls_json or "[]"),
+                    str(tool_results_json or "[]"),
+                    str(candidate_code or ""),
+                    str(skill_name or ""),
+                    str(skill_code or ""),
+                    str(hypothesis_yaml or ""),
+                    str(status or ""),
+                    str(error_diagnostic or ""),
+                    str(prompt_sent or ""),
+                    int(prompt_tokens),
+                    int(completion_tokens),
+                    int(reasoning_tokens),
+                    float(wall_ms),
+                    datetime.datetime.now(),
+                ],
+            )
+        except Exception:
+            pass
+        finally:
+            con.close()
+
+    def get_recent_synthesis_logs(
+        self,
+        generation: int | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Retrieves recent synthesis logs ordered by generation and turn sequence."""
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            if generation is not None:
+                cur = con.execute(
+                    """
+                    SELECT log_id, generation, batch_id, mode, turn_index, turn_type, repair_idx,
+                           model, thinking_content, message_content, tool_calls_json, tool_results_json,
+                           candidate_code, skill_name, skill_code, hypothesis_yaml, status,
+                           error_diagnostic, prompt_sent, prompt_tokens, completion_tokens,
+                           reasoning_tokens, wall_ms, created_at
+                    FROM synthesis_logs
+                    WHERE generation = ?
+                    ORDER BY turn_index ASC, repair_idx ASC, created_at ASC
+                    LIMIT ?
+                    """,
+                    (generation, limit),
+                )
+            else:
+                cur = con.execute(
+                    """
+                    SELECT log_id, generation, batch_id, mode, turn_index, turn_type, repair_idx,
+                           model, thinking_content, message_content, tool_calls_json, tool_results_json,
+                           candidate_code, skill_name, skill_code, hypothesis_yaml, status,
+                           error_diagnostic, prompt_sent, prompt_tokens, completion_tokens,
+                           reasoning_tokens, wall_ms, created_at
+                    FROM synthesis_logs
+                    ORDER BY generation DESC, turn_index DESC, repair_idx DESC, created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception:
+            return []
+        finally:
+            con.close()
+
     def prune_old_telemetry(
         self,
         current_generation: int,

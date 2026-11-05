@@ -265,7 +265,6 @@ class MacroHarvester:
                     self.invalid = False
 
                 def visit_Attribute(self, node: ast.Attribute) -> Any:
-                    self.generic_visit(node)
                     if isinstance(node.value, ast.Name) and node.value.id == "self":
                         if has_state_arg and node.attr in (
                             "visited",
@@ -297,6 +296,13 @@ class MacroHarvester:
                             return ast.Name(id=node.attr, ctx=node.ctx)
                         else:
                             self.invalid = True
+                            return node
+                    self.generic_visit(node)
+                    return node
+
+                def visit_Name(self, node: ast.Name) -> Any:
+                    if node.id == "self":
+                        self.invalid = True
                     return node
 
             rewriter = SelfRewriter()
