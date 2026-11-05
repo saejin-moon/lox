@@ -375,6 +375,9 @@ class CampaignOrchestrator:
         skills_dir.mkdir(parents=True, exist_ok=True)
         skill_path = skills_dir / f"{skill_name}.py"
         skill_path.write_text(code.strip() + "\n", encoding="utf-8")
+        ui.info(
+            f"Committed modular skill `skills/{skill_name}.py` ({len(code.strip().splitlines())} lines)"
+        )
 
     def get_recent_experiments_markdown(self, limit: int = 10) -> str:
         con = connect_db(self.db_path, read_only=True)
