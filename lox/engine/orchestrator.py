@@ -1402,6 +1402,18 @@ class CampaignOrchestrator:
                                 f"{eval_res.get('raw_episodes_run', 0)} episodes!"
                             )
 
+                    eval_res["seeds_evaluated"] = len(eval_res.get("runs", []))
+                    eval_res["is_early_stopped"] = bool(
+                        eval_res.get("early_stopped", False)
+                    )
+                    eval_res["pilot_best_delta"] = float(
+                        getattr(proposal, "pilot_best_delta", 0.0)
+                    )
+                    if verdict:
+                        verdict["seeds_evaluated"] = eval_res["seeds_evaluated"]
+                        verdict["is_early_stopped"] = eval_res["is_early_stopped"]
+                        verdict["pilot_best_delta"] = eval_res["pilot_best_delta"]
+
                     fn_stats = self.db_logger.save_batch(
                         batch_id=batch_id,
                         generation=gen,

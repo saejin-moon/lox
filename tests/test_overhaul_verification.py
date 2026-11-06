@@ -1509,3 +1509,205 @@ class Policy:
         assert eval_res.get("unreachable_abort") is True
     finally:
         pool.close()
+
+
+def test_pass9_debugging_telemetry_and_rollout_metrics(tmp_path: Path) -> None:
+    """Pass 9: Comprehensive verification of safety, behavioral, blunder, and efficiency telemetry."""
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import get_schema_markdown, init_db
+    from lox.lang.compiler import compile_policy_package
+    from lox.runner.pool import PersistentEvalPool
+
+    db_path = str(tmp_path / "test_telemetry.duckdb")
+    con = init_db(db_path)
+
+    # 1. Verify schema columns exist in DuckDB
+    runs_cols = [r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()]
+    for col in [
+        "auto_esc_count",
+        "subgen_preemptions",
+        "policy_exceptions",
+        "unique_tiles",
+        "pct_wait",
+        "pct_search",
+        "starved_with_food",
+        "died_unarmored",
+    ]:
+        assert col in runs_cols, f"Column {col} missing from runs table!"
+
+    batches_cols = [
+        r[1] for r in con.execute("PRAGMA table_info('batches')").fetchall()
+    ]
+    for col in ["seeds_evaluated", "is_early_stopped", "pilot_best_delta"]:
+        assert col in batches_cols, f"Column {col} missing from batches table!"
+
+    exp_cols = [
+        r[1] for r in con.execute("PRAGMA table_info('experiments')").fetchall()
+    ]
+    for col in ["seeds_evaluated", "is_early_stopped", "pilot_best_delta"]:
+        assert col in exp_cols, f"Column {col} missing from experiments table!"
+
+    schema_md = get_schema_markdown(db_path)
+    assert "auto_esc_count" in schema_md
+    assert "starved_with_food" in schema_md
+    assert "seeds_evaluated" in schema_md
+
+    # 2. Test saving and querying telemetry in BatchDatabaseLogger
+    logger = BatchDatabaseLogger(db_path=db_path)
+    sample_runs = [
+        {
+            "run_id": "test_run_001",
+            "seed": 42,
+            "depth": 3,
+            "max_depth": 4,
+            "score": 350,
+            "turns": 400,
+            "steps": 400,
+            "xp_level": 2,
+            "final_hp": 0,
+            "max_hp": 18,
+            "final_ac": 10,
+            "gold": 50,
+            "end_reason": "died of starvation",
+            "death_message": "You starved to death.",
+            "is_outlier_good": True,
+            "outlier_z_score": 2.5,
+            "batch_percentile": 95.0,
+            "summary_digest": "Starvation on dlvl 3",
+            "game_log": "You feel hungry. You starve.",
+            "milestones_json": "{}",
+            "triggered_functions": "{}",
+            "last_active_function": "explore",
+            "action_bytes": b"\x1b\x1b",
+            "wall_ms": 120.5,
+            "auto_esc_count": 5,
+            "subgen_preemptions": 3,
+            "policy_exceptions": 1,
+            "unique_tiles": 58,
+            "pct_wait": 15.25,
+            "pct_search": 32.50,
+            "starved_with_food": True,
+            "died_unarmored": True,
+        }
+    ]
+
+    logger.save_batch(
+        batch_id="batch_telemetry_test",
+        generation=1,
+        mode="FUNC_MOD_ADD",
+        parent_policy_id="pol_base",
+        candidate_policy_id="pol_cand",
+        target_functions=["explore"],
+        runs=sample_runs,
+        episodes_discarded=2,
+        batch_metrics={
+            "avg_depth": 3.0,
+            "p90_depth": 4.0,
+            "max_depth": 4,
+            "avg_score": 350.0,
+            "max_score": 350,
+            "avg_turns": 400.0,
+            "seeds_evaluated": 60,
+            "is_early_stopped": True,
+            "pilot_best_delta": 0.35,
+        },
+        verdict={
+            "passed": False,
+            "mean_delta": -0.1,
+            "wilcoxon_p": 0.45,
+            "ci_lower": -0.2,
+            "ci_upper": 0.05,
+            "wins": 20,
+            "losses": 25,
+            "ties": 15,
+            "seeds_evaluated": 60,
+            "is_early_stopped": True,
+            "pilot_best_delta": 0.35,
+            "reason": "Sequential futility early stopping at n=60",
+        },
+    )
+
+    logger.save_experiment(
+        experiment_id="exp_telemetry_test",
+        generation=1,
+        batch_id="batch_telemetry_test",
+        mode="FUNC_MOD_ADD",
+        target_functions=["explore"],
+        hypothesis={"mechanism": "improve exploration"},
+        verdict={
+            "passed": False,
+            "mean_delta": -0.1,
+            "wilcoxon_p": 0.45,
+            "ci_lower": -0.2,
+            "ci_upper": 0.05,
+            "wins": 20,
+            "losses": 25,
+            "ties": 15,
+            "seeds_evaluated": 60,
+            "is_early_stopped": True,
+            "pilot_best_delta": 0.35,
+            "reason": "Sequential futility early stopping at n=60",
+        },
+    )
+
+    row_run = con.execute("""
+        SELECT auto_esc_count, subgen_preemptions, policy_exceptions,
+               unique_tiles, pct_wait, pct_search, starved_with_food, died_unarmored
+        FROM runs WHERE run_id = 'test_run_001'
+    """).fetchone()
+    assert row_run == (5, 3, 1, 58, 15.25, 32.50, True, True)
+
+    row_batch = con.execute("""
+        SELECT seeds_evaluated, is_early_stopped, pilot_best_delta
+        FROM batches WHERE batch_id = 'batch_telemetry_test'
+    """).fetchone()
+    assert row_batch == (60, True, 0.35)
+
+    row_exp = con.execute("""
+        SELECT seeds_evaluated, is_early_stopped, pilot_best_delta
+        FROM experiments WHERE experiment_id = 'exp_telemetry_test'
+    """).fetchone()
+    assert row_exp == (60, True, 0.35)
+    con.close()
+
+    # 3. Test PolicyRunner runtime telemetry tracking
+    pol_code = """
+class Policy:
+    def __init__(self):
+        self.flee_hp_ratio = 0.5
+        self.preempt_on_hostile = True
+    def subgen(self, state):
+        while True:
+            state = yield Action.WAIT
+    def run(self, state):
+        while True:
+            act = yield from self.subgen(state)
+            state = yield act
+"""
+    compiled = compile_policy_package(pol_code)
+    runner = compiled.create_runner()
+    assert runner.auto_esc_count == 0
+    assert runner.subgen_preemptions == 0
+    assert runner.policy_exceptions == 0
+
+    pool = PersistentEvalPool(workers=2, max_steps=15)
+    try:
+        eval_res = pool.evaluate_batch(
+            batch_id="b_eval_telemetry",
+            policy_code=pol_code,
+            target_functions=["run"],
+            target_episodes=2,
+            show_progress=False,
+        )
+        assert len(eval_res["runs"]) >= 1
+        r0 = eval_res["runs"][0]
+        assert "auto_esc_count" in r0
+        assert "subgen_preemptions" in r0
+        assert "policy_exceptions" in r0
+        assert "unique_tiles" in r0
+        assert "pct_wait" in r0
+        assert "pct_search" in r0
+        assert "starved_with_food" in r0
+        assert "died_unarmored" in r0
+    finally:
+        pool.close()

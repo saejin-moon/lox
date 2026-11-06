@@ -243,16 +243,36 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    FROM champion_runs ORDER BY max_depth DESC, turns DESC LIMIT 5;
    ```
 
+4. **Behavioral, Tactical & Safety Diagnostic Query**:
+   ```sql
+   -- Check for interactive prompt traps, generator interrupts, action stalls, and tactical blunders
+   SELECT AVG(auto_esc_count) AS avg_esc,
+          AVG(subgen_preemptions) AS avg_preempts,
+          AVG(policy_exceptions) AS avg_exceptions,
+          AVG(unique_tiles) AS avg_tiles,
+          AVG(pct_wait) AS avg_pct_wait,
+          AVG(pct_search) AS avg_pct_search,
+          SUM(CASE WHEN starved_with_food THEN 1 ELSE 0 END) AS starved_with_food_cnt,
+          SUM(CASE WHEN died_unarmored THEN 1 ELSE 0 END) AS died_unarmored_cnt
+   FROM champion_runs;
+   ```
+   *Interpretation*:
+   - `avg_esc > 0`: Policy is trapped by text/naming prompts and relying on harness safety fallback.
+   - `avg_preempts >> 0`: Multi-step generator skills are frequently interrupted before completion.
+   - `avg_pct_wait > 30%` or `avg_pct_search > 40%`: Policy spends excessive turns idling or spamming search.
+   - `starved_with_food_cnt > 0`: Hero starved with food rations in pack (needs eating routine).
+   - `died_unarmored_cnt > 0`: Hero died with AC 10 despite having armor in pack (needs equip routine).
+
 ### Available Investigation & Verification Tools
 1. `query_db(sql)`: Run read-only SQL queries on DuckDB (`champion_runs`, `champion_function_stats`, `champion_ticks`, `latest_pilot_runs`, `runs`, `ticks`, `batches`, `function_stats`, `experiments`, `expert_runs`, `expert_ticks`).
-   - Query `champion_runs` to inspect what happened in the active champion policy's episodes (`summary_digest`, `game_log`, `triggered_functions`).
+   - Query `champion_runs` to inspect what happened in the active champion policy's episodes (`summary_digest`, `game_log`, `triggered_functions`, `auto_esc_count`, `unique_tiles`, `pct_wait`, `pct_search`, `starved_with_food`, `died_unarmored`).
    - Query `expert_runs` and `expert_ticks` to study how successful human ascensions and reference runs progress, what intrinsics/kit they acquire, and how they act across depths.
 2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact monster mechanics, corpse effects, item properties, intrinsics, and dungeon branches.
 3. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py` (or call `query_policy_docs("actions")` for the complete command index).
 4. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
    - Tests candidate Python code in a live NetHack sandbox.
    - **Step 1 (Smoke Check & Behavioral Critic)**: Verifies AST, checks reachability, detects oscillations and search spam. Optional `replay_run_id` fast-forwards into any recorded mid-game run in ~10ms.
-   - **Step 2 (30-Episode Parallel Pilot Batch)**: Dispatches 30 episodes across persistent workers (up to 5 pilot revisions per generation) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.
+   - **Step 2 (30-Episode Parallel Pilot Batch)**: Dispatches 30 episodes across persistent workers (up to 8 pilot revisions per generation, with fallback to best candidate) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.
 
 ### Scientific Investigation Protocol (MANDATORY)
 1. **Never Guess from Intuition**: NetHack mechanics are strictly ruled by the C engine (e.g. traps, secret doors, searching probabilities, hunger increments, prayer timeouts, pet displacement, monster ranged attacks). Guessing code changes without empirical research causes catastrophic regressions.

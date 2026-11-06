@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS batches (
     wilcoxon_p DOUBLE,
     ci_lower DOUBLE,
     ci_upper DOUBLE,
+    seeds_evaluated INTEGER DEFAULT 0,
+    is_early_stopped BOOLEAN DEFAULT FALSE,
+    pilot_best_delta DOUBLE DEFAULT 0.0,
     created_at TIMESTAMP
 );
 
@@ -92,7 +95,15 @@ CREATE TABLE IF NOT EXISTS runs (
     triggered_functions VARCHAR,
     last_active_function VARCHAR,
     action_bytes BLOB,
-    wall_ms DOUBLE
+    wall_ms DOUBLE,
+    auto_esc_count INTEGER DEFAULT 0,
+    subgen_preemptions INTEGER DEFAULT 0,
+    policy_exceptions INTEGER DEFAULT 0,
+    unique_tiles INTEGER DEFAULT 0,
+    pct_wait DOUBLE DEFAULT 0.0,
+    pct_search DOUBLE DEFAULT 0.0,
+    starved_with_food BOOLEAN DEFAULT FALSE,
+    died_unarmored BOOLEAN DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS ticks (
@@ -165,6 +176,9 @@ CREATE TABLE IF NOT EXISTS experiments (
     wins INTEGER,
     losses INTEGER,
     ties INTEGER,
+    seeds_evaluated INTEGER DEFAULT 0,
+    is_early_stopped BOOLEAN DEFAULT FALSE,
+    pilot_best_delta DOUBLE DEFAULT 0.0,
     verdict_reason VARCHAR,
     created_at TIMESTAMP
 );
@@ -298,9 +312,54 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
             if len(cols) != 20:
                 con.execute("DROP TABLE ticks")
         if "runs" in tables:
-            cols = [r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()]
-            if len(cols) != 27:
-                con.execute("DROP TABLE runs")
+            cols_runs = [
+                r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()
+            ]
+            for c_name, c_typ in [
+                ("auto_esc_count", "INTEGER DEFAULT 0"),
+                ("subgen_preemptions", "INTEGER DEFAULT 0"),
+                ("policy_exceptions", "INTEGER DEFAULT 0"),
+                ("unique_tiles", "INTEGER DEFAULT 0"),
+                ("pct_wait", "DOUBLE DEFAULT 0.0"),
+                ("pct_search", "DOUBLE DEFAULT 0.0"),
+                ("starved_with_food", "BOOLEAN DEFAULT FALSE"),
+                ("died_unarmored", "BOOLEAN DEFAULT FALSE"),
+            ]:
+                if c_name not in cols_runs:
+                    try:
+                        con.execute(f"ALTER TABLE runs ADD COLUMN {c_name} {c_typ}")
+                    except Exception:
+                        pass
+        if "batches" in tables:
+            cols_b = [
+                r[1] for r in con.execute("PRAGMA table_info('batches')").fetchall()
+            ]
+            for c_name, c_typ in [
+                ("seeds_evaluated", "INTEGER DEFAULT 0"),
+                ("is_early_stopped", "BOOLEAN DEFAULT FALSE"),
+                ("pilot_best_delta", "DOUBLE DEFAULT 0.0"),
+            ]:
+                if c_name not in cols_b:
+                    try:
+                        con.execute(f"ALTER TABLE batches ADD COLUMN {c_name} {c_typ}")
+                    except Exception:
+                        pass
+        if "experiments" in tables:
+            cols_exp = [
+                r[1] for r in con.execute("PRAGMA table_info('experiments')").fetchall()
+            ]
+            for c_name, c_typ in [
+                ("seeds_evaluated", "INTEGER DEFAULT 0"),
+                ("is_early_stopped", "BOOLEAN DEFAULT FALSE"),
+                ("pilot_best_delta", "DOUBLE DEFAULT 0.0"),
+            ]:
+                if c_name not in cols_exp:
+                    try:
+                        con.execute(
+                            f"ALTER TABLE experiments ADD COLUMN {c_name} {c_typ}"
+                        )
+                    except Exception:
+                        pass
         if "function_stats" in tables:
             cols_fs = [
                 r[1]
@@ -333,15 +392,15 @@ def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:
   - `champion_ticks`: Tick-by-tick logs linked to `champion_runs`.
   - `latest_pilot_runs`: All episodes from the most recent pilot batch.
 - **`runs`** (Every evaluated episode):
-  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR).
+  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR), **`auto_esc_count` (INT: times harness forced auto-ESC for unhandled prompt)**, **`subgen_preemptions` (INT: generator subroutines aborted by emergency threat)**, **`policy_exceptions` (INT: non-fatal policy exceptions caught)**, **`unique_tiles` (INT: distinct floor tiles visited)**, **`pct_wait` (DOUBLE: % of steps spent waiting/resting)**, **`pct_search` (DOUBLE: % of steps spent searching 's')**, **`starved_with_food` (BOOLEAN: True if hero died of starvation while carrying food in pack)**, **`died_unarmored` (BOOLEAN: True if hero died with starting AC >= 10 despite carrying armor in pack)**.
 - **`ticks`** (Granular tick-by-tick log linked via `run_id` for outlier good runs, exemplars, and sampled runs):
   `run_id` (VARCHAR), `turn` (INT), `step_idx` (INT), `depth` (INT), `dungeon_num` (INT), `hp` (INT), `max_hp` (INT), `energy` (INT), `ac` (INT), `xp_level` (INT), `hunger_state` (INT), `condition_mask` (INT), `y` (INT), `x` (INT), `action_name` (VARCHAR), `raw_key` (INT), `active_function` (VARCHAR), `message` (VARCHAR), `visible_monsters` (VARCHAR), `inventory_summary` (VARCHAR).
 - **`batches`** (Per-generation batch overview):
-  `batch_id`, `generation`, `mode`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`.
+  `batch_id`, `generation`, `mode`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `seeds_evaluated` (INT), `is_early_stopped` (BOOLEAN), `pilot_best_delta` (DOUBLE).
 - **`function_stats`** (Per-function execution & statistical debugging metrics per batch):
   `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, **`ochiai_good_run_score` (DOUBLE: correlation with `is_outlier_good=TRUE`)**, **`liblit_failure_score` (DOUBLE: correlation with failure)**, **`stagnation_turns` (BIGINT: turns spent stalled after last progress)**, **`stagnation_share` (DOUBLE: fraction of all stagnant turns in batch consumed by this function)**, **`livelock_score` (DOUBLE: livelock sink severity)**.
 - **`experiments`** (Historical hypothesis outcomes):
-  `experiment_id`, `generation`, `mode`, `target_functions`, `observation_from_db`, `mechanism`, `passed`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`, `wins`, `losses`, `ties`, `verdict_reason`.
+  `experiment_id`, `generation`, `mode`, `target_functions`, `observation_from_db`, `mechanism`, `passed`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`, `wins`, `losses`, `ties`, `seeds_evaluated` (INT), `is_early_stopped` (BOOLEAN), `pilot_best_delta` (DOUBLE), `verdict_reason`.
 - **`expert_runs`** (Consolidated successful human & championship-bot NetHack runs using the **same summary/log/stats columns as `runs`**):
   `run_id`, `source` ('nao_human' | 'autoascend'), `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason` ('ascended' | 'deep_run'), **`summary_digest` (TEXT)**, **`game_log` (TEXT)**, `milestones_json` (VARCHAR), `dumplog_text` (TEXT).
 - **`expert_ticks`** (Tick-by-tick trajectories of expert runs linked via `run_id`):

@@ -62,7 +62,7 @@ class BatchDatabaseLogger:
             con.execute(
                 """
                 INSERT OR REPLACE INTO batches VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [
@@ -85,6 +85,9 @@ class BatchDatabaseLogger:
                     float(verdict.get("wilcoxon_p", 1.0)) if verdict else 1.0,
                     float(verdict.get("ci_lower", 0.0)) if verdict else 0.0,
                     float(verdict.get("ci_upper", 0.0)) if verdict else 0.0,
+                    int(batch_metrics.get("seeds_evaluated", len(runs))),
+                    bool(batch_metrics.get("is_early_stopped", False)),
+                    float(batch_metrics.get("pilot_best_delta", 0.0)),
                     now,
                 ],
             )
@@ -146,6 +149,22 @@ class BatchDatabaseLogger:
                     ],
                     "action_bytes": [bytes(r.get("action_bytes", b"")) for r in runs],
                     "wall_ms": [float(r.get("wall_ms", 0.0)) for r in runs],
+                    "auto_esc_count": [int(r.get("auto_esc_count", 0)) for r in runs],
+                    "subgen_preemptions": [
+                        int(r.get("subgen_preemptions", 0)) for r in runs
+                    ],
+                    "policy_exceptions": [
+                        int(r.get("policy_exceptions", 0)) for r in runs
+                    ],
+                    "unique_tiles": [int(r.get("unique_tiles", 0)) for r in runs],
+                    "pct_wait": [float(r.get("pct_wait", 0.0)) for r in runs],
+                    "pct_search": [float(r.get("pct_search", 0.0)) for r in runs],
+                    "starved_with_food": [
+                        bool(r.get("starved_with_food", False)) for r in runs
+                    ],
+                    "died_unarmored": [
+                        bool(r.get("died_unarmored", False)) for r in runs
+                    ],
                 }
                 run_tbl = pa.Table.from_pydict(run_cols)
                 con.register("_temp_runs", run_tbl)
@@ -337,7 +356,7 @@ class BatchDatabaseLogger:
             con.execute(
                 """
                 INSERT OR REPLACE INTO experiments VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [
@@ -363,6 +382,9 @@ class BatchDatabaseLogger:
                     int(verdict.get("wins", 0)),
                     int(verdict.get("losses", 0)),
                     int(verdict.get("ties", 0)),
+                    int(verdict.get("seeds_evaluated", 0)),
+                    bool(verdict.get("is_early_stopped", False)),
+                    float(verdict.get("pilot_best_delta", 0.0)),
                     str(verdict.get("reason", "")),
                     datetime.datetime.now(),
                 ],

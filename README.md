@@ -192,12 +192,12 @@ Rather than prematurely aborting generations when all pilot revision attempts fa
 
 All experimental telemetry and reference human ascensions are stored in a single DuckDB analytical database (`data/lox.duckdb`, defined in [`lox/db/schema.py`](lox/db/schema.py)):
 
-1. **`batches`**: Per-generation summary (`batch_id`, `generation`, `mode`, `target_functions`, `avg_depth`, `p90_depth`, `max_depth`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`).
-2. **`runs`**: Episode-level telemetry (`run_id`, `seed`, `max_depth`, `final_hp`, `final_ac`, `xp_level`, `score`, `turns`, `end_reason`, `killer_name`, `summary_digest`, `game_log`, `milestones_json`, `is_outlier_good`, `outlier_z_score`, `action_bytes`).
+1. **`batches`**: Per-generation summary (`batch_id`, `generation`, `mode`, `target_functions`, `avg_depth`, `p90_depth`, `max_depth`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `seeds_evaluated`, `is_early_stopped`, `pilot_best_delta`).
+2. **`runs`**: Episode-level telemetry (`run_id`, `seed`, `max_depth`, `final_hp`, `final_ac`, `xp_level`, `score`, `turns`, `end_reason`, `death_message`, `summary_digest`, `game_log`, `milestones_json`, `is_outlier_good`, `outlier_z_score`, `auto_esc_count`, `subgen_preemptions`, `policy_exceptions`, `unique_tiles`, `pct_wait`, `pct_search`, `starved_with_food`, `died_unarmored`, `action_bytes`).
 3. **`ticks`**: Tail-sampled turn traces (`run_id`, `turn`, `dlvl`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `active_function`, `message`, `nearby_monsters`).
-4. **`function_stats`**: Spectrum-based fault and success attribution per policy method (`episodes_triggered`, `total_calls`, `total_turns_active`, `ochiai_good_run_score`, `liblit_failure_score`).
+4. **`function_stats`**: Spectrum-based fault and success attribution per policy method (`episodes_triggered`, `total_calls`, `total_turns_active`, `ochiai_good_run_score`, `liblit_failure_score`, `stagnation_turns`, `stagnation_share`, `livelock_score`).
 5. **`policies`**: Versioned snapshots of every candidate and promoted `policy_code` and `macros_code`.
-6. **`experiments`**: Causal hypotheses, binding constraints, verified C rules, pilot diagnostics, and statistical verdicts.
+6. **`experiments`**: Causal hypotheses, binding constraints, verified C rules, pilot diagnostics, statistical verdicts, and rollout efficiency (`seeds_evaluated`, `is_early_stopped`, `pilot_best_delta`).
 7. **`discoveries`**: Validated campaign breakthroughs (`discovery_id`, `generation`, `batch_id`, `mode`, `target_functions`, `binding_constraint`, `verified_c_rule`, `mechanism`, `mean_delta`, `avg_depth`, `p90_depth`, `max_depth`, `created_at`).
 8. **`expert_runs`** & **`expert_ticks`**: Real human NetHack ascensions (`archive.alt.org` xlogfile + dumplogs) and NLE reference trajectories stored in the exact same schema as `runs` and `ticks`.
 

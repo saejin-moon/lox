@@ -42,6 +42,7 @@ class SynthesisProposal:
     skill_code: str = ""
     aborted: bool = False
     abort_reason: str = ""
+    pilot_best_delta: float = 0.0
 
 
 class AuthorAgent:
@@ -1321,6 +1322,11 @@ class AuthorAgent:
                 )
             if isinstance(changed_fns, str):
                 changed_fns = [changed_fns]
+            best_delta = (
+                float(self.tools.best_pilot_delta)
+                if getattr(self, "tools", None) and self.tools.best_pilot_delta > -1e8
+                else 0.0
+            )
             return SynthesisProposal(
                 mode=mode,
                 hypothesis=latest_hyp,
@@ -1330,6 +1336,7 @@ class AuthorAgent:
                 target_functions=list(changed_fns),
                 tool_calls_made=total_tool_calls,
                 skill_code=skill_code,
+                pilot_best_delta=best_delta,
             )
 
         raise RuntimeError(

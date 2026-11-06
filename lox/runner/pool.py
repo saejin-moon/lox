@@ -138,6 +138,14 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 "end_reason": msg.split(".")[0][:60] if msg else "died",
                 "death_message": msg[:160],
                 "action_bytes": bytes(harness.action_bytes),
+                "auto_esc_count": 0,
+                "subgen_preemptions": 0,
+                "policy_exceptions": 0,
+                "unique_tiles": 1,
+                "pct_wait": 0.0,
+                "pct_search": 0.0,
+                "starved_with_food": False,
+                "died_unarmored": False,
                 "ticks": [],
                 "function_stats": {},
                 "registered_params": {},
@@ -165,6 +173,8 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     end_reason = "ended"
     death_msg = ""
     visited_positions = {(state.y, state.x)}
+    wait_count = 0
+    search_count = 0
     stairs_down_found = bool(
         getattr(state, "stairs_down_pos", None) is not None
         or (hasattr(state, "is_stairs_down") and state.is_stairs_down(state.y, state.x))
@@ -181,13 +191,30 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             active_fn = runner.tracer.active_fn
             end_reason = f"loop_guard:{active_fn}"
             death_msg = str(loop_err)
+            runner.policy_exceptions += 1
             break
         except Exception as exc:
             raw_act = Action.WAIT
             active_fn = runner.tracer.active_fn
             end_reason = f"policy_error:{type(exc).__name__}"
             death_msg = str(exc)[:120]
+            runner.policy_exceptions += 1
             break
+
+        is_wait = (
+            raw_act == Action.WAIT
+            or raw_act == "."
+            or (hasattr(raw_act, "bytes_payload") and raw_act.bytes_payload == b".")
+        )
+        is_search = (
+            raw_act == Action.SEARCH
+            or raw_act == "s"
+            or (hasattr(raw_act, "bytes_payload") and raw_act.bytes_payload == b"s")
+        )
+        if is_wait:
+            wait_count += 1
+        elif is_search:
+            search_count += 1
 
         last_active_fn = active_fn
         next_state, done, info = harness.step(raw_act)
@@ -338,6 +365,31 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
+    # Check tactical blunder flags at death
+    is_starved = "starv" in death_msg.lower() or "starv" in end_reason.lower()
+    starved_with_food = False
+    died_unarmored = False
+
+    if hasattr(state, "inventory"):
+        try:
+            inv = state.inventory()
+            has_food = any(
+                getattr(it, "oclass", None) == 7 or getattr(it, "char", "") == "%"
+                for it in inv
+            )
+            starved_with_food = bool(is_starved and has_food)
+            has_armor = any(
+                getattr(it, "is_armor", False) or getattr(it, "oclass", None) == 3
+                for it in inv
+            )
+            died_unarmored = bool(last_ac >= 10 and has_armor)
+        except Exception:
+            pass
+
+    total_steps = max(1, harness.step_count)
+    pct_wait = round((wait_count / total_steps) * 100.0, 2)
+    pct_search = round((search_count / total_steps) * 100.0, 2)
+
     # Cap stored ticks per run at 500 (first 100 + every Nth + last 150) so memory never explodes on 25k-step runs
     if len(ticks) > 500:
         mid = ticks[100:-150]
@@ -371,7 +423,14 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         "summary_digest": summary_digest,
         "game_log": game_log,
         "milestones": milestones,
+        "auto_esc_count": runner.auto_esc_count,
+        "subgen_preemptions": runner.subgen_preemptions,
+        "policy_exceptions": runner.policy_exceptions,
         "unique_tiles": len(visited_positions),
+        "pct_wait": pct_wait,
+        "pct_search": pct_search,
+        "starved_with_food": starved_with_food,
+        "died_unarmored": died_unarmored,
         "stairs_down_found": stairs_down_found,
         "triggered_functions": dict(runner.tracer.fn_calls),
         "functions_triggered": dict(runner.tracer.fn_calls),

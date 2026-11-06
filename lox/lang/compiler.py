@@ -240,6 +240,9 @@ class PolicyRunner:
         self._started: bool = False
         self._mode: str = "step"
         self._text_prompt_ticks: int = 0
+        self.auto_esc_count: int = 0
+        self.subgen_preemptions: int = 0
+        self.policy_exceptions: int = 0
 
         # Inject `self.param(...)` onto the policy instance if not already defined
         if not hasattr(self.instance, "param"):
@@ -286,6 +289,7 @@ class PolicyRunner:
         )
         if self._active_subgen is not None and should_preempt:
             self._active_subgen = None
+            self.subgen_preemptions += 1
 
         if self._active_subgen is not None:
             try:
@@ -369,6 +373,7 @@ class PolicyRunner:
             if not is_esc and self._text_prompt_ticks >= 2:
                 self._text_prompt_ticks = 0
                 act = Action.ESC
+                self.auto_esc_count += 1
         else:
             self._text_prompt_ticks = 0
 

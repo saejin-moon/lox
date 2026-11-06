@@ -15,6 +15,8 @@ Welcome to **LOX**, an autonomous, high-throughput empirical policy synthesis en
    - Text/naming prompts: `state.in_text_prompt` and safety fallback auto-`ESC` prevent interactive naming traps from stalling policies.
 3. **Go-Explore Outlier Good-Run Attribution & Multi-Table DuckDB**:
    - Every evaluation batch computes statistical progression scores across all recorded episodes and flags top-performing statistical exceptions with `is_outlier_good = TRUE` (`outlier_z_score`, `batch_percentile`).
+   - Tracks granular behavioral and safety telemetry directly in `runs`: `auto_esc_count` (harness prompt dismissals), `subgen_preemptions` (interrupted generator subroutines), `policy_exceptions` (caught runtime errors), `unique_tiles`, `pct_wait`, `pct_search`, and tactical blunder flags (`starved_with_food`, `died_unarmored`).
+   - Records rollout efficiency in `batches` and `experiments`: `seeds_evaluated`, `is_early_stopped`, and `pilot_best_delta`.
    - Computes **Ochiai Good-Run Similarity** and **Liblit Failure Importance** per function (`function_stats` table) so the Author Agent can immediately see which functions drive outlier success vs. mortality.
    - Consolidates real human NetHack ascensions (`archive.alt.org` xlogfile + dumplogs) and NLE reference traces directly into DuckDB's `expert_runs` and `expert_ticks` tables using the exact same `summary_digest` / `game_log` / overview stats structure as `runs` and `ticks`.
 4. **Stateless Per-Generation Author Agent & Focused Modification Modes**:
