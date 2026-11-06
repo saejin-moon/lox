@@ -61,7 +61,13 @@ class BatchDatabaseLogger:
             con.execute("BEGIN TRANSACTION")
             con.execute(
                 """
-                INSERT OR REPLACE INTO batches VALUES (
+                INSERT OR REPLACE INTO batches (
+                    batch_id, generation, mode, parent_policy_id, candidate_policy_id,
+                    target_functions, episodes_recorded, episodes_discarded,
+                    avg_depth, p90_depth, max_depth, avg_score, max_score, avg_turns,
+                    outlier_count, hypothesis_passed, wilcoxon_p, ci_lower, ci_upper,
+                    seeds_evaluated, is_early_stopped, pilot_best_delta, created_at
+                ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
@@ -167,8 +173,11 @@ class BatchDatabaseLogger:
                     ],
                 }
                 run_tbl = pa.Table.from_pydict(run_cols)
+                run_cols_str = ", ".join(run_cols.keys())
                 con.register("_temp_runs", run_tbl)
-                con.execute("INSERT OR REPLACE INTO runs SELECT * FROM _temp_runs")
+                con.execute(
+                    f"INSERT OR REPLACE INTO runs ({run_cols_str}) SELECT {run_cols_str} FROM _temp_runs"
+                )
                 con.unregister("_temp_runs")
 
                 # Smart Tail-Based Tick Sampling:
@@ -249,8 +258,11 @@ class BatchDatabaseLogger:
 
                 if tick_cols["run_id"]:
                     tick_tbl = pa.Table.from_pydict(tick_cols)
+                    tick_cols_str = ", ".join(tick_cols.keys())
                     con.register("_temp_ticks", tick_tbl)
-                    con.execute("INSERT INTO ticks SELECT * FROM _temp_ticks")
+                    con.execute(
+                        f"INSERT INTO ticks ({tick_cols_str}) SELECT {tick_cols_str} FROM _temp_ticks"
+                    )
                     con.unregister("_temp_ticks")
 
             if fn_stats:
@@ -292,8 +304,11 @@ class BatchDatabaseLogger:
                     ],
                 }
                 fn_tbl = pa.Table.from_pydict(fn_cols)
+                fn_cols_str = ", ".join(fn_cols.keys())
                 con.register("_temp_fn_stats", fn_tbl)
-                con.execute("INSERT INTO function_stats SELECT * FROM _temp_fn_stats")
+                con.execute(
+                    f"INSERT INTO function_stats ({fn_cols_str}) SELECT {fn_cols_str} FROM _temp_fn_stats"
+                )
                 con.unregister("_temp_fn_stats")
 
             con.execute("COMMIT")
@@ -321,7 +336,10 @@ class BatchDatabaseLogger:
         try:
             con.execute(
                 """
-                INSERT OR REPLACE INTO policies VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO policies (
+                    policy_id, generation, mode, policy_code, macros_code,
+                    params_json, avg_depth, max_depth, is_promoted, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     policy_id,
@@ -355,7 +373,12 @@ class BatchDatabaseLogger:
         try:
             con.execute(
                 """
-                INSERT OR REPLACE INTO experiments VALUES (
+                INSERT OR REPLACE INTO experiments (
+                    experiment_id, generation, batch_id, mode, target_functions,
+                    hypothesis_yaml, observation_from_db, mechanism, passed, mean_delta,
+                    ci_lower, ci_upper, wilcoxon_p, wins, losses, ties,
+                    seeds_evaluated, is_early_stopped, pilot_best_delta, verdict_reason, created_at
+                ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,

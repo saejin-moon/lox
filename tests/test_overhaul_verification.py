@@ -1711,3 +1711,100 @@ class Policy:
         assert "died_unarmored" in r0
     finally:
         pool.close()
+
+
+def test_gen0_logging_and_campaign_on_migrated_schema(tmp_path):
+    """Verifies that save_batch, save_experiment, and full Gen 0 execution succeed
+
+    even when ALTER TABLE ADD COLUMN has appended telemetry columns after created_at TIMESTAMP.
+    """
+    import shutil
+    from pathlib import Path
+
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.orchestrator import CampaignOrchestrator
+
+    db_file = str(tmp_path / "migrated_test.duckdb")
+    if Path("data/lox.duckdb").exists():
+        shutil.copy2("data/lox.duckdb", db_file)
+    else:
+        init_db(db_file)
+
+    # 1. Verify BatchDatabaseLogger can insert without positional TIMESTAMP cast error
+    logger = BatchDatabaseLogger(db_file)
+    logger.save_batch(
+        batch_id="b_migrated_001",
+        generation=0,
+        mode="FULL_WRITE",
+        parent_policy_id="none",
+        candidate_policy_id="pol_001",
+        target_functions=["run"],
+        runs=[],
+        episodes_discarded=0,
+        batch_metrics={
+            "avg_depth": 1.5,
+            "p90_depth": 2.0,
+            "max_depth": 2,
+            "avg_score": 20.0,
+            "max_score": 30,
+            "avg_turns": 50.0,
+            "outliers": 0,
+            "seeds_evaluated": 25,
+            "is_early_stopped": True,
+            "pilot_best_delta": 0.45,
+        },
+        verdict={
+            "passed": True,
+            "wilcoxon_p": 0.01,
+            "ci_lower": 0.1,
+            "ci_upper": 0.5,
+            "mean_delta": 0.3,
+            "wins": 20,
+            "losses": 5,
+            "ties": 0,
+            "seeds_evaluated": 25,
+            "is_early_stopped": True,
+            "pilot_best_delta": 0.45,
+            "reason": "Test migration",
+        },
+    )
+
+    con = connect_db(db_file, read_only=True)
+    b_row = con.execute(
+        "SELECT seeds_evaluated, is_early_stopped, pilot_best_delta, created_at FROM batches WHERE batch_id='b_migrated_001'"
+    ).fetchone()
+    assert b_row[0] == 25
+    assert b_row[1] is True
+    assert abs(b_row[2] - 0.45) < 1e-6
+    assert b_row[3] is not None
+    con.close()
+
+    # 2. Now run an end-to-end Generation 0 Campaign on this DB
+    pol_file = str(tmp_path / "policy.py")
+    orch = CampaignOrchestrator(
+        provider="mock",
+        model="mock-model",
+        db_path=db_file,
+        policy_path=pol_file,
+        workers=2,
+        max_steps=30,
+        full_write_episodes=4,
+    )
+    try:
+        res = orch.run_campaign(
+            max_generations=1, forced_mode="FULL_WRITE", seed_base=123
+        )
+        assert res["active_policy_code"] != ""
+        con = connect_db(db_file, read_only=True)
+        gen0_batches = con.execute(
+            "SELECT COUNT(*) FROM batches WHERE generation=0"
+        ).fetchone()[0]
+        gen0_exps = con.execute(
+            "SELECT COUNT(*) FROM experiments WHERE generation=0"
+        ).fetchone()[0]
+        assert gen0_batches >= 1
+        assert gen0_exps >= 1
+        con.close()
+    finally:
+        orch.pool.close()
