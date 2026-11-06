@@ -18,9 +18,9 @@ class ModeScheduler:
 
     def __init__(
         self,
-        param_tune_every: int = 3,
+        param_tune_every: int = 100,
         macro_every: int = 0,
-        use_bandit_after_gen: int = 15,
+        use_bandit_after_gen: int = 50,
     ):
         self.param_tune_every = max(1, int(param_tune_every))
         self.macro_every = int(macro_every)
@@ -75,7 +75,7 @@ class ModeScheduler:
 
         self._gens_since_macro += 1
 
-        # Periodic Macro Synthesis so the Author builds up `macros.py` early and regularly (only if enabled > 0)
+        # Periodic Macro Synthesis (only if enabled > 0)
         if self.macro_every > 0 and (
             (
                 generation > 0
@@ -89,7 +89,11 @@ class ModeScheduler:
             self.counts["MACRO_WRITE"] += 1
             return "MACRO_WRITE"
 
-        can_tune = has_tunable_params and self._promoted_since_tune >= 1
+        can_tune = (
+            has_tunable_params
+            and self.param_tune_every > 0
+            and self._promoted_since_tune >= 1
+        )
 
         # Periodic Parameter Finetuning every `param_tune_every` function modifications (only if promoted changes occurred)
         if can_tune and (
@@ -110,7 +114,6 @@ class ModeScheduler:
         total_pulls = sum(self.counts.values())
         if generation >= self.use_bandit_after_gen and total_pulls >= 6:
             candidates = ["FUNC_MOD_ADD"]
-            # Enforce anti-starvation cooldown for MACRO_WRITE (never consecutive, min 6 gens cooldown, only if enabled)
             if (
                 self.macro_every > 0
                 and self._gens_since_macro >= max(6, self.macro_every)

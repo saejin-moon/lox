@@ -7,7 +7,7 @@
 Standard deep reinforcement learning trains opaque neural weights over billions of environment frames, and online LLM agents pay a high latency and token cost on every single turn. `LOX` places the language model in the **outer scientific loop** and compiled Python 3.11+ in the **inner execution loop**:
 
 - **Inner Loop (CPU / Numba)**: Compiled Python 3.11+ generator policies execute directly against the C/Python environment harness at **50,000 to 121,000+ steps/sec** across worker cores (`0` LLM tokens per step). The harness handles C prompt pagination (`flags.xwaitforspace` / `--More--` dismissal) automatically and supports microsecond action-byte prefix replay.
-- **Outer Loop (Stateless Scientist LLM)**: Between evaluation batches, a stateless Author Agent queries a multi-table **DuckDB** warehouse (`runs`, `ticks`, `function_stats`, `discoveries`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Strategy Knowledge Base**. It isolates the active policy's top binding constraint, verifies environment rules against C struct tables (`permonst`, `objclass`) and Wiki articles, tests candidate code in a **5 x 30-episode execution-guided pilot loop** (`dry_run_policy`) with behavioral stall telemetry and prefix-replay shards, and submits verified candidates to sequential statistical hypothesis testing.
+- **Outer Loop (Stateless Scientist LLM)**: Between evaluation batches, a stateless Author Agent queries a multi-table **DuckDB** warehouse (`runs`, `ticks`, `function_stats`, `discoveries`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Strategy Knowledge Base**. It isolates the active policy's top binding constraint, verifies environment rules against C struct tables (`permonst`, `objclass`) and Wiki articles, tests candidate code in an **8 x 30-episode execution-guided pilot loop** (`dry_run_policy`) with behavioral stall telemetry and prefix-replay shards, and promotes the best candidate to sequential statistical hypothesis testing without hard-aborting on pilot noise.
 
 ---
 
@@ -39,9 +39,10 @@ Most game-playing LLM agents depend on human-engineered domain wrappers: hardcod
    - It provides a **1-to-1 connection** between policy yields and native environment actions ([`Action`](lox/env/actions.py) / [`CraftaxAction`](lox/env/craftax/actions.py), [`key(ch)`](lox/env/actions.py) raw ASCII bytes, and [`seq(...)`](lox/env/actions.py) multi-keystroke sequences).
    - It exposes the game state lazily via [`GameState`](lox/env/state.py): all 27 `blstats` fields, `BL_MASK_*` status bitmasks, 21x79 or 48x48 grids (`glyphs`, `chars`, `colors`, `specials`), inventory slots, and pre-indexed C symbol table lookups over `nle.nethack.permonst` (`state.mon_info(y, x)`) and `nle.nethack.objclass` (`state.obj_info(glyph)`), paired with Numba-JIT grid topology primitives in [`lox/env/grid_utils.py`](lox/env/grid_utils.py).
    - It clears NetHack C engine pagination (`flags.xwaitforspace == 1` / `--More--` prompts) transparently while recording every raw byte for bit-identical replay.
-2. **Near-Full Python 3.11+ Policy Language & Macro Library ([`lox/lang/`](lox/lang/))**:
-   - The Author Agent writes standard Python 3.11+ in `data/workspace/policy.py`, `data/workspace/macros.py`, and modular skills in `data/workspace/skills/`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
+2. **Near-Full Python 3.11+ Policy Language & Modular Skills ([`lox/lang/`](lox/lang/))**:
+   - The Author Agent writes standard Python 3.11+ in `data/workspace/policy.py` and modular skill packages in `data/workspace/skills/`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
    - Compile-time AST instrumentation ([`PolicyInstrumentTransformer`](lox/lang/instrument.py) and [`ExecutionTracer`](lox/lang/instrument.py)) adds `<1 us` per-function call tracking, per-function turn attribution, zero-yield loop protection ([`PolicyLoopError`](lox/lang/instrument.py)), and tunable numerical parameter hooks (`self.param(name, default, min_val, max_val)`).
+   - Automatic text/naming prompt dismissal: exposes `state.in_text_prompt` / `state.in_naming_prompt` directly to policy state and features a safety fallback auto-`ESC` in the execution runner to prevent unhandled text prompts (e.g. `Call a scroll: `) from trapping policies.
 
 ---
 
@@ -54,19 +55,19 @@ Most game-playing LLM agents depend on human-engineered domain wrappers: hardcod
 │  • Dynamic User Prompt: Mode Instructions + Active Code + Contrastive Digest     │
 │  • Epistemic Memory: Verified Breakthroughs (discoveries) & Rejected Hypotheses  │
 │  • Tools: query_db(sql) | query_wiki(q) | query_policy_docs(t) | dry_run_policy  │
-│  • Execution-Guided Pilot Loop: Up to 5 revisions x 30 paired episodes (~0.8s)   │
-│    with Behavioral Critic (stall telemetry) + Anti-Complexity Ratchet            │
+│  • Execution-Guided Pilot Loop: Up to 8 revisions x 30 paired episodes (~0.8s)   │
+│    with Best-Candidate Fallback (no auto-abort) + Behavioral Critic Telemetry    │
 └───────────────────────────────────────┬──────────────────────────────────────────┘
                                         │ Emits Causal YAML Hypothesis + Python Code
                                         ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │            HYBRID CADENCE / EXTREME-VALUE UCB SCHEDULER & MAP-ELITES             │
-│  ┌────────────┐ ┌─────────────┐ ┌──────────────┐ ┌────────────┐ ┌──────────────┐ │
-│  │ FULL_WRITE │ │ MACRO_WRITE │ │ FUNC_MOD_ADD │ │ PARAM_TUNE │ │ STRUCTURAL_  │ │
-│  │  250 eps   │ │ 0 eps (inst)│ │ 150 trig eps │ │ 0 LLM toks │ │   REFACTOR   │ │
-│  │ (Gen 0)    │ │ ->macros.py │ │ + 40 shards  │ │ (CRN-SPSA) │ │   200 eps    │ │
-│  └─────┬──────┘ └──────┬──────┘ └──────┬───────┘ └─────┬──────┘ └──────┬───────┘ │
-└────────┼───────────────┼───────────────┼───────────────┼───────────────┼─────────┘
+│  ┌────────────┐ ┌──────────────┐ ┌──────────────┐ ┌────────────┐ ┌─────────────┐ │
+│  │ FULL_WRITE │ │ FUNC_MOD_ADD │ │ STRUCTURAL_  │ │ PARAM_TUNE │ │ (SKILLS     │ │
+│  │  250 eps   │ │ 150 trig eps │ │   REFACTOR   │ │ every 100g │ │  PACKAGES)  │ │
+│  │ (Gen 0)    │ │ + 40 shards  │ │   200 eps    │ │ (CRN-SPSA) │ │ skills/*.py │ │
+│  └─────┬──────┘ └──────┬───────┘ └──────┬───────┘ └─────┬──────┘ └──────┬──────┘ │
+└────────┼───────────────┼────────────────┼───────────────┼───────────────┼────────┘
          │               │ (Instant Gen) │               │               │
          ▼               ▼               ▼               ▼               ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
@@ -164,15 +165,14 @@ Every [`GameState`](lox/env/state.py) maintains a persistent per-episode [`World
 
 ---
 
-## 6. The Five Modification Modes, MAP-Elites Archive & Library Learning
+## 6. The Core Modification Modes, MAP-Elites Archive & Modular Skills
 
 | Mode | Episode Budget | Verification Gate | Purpose |
 | :--- | :--- | :--- | :--- |
 | **`FULL_WRITE`** | `250` episodes | 30-episode live smoke test | Synthesizes `class Policy` from scratch on Generation 0 without a pre-fed starter policy. |
-| **`MACRO_WRITE`** | `0` episodes *(instant)* | Real-state execution across 3 fixtures | Synthesizes reusable generator/helper macros into `data/workspace/macros.py` with static AST contract linting. |
-| **`FUNC_MOD_ADD`** | `150` triggered eps / fn + `40` shards | 5 x 30-episode pilot revision loop | Surgically adds or modifies targeted methods on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)); untriggered episodes are discarded (`triggered == False`). |
-| **`PARAM_TUNE`** | `0` LLM tokens (`CRN-SPSA`) | Paired CRN validation batch | Optimizes all `self.param(name, default, min, max)` thresholds via Common Random Numbers SPSA and bakes winning constants back into the AST. |
-| **`STRUCTURAL_REFACTOR`** | `200` episodes | 5 x 30-episode pilot revision loop | Triggered when `policy.py` exceeds 550 lines or during stagnation to break large monolithic logic into modular files under `data/workspace/skills/`. |
+| **`FUNC_MOD_ADD`** | `150` triggered eps / fn + `40` shards | 8 x 30-episode pilot revision loop | Surgically adds or modifies targeted methods on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)); untriggered episodes are discarded (`triggered == False`). |
+| **`STRUCTURAL_REFACTOR`** | `200` episodes | 8 x 30-episode pilot revision loop | Triggered when `policy.py` exceeds 550 lines or during stagnation to break large monolithic logic into modular files under `data/workspace/skills/`. |
+| **`PARAM_TUNE`** | `0` LLM tokens (`CRN-SPSA`) | Paired CRN validation batch | Optional numerical threshold tuner (run every 100 generations or disabled); tunes `self.param(name, default, min, max)` and bakes winning constants into the AST. |
 
 ### MAP-Elites Behavioral Archive ([`lox/engine/orchestrator.py`](lox/engine/orchestrator.py))
 To preserve stepping-stone adaptations without reverting promoted gains, `CampaignOrchestrator` maintains a quality-diversity archive across three behavioral niches:
@@ -180,9 +180,11 @@ To preserve stepping-stone adaptations without reverting promoted gains, `Campai
 - `combat_ac`: Elite policy minimizing armor class (`avg_ac`) while maintaining non-regressing depth.
 - `progression_xl`: Elite policy maximizing experience level (`avg_xl`) while maintaining non-regressing depth.
 
-### Wake-Sleep Library Learning ([`lox/lang/macros.py`](lox/lang/macros.py))
-- **Top-Down Synthesis (`MACRO_WRITE`)**: Verified against three real game-state fixtures (open room with items/stairs, adjacent hostile combat, and locked-door dead-end corridor) before committing to `data/workspace/macros.py`.
-- **Bottom-Up Extraction (`MacroHarvester`)**: Automatically harvests pure/stateless helper methods with high Ochiai Good-Run scores (`ochiai_good_run_score >= 0.25`) from promoted policies, rewriting `self.<mem_attr>` references to `state.mem.<mem_attr>` and promoting them into `data/workspace/macros.py`.
+### Modular Skills Architecture (`data/workspace/skills/`)
+Reusable domain capabilities (such as `skills/navigation.py`, `skills/combat.py`, and `skills/survival.py`) are maintained directly as clean, imported Python modules within the workspace. The Author Agent can inspect, refactor, and import from `skills.*` directly, eliminating duplicate legacy macro abstractions and enabling seamless modular skill evolution.
+
+### Pilot Fallback & Calibration (`scripts/calibrate_pilot.py`)
+Rather than prematurely aborting generations when all pilot revision attempts fail to pass the strict sign test, `LOX` employs `--pilot-fallback best` to promote the highest-progression candidate to the full 150-seed rollout, where Sequential Futility Early Stopping ($U_n \le 0.0$ at $n=60$) guards compute without discarding potentially breakthrough policies. The revision budget can be inspected and calibrated at any time via `uv run python scripts/calibrate_pilot.py --db-path data/lox.duckdb`.
 
 ---
 
@@ -371,6 +373,9 @@ Safely inspect progress without interrupting workers:
 ```bash
 # CLI summary of recent activity and depth velocity
 uv run python scripts/status_lox.py --since-hours 12
+
+# Calibrate pilot revision budget and inspect attempt promotion transfer rates
+uv run python scripts/calibrate_pilot.py --db-path data/lox.duckdb
 
 # View the latest generated markdown status report
 cat data/workspace/STATUS.md

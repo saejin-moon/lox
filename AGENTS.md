@@ -9,20 +9,22 @@ Welcome to **LOX**, an autonomous, high-throughput empirical policy synthesis en
 1. **Zero Hardcoded Strategy in the Harness**:
    - The Architect's harness (`lox/env/`) contains **zero** game heuristics, **zero** hardcoded monster/corpse/item lists, and **zero** hidden macro adapters.
    - It provides a **pure 1-to-1 connection** between policy yields and native NLE C actions (`Action` enum, `key(ch)`, `seq(...)` multi-keystroke sequences) and exposes the complete NetHack game state lazily via `GameState` (`blstats`, 21×79 screen grids, inventory, and direct C symbol table queries over `nle.nethack.permonst` and `nle.nethack.objclass`).
-2. **Near-Full Python Policy Language & Persistent Macro Library**:
-   - Policies (`data/workspace/policy.py`) and reusable macros (`data/workspace/macros.py`) support full Python 3.11+ syntax (`class`, generators `yield` / `yield from`, `match/case`, comprehensions, `@dataclass`, closures, type hints, and safe stdlib modules `math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
+2. **Near-Full Python Policy Language & Modular Skills Library**:
+   - Policies (`data/workspace/policy.py`) and modular skill packages (`data/workspace/skills/`) support full Python 3.11+ syntax (`class`, generators `yield` / `yield from`, `match/case`, comprehensions, `@dataclass`, closures, type hints, and safe stdlib modules `math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
    - Compile-time AST instrumentation (`PolicyInstrumentTransformer` & `ExecutionTracer`) injects `<1 µs` per-function call tracking, per-function turn attribution, loop-watchdog protection (`PolicyLoopError`), and tunable parameter hooks (`self.param(name, default, min_val, max_val)`).
+   - Text/naming prompts: `state.in_text_prompt` and safety fallback auto-`ESC` prevent interactive naming traps from stalling policies.
 3. **Go-Explore Outlier Good-Run Attribution & Multi-Table DuckDB**:
    - Every evaluation batch computes statistical progression scores across all recorded episodes and flags top-performing statistical exceptions with `is_outlier_good = TRUE` (`outlier_z_score`, `batch_percentile`).
    - Computes **Ochiai Good-Run Similarity** and **Liblit Failure Importance** per function (`function_stats` table) so the Author Agent can immediately see which functions drive outlier success vs. mortality.
    - Consolidates real human NetHack ascensions (`archive.alt.org` xlogfile + dumplogs) and NLE reference traces directly into DuckDB's `expert_runs` and `expert_ticks` tables using the exact same `summary_digest` / `game_log` / overview stats structure as `runs` and `ticks`.
-4. **Stateless Per-Generation Author Agent & 4 Modification Modes**:
+4. **Stateless Per-Generation Author Agent & Focused Modification Modes**:
    - Each generation starts a **fresh, stateless LLM session** with a 100% static cached System Prompt (Policy Language Specs + DuckDB Schema) and 4 high-signal tools: `query_db(sql)`, `query_wiki(query)`, `query_policy_docs(topic)`, and `dry_run_policy(code)`.
-   - **4 Modification Modes**:
-     - `FULL_WRITE` (10,000 episodes): Synthesizes `class Policy` from scratch on Generation 0 without a pre-fed starter policy.
-     - `MACRO_WRITE` (0 episodes — instant commit): Synthesizes reusable macros into `data/workspace/macros.py` and immediately advances to the next generation.
-     - `FUNC_MOD_ADD` (1,000 triggered episodes per modified/added function): Splices targeted methods onto `Policy`; episodes that do not call any targeted function are immediately discarded (`triggered == False`) and excluded from stats and DB storage.
-     - `PARAM_TUNE` (0 LLM tokens — CRN-SPSA): Simultaneously tunes all `self.param(...)` numerical thresholds using Common Random Numbers SPSA and bakes winning constants back into the AST.
+   - **Pilot Revision Budget & Fallback**: Up to 8 pilot revision attempts per generation (`--pilot-revisions 8`). When all pilot revisions fail the strict sign test, `LOX` falls back to the highest-scoring candidate (`--pilot-fallback best`) and evaluates it in the full rollout with Sequential Futility Early Stopping ($U_n \le 0.0$ at $n=60$) rather than auto-aborting.
+   - **Modification Modes**:
+     - `FULL_WRITE`: Synthesizes `class Policy` from scratch on Generation 0 without a pre-fed starter policy.
+     - `FUNC_MOD_ADD`: Splices targeted methods onto `Policy` or evolves modular packages in `skills/`; untriggered episodes are discarded.
+     - `STRUCTURAL_REFACTOR`: Triggered when monolithic policies grow large, modularizing logic into `data/workspace/skills/`.
+     - `PARAM_TUNE`: Optional numerical threshold tuner (run every 100 generations or disabled).
 5. **Parameter-Free Hypothesis Testing**:
    - The Author Agent states a qualitative causal YAML hypothesis (`observation_from_db`, `mechanism`, `target_functions`) without guessing numerical effect sizes.
    - Candidate policies are evaluated via **Anytime-Valid Empirical Bernstein Confidence Sequences** (`[ci_lower, ci_upper]`), **One-Sided Paired Wilcoxon Signed-Rank Tests** (`wilcoxon_p < 0.05`), and **Sequential Futility Early Stopping**.
@@ -93,7 +95,10 @@ uv run python scripts/download_experts.py --max-ascensions 50
 # Add local .txt dumplogs, .ttyrec/.ttyrec.bz2 files (e.g. NLD-AA), or direct URLs:
 uv run python scripts/download_experts.py --dumplog path/to/dumplogs/ --ttyrec path/to/ttyrecs/
 
-# 4. Launch a synthesis campaign (e.g. with GLM 5.3 Flash Nitro via OpenRouter)
+# 4. Calibrate pilot revision budget from experimental history
+uv run python scripts/calibrate_pilot.py --db-path data/lox.duckdb
+
+# 5. Launch a synthesis campaign (e.g. with GLM 5.3 Flash Nitro via OpenRouter)
 uv run python scripts/run_lox.py \
   --provider openrouter \
   --model z-ai/glm-5.3-flash:nitro \

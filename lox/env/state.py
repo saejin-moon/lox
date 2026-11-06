@@ -1465,7 +1465,22 @@ class GameState:
 
     @property
     def in_text_prompt(self) -> bool:
-        return self.is_in_getlin
+        if self.is_in_getlin:
+            return True
+        msg = self.message.lower()
+        return any(
+            p in msg
+            for p in (
+                "call a ",
+                "what do you want to call",
+                "name a ",
+                "what do you want to name",
+            )
+        )
+
+    @property
+    def in_naming_prompt(self) -> bool:
+        return self.in_text_prompt
 
     @property
     def is_game_over(self) -> bool:

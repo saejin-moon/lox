@@ -7,11 +7,13 @@ and the Stateless Author Agent.
 
 from __future__ import annotations
 
+import collections
 import datetime
 import json
 import math
 import os
 import re
+import shutil
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -32,7 +34,7 @@ from lox.engine.hypothesis import (
 )
 from lox.engine.modes import run_spsa_param_tuning
 from lox.engine.scheduler import ModeScheduler
-from lox.lang.macros import DEFAULT_MACROS_PATH, MacroHarvester, MacroLibrary
+from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
 
@@ -292,13 +294,14 @@ class CampaignOrchestrator:
         full_write_episodes: int = 10000,
         func_mod_episodes_per_fn: int = 1000,
         param_tune_episodes: int = 100,
-        param_tune_every: int = 3,
+        param_tune_every: int = 100,
         macro_every: int = 0,
         early_stopping: bool = True,
         max_repair_turns: int = 5,
-        pilot_revisions: int = 2,
+        pilot_revisions: int = 8,
         pilot_episodes: int = 30,
         benchmark: str = "nethack",
+        pilot_fallback: str = "best",
     ):
         self.provider = provider
         self.model = model
@@ -316,6 +319,8 @@ class CampaignOrchestrator:
         self.pilot_revisions = pilot_revisions
         self.pilot_episodes = pilot_episodes
         self.benchmark = benchmark
+        self.pilot_fallback = str(pilot_fallback)
+        self.target_fn_failure_counts: collections.Counter[str] = collections.Counter()
         self.policy_archive: dict[str, PolicyArchiveEntry] = {}
         self.workspace_dir = str(Path(self.policy_path).parent)
 
@@ -339,6 +344,7 @@ class CampaignOrchestrator:
             macros_path=macros_path,
             max_repair_turns=max_repair_turns,
             benchmark=benchmark,
+            pilot_fallback=pilot_fallback,
         )
         self.scheduler = ModeScheduler(
             param_tune_every=param_tune_every,
@@ -1018,6 +1024,12 @@ class CampaignOrchestrator:
                             target_episodes=self.func_mod_episodes_per_fn,
                         )
 
+                    stag_fn = ""
+                    for fn, fail_cnt in self.target_fn_failure_counts.most_common():
+                        if fail_cnt >= 3:
+                            stag_fn = fn
+                            break
+
                     try:
                         proposal = self.author.synthesize(
                             mode=mode,
@@ -1033,6 +1045,7 @@ class CampaignOrchestrator:
                             recent_discoveries=recent_discoveries,
                             recent_failures=recent_failures,
                             max_steps=active_max_steps,
+                            stagnation_function=stag_fn,
                         )
                     except PermissionError as auth_err:
                         ui.warn(f"Fatal authentication/billing error: {auth_err}")
@@ -1437,6 +1450,8 @@ class CampaignOrchestrator:
 
                     if verdict["passed"]:
                         consecutive_failures = 0
+                        for fn in getattr(proposal, "target_functions", []):
+                            self.target_fn_failure_counts[fn] = 0
                         current_policy = proposal.full_policy_code
                         current_policy_id = cand_id
                         self.save_active_policy(current_policy)
@@ -1579,9 +1594,11 @@ class CampaignOrchestrator:
                             (ckpt_dir / "policy.py").write_text(
                                 current_policy, encoding="utf-8"
                             )
-                            (ckpt_dir / "macros.py").write_text(
-                                self.macro_lib.load_code(), encoding="utf-8"
-                            )
+                            skills_dir = Path(self.workspace_dir) / "skills"
+                            if skills_dir.is_dir():
+                                shutil.copytree(
+                                    skills_dir, ckpt_dir / "skills", dirs_exist_ok=True
+                                )
                             meta = {
                                 "generation": gen,
                                 "policy_id": cand_id,
@@ -1595,19 +1612,12 @@ class CampaignOrchestrator:
                             (ckpt_dir / "meta.json").write_text(
                                 json.dumps(meta, indent=2), encoding="utf-8"
                             )
-
-                        # Trigger bottom-up macro harvesting (DreamCoder/Voyager style)
-                        harvested = MacroHarvester.harvest_from_policy(
-                            policy_code=current_policy,
-                            macro_lib=self.macro_lib,
-                            fn_stats=fn_stats,
-                        )
-                        if harvested:
-                            ui.info(
-                                f"Bottom-Up Library Learning: Harvested verified macro(s) {harvested} into `{self.macros_path}`."
-                            )
                     else:
                         consecutive_failures += 1
+                        for fn in getattr(proposal, "target_functions", []):
+                            self.target_fn_failure_counts[fn] = (
+                                self.target_fn_failure_counts.get(fn, 0) + 1
+                            )
                         if not last_batch_digest and eval_res["runs"]:
                             last_batch_digest = build_batch_contrast_digest(
                                 eval_res, eval_res["runs"], fn_stats

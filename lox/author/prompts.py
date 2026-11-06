@@ -31,7 +31,7 @@ FULL_ACTION_DOCS = r"""### Complete NetHack Action Command Index
 
 POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
 
-#### 1. Execution Model (`class Policy` and `macros.py`)
+#### 1. Execution Model (`class Policy` and Modular Skills)
 - Your policy is a standard Python 3.11+ class named `class Policy:`.
 - A fresh `Policy()` instance is created at the start of every episode.
 - **Recommended Architecture (Dispatcher + Action-Returning Specialist Methods)**:
@@ -54,6 +54,10 @@ POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
               state = yield (act if act is not None else Action.SEARCH)
   ```
   - You can also write `def step(self, state: GameState) -> Action:` directly, or use generator subroutines via `state = yield from self.sub_gen(state)`.
+  - **Prompt Safety & Naming Prompts**:
+    When NetHack prompts for text input (e.g. `Call a scroll: `, `Call a potion: `), `state.in_text_prompt` is True.
+    If your policy returns a movement key, it types into the text buffer. Yield `Action.ESC` (`'\x1b'`) to dismiss text naming prompts immediately!
+    The harness also includes a safety fallback auto-ESC if unhandled after 2 turns so runs never stall to max_steps.
   - **3 Strict Generator Rules**:
     1. In a generator (`def run` containing `yield`), ALWAYS receive the next state via `state = yield act` (never `return act` inside a generator—in Python `return val` inside a generator raises `StopIteration`!).
     2. If a helper method is a normal function that returns an `Action` or `None`, call it as `act = self.helper(state)` and then `state = yield act`.
@@ -345,15 +349,25 @@ def build_user_prompt(
     mode: str,
     generation: int,
     current_policy: str,
-    macros_docs: str,
+    macros_docs: str = "",
     batch_digest: str = "",
     recent_experiments: str = "",
     skills: dict[str, str] | None = None,
     recent_discoveries: list[dict[str, Any]] | None = None,
     recent_failures: list[dict[str, Any]] | None = None,
+    stagnation_function: str = "",
 ) -> str:
     """Constructs the stateless Turn-0 prompt tailored to the active Modification Mode."""
     from lox.lang.validator import extract_module_outline
+
+    stagnation_block = ""
+    if stagnation_function:
+        stagnation_block = (
+            f"\n> [!WARNING]\n"
+            f"> **Anti-Rut Stagnation Directive**: The target function `{stagnation_function}` has repeatedly failed verification.\n"
+            f"> You are **PROHIBITED** from targeting or modifying `{stagnation_function}` this generation!\n"
+            f"> Pivot to other unaddressed failure causes (e.g. food starvation, corridor combat retreat, or prompt safety).\n"
+        )
 
     skills_block = ""
     if skills:
@@ -466,8 +480,7 @@ Your task:
 
     if mode == "STRUCTURAL_REFACTOR":
         return f"""### Generation {generation} — Mode: `STRUCTURAL_REFACTOR` (Architectural Policy Refactoring)
-{digest_block}{exp_block}{discoveries_block}{failures_block}
-{macros_docs}
+{digest_block}{exp_block}{discoveries_block}{failures_block}{stagnation_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 
@@ -500,8 +513,7 @@ Single-skill targeted patches have stalled or reached a local optimum. You have 
 
     # Default: FUNC_MOD_ADD
     return f"""### Generation {generation} — Mode: `FUNC_MOD_ADD` (Targeted Single-Skill Addition / Modification)
-{digest_block}{exp_block}{discoveries_block}{failures_block}
-{macros_docs}
+{digest_block}{exp_block}{discoveries_block}{failures_block}{stagnation_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 

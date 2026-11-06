@@ -119,8 +119,8 @@ def main() -> None:
     parser.add_argument(
         "--param-tune-every",
         type=int,
-        default=4,
-        help="Run PARAM_TUNE every N generations (default: 4)",
+        default=100,
+        help="Run PARAM_TUNE every N generations (default: 100)",
     )
     parser.add_argument(
         "--macro-every",
@@ -133,7 +133,6 @@ def main() -> None:
         default=None,
         choices=[
             "FULL_WRITE",
-            "MACRO_WRITE",
             "FUNC_MOD_ADD",
             "PARAM_TUNE",
             "STRUCTURAL_REFACTOR",
@@ -148,8 +147,14 @@ def main() -> None:
     parser.add_argument(
         "--pilot-revisions",
         type=int,
-        default=2,
-        help="Max self-iterative pilot revision runs per generation (default: 2)",
+        default=8,
+        help="Max self-iterative pilot revision runs per generation (default: 8)",
+    )
+    parser.add_argument(
+        "--pilot-fallback",
+        default="best",
+        choices=["best", "abort"],
+        help="Action when all pilot revision attempts fail validation: 'best' promotes highest-delta candidate to full rollout with futility early stopping, 'abort' skips (default: best)",
     )
     parser.add_argument(
         "--pilot-episodes",
@@ -200,6 +205,7 @@ def main() -> None:
         pilot_revisions=args.pilot_revisions,
         pilot_episodes=args.pilot_episodes,
         benchmark=args.benchmark,
+        pilot_fallback=args.pilot_fallback,
     )
     try:
         orchestrator.run_campaign(

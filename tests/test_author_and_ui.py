@@ -498,7 +498,9 @@ def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypat
 
         # 3. Agent synthesize sends scientific investigation guidance on pilot failure
         agent = AuthorAgent(
-            provider="openrouter", db_path=str(tmp_path / "diag.duckdb")
+            provider="openrouter",
+            db_path=str(tmp_path / "diag.duckdb"),
+            pilot_fallback="abort",
         )
         received_messages = []
 
@@ -540,6 +542,49 @@ def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypat
         assert "DO NOT BLINDLY GUESS CODE EDITS!" in failure_guidance[0]
         assert "query_wiki" in failure_guidance[0]
         assert "query_db" in failure_guidance[0]
+    finally:
+        pool.close()
+
+
+def test_pilot_fallback_best_does_not_abort(tmp_path, monkeypatch):
+    from lox.runner.pool import PersistentEvalPool
+
+    pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=10)
+    try:
+        agent = AuthorAgent(
+            provider="openrouter",
+            db_path=str(tmp_path / "fallback.duckdb"),
+            pilot_fallback="best",
+        )
+        failing_code = """class Policy:
+    def run(self, state):
+        while True:
+            state = yield Action.WAIT
+"""
+
+        def mock_call_llm(messages, allow_tools=True):
+            return {
+                "role": "assistant",
+                "content": f"```yaml\nmode: FUNC_MOD_ADD\ntarget_functions: [run]\nobservation_from_db: 'test'\nmechanism: 'test'\n```\n```python\n{failing_code}```",
+                "tool_calls": [],
+            }
+
+        monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm)
+        baseline_runs = [
+            {"seed": 100, "max_depth": 5, "score": 500},
+            {"seed": 101, "max_depth": 5, "score": 500},
+        ]
+        proposal = agent.synthesize(
+            mode="FUNC_MOD_ADD",
+            generation=2,
+            current_policy=failing_code,
+            pool=pool,
+            baseline_runs=baseline_runs,
+            max_pilot_runs=1,
+            pilot_episodes=2,
+        )
+        assert proposal.aborted is False
+        assert proposal.full_policy_code != ""
     finally:
         pool.close()
 

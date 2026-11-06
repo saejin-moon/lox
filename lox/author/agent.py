@@ -65,6 +65,7 @@ class AuthorAgent:
         routing: str = "nitro",
         max_repair_turns: int = 5,
         benchmark: str = "nethack",
+        pilot_fallback: str = "best",
     ):
         self.provider = provider.lower()
         self.model = model
@@ -83,6 +84,7 @@ class AuthorAgent:
         self.routing = routing
         self.max_repair_turns = max_repair_turns
         self.benchmark = str(benchmark)
+        self.pilot_fallback = str(pilot_fallback)
         self.latest_attempted_hyp: dict[str, Any] = {}
         self.tools = AuthorToolRegistry(
             db_path=db_path, macros_path=macros_path, benchmark=benchmark
@@ -633,12 +635,13 @@ class AuthorAgent:
         max_tool_turns: int | None = None,
         pool: Any = None,
         baseline_runs: list[dict[str, Any]] | None = None,
-        max_pilot_runs: int = 5,
+        max_pilot_runs: int = 8,
         pilot_episodes: int = 30,
         skills: dict[str, str] | None = None,
         recent_discoveries: list[dict[str, Any]] | None = None,
         recent_failures: list[dict[str, Any]] | None = None,
         max_steps: int = 5000,
+        stagnation_function: str = "",
     ) -> SynthesisProposal:
         """
         Runs a fresh, stateless multi-turn tool-calling session for `generation` and `mode`.
@@ -662,19 +665,22 @@ class AuthorAgent:
             benchmark=self.benchmark,
         )
         if max_tool_turns is None:
-            max_tool_turns = 14 if mode == "FULL_WRITE" else 12
+            max_tool_turns = (
+                24 if mode == "FULL_WRITE" else max(18, max_pilot_runs + 10)
+            )
 
         sys_prompt = build_system_prompt(self.db_path)
         user_prompt = build_user_prompt(
             mode=mode,
             generation=generation,
             current_policy=current_policy,
-            macros_docs=self.tools.macro_lib.format_docs(),
+            macros_docs="",
             batch_digest=batch_digest,
             recent_experiments=recent_experiments,
             skills=skills,
             recent_discoveries=recent_discoveries,
             recent_failures=recent_failures,
+            stagnation_function=stagnation_function,
         )
 
         messages: list[dict[str, Any]] = [
@@ -1003,58 +1009,66 @@ class AuthorAgent:
             except Exception:
                 pass
 
-        # Pilot Gate Abort: If pilots were run during the tool phase and none improved over baseline,
-        # abort immediately instead of falling through to smoke check and running 150-seed rollout.
+        # Pilot Gate: If pilots were run during the tool phase and none passed the strict sign gate:
         if (
             self.tools.pilot_runs_used > 0
             and not self.tools.last_pilot_improved
             and mode not in ("MACRO_WRITE", "FULL_WRITE")
         ):
             summary = self.tools.last_pilot_summary or "insufficient signal"
-            ui.warn(
-                f"Pilot Gate: Candidate failed all {self.tools.pilot_runs_used} pilot revisions ({summary}). Aborting rollout."
-            )
-            try:
-                self.db_logger.save_synthesis_log(
-                    log_id=f"syn_{generation}_{total_tool_calls}_pilot_abort_{int(time.time() * 1000)}",
-                    generation=generation,
-                    batch_id=batch_id,
-                    mode=mode,
-                    turn_index=total_tool_calls,
-                    turn_type="PILOT_ABORT",
-                    repair_idx=0,
-                    model=self.model,
-                    thinking_content="",
-                    message_content=summary,
-                    tool_calls_json="[]",
-                    tool_results_json="[]",
-                    candidate_code=self.tools.last_attempted_pilot_code or "",
-                    skill_name=str((latest_hyp or {}).get("skill_module", "")),
-                    skill_code=getattr(self.tools, "last_passed_skill_code", ""),
-                    hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
-                    status="PILOT_FAILED",
-                    error_diagnostic=summary,
-                    prompt_sent="",
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    reasoning_tokens=0,
-                    wall_ms=0.0,
+            if (
+                getattr(self, "pilot_fallback", "best") == "best"
+                and self.tools.best_pilot_code
+            ):
+                ui.info(
+                    f"Pilot Gate: Revisions exhausted without strict sign pass ({summary}). "
+                    f"Proceeding to full evaluation with best pilot candidate (Δ={self.tools.best_pilot_delta:+.2f})."
                 )
-            except Exception:
-                pass
+            else:
+                ui.warn(
+                    f"Pilot Gate: Candidate failed all {self.tools.pilot_runs_used} pilot revisions ({summary}). Aborting rollout."
+                )
+                try:
+                    self.db_logger.save_synthesis_log(
+                        log_id=f"syn_{generation}_{total_tool_calls}_pilot_abort_{int(time.time() * 1000)}",
+                        generation=generation,
+                        batch_id=batch_id,
+                        mode=mode,
+                        turn_index=total_tool_calls,
+                        turn_type="PILOT_ABORT",
+                        repair_idx=0,
+                        model=self.model,
+                        thinking_content="",
+                        message_content=summary,
+                        tool_calls_json="[]",
+                        tool_results_json="[]",
+                        candidate_code=self.tools.last_attempted_pilot_code or "",
+                        skill_name=str((latest_hyp or {}).get("skill_module", "")),
+                        skill_code=getattr(self.tools, "last_passed_skill_code", ""),
+                        hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
+                        status="PILOT_FAILED",
+                        error_diagnostic=summary,
+                        prompt_sent="",
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        reasoning_tokens=0,
+                        wall_ms=0.0,
+                    )
+                except Exception:
+                    pass
 
-            return SynthesisProposal(
-                mode=mode,
-                hypothesis=latest_hyp,
-                raw_code_patch="",
-                full_policy_code=current_policy,
-                full_macros_code=self.tools.macro_lib.load_code(),
-                target_functions=[],
-                tool_calls_made=total_tool_calls,
-                skill_code="",
-                aborted=True,
-                abort_reason=f"PILOT_GATE_ABORT: {summary}",
-            )
+                return SynthesisProposal(
+                    mode=mode,
+                    hypothesis=latest_hyp,
+                    raw_code_patch="",
+                    full_policy_code=current_policy,
+                    full_macros_code="",
+                    target_functions=[],
+                    tool_calls_made=total_tool_calls,
+                    skill_code="",
+                    aborted=True,
+                    abort_reason=f"PILOT_GATE_ABORT: {summary}",
+                )
 
         # Compiler-in-the-loop verification & sequential self-repair
         is_macro_mode = mode == "MACRO_WRITE"
@@ -1074,21 +1088,23 @@ class AuthorAgent:
                     code_patch = self.tools.last_passed_code
             elif not code_patch and self.tools.last_passed_code:
                 code_patch = self.tools.last_passed_code
-            elif not code_patch:
-                code_patch = (
-                    self.tools.last_passed_code
-                    or self.tools.best_pilot_code
-                    or code_patch
-                )
+            elif self.tools.best_pilot_code and (
+                not code_patch or not self.tools.last_pilot_improved
+            ):
+                code_patch = self.tools.best_pilot_code
 
             if not code_patch:
                 diag = "No ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
                 status = "MISSING_CODE"
             else:
-                s_name = (hyp or latest_hyp).get("skill_module") or getattr(
-                    self.tools, "last_passed_skill_name", None
+                s_name = (
+                    (hyp or latest_hyp).get("skill_module")
+                    or getattr(self.tools, "last_passed_skill_name", None)
+                    or getattr(self.tools, "best_pilot_skill_name", None)
                 )
-                s_code = getattr(self.tools, "last_passed_skill_code", None)
+                s_code = getattr(self.tools, "last_passed_skill_code", None) or getattr(
+                    self.tools, "best_pilot_skill_code", None
+                )
                 diag, status = self.tools.dry_run_policy(
                     code=code_patch,
                     is_macro=is_macro_mode,

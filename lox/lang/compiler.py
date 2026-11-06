@@ -58,7 +58,6 @@ from lox.lang.instrument import (
 )
 from lox.lang.validator import (
     PolicyValidationError,
-    check_macro_contracts,
     validate_python_code,
 )
 
@@ -240,6 +239,7 @@ class PolicyRunner:
         self._active_subgen: Any = None
         self._started: bool = False
         self._mode: str = "step"
+        self._text_prompt_ticks: int = 0
 
         # Inject `self.param(...)` onto the policy instance if not already defined
         if not hasattr(self.instance, "param"):
@@ -358,6 +358,20 @@ class PolicyRunner:
                 self._active_subgen = None
                 act = Action.WAIT
 
+        # Fallback auto-ESC: unhandled text/naming prompt dismissal
+        if getattr(state, "in_text_prompt", False):
+            self._text_prompt_ticks += 1
+            is_esc = (
+                act == Action.ESC
+                or act == "\x1b"
+                or (isinstance(act, RawAction) and b"\x1b" in act.bytes_payload)
+            )
+            if not is_esc and self._text_prompt_ticks >= 2:
+                self._text_prompt_ticks = 0
+                act = Action.ESC
+        else:
+            self._text_prompt_ticks = 0
+
         active_fn = self.tracer.record_turn_yield()
         return act, active_fn
 
@@ -378,6 +392,7 @@ class CompiledPolicy:
         self.skills = dict(skills) if skills else {}
         self._skill_code_objs: dict[str, Any] = {}
         self.skill_function_names: dict[str, list[str]] = {}
+        self.macro_function_names: list[str] = []
 
         # Parse, validate, and instrument skills package
         for skill_name, skill_code in self.skills.items():
@@ -399,12 +414,8 @@ class CompiledPolicy:
                 if isinstance(n, ast.FunctionDef) and n.name != "__init__"
             ]
 
-        # Parse, validate, and instrument macros
+        # Legacy macros support (compiled if provided for backwards compatibility)
         if macros_code and macros_code.strip():
-            contract_errors = check_macro_contracts(policy_code, macros_code)
-            if contract_errors:
-                raise PolicyValidationError("\n".join(contract_errors))
-
             macro_tree = validate_python_code(macros_code, filename="macros.py")
             macro_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(
                 macro_tree
@@ -413,6 +424,10 @@ class CompiledPolicy:
             self._macro_code_obj = compile(
                 macro_tree, filename="macros.py", mode="exec"
             )
+            for n in ast.walk(macro_tree):
+                if isinstance(n, ast.FunctionDef) and n.name != "__init__":
+                    if n.name not in self.macro_function_names:
+                        self.macro_function_names.append(n.name)
         else:
             self._macro_code_obj = None
 

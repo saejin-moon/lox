@@ -86,7 +86,7 @@ class AuthorToolRegistry:
         self.pool: Any = None
         self.baseline_runs: list[dict[str, Any]] = []
         self.pilot_runs_used: int = 0
-        self.max_pilot_runs: int = 5
+        self.max_pilot_runs: int = 8
         self.pilot_episodes: int = 30
         self.last_pilot_improved: bool = False
         self.last_pilot_summary: str = ""
@@ -99,7 +99,7 @@ class AuthorToolRegistry:
         self,
         pool: Any = None,
         baseline_runs: list[dict[str, Any]] | None = None,
-        max_pilot_runs: int = 5,
+        max_pilot_runs: int = 8,
         pilot_episodes: int = 30,
         skills: dict[str, str] | None = None,
         generation: int = 0,
