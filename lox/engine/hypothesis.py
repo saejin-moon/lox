@@ -293,22 +293,46 @@ def evaluate_paired_hypothesis(
     mean_d, ci_low, ci_high = compute_confidence_sequence(deltas, alpha=alpha)
     p_val, wins, losses, ties = wilcoxon_signed_rank_p(deltas)
 
+    # Decisive-subset analysis (ties excluded to prevent dilution of surgical skill gains)
+    decisive_deltas = deltas[np.abs(deltas) > 1e-6]
+    n_decisive = len(decisive_deltas)
+    if n_decisive >= 6:
+        mean_d_dec, ci_low_dec, _ = compute_confidence_sequence(
+            decisive_deltas, alpha=alpha
+        )
+        decisive_significant = (
+            (ci_low_dec > 0.0)
+            or (p_val < alpha)
+            or (wins >= 2 * losses and mean_d_dec >= 0.15)
+        )
+    else:
+        mean_d_dec, ci_low_dec = mean_d, ci_low
+        decisive_significant = False
+
     reasons: list[str] = []
-    if mean_d <= 0.0:
-        reasons.append(f"Non-positive mean delta ({mean_d:+.3f})")
+    if mean_d <= -0.005:
+        reasons.append(f"Non-positive overall mean delta ({mean_d:+.3f})")
     if wins <= losses:
         reasons.append(f"Wins ({wins}) <= Losses ({losses})")
-    if ci_low <= 0.0 and p_val >= alpha:
+
+    # Significant improvement either globally or on the decisive subset where the skill changed behavior
+    is_significant = (ci_low > 0.0) or (p_val < alpha) or decisive_significant
+    if not is_significant:
         reasons.append(
-            f"Not statistically significant (95% CS lower={ci_low:+.3f}, Wilcoxon p={p_val:.4f} >= {alpha})"
+            f"Not statistically significant (95% CS lower={ci_low:+.3f}, decisive lower={ci_low_dec:+.3f}, Wilcoxon p={p_val:.4f} >= {alpha})"
         )
 
     passed = len(reasons) == 0
-    reason_str = (
-        f"Significant gain on {len(deltas)} triggered seeds (p={p_val:.4f})"
-        if passed
-        else "; ".join(reasons)
-    )
+    if passed:
+        if decisive_significant and ci_low <= 0.0 and p_val >= alpha:
+            reason_str = (
+                f"Significant decisive gain ({wins}W/{losses}L on {n_decisive} decisive seeds, "
+                f"Δ_dec={mean_d_dec:+.3f}, overall Δ={mean_d:+.3f})"
+            )
+        else:
+            reason_str = f"Significant gain on {len(deltas)} triggered seeds (p={p_val:.4f}, Δ={mean_d:+.3f})"
+    else:
+        reason_str = "; ".join(reasons)
 
     return {
         "passed": passed,

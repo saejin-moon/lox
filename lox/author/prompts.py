@@ -283,8 +283,8 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 4. **Universal Root-Cause Diagnostic Protocol (Chronic vs. Acute Failures)**:
    In any sequential decision process with budgets or resource clocks (step limits, operational budgets, health, energy, food):
    - **Acute Failure (Direct Lethality)**: If `stagnation_ratio < 0.35`, the agent died while actively making progress. Repair the immediate tactical responder (e.g. combat, hazard evasion).
-   - **Chronic Failure (Resource Depletion / Livelock)**: If `stagnation_ratio >= 0.50`, terminal events (such as timeouts, starvation, or budget exhaustion) are secondary symptoms. The causal disease is the **Livelock Sink** identified in the telemetry.
-   - **Invariant**: When modifying policies under `FUNC_MOD_ADD`, target the function with the highest `stagnation_share` / `livelock_score`, NOT the secondary resource consumer.
+   - **Chronic Failure (Resource Depletion / Livelock)**: If `stagnation_ratio >= 0.50`, terminal events (such as timeouts, starvation, or budget exhaustion) are secondary symptoms. The causal disease is the environmental blockage causing the livelock.
+   - **Invariant**: Do NOT blindly target `explore()` simply because it has the highest turn count! `explore()` is the passive fallback state when no immediate goals remain. If the hero is wandering in `explore`, the causal blocker is missing environmental progress: unbreached closed/locked doors on room boundaries, secret doors needing `Action.SEARCH`, uncollected food, or descending stairs. Target the specialist handler that unlocks physical progress!
 5. **Anti-Hallucination & Dungeon Context Anchor**:
    Anchor your reasoning to your current dungeon depth (`state.depth`). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. Use `state.mem.passable_mask` (or ensure `ord('-')`, `ord('|')`, and `ord(' ')` are strictly False in custom masks) and remember monsters attack across all 8 adjacent tiles (`max(abs(dy), abs(dx)) == 1`).
 6. **Pre-Submission Invariant Checklist**:
@@ -384,9 +384,11 @@ def build_user_prompt(
     if stagnation_function:
         stagnation_block = (
             f"\n> [!WARNING]\n"
-            f"> **Anti-Rut Stagnation Directive**: The target function `{stagnation_function}` has repeatedly failed verification.\n"
-            f"> You are **PROHIBITED** from targeting or modifying `{stagnation_function}` this generation!\n"
-            f"> Pivot to other unaddressed failure causes (e.g. food starvation, corridor combat retreat, or prompt safety).\n"
+            f"> **Anti-Rut Stagnation Directive**: The target function(s) `{stagnation_function}` have repeatedly failed verification.\n"
+            f"> You are **STRICTLY PROHIBITED** from targeting or modifying `{stagnation_function}` this generation!\n"
+            f"> You MUST pivot to other unaddressed failure causes: door breaching (`handle_doors`, kicking locked doors), "
+            f"secret door searching (`Action.SEARCH` along dead-end wall perimeters), food preservation/nutrition (`handle_nutrition`), "
+            f"armor/weapon equipment (`handle_equipment`), or combat tactical retreat.\n"
         )
 
     skills_block = ""

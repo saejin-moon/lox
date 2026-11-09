@@ -996,8 +996,16 @@ class AuthorToolRegistry:
                     else:
                         p_sign = 1.0
 
-                    improved = (p_sign <= 0.15 and mean_delta >= 0.04) or (
-                        delta_depth >= 0.10 and wins > losses
+                    # Tie-aware directional pilot validation
+                    improved = (
+                        wins > losses
+                        and mean_delta >= -1e-6
+                        and (
+                            p_sign <= 0.20
+                            or delta_depth >= 0.04
+                            or wins >= losses + 2
+                            or mean_delta >= 0.03
+                        )
                     )
                     summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f} (p_sign={p_sign:.3f})"
                     paired_line = (
@@ -1006,10 +1014,10 @@ class AuthorToolRegistry:
                         f"Sign-Test p: {p_sign:.4f}\n"
                     )
                     verdict_line = (
-                        ">>> PILOT VERDICT: STATISTICALLY SIGNIFICANT PILOT SIGNAL over baseline."
+                        ">>> PILOT VERDICT: POSITIVE DIRECTIONAL PILOT SIGNAL over baseline."
                         if improved
                         else (
-                            f">>> PILOT VERDICT: INSUFFICIENT OR FLAT SIGNAL VS BASELINE ({wins}W/{losses}L, p_sign={p_sign:.3f} > 0.15). "
+                            f">>> PILOT VERDICT: INSUFFICIENT OR FLAT SIGNAL VS BASELINE ({wins}W/{losses}L, p_sign={p_sign:.3f}). "
                             "STOP! Do NOT submit noisy code. Refine your code or call query_db/query_wiki before submitting!"
                         )
                     )

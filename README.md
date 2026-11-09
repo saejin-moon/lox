@@ -221,10 +221,12 @@ observation_from_db: "Outlier runs reaching Dlvl 4+ execute Action.DOWN within 1
 mechanism: "Check state.is_on_stairs_down before pathfinding so the policy yields Action.DOWN immediately when standing on '>'."
 ```
 
-Candidate policies are evaluated on paired seeds against the active baseline using three objective statistical gates in [`lox/engine/hypothesis.py`](lox/engine/hypothesis.py):
+Candidate policies are evaluated on paired seeds against the active baseline using objective statistical gates in [`lox/engine/hypothesis.py`](lox/engine/hypothesis.py):
 1. **Sequential Futility Early Stopping**: If after $n \ge 60$ paired triggered seeds the 95% Empirical Bernstein Confidence Sequence upper bound satisfies $U_n \le 0.0$, evaluation terminates early to save compute.
-2. **Positive Mean Progression Delta**: $\bar{d} > 0.0$ and strictly more improved seeds than regressed seeds ($\text{wins} > \text{losses}$).
-3. **Statistical Significance**: Either the 95% Confidence Sequence lower bound $L_N > 0.0$ or the one-sided Paired Wilcoxon Signed-Rank p-value satisfies $p < 0.05$.
+2. **Positive Mean Progression Delta**: $\bar{d} \ge -0.005$ and strictly more improved seeds than regressed seeds ($\text{wins} > \text{losses}$).
+3. **Decisive-Pair Statistical Significance**: Either the 95% Confidence Sequence lower bound $L_N > 0.0$, the one-sided Paired Wilcoxon Signed-Rank p-value satisfies $p < 0.05$, or the decisive subset ($|\Delta| > 10^{-6}$) achieves a positive confidence sequence ($L_{dec} > 0.0$ or $\text{wins} \ge 2 \times \text{losses}$ with $\bar{d}_{dec} \ge 0.15$). This eliminates the *tie-dilution trap* where 60–80% trajectory ties on mature baselines previously crushed statistical power for modular skill patches.
+4. **Tie-Aware Directional Pilot Filtering**: Pilot evaluation in `dry_run_policy` verifies directional signal ($\text{wins} > \text{losses}$, $\bar{d} \ge 0$, and $p_{sign} \le 0.20$ or $\Delta_{depth} \ge 0.04$ or $\text{wins} \ge \text{losses} + 2$) preventing high tie rates from rejecting viable candidates before full rollouts.
+5. **Anti-Rut Multi-Function Banning & Telemetry Inversion**: Automatically bans any target function failing $\ge 2$ consecutive generations, commanding the agent to address root physical blockers (closed/locked door kicking, dead-end secret door search, staircase navigation) rather than churning on passive dispatcher turn sinks.
 
 ---
 

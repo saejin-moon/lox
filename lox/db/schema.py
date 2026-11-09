@@ -316,6 +316,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                 r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()
             ]
             for c_name, c_typ in [
+                ("is_shard", "BOOLEAN DEFAULT FALSE"),
+                ("shard_id", "VARCHAR DEFAULT ''"),
                 ("auto_esc_count", "INTEGER DEFAULT 0"),
                 ("subgen_preemptions", "INTEGER DEFAULT 0"),
                 ("policy_exceptions", "INTEGER DEFAULT 0"),

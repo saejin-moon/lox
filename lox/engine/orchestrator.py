@@ -1024,11 +1024,12 @@ class CampaignOrchestrator:
                             target_episodes=self.func_mod_episodes_per_fn,
                         )
 
-                    stag_fn = ""
-                    for fn, fail_cnt in self.target_fn_failure_counts.most_common():
-                        if fail_cnt >= 3:
-                            stag_fn = fn
-                            break
+                    banned_fns = [
+                        fn
+                        for fn, fail_cnt in self.target_fn_failure_counts.items()
+                        if fail_cnt >= 2
+                    ]
+                    stag_fn = ", ".join(banned_fns) if banned_fns else ""
 
                     try:
                         proposal = self.author.synthesize(

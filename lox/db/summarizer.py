@@ -748,12 +748,26 @@ def build_batch_contrast_digest(
                 "    - You MUST improve **staircase location & descent** (`state.stairs_down_pos`, stepping onto `>` and yielding `Action.DOWN`) and **secret door searching** (searching adjacent wall/corridor tiles with `Action.SEARCH` when unvisited areas cannot be reached)."
             )
         elif avg_rec >= 0.85 and top_livelock_fns:
+            primary_sink = top_livelock_fns[0]["function_name"]
             lines.append(
-                "- **PRIMARY BOTTLENECK: COMPACT LIMIT CYCLE / OSCILLATION LIVELOCK**:\n"
-                f"  * High recurrence ({avg_rec:.2f}) indicates the hero is ping-ponging between 2–3 tiles or blocked against an obstacle.\n"
-                f"  * Primary Livelock Sink: `{top_livelock_fns[0]['function_name']}` ({top_livelock_fns[0].get('stagnation_turns', 0):,} stalled turns).\n"
-                "  * You MUST update this function's state persistence (`self.*` target tracking, dead-end blacklists, or displacement wait) to break the cycle."
+                "- **PRIMARY BOTTLENECK: COMPACT LIMIT CYCLE / FRONTIER STALEMATE**:\n"
+                f"  * High recurrence ({avg_rec:.2f}) indicates the hero is ping-ponging between visited tiles or blocked against an obstacle.\n"
+                f"  * Primary Turn Sink: `{primary_sink}` ({top_livelock_fns[0].get('stagnation_turns', 0):,} stalled turns).\n"
             )
+            if primary_sink in ("explore", "run", "explore_level", "step"):
+                lines.append(
+                    "  * **Crucial Root-Cause Guidance**:\n"
+                    "    - `explore` is the passive dispatcher state that runs when no unvisited tiles remain in line-of-sight.\n"
+                    "    - Do NOT add endless ad-hoc tile blacklists or displacement counters to `explore`!\n"
+                    "    - The hero is oscillating because all room tiles are visited and no frontier remains. You MUST improve:\n"
+                    "      1) **Closed & Locked Doors**: Detect closed doors (`'+'`) on room boundaries, approach them, and open (`Action.OPEN`) or kick (`seq(Action.KICK, dir)`).\n"
+                    "      2) **Secret Door Searching**: Stand adjacent to dead-end walls/corridors and search (`Action.SEARCH`) to reveal hidden passages.\n"
+                    "      3) **Staircase Navigation**: Prioritize stepping onto downstairs (`'>'`) and descending (`Action.DOWN`)."
+                )
+            else:
+                lines.append(
+                    f"  * Check `{primary_sink}`'s exit conditions and state persistence to ensure it yields control once resolved."
+                )
         elif top_livelock_fns:
             lines.append(
                 "- **Livelock Sinks (Functions consuming turns during zero-progress stagnation)**:"
