@@ -280,11 +280,9 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    Every event in NetHack (messages, status changes, deaths) is governed by an exact C function. Isolate the exact message string from the final 3 lines of `game_log` (e.g. "You feel hungry", "The door resists", "The jackal bites!"), strip proper nouns, and pass that phrase to `query_wiki(query=...)` to learn the exact C rule that caused it.
 3. **The Binding Constraint Rule**:
    Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint). Never spend a generation fixing a 2% edge case when 70% of runs died to the same primary cause.
-4. **Universal Root-Cause Diagnostic Protocol (Chronic vs. Acute Failures)**:
-   In any sequential decision process with budgets or resource clocks (step limits, operational budgets, health, energy, food):
-   - **Acute Failure (Direct Lethality)**: If `stagnation_ratio < 0.35`, the agent died while actively making progress. Repair the immediate tactical responder (e.g. combat, hazard evasion).
-   - **Chronic Failure (Resource Depletion / Livelock)**: If `stagnation_ratio >= 0.50`, terminal events (such as timeouts, starvation, or budget exhaustion) are secondary symptoms. The causal disease is the environmental blockage causing the livelock.
-   - **Invariant**: Do NOT blindly target `explore()` simply because it has the highest turn count! `explore()` is the passive fallback state when no immediate goals remain. If the hero is wandering in `explore`, the causal blocker is missing environmental progress: unbreached closed/locked doors on room boundaries, secret doors needing `Action.SEARCH`, uncollected food, or descending stairs. Target the specialist handler that unlocks physical progress!
+4. **Empirical Root-Cause Discovery**:
+   Inspect the raw termination breakdown, death counts, and RLE phase timelines in the batch digest and DuckDB.
+   Do not guess which subsystem failed based on preconceived notions or simple turn counts. Formulate targeted SQL queries (`query_db`) over `runs` and `ticks` to inspect the exact state, position, messages, and action history in the turns leading up to death or timeout before writing code.
 5. **Anti-Hallucination & Dungeon Context Anchor**:
    Anchor your reasoning to your current dungeon depth (`state.depth`). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. Use `state.mem.passable_mask` (or ensure `ord('-')`, `ord('|')`, and `ord(' ')` are strictly False in custom masks) and remember monsters attack across all 8 adjacent tiles (`max(abs(dy), abs(dx)) == 1`).
 6. **Pre-Submission Invariant Checklist**:
@@ -379,17 +377,6 @@ def build_user_prompt(
 ) -> str:
     """Constructs the stateless Turn-0 prompt tailored to the active Modification Mode."""
     from lox.lang.validator import extract_module_outline
-
-    stagnation_block = ""
-    if stagnation_function:
-        stagnation_block = (
-            f"\n> [!WARNING]\n"
-            f"> **Anti-Rut Stagnation Directive**: The target function(s) `{stagnation_function}` have repeatedly failed verification.\n"
-            f"> You are **STRICTLY PROHIBITED** from targeting or modifying `{stagnation_function}` this generation!\n"
-            f"> You MUST pivot to other unaddressed failure causes: door breaching (`handle_doors`, kicking locked doors), "
-            f"secret door searching (`Action.SEARCH` along dead-end wall perimeters), food preservation/nutrition (`handle_nutrition`), "
-            f"armor/weapon equipment (`handle_equipment`), or combat tactical retreat.\n"
-        )
 
     skills_block = ""
     if skills:
@@ -502,7 +489,7 @@ Your task:
 
     if mode == "STRUCTURAL_REFACTOR":
         return f"""### Generation {generation} — Mode: `STRUCTURAL_REFACTOR` (Architectural Policy Refactoring)
-{digest_block}{exp_block}{discoveries_block}{failures_block}{stagnation_block}
+{digest_block}{exp_block}{discoveries_block}{failures_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 
@@ -535,7 +522,7 @@ Single-skill targeted patches have stalled or reached a local optimum. You have 
 
     # Default: FUNC_MOD_ADD
     return f"""### Generation {generation} — Mode: `FUNC_MOD_ADD` (Targeted Single-Skill Addition / Modification)
-{digest_block}{exp_block}{discoveries_block}{failures_block}{stagnation_block}
+{digest_block}{exp_block}{discoveries_block}{failures_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 

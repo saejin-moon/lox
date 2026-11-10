@@ -127,6 +127,31 @@ def test_parameter_free_hypothesis_testing_and_early_stopping():
         is True
     )
 
+    # Neutral/modular refactoring (mostly ties, zero mean delta):
+    # Fails under FUNC_MOD_ADD (requires p < 0.05), but passes under STRUCTURAL_REFACTOR
+    cand_runs_refactor_neutral = [dict(base_runs[i]) for i in range(len(base_runs))]
+    # Small neutral fluctuation on 2 seeds
+    cand_runs_refactor_neutral[0]["score"] += 10
+    cand_runs_refactor_neutral[1]["score"] -= 10
+    verdict_func_mod = evaluate_paired_hypothesis(
+        cand_runs_refactor_neutral, base_runs, mode="FUNC_MOD_ADD"
+    )
+    assert (
+        verdict_func_mod["passed"] is False
+    )  # p is ~1.0, not statistically significant
+
+    verdict_refactor = evaluate_paired_hypothesis(
+        cand_runs_refactor_neutral, base_runs, mode="STRUCTURAL_REFACTOR"
+    )
+    assert verdict_refactor["passed"] is True
+    assert "Refactor non-regression verified" in verdict_refactor["reason"]
+
+    # Truly regressive refactoring fails even under STRUCTURAL_REFACTOR
+    verdict_bad_refactor = evaluate_paired_hypothesis(
+        cand_runs_bad, base_runs, mode="STRUCTURAL_REFACTOR"
+    )
+    assert verdict_bad_refactor["passed"] is False
+
 
 def test_spsa_param_tuning_and_ast_baking():
     code = """

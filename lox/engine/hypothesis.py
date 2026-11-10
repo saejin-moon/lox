@@ -214,6 +214,7 @@ def evaluate_paired_hypothesis(
     baseline_runs: list[dict[str, Any]],
     alpha: float = 0.05,
     benchmark: str = "nethack",
+    mode: str = "FUNC_MOD_ADD",
 ) -> dict[str, Any]:
     """
     Evaluates a candidate policy batch against the baseline batch on triggered seeds.
@@ -308,6 +309,35 @@ def evaluate_paired_hypothesis(
     else:
         mean_d_dec, ci_low_dec = mean_d, ci_low
         decisive_significant = False
+
+    # Structural refactoring: sole purpose is code modularization without regression.
+    # Non-regression gate: does not demand statistical superiority (Wilcoxon p < 0.05).
+    if mode == "STRUCTURAL_REFACTOR":
+        refactor_reasons: list[str] = []
+        if mean_d < -0.015:
+            refactor_reasons.append(f"Regressive mean delta ({mean_d:+.3f})")
+        if losses > wins + 5:
+            refactor_reasons.append(
+                f"Excessive regressions: Losses ({losses}) > Wins ({wins}) + 5"
+            )
+        refactor_passed = len(refactor_reasons) == 0
+        refactor_reason_str = (
+            f"Refactor non-regression verified ({wins}W/{losses}L/{ties}T, Δ={mean_d:+.3f})"
+            if refactor_passed
+            else "; ".join(refactor_reasons)
+        )
+        return {
+            "passed": refactor_passed,
+            "mean_delta": round(mean_d, 4),
+            "ci_lower": round(ci_low, 4),
+            "ci_upper": round(ci_high, 4),
+            "wilcoxon_p": round(p_val, 5),
+            "wins": wins,
+            "losses": losses,
+            "ties": ties,
+            "paired_count": len(deltas),
+            "reason": refactor_reason_str,
+        }
 
     reasons: list[str] = []
     if mean_d <= -0.005:

@@ -968,6 +968,25 @@ class AuthorAgent:
                     }
                 )
 
+            if (
+                turn_idx >= 4
+                and self.tools.pilot_runs_used == 0
+                and not any(
+                    (tc.get("function") or {}).get("name") == "dry_run_policy"
+                    for tc in tool_calls
+                )
+            ):
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"⚠️ Budget Notice: You are on Turn {turn_idx}/{max_tool_turns}. "
+                            "You have completed empirical research. Please synthesize your candidate code now and call `dry_run_policy(code=...)` "
+                            "to verify your hypothesis before tool turns run out."
+                        ),
+                    }
+                )
+
             try:
                 has_pilot = any(
                     (tc.get("function") or {}).get("name") == "dry_run_policy"

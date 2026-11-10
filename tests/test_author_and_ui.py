@@ -890,4 +890,3 @@ def test_summarizer_level_stall_vs_livelock():
     digest = build_batch_contrast_digest(batch_stats, runs, fn_stats)
     assert "PRIMARY BOTTLENECK: LEVEL EXPLORATION & STAIRCASE DESCENT FAILURE" in digest
     assert "staircase location & descent" in digest
-    assert "Do NOT waste generations modifying prompt replies" in digest

@@ -1024,12 +1024,7 @@ class CampaignOrchestrator:
                             target_episodes=self.func_mod_episodes_per_fn,
                         )
 
-                    banned_fns = [
-                        fn
-                        for fn, fail_cnt in self.target_fn_failure_counts.items()
-                        if fail_cnt >= 2
-                    ]
-                    stag_fn = ", ".join(banned_fns) if banned_fns else ""
+                    stag_fn = ""
 
                     try:
                         proposal = self.author.synthesize(
@@ -1170,20 +1165,26 @@ class CampaignOrchestrator:
                         continue
 
                     # --- MODE 1 (`FULL_WRITE`) & MODE 3 (`FUNC_MOD_ADD` / `STRUCTURAL_REFACTOR`) ---
+                    declared_targets = proposal.hypothesis.get("target_functions") or []
+                    if isinstance(declared_targets, str):
+                        declared_targets = [declared_targets]
+                    declared_targets = [
+                        f for f in declared_targets if f and f != "__init__"
+                    ]
+
                     raw_targets = [
                         f for f in proposal.target_functions if f and f != "__init__"
                     ]
-                    non_root_targets = [
-                        f for f in raw_targets if f not in ("run", "step", "act")
-                    ]
+                    # Prefer explicitly declared hypothesis target_functions over diff leakage on helper methods
+                    chosen_targets = declared_targets or raw_targets
                     target_fns = (
                         []
                         if proposal.mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
-                        else (non_root_targets or raw_targets)
+                        else chosen_targets
                     )
                     target_eps = (
                         self.full_write_episodes
-                        if proposal.mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
+                        if proposal.mode == "FULL_WRITE"
                         else self.func_mod_episodes_per_fn
                     )
 
@@ -1379,6 +1380,7 @@ class CampaignOrchestrator:
                             eval_res["runs"],
                             baseline_runs + base_shard_runs,
                             benchmark=self.benchmark,
+                            mode=proposal.mode,
                         )
                         if target_fns:
                             total_target_calls = sum(
