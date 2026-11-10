@@ -498,36 +498,43 @@ Your task:
 """
 
     if mode == "STRUCTURAL_REFACTOR":
-        return f"""### Generation {generation} — Mode: `STRUCTURAL_REFACTOR` (Architectural Policy Refactoring)
+        return f"""### Generation {generation} — Mode: `STRUCTURAL_REFACTOR` (Subsystem Modularization into Skills)
 {digest_block}{exp_block}{discoveries_block}{failures_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 
 ### Scientific Protocol for `STRUCTURAL_REFACTOR`:
-Single-skill targeted patches have stalled or reached a local optimum. You have permission to perform a **structural refactoring** of `class Policy`.
-1. **Stage 1: Empirical Investigation & The Binding Constraint Rule**:
-   - **The Binding Constraint Rule**: Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint).
-   - Query DuckDB (`runs`, `experiments`, `expert_runs`) to identify why the previous architecture stalled (e.g. state management bottlenecks, lack of multi-turn goal commitment, unhandled traps or hunger states).
-   - Use `query_wiki` to confirm the C engine mechanics governing the bottleneck.
-2. **Stage 2: Restructuring & Subsystem Modularization**:
-   - You can rewrite `class Policy:` from scratch OR provide only the restructured methods (the engine's surgical splicer will splice them in without requiring you to re-type unchanged methods).
-   - You can freely use verified macros from `macros.py` and `state.mem` for zero-heuristic spatial/episodic memory.
-   - **Modular Subsystems (`skills/<module>.py`)**: When `policy.py` exceeds 400 lines or has many methods, extract cohesive domain logic (e.g. `skills/combat.py`, `skills/nutrition.py`, `skills/navigation.py`) out of `policy.py`. Specify `skill_module: "<name>"` in your YAML hypothesis.
-3. **Stage 3: Verification & Pre-Submission Invariants**:
-   - Mentally verify all 4 invariants (Generator Invariant, State Persistence, Passability Mask, Trigger Reachability).
-   - Test your candidate code using `dry_run_policy(code=..., skill_name="<name>", skill_code="...")`.
+The policy has grown into a large monolith (or reached a structural plateau). Your **primary objective** in this generation is **mandatory modular decomposition into `skills/<module>.py`**.
+
+1. **Stage 1: Mandatory Subsystem Extraction**:
+   - You **MUST** extract at least one cohesive subsystem out of `policy.py` into a separate module under `skills/<module>.py` (e.g. `skills/combat.py`, `skills/navigation.py`, `skills/nutrition.py`, or `skills/equipment.py`).
+   - In `policy.py`, import the extracted methods or classes (e.g. `from skills.combat import handle_combat`).
+   - You must specify `skill_module: "<name>"` in your YAML hypothesis block.
+
+2. **Stage 2: CRITICAL INVARIANT: Zero Behavioral Regression**:
+   - Refactoring is for **code modularization and architectural hygiene, NOT unverified behavioral experimentation**.
+   - Do **NOT** rewrite navigation rules, change descent gates, or alter survival thresholds while refactoring!
+   - Keep the extracted skill's logic **behaviorally identical** to the existing working implementation in `policy.py`.
+   - Structural refactors are evaluated against a **Behavioral Parity Gate** (must maintain performance without regression). Breaking working logic will result in immediate rejection.
+
+3. **Stage 3: Verification with `dry_run_policy`**:
+   - Test your candidate policy and extracted skill module using:
+     `dry_run_policy(code=policy_code, skill_name="<name>", skill_code=skill_module_code)`
+   - Verify that imports resolve cleanly, there are zero syntax or attribute errors, and the policy completes the pilot without behavioral regression.
+
 4. **Stage 4: Commit Output**:
-   - Output a `yaml` block detailing your hypothesis:
+   - Output a `yaml` block detailing the modular extraction:
      ```yaml
      mode: STRUCTURAL_REFACTOR
      target_functions: [run]
-     binding_constraint: "The primary systemic limitation or plateau cause"
-     verified_c_rule: "C engine rule or expert progression pattern identified via query_wiki/query_db"
-     mechanism: "How the refactored class Policy resolves the architectural bottleneck"
-     state_persistence: "What self.* fields manage state and prevent oscillations"
-     skill_module: "optional_skill_name"
+     skill_module: "extracted_skill_name"
+     binding_constraint: "Monolithic code modularization"
+     verified_c_rule: "Behavioral parity: exact preservation of existing logic"
+     mechanism: "Extracted cohesive subsystem from policy.py into skills/<name>.py and imported it"
+     state_persistence: "Attributes on self used by the extracted skill"
      ```
-   - Output your restructured method(s) (or full `class Policy:`) in a ```python ... ``` block. If creating or modifying a skill, provide its code in a second ```python ... ``` block labeled with `# skill_module: <name>`.
+   - Block 1: Output your refactored `class Policy:` (importing the skill) in a ```python ... ``` block.
+   - Block 2: Output your new/updated skill module in a second ```python ... ``` block labeled with `# skill_module: <name>`.
 """
 
     # Default: FUNC_MOD_ADD

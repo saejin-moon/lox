@@ -648,3 +648,98 @@ def test_floor_residence_and_staircase_utilization_telemetry():
     assert (
         "**Staircase Utilization at Step Limit**: 1/1 timeout runs (100.0%)" in digest
     )
+
+
+def test_full_ascension_telemetry_digest():
+    """Verify that complete ascension telemetry (branch traversal, descent readiness, hazard blunders, endgame milestones) renders cleanly."""
+    from lox.db.summarizer import build_batch_contrast_digest
+
+    batch_stats = {
+        "batch_id": "b_ascension_test",
+        "max_depth": 10,
+        "avg_depth": 5.0,
+        "p90_depth": 9.0,
+        "episodes_discarded": 0,
+    }
+    runs = [
+        {
+            "run_id": "r_deep",
+            "seed": 201,
+            "max_depth": 10,
+            "final_ac": -4,
+            "turns": 3000,
+            "steps": 3000,
+            "end_reason": "You kill the gas spore!  You are caught in the gas spore's explosion",
+            "death_message": "You kill the gas spore!  You are caught in the gas spore's explosion",
+            "milestones": {
+                "depth_first_turn": {"1": 0, "2": 50, "3": 120, "4": 250},
+                "depth_first_xl": {"1": 1, "2": 2, "3": 3, "4": 5},
+                "depth_first_hp": {
+                    "1": [16, 16],
+                    "2": [16, 16],
+                    "3": [28, 28],
+                    "4": [45, 45],
+                },
+                "dungeons_visited": [0, 2, 4],  # DoD, Gnomish Mines, Sokoban
+                "hazard_events": ["gas_spore_explosion"],
+                "ascension_milestones": ["altar_found", "castle_drawbridge"],
+                "stairs_down_found": True,
+            },
+            "stairs_down_found": True,
+            "starved_with_food": False,
+            "died_unarmored": False,
+            "summary_digest": "Overview: Depth=10 | Turns=3000",
+        },
+        {
+            "run_id": "r_early",
+            "seed": 202,
+            "max_depth": 2,
+            "final_ac": 8,
+            "turns": 1500,
+            "steps": 1500,
+            "end_reason": "You faint from lack of food",
+            "death_message": "You faint from lack of food",
+            "milestones": {
+                "depth_first_turn": {"1": 0, "2": 1000},
+                "depth_first_xl": {"1": 1, "2": 1},
+                "depth_first_hp": {"1": [16, 16], "2": [16, 16]},
+                "dungeons_visited": [0],
+                "hazard_events": ["floating_eye_paralysis"],
+                "stairs_down_found": True,
+            },
+            "stairs_down_found": True,
+            "starved_with_food": True,
+            "died_unarmored": True,
+            "summary_digest": "Overview: Depth=2 | Turns=1500",
+        },
+    ]
+
+    digest = build_batch_contrast_digest(batch_stats, runs, [])
+
+    # 1. Descent readiness
+    assert "Descent Readiness (Preparation at Floor Entry)" in digest
+    assert "Dlvl 2: XL=1.5 HP=16 (Exp: XL 2, HP 16)" in digest
+    assert "Dlvl 4: XL=5.0 HP=45 (Exp: XL 5, HP 42)" in digest
+
+    # 2. Branch traversal
+    assert "Dungeon Branch Traversal" in digest
+    assert "Dungeons of Doom: 2/2 (100.0%)" in digest
+    assert "Gnomish Mines: 1/2 (50.0%)" in digest
+    assert "Sokoban: 1/2 (50.0%)" in digest
+
+    # 3. Tactical Hazard Blunders
+    assert "Tactical Hazard Blunders" in digest
+    assert "Gas Spore Explosions: 1 runs" in digest
+    assert "Eye Paralysis Deaths: 1 runs" in digest
+    assert "Starved with Carried Food: 1 runs" in digest
+    assert "Died Unarmored: 1 runs" in digest
+
+    # 4. Armor & Defense progression
+    assert "Armor & Defense Progression" in digest
+    assert "Avg AC=2.0 | Best AC=-4" in digest
+    assert "1/2 runs (50.0%) achieved fortified armor (AC <= 0)" in digest
+
+    # 5. Endgame & Ascension milestones
+    assert "Ascension & Endgame Milestones" in digest
+    assert "Minetown Altar Found: 1 runs" in digest
+    assert "Castle Drawbridge: 1 runs" in digest

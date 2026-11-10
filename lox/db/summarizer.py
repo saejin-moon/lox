@@ -38,6 +38,11 @@ def summarize_episode_ticks(
     # 1. Milestones & deduplicated game log
     depths_seen: list[int] = []
     depth_first_turn: dict[int, int] = {}
+    depth_first_xl: dict[int, int] = {}
+    depth_first_hp: dict[int, list[int]] = {}
+    dungeons_seen: set[int] = set()
+    hazard_events: set[str] = set()
+    ascension_milestones: set[str] = set()
     best_ac = int(ticks[0].get("ac", 10))
     max_xl = int(ticks[0].get("xp_level", 1))
     log_lines: list[str] = []
@@ -54,9 +59,13 @@ def summarize_episode_ticks(
         turn = int(t.get("turn", 0))
         ac = int(t.get("ac", 10))
         xl = int(t.get("xp_level", 1))
+        cur_hp = int(t.get("hp", 0))
+        cur_max_hp = int(t.get("max_hp", 0))
         sc = float(t.get("score", 0))
         ach = float(t.get("achievements", 0))
         pos = (int(t.get("y", 0)), int(t.get("x", 0)))
+        dnum = int(t.get("dungeon_num", 0))
+        dungeons_seen.add(dnum)
 
         # Universal composite progress monotonic evaluation
         prog = d * 10.0 + xl * 2.0 + sc * 0.01 + ach * 100.0
@@ -72,6 +81,8 @@ def summarize_episode_ticks(
 
         if d not in depth_first_turn:
             depth_first_turn[d] = turn
+            depth_first_xl[d] = xl
+            depth_first_hp[d] = [cur_hp, cur_max_hp]
             depths_seen.append(d)
         if ac < best_ac:
             best_ac = ac
@@ -80,6 +91,56 @@ def summarize_episode_ticks(
 
         msg = str(t.get("message", "")).strip()
         if msg:
+            msg_l = msg.lower()
+            if "gas spore" in msg_l and ("explosion" in msg_l or "caught in" in msg_l):
+                hazard_events.add("gas_spore_explosion")
+            if (
+                "floating eye" in msg_l
+                or "frozen by a monster's gaze" in msg_l
+                or "paralyzed" in msg_l
+            ):
+                hazard_events.add("floating_eye_paralysis")
+            if (
+                "turn to stone" in msg_l
+                or "petrif" in msg_l
+                or "cockatrice" in msg_l
+                or "chickatrice" in msg_l
+                or "medusa" in msg_l
+            ):
+                hazard_events.add("petrification")
+            if (
+                "drown" in msg_l
+                or "fall into the water" in msg_l
+                or "pool of water" in msg_l
+            ):
+                hazard_events.add("drowning")
+            if "cloud of gas puts you to sleep" in msg_l:
+                hazard_events.add("sleeping_gas")
+            if "polymorph trap" in msg_l or "turn into a" in msg_l:
+                hazard_events.add("polymorph_trap")
+
+            # Key ascension milestones
+            if "temple" in msg_l or "altar" in msg_l:
+                ascension_milestones.add("altar_found")
+            if "vibrating square" in msg_l or "floor vibrates" in msg_l:
+                ascension_milestones.add("vibrating_square")
+            if "bell of opening" in msg_l:
+                ascension_milestones.add("bell_of_opening")
+            if "candelabrum" in msg_l:
+                ascension_milestones.add("candelabrum")
+            if "book of the dead" in msg_l:
+                ascension_milestones.add("book_of_the_dead")
+            if "amulet of yendor" in msg_l or "feel the amulet" in msg_l:
+                ascension_milestones.add("amulet_of_yendor")
+            if "drawbridge" in msg_l:
+                ascension_milestones.add("castle_drawbridge")
+            if "wish" in msg_l and (
+                "what do you want to wish" in msg_l or "grant you" in msg_l
+            ):
+                ascension_milestones.add("wishing")
+            if "ascended" in msg_l or "escaped the dungeon" in msg_l:
+                ascension_milestones.add("ascended")
+
             if msg == last_msg:
                 msg_repeat += 1
             else:
@@ -311,6 +372,11 @@ def summarize_episode_ticks(
         "max_depth": max(depths_seen) if depths_seen else 1,
         "depths_visited": depths_seen,
         "depth_first_turn": {str(k): v for k, v in depth_first_turn.items()},
+        "depth_first_xl": {str(k): v for k, v in depth_first_xl.items()},
+        "depth_first_hp": {str(k): v for k, v in depth_first_hp.items()},
+        "dungeons_visited": sorted(list(dungeons_seen)),
+        "hazard_events": sorted(list(hazard_events)),
+        "ascension_milestones": sorted(list(ascension_milestones)),
         "best_ac": best_ac,
         "max_xl": max_xl,
         "stall_count": len(stalls),
@@ -775,6 +841,183 @@ def build_batch_contrast_digest(
             f"- **Staircase Utilization at Step Limit**: {timeout_with_stairs}/{max_steps_runs} timeout runs "
             f"({util_pct:.1f}%) had downstairs mapped in memory but reached max_steps before descending."
         )
+
+    # Descent readiness distribution (XL & HP when first entering deeper floors)
+    depth_entry_xl: dict[int, list[float]] = defaultdict(list)
+    depth_entry_hp: dict[int, list[float]] = defaultdict(list)
+    for r in runs:
+        ms = _extract_run_milestones(r)
+        dxl = ms.get("depth_first_xl") or {}
+        dhp = ms.get("depth_first_hp") or {}
+        for d_str, xl_val in dxl.items():
+            if str(d_str).isdigit():
+                depth_entry_xl[int(d_str)].append(float(xl_val))
+        for d_str, hp_pair in dhp.items():
+            if (
+                str(d_str).isdigit()
+                and isinstance(hp_pair, (list, tuple))
+                and len(hp_pair) >= 2
+            ):
+                depth_entry_hp[int(d_str)].append(float(hp_pair[1]))  # Max HP
+
+    expert_prep = {
+        2: "Exp: XL 2, HP 16",
+        3: "Exp: XL 3, HP 28",
+        4: "Exp: XL 5, HP 42",
+        5: "Exp: XL 6, HP 50",
+        7: "Exp: XL 8, HP 65",
+        10: "Exp: XL 10, HP 85",
+    }
+    readiness_parts = []
+    for d_val in sorted(depth_entry_xl.keys()):
+        if d_val >= 2 and d_val in expert_prep and depth_entry_xl[d_val]:
+            avg_xl = np.mean(depth_entry_xl[d_val])
+            avg_hp = np.mean(depth_entry_hp[d_val]) if depth_entry_hp[d_val] else 0.0
+            readiness_parts.append(
+                f"Dlvl {d_val}: XL={avg_xl:.1f} HP={avg_hp:.0f} ({expert_prep[d_val]})"
+            )
+    if readiness_parts:
+        lines.append(
+            f"- **Descent Readiness (Preparation at Floor Entry)**: {' | '.join(readiness_parts[:3])}."
+        )
+
+    # Dungeon Branch Traversal
+    BRANCH_NAMES = {
+        0: "Dungeons of Doom",
+        1: "Gehennom",
+        2: "Gnomish Mines",
+        3: "The Quest",
+        4: "Sokoban",
+        5: "Fort Ludios",
+        6: "Vlad's Tower",
+        7: "Elemental Planes",
+    }
+    branch_counts: Counter[str] = Counter()
+    for r in runs:
+        ms = _extract_run_milestones(r)
+        dungs = ms.get("dungeons_visited") or [0]
+        for dnum in set(dungs):
+            if isinstance(dnum, int) and dnum in BRANCH_NAMES:
+                branch_counts[BRANCH_NAMES[dnum]] += 1
+            else:
+                branch_counts["Dungeons of Doom"] += 1
+
+    branch_parts = [
+        f"{bname}: {branch_counts[bname]}/{len(runs)} ({branch_counts[bname] * 100.0 / len(runs):.1f}%)"
+        for bname in (
+            "Dungeons of Doom",
+            "Gnomish Mines",
+            "Sokoban",
+            "The Quest",
+            "Gehennom",
+            "Elemental Planes",
+        )
+        if branch_counts[bname] > 0
+    ]
+    if branch_parts:
+        lines.append(f"- **Dungeon Branch Traversal**: {' | '.join(branch_parts)}.")
+
+    # Tactical Hazard Blunders across all depths
+    gas_spore_deaths = 0
+    eye_paralysis_deaths = 0
+    petrif_deaths = 0
+    drown_deaths = 0
+    starved_food_cnt = 0
+    died_unarmored_cnt = 0
+    sleeping_gas_cnt = 0
+
+    for r in runs:
+        end_r = str(r.get("end_reason", "")).lower()
+        d_msg = str(r.get("death_message", "")).lower()
+        comb = end_r + " " + d_msg
+        ms = _extract_run_milestones(r)
+        hazards = set(ms.get("hazard_events") or [])
+
+        if "gas spore" in comb or "gas_spore_explosion" in hazards:
+            gas_spore_deaths += 1
+        if (
+            "floating eye" in comb
+            or "frozen by a monster's gaze" in comb
+            or "floating_eye_paralysis" in hazards
+        ):
+            eye_paralysis_deaths += 1
+        if (
+            "turn to stone" in comb
+            or "petrif" in comb
+            or "cockatrice" in comb
+            or "petrification" in hazards
+        ):
+            petrif_deaths += 1
+        if "drown" in comb or "fall into the water" in comb or "drowning" in hazards:
+            drown_deaths += 1
+        if r.get("starved_with_food"):
+            starved_food_cnt += 1
+        if r.get("died_unarmored"):
+            died_unarmored_cnt += 1
+        if "sleeping_gas" in hazards or "cloud of gas puts you to sleep" in comb:
+            sleeping_gas_cnt += 1
+
+    hazard_items = []
+    if gas_spore_deaths > 0:
+        hazard_items.append(f"Gas Spore Explosions: {gas_spore_deaths} runs")
+    if eye_paralysis_deaths > 0:
+        hazard_items.append(f"Eye Paralysis Deaths: {eye_paralysis_deaths} runs")
+    if petrif_deaths > 0:
+        hazard_items.append(f"Petrification: {petrif_deaths} runs")
+    if drown_deaths > 0:
+        hazard_items.append(f"Drowning: {drown_deaths} runs")
+    if starved_food_cnt > 0:
+        hazard_items.append(f"Starved with Carried Food: {starved_food_cnt} runs")
+    if died_unarmored_cnt > 0:
+        hazard_items.append(f"Died Unarmored: {died_unarmored_cnt} runs")
+    if sleeping_gas_cnt > 0:
+        hazard_items.append(f"Sleeping Gas Traps: {sleeping_gas_cnt} runs")
+
+    if hazard_items:
+        lines.append(f"- **Tactical Hazard Blunders**: {'; '.join(hazard_items)}.")
+
+    # Armor & Defense Progression across depths
+    acs = [int(r.get("final_ac", 10)) for r in runs if r.get("final_ac") is not None]
+    if acs:
+        neg_ac = sum(1 for a in acs if a <= 0)
+        lines.append(
+            f"- **Armor & Defense Progression**: Avg AC={np.mean(acs):.1f} | Best AC={min(acs)} | "
+            f"{neg_ac}/{len(runs)} runs ({neg_ac * 100.0 / len(runs):.1f}%) achieved fortified armor (AC <= 0)."
+        )
+
+    # Endgame & Ascension Progression Milestones
+    milestone_counts: Counter[str] = Counter()
+    for r in runs:
+        ms = _extract_run_milestones(r)
+        m_list = ms.get("ascension_milestones") or []
+        for m_tag in set(m_list):
+            milestone_counts[m_tag] += 1
+        if (
+            r.get("end_reason") == "ascended"
+            or "ascended" in str(r.get("death_message", "")).lower()
+        ):
+            milestone_counts["ascended"] += 1
+
+    ms_display = [
+        ("Minetown Altar Found", milestone_counts["altar_found"]),
+        ("Castle Drawbridge", milestone_counts["castle_drawbridge"]),
+        ("Wishes Made", milestone_counts["wishing"]),
+        ("Vibrating Square", milestone_counts["vibrating_square"]),
+        (
+            "Invocations Items",
+            max(
+                milestone_counts["bell_of_opening"],
+                milestone_counts["candelabrum"],
+                milestone_counts["book_of_the_dead"],
+            ),
+        ),
+        ("Amulet of Yendor", milestone_counts["amulet_of_yendor"]),
+        ("Planes Reached", milestone_counts["planes_reached"]),
+        ("Ascensions", milestone_counts["ascended"]),
+    ]
+    achieved_ms = [f"{label}: {cnt} runs" for label, cnt in ms_display if cnt > 0]
+    if achieved_ms:
+        lines.append(f"- **Ascension & Endgame Milestones**: {', '.join(achieved_ms)}.")
 
     # Domain-agnostic chronic stagnation & livelock sink telemetry
     chronic_runs = 0
