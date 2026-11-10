@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Any
 
 import numpy as np
@@ -392,6 +392,17 @@ def mark_outlier_good_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return runs
 
 
+def _extract_run_milestones(run: dict[str, Any]) -> dict[str, Any]:
+    """Safely extracts milestone dictionary from run dict (handles dict or JSON string)."""
+    ms = run.get("milestones") or run.get("milestones_json") or {}
+    if isinstance(ms, str):
+        try:
+            return json.loads(ms)
+        except Exception:
+            return {}
+    return dict(ms) if isinstance(ms, dict) else {}
+
+
 def compute_function_stats(
     batch_id: str,
     generation_or_runs: int | list[dict[str, Any]],
@@ -432,12 +443,7 @@ def compute_function_stats(
         parsed_turns.append(u_dict)
         all_fns.update(t_dict.keys())
 
-        ms = r.get("milestones") or {}
-        if isinstance(ms, str):
-            try:
-                ms = json.loads(ms)
-            except Exception:
-                ms = {}
+        ms = _extract_run_milestones(r)
         s_dict = ms.get("stagnation_fn_turns") or {}
         for f_name, t_cnt in s_dict.items():
             fn_stagnation_turns_map[f_name] += int(t_cnt)
@@ -695,27 +701,86 @@ def build_batch_contrast_digest(
             f"- **Exploration Tile Coverage**: Avg {np.mean(tiles_seen):.1f} unique tiles mapped per run."
         )
 
-    # Stairs down discovery rate
-    stairs_seen = sum(
-        1
+    # Floor residence distribution (turns spent per depth)
+    depth_residences: dict[int, list[int]] = defaultdict(list)
+    for r in runs:
+        ms = _extract_run_milestones(r)
+        dft = ms.get("depth_first_turn") or {}
+        dft_ints = {
+            int(k): int(v)
+            for k, v in dft.items()
+            if str(k).isdigit() or isinstance(k, int)
+        }
+        turns = int(r.get("turns", 0))
+        if dft_ints:
+            sorted_depths = sorted(dft_ints.keys())
+            for idx_d, d_val in enumerate(sorted_depths):
+                if idx_d + 1 < len(sorted_depths):
+                    next_d_val = sorted_depths[idx_d + 1]
+                    res = max(0, dft_ints[next_d_val] - dft_ints[d_val])
+                else:
+                    res = max(0, turns - dft_ints[d_val])
+                depth_residences[d_val].append(res)
+        else:
+            # Fallback when milestones.depth_first_turn is missing
+            depth_residences[1].append(turns)
+
+    res_parts = [
+        f"Dlvl {d_val} avg={np.mean(depth_residences[d_val]):.0f} turns"
+        for d_val in sorted(depth_residences.keys())[:3]
+        if depth_residences[d_val]
+    ]
+    if res_parts:
+        lines.append(
+            f"- **Floor Residence (Turns per Depth)**: {', '.join(res_parts)} "
+            "(vs Human Expert Reference: Dlvl 1 avg=40 turns, Dlvl 2 avg=85 turns)."
+        )
+
+    # Down stairs discovery, conversion and utilization
+    stair_runs = [
+        r
         for r in runs
         if r.get("stairs_down_found")
+        or _extract_run_milestones(r).get("stairs_down_found")
         or "descend the stairs" in str(r.get("summary_digest", "")).lower()
-    )
+    ]
+    stairs_seen = len(stair_runs)
     lines.append(
         f"- **Down Stairs (`>`) Discovery Rate**: {stairs_seen * 100.0 / len(runs):.1f}% ({stairs_seen}/{len(runs)} runs found or descended stairs)."
     )
+
+    if stairs_seen > 0:
+        descended_runs = sum(1 for r in stair_runs if int(r.get("max_depth", 1)) > 1)
+        remained_runs = stairs_seen - descended_runs
+        conv_rate = descended_runs * 100.0 / stairs_seen
+        lines.append(
+            f"- **Downstairs Conversion Rate**: {descended_runs}/{stairs_seen} runs ({conv_rate:.1f}%) "
+            f"that located downstairs descended to Dlvl 2+ "
+            f"({remained_runs} run{'s' if remained_runs != 1 else ''} located stairs but died or timed out on Dlvl 1 without descending)."
+        )
+
+    if max_steps_runs > 0:
+        timeout_with_stairs = sum(
+            1
+            for r in runs
+            if r.get("end_reason") == "max_steps"
+            and (
+                r.get("stairs_down_found")
+                or _extract_run_milestones(r).get("stairs_down_found")
+                or "descend the stairs" in str(r.get("summary_digest", "")).lower()
+            )
+        )
+        util_pct = timeout_with_stairs * 100.0 / max_steps_runs
+        lines.append(
+            f"- **Staircase Utilization at Step Limit**: {timeout_with_stairs}/{max_steps_runs} timeout runs "
+            f"({util_pct:.1f}%) had downstairs mapped in memory but reached max_steps before descending."
+        )
 
     # Domain-agnostic chronic stagnation & livelock sink telemetry
     chronic_runs = 0
     recurrence_values: list[float] = []
     for r in runs:
-        ms = r.get("milestones") or {}
-        if isinstance(ms, str):
-            try:
-                ms = json.loads(ms)
-            except Exception:
-                ms = {}
+        ms = _extract_run_milestones(r)
         s_ratio = float(ms.get("stagnation_ratio", 0.0))
         rec_r = float(ms.get("recurrence_rate", 0.0))
         if s_ratio >= 0.50:

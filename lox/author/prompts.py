@@ -216,16 +216,26 @@ Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigati
 ### Empirical Differential Diagnostics (SQL Investigation Templates)
 Do not guess why a run stalled or died. Formulate differential queries against DuckDB (`champion_runs`, `champion_function_stats`, `champion_ticks`, `expert_runs`, `expert_ticks`) to isolate the exact physical gap between failed runs and expert ascensions:
 
-1. **Physical Deficit Query (Contrast Failures vs Experts at Same Depth)**:
+1. **Floor Residence & Physical State Contrast Query (Compare Turns per Depth vs Experts)**:
    ```sql
-   -- What was the physical state of expert characters on the exact floor where my runs died?
+   -- Contrast turns spent per depth between expert ascensions and champion runs
+   -- 1A. How many turns do expert ascensions spend exploring Dlvl 1, 2, 3?
+   SELECT depth, COUNT(DISTINCT run_id) AS runs, AVG(max_t - min_t) AS avg_turns_on_floor
+   FROM (
+       SELECT run_id, depth, MIN(turn) AS min_t, MAX(turn) AS max_t
+       FROM expert_ticks
+       WHERE depth <= 4
+       GROUP BY run_id, depth
+   ) GROUP BY depth ORDER BY depth;
+
+   -- 1B. Physical deficit and total turns at failure depth:
    SELECT 'champion_failures' AS source, AVG(final_ac) AS avg_ac, AVG(max_hp) AS avg_hp, AVG(turns) AS avg_turns
    FROM champion_runs WHERE depth = 2
    UNION ALL
    SELECT 'expert_ascensions' AS source, AVG(ac) AS avg_ac, AVG(hp) AS avg_hp, AVG(turn) AS avg_turns
    FROM expert_ticks WHERE depth = 2;
    ```
-   *Interpretation*: If experts have AC <= 4 and your runs have AC 10, your policy is not equipping armor. If experts have 2x higher HP/XL, your policy is taking unnecessary melee damage or failing to level up.
+   *Interpretation*: If expert runs spend ~40 turns on Dlvl 1 and ~85 turns on Dlvl 2 while your policy spends thousands of turns on Dlvl 1, your policy is chronically lingering instead of taking stairs down when found. If experts have AC <= 4 and your runs have AC 10, your policy is not equipping armor. If experts have 2x higher HP/XL, your policy is taking unnecessary melee damage or failing to level up.
 
 2. **Monster Encounter & Tactical Response Query**:
    ```sql

@@ -452,6 +452,9 @@ def test_dynamic_failure_telemetry_digest():
     assert "pet displacement loop" in digest
     assert "Down Stairs (`>`) Discovery Rate" in digest
     assert "Avg 18.5 unique tiles mapped" in digest
+    assert "Floor Residence (Turns per Depth)" in digest
+    assert "Downstairs Conversion Rate" in digest
+    assert "Staircase Utilization at Step Limit" in digest
 
     # Must NOT contain old misleading hardcoded text
     assert "Cyclic Positional Oscillations (Ping-Pong Loops)" not in digest
@@ -579,3 +582,69 @@ def test_two_stage_pilot_sign_test():
     # Decisive: 12 wins, 5 losses (n=17) -> p ~ 0.07 -> passes alpha=0.15 hurdle
     p_decisive = float(sp_stats.binom.sf(12 - 1, 17, 0.5))
     assert p_decisive <= 0.15
+
+
+def test_floor_residence_and_staircase_utilization_telemetry():
+    """Verify that floor residence distribution and staircase utilization at timeout are accurately computed."""
+    from lox.db.summarizer import build_batch_contrast_digest
+
+    batch_stats = {
+        "batch_id": "b_residence_test",
+        "max_depth": 3,
+        "avg_depth": 2.0,
+        "p90_depth": 3.0,
+        "episodes_discarded": 0,
+    }
+    runs = [
+        {
+            "run_id": "r1",
+            "seed": 101,
+            "max_depth": 3,
+            "turns": 500,
+            "steps": 500,
+            "end_reason": "died",
+            "milestones": {
+                "depth_first_turn": {"1": 0, "2": 100, "3": 300},
+                "stairs_down_found": True,
+            },
+            "stairs_down_found": True,
+            "summary_digest": "Overview: Depth=3 | Turns=500",
+        },
+        {
+            "run_id": "r2",
+            "seed": 102,
+            "max_depth": 1,
+            "turns": 1000,
+            "steps": 1000,
+            "end_reason": "max_steps",
+            "milestones": {
+                "depth_first_turn": {"1": 0},
+                "stairs_down_found": True,
+            },
+            "stairs_down_found": True,
+            "summary_digest": "Overview: Depth=1 | Turns=1000",
+        },
+    ]
+
+    digest = build_batch_contrast_digest(batch_stats, runs, [])
+
+    # Floor residence:
+    # r1: D1=100 turns, D2=200 turns, D3=200 turns
+    # r2: D1=1000 turns
+    # D1 avg = (100 + 1000)/2 = 550 turns
+    # D2 avg = 200 turns
+    assert "Dlvl 1 avg=550 turns" in digest
+    assert "Dlvl 2 avg=200 turns" in digest
+    assert "Human Expert Reference: Dlvl 1 avg=40 turns, Dlvl 2 avg=85 turns" in digest
+
+    # Downstairs conversion: 1 of 2 runs with stairs descended to Dlvl 2+ (50.0%)
+    assert "**Downstairs Conversion Rate**: 1/2 runs (50.0%)" in digest
+    assert (
+        "1 run located stairs but died or timed out on Dlvl 1 without descending"
+        in digest
+    )
+
+    # Staircase utilization at step limit: 1 of 1 timeout runs had stairs (100.0%)
+    assert (
+        "**Staircase Utilization at Step Limit**: 1/1 timeout runs (100.0%)" in digest
+    )
