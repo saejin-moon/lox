@@ -23,6 +23,6 @@ data/*
 forest/
 logs/
 *.log
-
+*.ttyrec*
 
 temp/

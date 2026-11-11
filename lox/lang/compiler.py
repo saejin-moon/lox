@@ -275,17 +275,22 @@ class PolicyRunner:
         except Exception:
             pass
 
-        crit_hp = getattr(self.instance, "flee_hp_ratio", 0.25)
+        crit_hp = getattr(self.instance, "flee_hp_ratio", None)
         hp_ratio = (state.hp / max(1, state.max_hp)) if state.max_hp > 0 else 1.0
+        hp_preempt = bool(crit_hp is not None and hp_ratio < float(crit_hp))
+
+        policy_preempt = False
+        if hasattr(self.instance, "should_preempt_subgenerator"):
+            try:
+                policy_preempt = bool(self.instance.should_preempt_subgenerator(state))
+            except Exception:
+                policy_preempt = False
+
         should_preempt = (
-            hp_ratio < crit_hp
-            or getattr(state, "in_yn_prompt", False)
+            getattr(state, "in_yn_prompt", False)
             or getattr(state, "in_text_prompt", False)
-            or (
-                getattr(self.instance, "preempt_on_hostile", True)
-                and hasattr(state, "adjacent_hostiles")
-                and len(state.adjacent_hostiles()) > 0
-            )
+            or hp_preempt
+            or policy_preempt
         )
         if self._active_subgen is not None and should_preempt:
             self._active_subgen = None

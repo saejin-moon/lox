@@ -43,13 +43,29 @@ ALL_OBSERVATION_KEYS: tuple[str, ...] = (
     "inv_oclasses",
     "program_state",
     "internal",
-    "screen_descriptions",
     "tty_chars",
     "tty_colors",
     "tty_cursor",
+    "screen_descriptions",
     "misc",
 )
-LEAN_OBSERVATION_KEYS: tuple[str, ...] = ALL_OBSERVATION_KEYS
+LEAN_OBSERVATION_KEYS: tuple[str, ...] = (
+    "glyphs",
+    "chars",
+    "colors",
+    "specials",
+    "blstats",
+    "message",
+    "inv_glyphs",
+    "inv_strs",
+    "inv_letters",
+    "inv_oclasses",
+    "program_state",
+    "internal",
+    "tty_chars",
+    "tty_colors",
+    "tty_cursor",
+)
 
 ASCII_SPACE = ord(" ")
 ASCII_ESC = 27
@@ -70,12 +86,18 @@ class NetHackHarness:
         max_steps: int = 25000,
         options: tuple[str, ...] | None = None,
         auto_dismiss_more: bool = True,
+        lean_obs: bool = True,
+        max_zero_turn_stalls: int = 100,
     ):
         self.role = role
         self.max_steps = max_steps
         self.auto_dismiss_more = auto_dismiss_more
+        self.lean_obs = lean_obs
+        self.max_zero_turn_stalls = max_zero_turn_stalls
         self.options = options if options is not None else nh.NETHACKOPTIONS
-        self._obs_keys = list(LEAN_OBSERVATION_KEYS)
+        self._obs_keys = list(
+            LEAN_OBSERVATION_KEYS if lean_obs else ALL_OBSERVATION_KEYS
+        )
         self._idx_map = {k: i for i, k in enumerate(self._obs_keys)}
         self._prog_state_idx = self._idx_map["program_state"]
         self._msg_idx = self._idx_map["message"]
@@ -97,6 +119,10 @@ class NetHackHarness:
         self.action_bytes = bytearray()
         self.step_byte_offsets: list[int] = []
         self.prompt_aborts: int = 0
+        self.prompt_linger_steps: int = 0
+        self.max_prompt_linger: int = 3
+        self.consecutive_zero_turn_steps: int = 0
+        self._prev_turn: int = -1
         self._last_raw_tuple: tuple[np.ndarray, ...] = ()
         self.done: bool = False
         self.mem: WorldMemory = WorldMemory()
@@ -153,12 +179,14 @@ class NetHackHarness:
                 # prog[0]=game_over, prog[1]=in_yn_function, prog[2]=in_getlin, prog[3]=in_moveloop
                 if prog[0] == 1:
                     b = ASCII_SPACE
-                elif prog[2] == 1:
-                    b = ASCII_ESC
+                elif prog[1] == 1 or prog[2] == 1:
+                    # Allow interactive prompt to be returned to policy for resolution
+                    if self.prompt_linger_steps < self.max_prompt_linger:
+                        self.prompt_linger_steps += 1
+                        break
+                    b = ASCII_ESC if prog[2] == 1 else ASCII_N
                     self.prompt_aborts += 1
-                elif prog[1] == 1:
-                    b = ASCII_N
-                    self.prompt_aborts += 1
+                    self.prompt_linger_steps = 0
                 else:
                     b = ASCII_SPACE
             self.action_bytes.append(b)
@@ -183,6 +211,9 @@ class NetHackHarness:
         self.action_bytes.clear()
         self.step_count = 0
         self.prompt_aborts = 0
+        self.prompt_linger_steps = 0
+        self.consecutive_zero_turn_steps = 0
+        self._prev_turn = -1
         self.done = False
         self.mem.reset()
 
@@ -203,7 +234,9 @@ class NetHackHarness:
 
         self._last_raw_tuple = obs_tuple
         self.step_byte_offsets = [len(self.action_bytes)]
-        state = GameState(obs_tuple, step_count=0, mem=self.mem)
+        state = GameState(
+            obs_tuple, step_count=0, mem=self.mem, obs_keys=self._obs_keys
+        )
         self.mem.update(state)
         return state
 
@@ -217,6 +250,7 @@ class NetHackHarness:
                 GameState(
                     self._last_raw_tuple,
                     step_count=self.step_count,
+                    obs_keys=self._obs_keys,
                 ),
                 True,
                 {"action_name": "DONE", "is_ascended": False},
@@ -271,15 +305,45 @@ class NetHackHarness:
             if raw_m and (not messages or messages[-1] != raw_m):
                 messages.append(raw_m)
 
+        if self._in_moveloop(obs_tuple):
+            self.prompt_linger_steps = 0
+
         self.step_count += 1
         self.step_byte_offsets.append(len(self.action_bytes))
+
+        # Check in-game turn advancement (zero-turn action awareness)
+        stalled_zero_turn = False
+        blstats_arr = (
+            obs_tuple[self._idx_map["blstats"]]
+            if "blstats" in self._idx_map
+            else (obs_tuple[4] if len(obs_tuple) > 4 else None)
+        )
+        curr_turn = (
+            int(blstats_arr[nh.NLE_BL_TIME])
+            if blstats_arr is not None and len(blstats_arr) > nh.NLE_BL_TIME
+            else self.step_count
+        )
+        if self._prev_turn >= 0 and curr_turn == self._prev_turn:
+            self.consecutive_zero_turn_steps += 1
+            if (
+                self.consecutive_zero_turn_steps >= self.max_zero_turn_stalls
+                and not done
+            ):
+                done = True
+                stalled_zero_turn = True
+        else:
+            self.consecutive_zero_turn_steps = 0
+        self._prev_turn = curr_turn
+
         truncated = self.step_count >= self.max_steps
         if truncated and not done:
             done = True
 
         self.done = bool(done)
         self._last_raw_tuple = obs_tuple
-        state = GameState(obs_tuple, step_count=self.step_count, mem=self.mem)
+        state = GameState(
+            obs_tuple, step_count=self.step_count, mem=self.mem, obs_keys=self._obs_keys
+        )
         state._message_cache = " | ".join(messages) if messages else ""
         self.mem.update(state, action_name=action_name)
 
@@ -297,6 +361,7 @@ class NetHackHarness:
                 "action_name": action_name,
                 "truncated": truncated,
                 "is_ascended": is_ascended,
+                "stalled_zero_turn": stalled_zero_turn,
             },
         )
 
@@ -398,7 +463,9 @@ class NetHackHarness:
 
         self._last_raw_tuple = obs_tuple
         self.step_count = step_ctr
-        state = GameState(obs_tuple, step_count=step_ctr, mem=self.mem)
+        state = GameState(
+            obs_tuple, step_count=step_ctr, mem=self.mem, obs_keys=self._obs_keys
+        )
         self.mem.update(state)
         return state
 

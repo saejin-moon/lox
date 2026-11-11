@@ -26,14 +26,53 @@ class NetHackAdapter(BenchmarkAdapter):
         self,
         role: str = "val-hum-law-fem",
         max_steps: int = 25000,
+        lean_obs: bool = True,
         **kwargs: Any,
     ) -> EnvHarness:
-        return NetHackHarness(role=role, max_steps=max_steps)
+        return NetHackHarness(role=role, max_steps=max_steps, lean_obs=lean_obs)
 
     def progression_metric(self, run: dict[str, Any]) -> float:
-        from lox.engine.hypothesis import progression_metric
+        import math
 
-        return progression_metric(run)
+        d = float(run.get("max_depth", run.get("depth", 1)))
+        raw_xl = run.get("xp_level")
+        if raw_xl is None:
+            raw_xl = run.get("final_xp_level", 1)
+        xl = max(0.0, min(float(raw_xl or 1), 30.0) - 1.0) * 0.12
+        ac_val = float(run.get("final_ac", 10))
+        ac_bonus = max(0.0, 10.0 - ac_val) * 0.04
+        sc = math.log1p(max(0.0, float(run.get("score", 0)))) * 0.06
+
+        has_stairs = bool(
+            run.get("stairs_down_found")
+            or (
+                isinstance(run.get("milestones"), dict)
+                and run["milestones"].get("stairs_down_found")
+            )
+            or d > 1.0
+            or "'>'" in str(run.get("summary_digest", ""))
+        )
+        stairs_bonus = 0.20 if has_stairs else 0.0
+        tiles = float(
+            run.get(
+                "unique_tiles",
+                run.get("milestones", {}).get("unique_tiles_d1", 0),
+            )
+        )
+        tiles_bonus = 0.10 * min(1.0, tiles / 60.0)
+
+        shard_survival_bonus = (
+            0.08
+            if (
+                run.get("is_shard")
+                and int(run.get("final_hp", 0)) > 0
+                and str(run.get("end_reason", "")) in ("max_steps", "ascended")
+            )
+            else 0.0
+        )
+        return (
+            d + xl + ac_bonus + sc + stairs_bonus + tiles_bonus + shard_survival_bonus
+        )
 
     def extract_milestones_and_stalls(
         self, ticks: list[dict[str, Any]]

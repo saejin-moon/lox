@@ -318,22 +318,15 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 if mons:
                     mon_parts = []
                     for m in mons[:5]:
-                        disp = (
-                            "pet"
-                            if getattr(m, "is_pet", False)
-                            else (
-                                "peaceful"
-                                if getattr(m, "is_peaceful", False)
-                                else "hostile"
-                            )
-                        )
+                        pet_tag = "pet," if getattr(m, "is_pet", False) else ""
                         m_info = getattr(m, "info", None)
                         diff = getattr(m_info, "difficulty", None) if m_info else None
-                        d_tag = f",d{diff}" if diff is not None else ""
+                        d_tag = f"d{diff}" if diff is not None else ""
+                        tag_str = f"[{pet_tag}{d_tag}]" if (pet_tag or d_tag) else ""
                         m_nm = getattr(m, "name", None) or (
                             m_info.name if m_info else "?"
                         )
-                        mon_parts.append(f"{m.char}({m_nm}[{disp}{d_tag}]@{m.y},{m.x})")
+                        mon_parts.append(f"{m.char}({m_nm}{tag_str}@{m.y},{m.x})")
                     vis_mons = ", ".join(mon_parts)
             tick_inv = (
                 last_inv_summary
@@ -373,6 +366,10 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             death_msg = msg[:160]
             if info.get("is_ascended"):
                 end_reason = "ascended"
+            elif info.get("stalled_zero_turn"):
+                end_reason = "stalled_zero_turn"
+                if not death_msg:
+                    death_msg = f"Zero-turn action stall ({getattr(harness, 'consecutive_zero_turn_steps', 100)} consecutive steps)"
             elif info.get("truncated"):
                 end_reason = "max_steps"
             elif (

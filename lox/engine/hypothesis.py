@@ -15,17 +15,21 @@ from typing import Any
 import numpy as np
 
 
-def progression_metric(run: dict[str, Any]) -> float:
+def progression_metric(run: dict[str, Any], benchmark: str | None = None) -> float:
     """
     Continuous composite progression metric for a run:
-    Primary: `max_depth` (weight 1.0 per floor)
-    Secondary survivability & progression signals:
-    - `xp_level` (0.12 per XL above 1)
-    - `final_ac` (0.04 per AC point below 10, rewarding armor/protection)
-    - `score` (0.06 * log1p(score), uncapped logarithmic progression)
-    - `stairs_down_found` (0.20 milestone bonus for locating downstairs on Dlvl 1)
-    - `unique_tiles` (0.10 * min(1.0, unique_tiles / 60.0) exploration coverage)
+    Delegates to benchmark adapter when specified, or evaluates composite depth/stat progression.
     """
+    bench = str(benchmark or run.get("benchmark") or "").lower()
+    if bench and bench != "nethack":
+        try:
+            from lox.env import get_adapter
+
+            adapter = get_adapter(bench)
+            return adapter.progression_metric(run)
+        except Exception:
+            pass
+
     d = float(run.get("max_depth", run.get("depth", 1)))
     raw_xl = run.get("xp_level")
     if raw_xl is None:

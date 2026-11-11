@@ -6,7 +6,7 @@
 
 Standard deep reinforcement learning trains opaque neural weights over billions of environment frames, and online LLM agents pay a high latency and token cost on every single turn. `LOX` places the language model in the **outer scientific loop** and compiled Python 3.11+ in the **inner execution loop**:
 
-- **Inner Loop (CPU / Numba)**: Compiled Python 3.11+ generator policies execute directly against the C/Python environment harness at **50,000 to 121,000+ steps/sec** across worker cores (`0` LLM tokens per step). The harness handles C prompt pagination (`flags.xwaitforspace` / `--More--` dismissal) automatically and supports microsecond action-byte prefix replay.
+- **Inner Loop (CPU / Numba)**: Compiled Python 3.11+ generator policies execute directly against the C/Python environment harness at **120,000 to 280,000+ steps/sec** across worker cores (`0` LLM tokens per step). The harness utilizes lean observation channels (eliminating redundant C-level rasterization), handles pagination (`--More--`) transparently, passes interactive prompts (`[yn]`, `[ynq]`) directly to policies with watchdog protection, and exposes zero-turn stall telemetry (`state.turn_advanced`, `state.consecutive_stalls`).
 - **Outer Loop (Stateless Scientist LLM)**: Between evaluation batches, a stateless Author Agent queries a multi-table **DuckDB** warehouse (`runs`, `ticks`, `function_stats`, `discoveries`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Strategy Knowledge Base**. It isolates the active policy's top binding constraint, verifies environment rules against C struct tables (`permonst`, `objclass`) and Wiki articles, tests candidate code in an **8 x 30-episode execution-guided pilot loop** (`dry_run_policy`) with behavioral stall telemetry and prefix-replay shards, and promotes the best candidate to sequential statistical hypothesis testing without hard-aborting on pilot noise.
 
 ---
@@ -17,14 +17,15 @@ Standard deep reinforcement learning trains opaque neural weights over billions 
 2. [System Architecture & Dataflow](#2-system-architecture--dataflow)
 3. [Autonomous Epistemic Discovery & Scientific System Prompt](#3-autonomous-epistemic-discovery--scientific-system-prompt)
 4. [Multi-Benchmark Architecture: NetHack & Craftax](#4-multi-benchmark-architecture-nethack--craftax)
-5. [Prefix-Replay Evaluation Shards & Spatial WorldMemory](#5-prefix-replay-evaluation-shards--spatial-worldmemory)
-6. [The Five Modification Modes, MAP-Elites Archive & Library Learning](#6-the-five-modification-modes-map-elites-archive--library-learning)
-7. [Multi-Table DuckDB Schema & Epistemic Persistence](#7-multi-table-duckdb-schema--epistemic-persistence)
-8. [Parameter-Free Sequential Hypothesis Testing](#8-parameter-free-sequential-hypothesis-testing)
-9. [Long-Horizon Scaling & Unattended Multi-Week Operations](#9-long-horizon-scaling--unattended-multi-week-operations)
-10. [Repository Structure](#10-repository-structure)
-11. [Quickstart & CLI Usage](#11-quickstart--cli-usage)
-12. [References & Citations](#12-references--citations)
+5. [Zero-Turn Stall Telemetry & Interactive Prompt Passthrough](#5-zero-turn-stall-telemetry--interactive-prompt-passthrough)
+6. [Prefix-Replay Evaluation Shards & Spatial WorldMemory](#6-prefix-replay-evaluation-shards--spatial-worldmemory)
+7. [The Five Modification Modes, MAP-Elites Archive & Library Learning](#7-the-five-modification-modes-map-elites-archive--library-learning)
+8. [Multi-Table DuckDB Schema & Epistemic Persistence](#8-multi-table-duckdb-schema--epistemic-persistence)
+9. [Parameter-Free Sequential Hypothesis Testing](#9-parameter-free-sequential-hypothesis-testing)
+10. [Long-Horizon Scaling & Unattended Multi-Week Operations](#10-long-horizon-scaling--unattended-multi-week-operations)
+11. [Repository Structure](#11-repository-structure)
+12. [Quickstart & CLI Usage](#12-quickstart--cli-usage)
+13. [References & Citations](#13-references--citations)
 
 ---
 
@@ -38,7 +39,9 @@ Most game-playing LLM agents depend on human-engineered domain wrappers: hardcod
    - The harness contains **zero** game heuristics, **zero** monster/corpse/item lists, and **zero** hidden macro adapters.
    - It provides a **1-to-1 connection** between policy yields and native environment actions ([`Action`](lox/env/actions.py) / [`CraftaxAction`](lox/env/craftax/actions.py), [`key(ch)`](lox/env/actions.py) raw ASCII bytes, and [`seq(...)`](lox/env/actions.py) multi-keystroke sequences).
    - It exposes the game state lazily via [`GameState`](lox/env/state.py): all 27 `blstats` fields, `BL_MASK_*` status bitmasks, 21x79 or 48x48 grids (`glyphs`, `chars`, `colors`, `specials`), inventory slots, and pre-indexed C symbol table lookups over `nle.nethack.permonst` (`state.mon_info(y, x)`) and `nle.nethack.objclass` (`state.obj_info(glyph)`), paired with Numba-JIT grid topology primitives in [`lox/env/grid_utils.py`](lox/env/grid_utils.py).
-   - It clears NetHack C engine pagination (`flags.xwaitforspace == 1` / `--More--` prompts) transparently while recording every raw byte for bit-identical replay.
+   - **Lean Observation Keys by Default**: Omits heavy unused C rasterization buffers (`screen_descriptions`, `misc`) by default to achieve **280,000+ steps/sec** while retaining full `tty_*` terminal line access.
+   - **Interactive Prompt Passthrough**: Decouples pagination `--More--` (auto-cleared with `SPACE`) from true decision prompts (`in_yn_function`, `in_getlin`), allowing policies to respond interactively across steps with a 3-step safety watchdog.
+   - **Zero-Turn Stall Protection**: Automatically tracks `state.turn_advanced` and `state.consecutive_stalls`. Episodes with $\ge 100$ consecutive zero-turn steps (e.g. repeated bump into peaceful monsters or overweight corpses) are truncated as `stalled_zero_turn` to protect simulation throughput.
 2. **Near-Full Python 3.11+ Policy Language & Modular Skills ([`lox/lang/`](lox/lang/))**:
    - The Author Agent writes standard Python 3.11+ in `data/workspace/policy.py` and modular skill packages in `data/workspace/skills/`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
    - Compile-time AST instrumentation ([`PolicyInstrumentTransformer`](lox/lang/instrument.py) and [`ExecutionTracer`](lox/lang/instrument.py)) adds `<1 us` per-function call tracking, per-function turn attribution, zero-yield loop protection ([`PolicyLoopError`](lox/lang/instrument.py)), and tunable numerical parameter hooks (`self.param(name, default, min_val, max_val)`).

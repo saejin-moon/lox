@@ -115,7 +115,7 @@ def test_gamestate_queries_and_pathfinding():
         assert isinstance(objs, list)
         if len(mons) > 0:
             m = mons[0]
-            assert hasattr(m, "is_hostile")
+            assert hasattr(m, "is_pet")
             assert hasattr(m, "name")
             assert len(m.name) > 0
 

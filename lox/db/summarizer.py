@@ -735,32 +735,12 @@ def build_batch_contrast_digest(
     # Macro-Category Binding Constraints Rollup & Depth-Tier Mortality Matrix
     macro_cats: Counter[str] = Counter()
     combat_specialist_counts: Counter[str] = Counter()
-    friendly_fire_deaths = 0
-    hostile_combat_deaths = 0
     tier_deaths: dict[str, Counter[str]] = {
         "Dlvl 1-3 (Early)": Counter(),
         "Dlvl 4-7 (Mid-Early / Mines)": Counter(),
         "Dlvl 8+ (Deep Frontier)": Counter(),
     }
     tier_totals: Counter[str] = Counter()
-
-    _PET_PEACEFUL_KEYWORDS = (
-        "little dog",
-        "dog",
-        "large dog",
-        "kitten",
-        "housecat",
-        "large cat",
-        "pony",
-        "horse",
-        "warhorse",
-        "watchman",
-        "watch captain",
-        "shopkeeper",
-        "priest",
-        "aligned priest",
-        "oracle",
-    )
 
     for r in runs:
         er = str(r.get("end_reason", "ended")).strip()
@@ -810,10 +790,6 @@ def build_batch_contrast_digest(
         ):
             cat = "Combat / Monster Deaths"
             combat_specialist_counts[last_fn] += 1
-            if any(pk in comb_l for pk in _PET_PEACEFUL_KEYWORDS):
-                friendly_fire_deaths += 1
-            else:
-                hostile_combat_deaths += 1
         elif er_l == "ascended":
             cat = "Ascended"
         else:
@@ -830,11 +806,7 @@ def build_batch_contrast_digest(
             spec_str = ", ".join(
                 f"`{fn}`: {c}" for fn, c in combat_specialist_counts.most_common(4)
             )
-            extra = (
-                f" — Hostile: {hostile_combat_deaths}, "
-                f"Pet/Peaceful Friendly-Fire: {friendly_fire_deaths} "
-                f"| Active Specialist at Death: [{spec_str}]"
-            )
+            extra = f" | Active Specialist at Death: [{spec_str}]"
         lines.append(f"- **{cat_name}**: {cat_cnt}/{len(runs)} ({cat_pct:.1f}%){extra}")
 
     tier_lines = []
@@ -1307,6 +1279,39 @@ def build_batch_contrast_digest(
                     f"  * **Terminal Inventory**: `{fin_inv[:180] if fin_inv else 'n/a'}`\n"
                     f"  * **Final 5 Game Log Messages**:\n```text\n{tail_log}\n```"
                 )
+
+    # Concrete Step-Limit Timeout Pre-Mortem Exemplars
+    timeout_runs = [
+        r for r in runs if str(r.get("end_reason", "")).lower() == "max_steps"
+    ]
+    if timeout_runs:
+        lines.append(
+            "\n### ⏱️ Concrete Step-Limit Timeout Pre-Mortem Exemplars (Final 8 Messages & State):"
+        )
+        for ex in timeout_runs[:3]:
+            ms = _extract_run_milestones(ex)
+            fin_inv = str(ms.get("final_inventory", "") or "")
+            if not fin_inv and ex.get("ticks"):
+                fin_inv = str((ex["ticks"][-1]).get("inventory_summary", "") or "")
+            g_log = str(ex.get("game_log", "") or "").strip().splitlines()
+            tail_log = (
+                "\n".join(g_log[-8:])
+                if g_log
+                else str(ex.get("death_message", "") or "No log messages recorded.")
+            )
+            top_stag_fn = ms.get("top_stagnation_fn", "unknown")
+            stag_turns = ms.get("stagnation_turns", 0)
+            stairs_status = (
+                "mapped in memory" if ms.get("stairs_down_found") else "not located"
+            )
+            lines.append(
+                f"- **Run `{ex.get('run_id')}`** (Seed={ex.get('seed')}, Dlvl={ex.get('depth', ex.get('max_depth', 1))}, "
+                f"Turns={ex.get('turns', 0)}, Steps={ex.get('steps', 0)}, "
+                f"HP={ex.get('final_hp', 0)}/{ex.get('final_max_hp', 0)}, AC={ex.get('final_ac', 10)}, "
+                f"LastActiveFn=`{ex.get('last_active_function', 'root')}`, TopStalledFn=`{top_stag_fn}` ({stag_turns} turns), Downstairs={stairs_status}):\n"
+                f"  * **Terminal Inventory**: `{fin_inv[:180] if fin_inv else 'n/a'}`\n"
+                f"  * **Final 8 Game Log Messages**:\n```text\n{tail_log}\n```"
+            )
 
     # Domain-agnostic chronic stagnation & livelock sink telemetry
     chronic_runs = 0

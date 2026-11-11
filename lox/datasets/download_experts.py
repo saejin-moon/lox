@@ -911,15 +911,8 @@ def ingest_expert_runs_into_duckdb(
             for step_i in range(1, 151):
                 # Simple reference trajectory exercising real NLE actions (search, open, move, descend, fight)
                 chosen_act = Action.SEARCH
-                mons = [
-                    m
-                    for m in st.visible_monsters()
-                    if not m.is_pet and not m.is_peaceful
-                ]
-                adj_mon = next(
-                    (m for m in mons if abs(m.y - st.y) <= 1 and abs(m.x - st.x) <= 1),
-                    None,
-                )
+                adj_mons = st.adjacent_monsters(exclude_pets=True)
+                adj_mon = adj_mons[0] if adj_mons else None
                 if adj_mon is not None:
                     from lox.env.actions import DIR_DELTAS
 

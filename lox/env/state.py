@@ -95,10 +95,6 @@ class MonsterInfo:
         return bool(self.flags2 & 0x00004000)
 
     @property
-    def is_peaceful_race(self) -> bool:
-        return bool(self.flags2 & 0x00200000)
-
-    @property
     def is_domestic(self) -> bool:
         return bool(self.flags2 & 0x00400000)
 
@@ -314,16 +310,11 @@ class VisibleMonster:
     char: str
     color: int
     is_pet: bool
-    is_peaceful: bool
     is_statue: bool
     is_ridden: bool
     is_invisible: bool
     name: str
     info: MonsterInfo | None
-
-    @property
-    def is_hostile(self) -> bool:
-        return not (self.is_pet or self.is_peaceful)
 
     def is_adjacent_to(self, y: int, x: int) -> bool:
         """Returns True if this monster is Chebyshev adjacent (within 1 tile in any of 8 directions) to (y, x)."""
@@ -391,7 +382,6 @@ _CHAR_LUT: tuple[str, ...] = tuple(
 )
 _ASCII_TRANS_TABLE: bytes = bytes(b if 32 <= b <= 126 else 32 for b in range(256))
 _MG_PET: int = int(getattr(nh, "MG_PET", 0))
-_MG_PEACEFUL: int = int(getattr(nh, "MG_PEACEFUL", 0))
 _MG_RIDDEN: int = int(getattr(nh, "MG_RIDDEN", 0))
 _MG_STATUE: int = int(getattr(nh, "MG_STATUE", 0))
 _MG_INVIS: int = int(getattr(nh, "MG_INVIS", 0))
@@ -640,6 +630,9 @@ class WorldMemory:
         "stair_graph",
         "kv",
         "recent_messages",
+        "prev_turn",
+        "consecutive_stalls",
+        "last_action_zero_turn",
     )
 
     def __init__(self) -> None:
@@ -655,6 +648,9 @@ class WorldMemory:
         self.recent_messages: collections.deque[tuple[int, int, str]] = (
             collections.deque(maxlen=25)
         )
+        self.prev_turn: int = -1
+        self.consecutive_stalls: int = 0
+        self.last_action_zero_turn: bool = False
 
     def reset(self) -> None:
         self.floors.clear()
@@ -663,6 +659,9 @@ class WorldMemory:
         self.stair_graph.clear()
         self.kv.clear()
         self.recent_messages.clear()
+        self.prev_turn = -1
+        self.consecutive_stalls = 0
+        self.last_action_zero_turn = False
 
     def get_floor(
         self, dnum: int, dlvl: int, shape: tuple[int, int] = (21, 79)
@@ -730,6 +729,20 @@ class WorldMemory:
             sx = int(state.x)
         except Exception:
             return
+
+        # Track in-game turn advancement (zero-turn action awareness)
+        try:
+            curr_turn = int(getattr(state, "turns", getattr(state, "turn", 0)))
+            step_cnt = getattr(state, "step_count", 0)
+            if self.prev_turn >= 0 and curr_turn == self.prev_turn and step_cnt > 0:
+                self.consecutive_stalls += 1
+                self.last_action_zero_turn = True
+            else:
+                self.consecutive_stalls = 0
+                self.last_action_zero_turn = False
+            self.prev_turn = curr_turn
+        except Exception:
+            pass
 
         gh, gw = 21, 79
         if hasattr(state, "chars") and hasattr(state.chars, "shape"):
@@ -878,24 +891,8 @@ class WorldMemory:
         except Exception:
             pass
 
-        # Update locked doors
+        # Update locked doors: prune opened/destroyed doors from memory if recorded by policy
         try:
-            msg = str(state.message).lower() if hasattr(state, "message") else ""
-            if "locked" in msg:
-                for dy, dx in [
-                    (-1, 0),
-                    (1, 0),
-                    (0, -1),
-                    (0, 1),
-                    (-1, -1),
-                    (-1, 1),
-                    (1, -1),
-                    (1, 1),
-                ]:
-                    ny, nx = sy + dy, sx + dx
-                    if 0 <= ny < 21 and 0 <= nx < 79:
-                        if state.chars[ny, nx] == ord("+"):
-                            floor.locked_doors.add((ny, nx))
             for dy_door, dx_door in list(floor.locked_doors):
                 if 0 <= dy_door < 21 and 0 <= dx_door < 79:
                     c = state.chars[dy_door, dx_door]
@@ -948,38 +945,59 @@ class GameState:
         raw_obs: dict[str, np.ndarray] | tuple[np.ndarray, ...],
         step_count: int = 0,
         mem: WorldMemory | None = None,
+        obs_keys: tuple[str, ...] | list[str] | None = None,
     ):
         if isinstance(raw_obs, (tuple, list)):
             self._raw_dict = None
-            self.glyphs: np.ndarray = raw_obs[0]
-            self.chars: np.ndarray = raw_obs[1]
-            self.colors: np.ndarray = raw_obs[2]
-            self.specials: np.ndarray = raw_obs[3]
-            self.blstats: np.ndarray = raw_obs[4]
-            self.raw_message: np.ndarray = raw_obs[5]
-            self.inv_glyphs: np.ndarray = raw_obs[6]
-            self.inv_strs: np.ndarray = raw_obs[7]
-            self.inv_letters: np.ndarray = raw_obs[8]
-            self.inv_oclasses: np.ndarray = raw_obs[9]
-            self.program_state: np.ndarray | None = (
-                raw_obs[10] if len(raw_obs) > 10 else None
-            )
-            self.internal: np.ndarray | None = (
-                raw_obs[11] if len(raw_obs) > 11 else None
-            )
-            self.screen_descriptions: np.ndarray | None = (
-                raw_obs[12] if len(raw_obs) > 12 else None
-            )
-            self.tty_chars: np.ndarray | None = (
-                raw_obs[13] if len(raw_obs) > 13 else None
-            )
-            self.tty_colors: np.ndarray | None = (
-                raw_obs[14] if len(raw_obs) > 14 else None
-            )
-            self.tty_cursor: np.ndarray | None = (
-                raw_obs[15] if len(raw_obs) > 15 else None
-            )
-            self.misc: np.ndarray | None = raw_obs[16] if len(raw_obs) > 16 else None
+            if obs_keys is not None:
+                idx = {k: i for i, k in enumerate(obs_keys)}
+                self.glyphs = raw_obs[idx["glyphs"]]
+                self.chars = raw_obs[idx["chars"]]
+                self.colors = raw_obs[idx["colors"]]
+                self.specials = raw_obs[idx["specials"]]
+                self.blstats = raw_obs[idx["blstats"]]
+                self.raw_message = raw_obs[idx["message"]]
+                self.inv_glyphs = raw_obs[idx["inv_glyphs"]]
+                self.inv_strs = raw_obs[idx["inv_strs"]]
+                self.inv_letters = raw_obs[idx["inv_letters"]]
+                self.inv_oclasses = raw_obs[idx["inv_oclasses"]]
+                self.program_state = (
+                    raw_obs[idx["program_state"]] if "program_state" in idx else None
+                )
+                self.internal = raw_obs[idx["internal"]] if "internal" in idx else None
+                self.screen_descriptions = (
+                    raw_obs[idx["screen_descriptions"]]
+                    if "screen_descriptions" in idx
+                    else None
+                )
+                self.tty_chars = (
+                    raw_obs[idx["tty_chars"]] if "tty_chars" in idx else None
+                )
+                self.tty_colors = (
+                    raw_obs[idx["tty_colors"]] if "tty_colors" in idx else None
+                )
+                self.tty_cursor = (
+                    raw_obs[idx["tty_cursor"]] if "tty_cursor" in idx else None
+                )
+                self.misc = raw_obs[idx["misc"]] if "misc" in idx else None
+            else:
+                self.glyphs = raw_obs[0]
+                self.chars = raw_obs[1]
+                self.colors = raw_obs[2]
+                self.specials = raw_obs[3]
+                self.blstats = raw_obs[4]
+                self.raw_message = raw_obs[5]
+                self.inv_glyphs = raw_obs[6]
+                self.inv_strs = raw_obs[7]
+                self.inv_letters = raw_obs[8]
+                self.inv_oclasses = raw_obs[9]
+                self.program_state = raw_obs[10] if len(raw_obs) > 10 else None
+                self.internal = raw_obs[11] if len(raw_obs) > 11 else None
+                self.screen_descriptions = raw_obs[12] if len(raw_obs) > 12 else None
+                self.tty_chars = raw_obs[13] if len(raw_obs) > 13 else None
+                self.tty_colors = raw_obs[14] if len(raw_obs) > 14 else None
+                self.tty_cursor = raw_obs[15] if len(raw_obs) > 15 else None
+                self.misc = raw_obs[16] if len(raw_obs) > 16 else None
         else:
             self._raw_dict = raw_obs
             self.blstats = raw_obs["blstats"]
@@ -1635,7 +1653,12 @@ class GameState:
 
     @property
     def in_yn_prompt(self) -> bool:
-        return self.is_in_yn
+        if self.is_in_yn:
+            return True
+        msg = self.message.lower()
+        return (
+            "[yn]" in msg or "[ynq]" in msg or "(yn)" in msg or "really attack" in msg
+        )
 
     @property
     def is_in_getlin(self) -> bool:
@@ -1663,6 +1686,25 @@ class GameState:
         return self.in_text_prompt
 
     @property
+    def turn_advanced(self) -> bool:
+        """Returns True if this step advanced the in-game clock (consumed >= 1 turn)."""
+        if self.mem is None:
+            return True
+        return not getattr(self.mem, "last_action_zero_turn", False)
+
+    @property
+    def consecutive_stalls(self) -> int:
+        """Returns the number of consecutive steps that failed to advance the in-game clock."""
+        if self.mem is None:
+            return 0
+        return int(getattr(self.mem, "consecutive_stalls", 0))
+
+    @property
+    def time_delta(self) -> int:
+        """Returns in-game turns elapsed on this step (1 if turn advanced, 0 if stalled)."""
+        return 1 if self.turn_advanced else 0
+
+    @property
     def is_game_over(self) -> bool:
         if self.program_state is not None and len(self.program_state) > 0:
             return bool(self.program_state[0])
@@ -1687,7 +1729,6 @@ class GameState:
                 col = int(colors[yi, xi])
                 spec = int(specials[yi, xi])
                 is_pet = bool(_IS_PET_LUT[g]) or bool(spec & _MG_PET)
-                is_peaceful = bool(spec & _MG_PEACEFUL)
                 is_statue = bool(spec & _MG_STATUE)
                 is_ridden = bool(spec & _MG_RIDDEN)
                 is_invis = bool(spec & _MG_INVIS)
@@ -1701,7 +1742,6 @@ class GameState:
                         char=ch,
                         color=col,
                         is_pet=is_pet,
-                        is_peaceful=is_peaceful,
                         is_statue=is_statue,
                         is_ridden=is_ridden,
                         is_invisible=is_invis,
@@ -1843,13 +1883,18 @@ class GameState:
         """Returns all visible objects on the hero's current tile."""
         return [o for o in self.visible_objects() if o.y == self.y and o.x == self.x]
 
-    def adjacent_hostiles(self) -> list[VisibleMonster]:
-        """Returns all visible hostile monsters in the 8 Chebyshev adjacent squares around the hero."""
+    def adjacent_monsters(self, exclude_pets: bool = True) -> list[VisibleMonster]:
+        """Returns all visible monsters in the 8 Chebyshev adjacent squares around the hero."""
         return [
             m
             for m in self.visible_monsters()
-            if m.is_hostile and max(abs(m.y - self.y), abs(m.x - self.x)) == 1
+            if (not exclude_pets or not m.is_pet)
+            and max(abs(m.y - self.y), abs(m.x - self.x)) == 1
         ]
+
+    def adjacent_hostiles(self) -> list[VisibleMonster]:
+        """Deprecated alias for adjacent_monsters(exclude_pets=True)."""
+        return self.adjacent_monsters(exclude_pets=True)
 
     @property
     def kv(self) -> dict[str, Any]:

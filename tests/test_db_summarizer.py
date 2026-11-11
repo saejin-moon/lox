@@ -925,7 +925,7 @@ def run(self, state):
         [],
     )
     assert "Macro-Category Binding Constraints Rollup" in b_digest
-    assert "Pet/Peaceful Friendly-Fire: 1" in b_digest
+    assert "**Combat / Monster Deaths**: 1/1" in b_digest
     assert "Depth-Tier Mortality Matrix" in b_digest
     assert "Action Primitive & Terminal Inventory Capability Audit" in b_digest
     assert "`QUAFF` (0 turns)" in b_digest

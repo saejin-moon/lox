@@ -517,16 +517,15 @@ class AuthorAgent:
 
     def handle_combat(self, state):
         hp_thresh = self.param("retreat_hp", 0.25, 0.1, 0.6)
-        mons = [m for m in state.visible_monsters() if not m.is_pet and not m.is_peaceful]
-        for m in mons:
-            if abs(m.y - state.y) <= 1 and abs(m.x - state.x) <= 1:
-                return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
+        adj_mons = state.adjacent_monsters(exclude_pets=True)
+        if adj_mons:
+            m = adj_mons[0]
+            return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
         return self.explore_step(state)
 
     def run(self, state):
         while True:
-            mons = [m for m in state.visible_monsters() if not m.is_pet and not m.is_peaceful]
-            if any(abs(m.y - state.y) <= 1 and abs(m.x - state.x) <= 1 for m in mons):
+            if state.adjacent_monsters(exclude_pets=True):
                 act = self.handle_combat(state)
             else:
                 act = self.explore_step(state)
@@ -613,10 +612,10 @@ class AuthorAgent:
         for item in state.inventory:
             if "healing" in item.name.lower() and item.char == "!":
                 return seq(Action.QUAFF, item.letter)
-    mons = [m for m in state.visible_monsters() if not m.is_pet and not m.is_peaceful]
-    for m in mons:
-        if abs(m.y - state.y) <= 1 and abs(m.x - state.x) <= 1:
-            return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
+    adj_mons = state.adjacent_monsters(exclude_pets=True)
+    if adj_mons:
+        m = adj_mons[0]
+        return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
     return self.explore_step(state)
 """
         spliced, changed = splice_functions_into_policy(current_policy, patch)

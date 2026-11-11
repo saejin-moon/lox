@@ -416,7 +416,6 @@ class AuthorToolRegistry:
                         char="d",
                         color=7,
                         is_pet=True,
-                        is_peaceful=True,
                         is_statue=False,
                         is_ridden=False,
                         is_invisible=False,
@@ -638,6 +637,10 @@ class AuthorToolRegistry:
             locked_door_stalls = 0
             pet_stalls = 0
             boulder_stalls = 0
+            prompt_repeat_count = 0
+            last_prompt_text = ""
+            prompt_livelock_detected = False
+            livelock_prompt_msg = ""
 
             if replay_run_id and os.path.exists(self.db_path):
                 con = connect_db(self.db_path, read_only=True)
@@ -670,6 +673,24 @@ class AuthorToolRegistry:
                 raw_act, active_fn = runner.next_action(state)
                 state, done, info = harness.step(raw_act)
                 msg_l = (state.message or "").lower()
+                is_prompt = (
+                    getattr(state, "in_yn_prompt", False)
+                    or getattr(state, "in_text_prompt", False)
+                    or "[yn]" in msg_l
+                    or "really attack" in msg_l
+                )
+                if is_prompt:
+                    if msg_l == last_prompt_text:
+                        prompt_repeat_count += 1
+                        if prompt_repeat_count >= 5:
+                            prompt_livelock_detected = True
+                            livelock_prompt_msg = state.message or "interactive prompt"
+                    else:
+                        prompt_repeat_count = 1
+                        last_prompt_text = msg_l
+                else:
+                    prompt_repeat_count = 0
+                    last_prompt_text = ""
                 if "locked" in msg_l:
                     locked_door_stalls += 1
                 if "swap places with" in msg_l or "in the way" in msg_l:
@@ -705,6 +726,11 @@ class AuthorToolRegistry:
             warn_lines: list[str] = []
             for h_warn in audit_policy_ast_hygiene(spliced_policy):
                 warn_lines.append(f"- AST HYGIENE WARNING: {h_warn}")
+            if prompt_livelock_detected:
+                warn_lines.append(
+                    f"- INTERACTIVE PROMPT LIVELOCK DETECTED: The prompt '{livelock_prompt_msg}' was triggered repeatedly without resolving! "
+                    "Ensure your prompt handling (e.g. handle_prompts) answers the prompt cleanly instead of looping indefinitely."
+                )
             if locked_door_stalls >= 2:
                 warn_lines.append(
                     f"- DOOR STALL TELEMETRY: Attempted Action.OPEN on locked door {locked_door_stalls} times! "

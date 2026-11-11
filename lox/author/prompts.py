@@ -59,10 +59,15 @@ POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
               state = yield (act if act is not None else Action.SEARCH)
   ```
   - You can also write `def step(self, state: GameState) -> Action:` directly, or use generator subroutines via `state = yield from self.sub_gen(state)`.
-  - **Prompt Safety & Naming Prompts**:
-    When NetHack prompts for text input (e.g. `Call a scroll: `, `Call a potion: `), `state.in_text_prompt` is True.
-    If your policy returns a movement key, it types into the text buffer. Yield `Action.ESC` (`'\x1b'`) to dismiss text naming prompts immediately!
-    The harness also includes a safety fallback auto-ESC if unhandled after 2 turns so runs never stall to max_steps.
+  - **Zero-Turn Action & Stall Telemetry (`state.turn_advanced`, `state.consecutive_stalls`)**:
+    In NetHack, actions that fail (bumping into a peaceful creature without confirmation, attempting to lift an overweight corpse, kicking an unkickable door) consume **0 game turns** (`state.turn` does not advance).
+    - `state.turn_advanced: bool`: Returns `True` if the previous action advanced game time, `False` if stalled.
+    - `state.consecutive_stalls: int`: Returns the count of consecutive steps that failed to advance game time. If your action failed (`state.consecutive_stalls > 0`), **do not blindly repeat the same action**! Runs exceeding 100 consecutive zero-turn steps are truncated as `stalled_zero_turn`.
+  - **Interactive Prompts (`state.in_yn_prompt`, `state.in_text_prompt`)**:
+    - When NetHack prompts for confirmation (e.g. `Really attack <name>? [yn]`, `Continue lifting? [ynq]`, `Are you sure you want to pray? [yn]`), `state.in_yn_prompt` is `True`. You can respond on the next step by yielding `'y'` or `'n'`.
+    - When NetHack prompts for text input (e.g. `Call a scroll: `, `Call a potion: `), `state.in_text_prompt` is `True`.
+      Yield `Action.ESC` (`'\x1b'`) to dismiss text naming prompts immediately!
+    - The harness includes a safety fallback auto-ESC/auto-N after 3 unhandled turns to prevent permanent simulation lockups.
   - **3 Strict Generator Rules**:
     1. In a generator (`def run` containing `yield`), ALWAYS receive the next state via `state = yield act` (never `return act` inside a generator—in Python `return val` inside a generator raises `StopIteration`!).
     2. If a helper method is a normal function that returns an `Action` or `None`, call it as `act = self.helper(state)` and then `state = yield act`.
@@ -132,12 +137,13 @@ Every turn, `state` exposes 100% of NetHack's observation arrays, terminal scree
   - Helper properties: `item.is_weapon`, `item.is_armor`, `item.is_food`, `item.is_corpse`, `item.is_worn`, `item.is_wielded`, `item.is_potion`, `item.is_scroll`, `item.is_wand`, `item.is_ring`, `item.is_amulet`, `item.is_tool`.
   - Status: `item.is_blessed`, `item.is_uncursed`, `item.is_cursed`.
   - C struct metadata: `item.info` (`ObjectInfo | None`: `name`, `descr`, `weight`, `cost`, `delay`, `oprop`) and `item.corpse_monster` (`MonsterInfo | None` if `is_corpse`).
-- **Visible Monsters (`state.visible_monsters() -> list[VisibleMonster]`) and Adjacent Hostiles (`state.adjacent_hostiles() -> list[VisibleMonster]`)**:
+- **Visible Monsters (`state.visible_monsters() -> list[VisibleMonster]`) and Adjacent Monsters (`state.adjacent_monsters(exclude_pets: bool = True) -> list[VisibleMonster]`)**:
   Each `m` in `state.visible_monsters()` has:
   - `m.y`, `m.x`, `m.name`, `m.char`, `m.color`.
-  - `m.is_hostile` (`not (is_pet or is_peaceful)`), `m.is_adjacent_to(state.y, state.x)` (8-way Chebyshev adjacency—monsters attack diagonally as well as orthogonally!), `m.is_pet`, `m.is_peaceful`, `m.is_statue`, `m.is_invisible`.
+  - `m.is_adjacent_to(state.y, state.x)` (8-way Chebyshev adjacency—monsters attack diagonally as well as orthogonally!), `m.is_pet`, `m.is_statue`, `m.is_invisible`.
   - `m.info` (`MonsterInfo` 1-to-1 C `permonst` struct): `m.info.difficulty`, `m.info.ac`, `m.info.speed`, `m.info.level`, `m.info.mr`, `m.info.nutrition`, `m.info.weight`, `m.info.size`, `m.info.resistances_mask`, `m.info.conveys_mask`, `m.info.flags1`, `m.info.flags2`, and C bitmask properties: `is_acidic`, `is_poisonous`, `is_undead`, `is_were`, `is_human`, `is_elf`, `is_dwarf`, `is_gnome`, `is_orc`, `is_demon`, `is_giant`, `is_shapeshifter`, `is_domestic`, `conveys_poison_res`, `conveys_fire_res`, `conveys_cold_res`, `conveys_sleep_res`, `conveys_shock_res`, `conveys_disint_res`, `conveys_stone_flag`, `conveys_see_invis`, `conveys_teleport`, `conveys_teleport_control`.
-  `state.adjacent_hostiles()` returns all visible hostile monsters in the 8 Chebyshev adjacent squares around the hero.
+  `state.adjacent_monsters(exclude_pets=True)` returns all visible non-pet monsters in the 8 Chebyshev adjacent squares around the hero.
+  *Note on Peaceful vs. Hostile Monsters*: In NetHack, the C screen glyphs do NOT expose whether a monster is currently hostile or peaceful. Peaceful creatures (e.g. domestic animals, shopkeepers, Minetown watchmen, co-aligned priests) spawn peaceful; bumping into them triggers a `Really attack <name>? [yn]` prompt. Your policy must handle peaceful vs hostile distinctions dynamically (handling prompts, tracking who attacked in messages, or using wiki monster data).
 - **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`) and Objects Here (`state.objects_here() -> list[VisibleObject]`)**:
   `state.visible_objects()` returns all visible items on the floor (including items on the hero's tile `(state.y, state.x)`).
   `state.objects_here()` returns only items directly on the hero's tile `(state.y, state.x)` (e.g. to inspect before pickup or eating).
@@ -299,7 +305,8 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    - Query `expert_runs` and `expert_ticks` to study how successful human ascensions and reference runs progress, what intrinsics/kit they acquire, and how they act across depths.
 2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact monster mechanics, corpse effects, item properties, intrinsics, and dungeon branches.
 3. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py` (or call `query_policy_docs("actions")` for the complete command index).
-4. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
+4. `read_skill(skill_name)`: Retrieve the complete Python source code of any modular skill package currently residing in `skills/` (e.g. `skills/survival.py`, `skills/navigation.py`).
+5. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
    - Tests candidate Python code in a live NetHack sandbox.
    - **Step 1 (Smoke Check & Behavioral Critic)**: Verifies AST, checks reachability, detects oscillations and search spam. Optional `replay_run_id` fast-forwards into any recorded mid-game run in ~10ms.
    - **Step 2 (30-Episode Parallel Pilot Batch)**: Dispatches 30 episodes across persistent workers (up to 8 pilot revisions per generation, with fallback to best candidate) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.
@@ -319,7 +326,7 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    Before outputting code, mentally verify all 4 invariants:
    - *Generator Invariant*: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
    - *State Persistence*: Specialist methods must update `self.*` attributes (e.g. `self.target_tile`, `self.tried_doors`) to prevent 2-tile ping-pong oscillations.
-   - *Passability & 8-Way Adjacency*: Never mark `ord('-')`, `ord('|')`, or `ord(' ')` (solid stone) as passable; prefer `state.mem.passable_mask`. Always check 8-way adjacency (`max(abs(dy), abs(dx)) == 1` or `state.adjacent_hostiles()`) in combat and door interactions.
+   - *Passability & 8-Way Adjacency*: Never mark `ord('-')`, `ord('|')`, or `ord(' ')` (solid stone) as passable; prefer `state.mem.passable_mask`. Always check 8-way adjacency (`max(abs(dy), abs(dx)) == 1` or `state.adjacent_monsters()`) in combat and door interactions.
    - *Trigger Reachability*: Any modified or newly added specialist method must be called from `run()`.
 """
 
@@ -585,7 +592,7 @@ The policy has grown into a large monolith (or reached a structural threshold). 
    - Check the **Action Primitive & Terminal Inventory Capability Audit**: if runs are dying with unused potions, scrolls, wands, or ranged weapons while `QUAFF`, `READ`, `ZAP`, or `THROW` have `0` turns across the batch, consider unlocking that survival/tactical capability!
 
 2. **Step 2: Pre-Mortem & Full-Tick Trace to Exact Code Line**:
-   - Inspect the **Concrete Lethal Pre-Mortem Trace Exemplars** in the digest and run `query_db` on `champion_ticks` (which stores **100% full, lossless step-by-step ticks** with `inventory_summary` and `visible_monsters` tagged `[pet|peaceful|hostile,dN]`) to trace the exact 10–20 turns before death or stall.
+   - Inspect the **Concrete Lethal Pre-Mortem Trace Exemplars** and **Concrete Step-Limit Timeout Pre-Mortem Exemplars** in the digest and run `query_db` on `champion_ticks` (which stores **100% full, lossless step-by-step ticks** with `inventory_summary` and `visible_monsters`) to trace the exact 10–20 turns before death or stall.
    - Cross-reference those ticks with the exact lines of `Current policy.py` (or `read_skill(...)`) to pinpoint the exact conditional branch, missing guard, or threshold that caused the specialist function to make the wrong decision.
 
 3. **Step 3: C-Mechanic & Expert Verification (`query_wiki` / `expert_runs`)**:
@@ -599,7 +606,7 @@ The policy has grown into a large monolith (or reached a structural threshold). 
 5. **Pre-Submission Invariant Checklist**:
    - *Generator Invariant*: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
    - *State Persistence*: Specialist methods must update `self.*` attributes (e.g. `self.target_tile`, `self.tried_doors`) to prevent 2-tile ping-pong oscillations.
-   - *Passability & 8-Way Adjacency*: Never mark `ord('-')`, `ord('|')`, or `ord(' ')` as passable; prefer `state.mem.passable_mask`. Always check 8-way adjacency (`max(abs(dy), abs(dx)) == 1` or `state.adjacent_hostiles()`).
+   - *Passability & 8-Way Adjacency*: Never mark `ord('-')`, `ord('|')`, or `ord(' ')` as passable; prefer `state.mem.passable_mask`. Always check 8-way adjacency (`max(abs(dy), abs(dx)) == 1` or `state.adjacent_monsters()`).
    - *Trigger Reachability*: Any modified or newly added specialist method must be called from `run()` / `dispatch()`.
 
 6. **Output Format (Once Ready to Test or Submit)**:
