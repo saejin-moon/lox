@@ -21,7 +21,8 @@ Welcome to **LOX**, an autonomous, high-throughput empirical policy synthesis en
    - Consolidates real human NetHack ascensions (`archive.alt.org` xlogfile + dumplogs) and NLE reference traces directly into DuckDB's `expert_runs` and `expert_ticks` tables using the exact same `summary_digest` / `game_log` / overview stats structure as `runs` and `ticks`.
 4. **Stateless Per-Generation Author Agent & Focused Modification Modes**:
    - Each generation starts a **fresh, stateless LLM session** with a 100% static cached System Prompt (Policy Language Specs + DuckDB Schema) and 4 high-signal tools: `query_db(sql)`, `query_wiki(query)`, `query_policy_docs(topic)`, and `dry_run_policy(code)`.
-   - **Pilot Revision Budget & Fallback**: Up to 8 pilot revision attempts per generation (`--pilot-revisions 8`). When all pilot revisions fail the strict sign test, `LOX` falls back to the highest-scoring candidate (`--pilot-fallback best`) and evaluates it in the full rollout with Sequential Futility Early Stopping ($U_n \le 0.0$ at $n=60$) rather than auto-aborting.
+   - **Pilot Revision Budget & Fallback**: Up to 4 pilot revision attempts per generation (`--pilot-revisions 4`). When all pilot revisions fail the strict sign test, `LOX` falls back to the highest-scoring candidate (`--pilot-fallback best`) if and only if its delta is non-negative ($\Delta \ge 0.0$); known regressive pilots ($\Delta < 0.0$) abort the rollout immediately to preserve compute.
+   - **Mutation Scope Guard**: In `WRITE` / `FUNC_MOD_ADD` mode, candidates are constrained to at most 2 functions to isolate causal impact and eliminate cross-subsystem regressions.
    - **Modification Modes**:
      - `FULL_WRITE`: Synthesizes `class Policy` from scratch on Generation 0 without a pre-fed starter policy.
      - `FUNC_MOD_ADD`: Splices targeted methods onto `Policy` or evolves modular packages in `skills/`; untriggered episodes are discarded.

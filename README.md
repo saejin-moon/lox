@@ -9,7 +9,7 @@ Standard reinforcement learning optimizes millions of opaque neural weights acro
 `LOX` resolves this fundamental tradeoff by placing the language model in the **outer scientific loop** and compiled Python 3.11+ in the **inner execution loop**:
 
 - **Inner Execution Loop (CPU / Numba)**: Compiled Python 3.11+ generator policies execute directly against the C/Python environment harness at **120,000 to 285,000+ steps/sec** across multi-core worker pools (`0` LLM tokens per action). The harness uses lean observation buffers, handles pagination (`--More--`) transparently, passes interactive decision prompts (`[yn]`, `[ynq]`, getlin) directly to policies with watchdog protection, and exposes zero-turn action stall telemetry (`state.turn_advanced`, `state.consecutive_stalls`).
-- **Outer Scientific Loop (Stateless Scientist LLM)**: Between evaluation batches, a stateless Author Agent queries an 8-table **DuckDB** analytical warehouse (`runs`, `ticks`, `function_stats`, `discoveries`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Strategy Knowledge Base** (SQLite FTS5 BM25). It diagnoses empirical bottlenecks, checks game mechanics against C struct tables (`permonst`, `objclass`), tests candidate revisions in an **8 × 30-episode execution-guided pilot loop** (`dry_run_policy`) with prefix-replay shards and behavioral telemetry, and promotes candidates to full rollouts governed by parameter-free sequential hypothesis testing.
+- **Outer Scientific Loop (Stateless Scientist LLM)**: Between evaluation batches, a stateless Author Agent queries an 8-table **DuckDB** analytical warehouse (`runs`, `ticks`, `function_stats`, `discoveries`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Strategy Knowledge Base** (SQLite FTS5 BM25). It diagnoses empirical bottlenecks, checks game mechanics against C struct tables (`permonst`, `objclass`), tests candidate revisions in an **4 × 30-episode execution-guided pilot loop** (`dry_run_policy`) with prefix-replay shards and behavioral telemetry, and promotes candidates to full rollouts governed by parameter-free sequential hypothesis testing.
 
 ---
 
@@ -168,7 +168,7 @@ Every [`GameState`](lox/env/state.py) maintains a persistent per-episode [`World
 | Mode | Episode Budget | Verification Gate | Purpose |
 | :--- | :--- | :--- | :--- |
 | **`FULL_WRITE`** | `250` episodes | 30-episode live smoke test | Synthesizes `class Policy` from scratch on Generation 0 without a starter policy. |
-| **`FUNC_MOD_ADD`** | `150` triggered eps / fn + `40` shards | 8 × 30-episode pilot revision loop | Surgically splices or modifies targeted methods on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)); untriggered episodes are discarded. |
+| **`FUNC_MOD_ADD`** | `150` triggered eps / fn + `40` shards | 4 × 30-episode pilot revision loop | Surgically splices or modifies targeted methods on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)) with a 2-function mutation scope limit; untriggered episodes are discarded. |
 | **`STRUCTURAL_REFACTOR`** | `200` episodes | Behavioral preservation gate | Triggered when `policy.py` exceeds 550 lines or during stagnation to break monolithic code into modular packages under `data/workspace/skills/`. |
 | **`PARAM_TUNE`** | `0` LLM tokens (`CRN-SPSA`) | Paired CRN validation batch | Optional numerical threshold optimizer (every 100 generations); tunes `self.param(name, default, min, max)` and bakes winning constants into the AST. |
 
@@ -179,7 +179,7 @@ To preserve stepping-stone adaptations without reverting promoted gains, `Campai
 - `progression_xl`: Elite policy maximizing experience level (`avg_xl`) while maintaining non-regressing depth.
 
 ### Pilot Fallback & Calibration ([`scripts/calibrate_pilot.py`](scripts/calibrate_pilot.py))
-Rather than aborting generations when all pilot revisions fail the strict sign test, LOX applies `--pilot-fallback best` to promote the highest-progression candidate to the full 150-seed rollout. Sequential Futility Early Stopping ($U_n \le 0.0$ at $n=60$) guards compute without discarding breakthrough candidates. Calibration metrics can be inspected at any time:
+Rather than aborting generations when all pilot revisions fail the strict sign test, LOX applies `--pilot-fallback best` to promote the highest-progression candidate to the full 150-seed rollout—provided its delta is non-negative ($\Delta \ge 0.0$). If all pilot revisions show negative progression, the rollout is immediately aborted to save compute. Calibration metrics can be inspected at any time:
 ```bash
 uv run python scripts/calibrate_pilot.py --db-path data/lox.duckdb
 ```

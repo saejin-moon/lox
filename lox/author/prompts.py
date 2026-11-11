@@ -597,7 +597,7 @@ The policy has grown into a large monolith (or reached a structural threshold). 
 
 3. **Step 3: C-Mechanic & Expert Verification (`query_wiki` / `expert_runs`)**:
    - Isolate the exact message or monster/item name from `game_log` and call `query_wiki(query=...)` or `query_db` on `expert_runs` / `expert_ticks` to verify the exact NetHack 3.6.6 C mechanic before writing code.
-   - Target **1 primary skill** (1 specialist method in `Policy`, OR an external module under `skills/<skill_module>.py`).
+   - Target **1 primary skill** (1 specialist method in `Policy`, OR an external module under `skills/<skill_module>.py`). In WRITE mode, modify at most 2 functions (e.g. 1 primary method + 1 caller/helper). Modifying 3+ functions is strictly rejected as a mutation scope violation to isolate causality and prevent cross-subsystem regressions. Broad rewrites belong in STRUCTURAL_REFACTOR mode.
 
 4. **Step 4: Paired Seed Counterfactual Verification (`dry_run_policy`)**:
    - Test your candidate code using `dry_run_policy(code=..., skill_name="<name>", skill_code="...")`.

@@ -300,7 +300,7 @@ class CampaignOrchestrator:
         macro_every: int = 0,
         early_stopping: bool = True,
         max_repair_turns: int = 5,
-        pilot_revisions: int = 8,
+        pilot_revisions: int = 4,
         pilot_episodes: int = 30,
         benchmark: str = "nethack",
         pilot_fallback: str = "best",

@@ -150,8 +150,8 @@ def main() -> None:
     parser.add_argument(
         "--pilot-revisions",
         type=int,
-        default=8,
-        help="Max self-iterative pilot revision runs per generation (default: 8)",
+        default=4,
+        help="Max self-iterative pilot revision runs per generation (default: 4)",
     )
     parser.add_argument(
         "--pilot-fallback",

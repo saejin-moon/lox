@@ -1062,18 +1062,23 @@ class AuthorAgent:
             and canon_mode not in ("MACRO_WRITE", "CREATE")
         ):
             summary = self.tools.last_pilot_summary or "insufficient signal"
+            best_delta = getattr(self.tools, "best_pilot_delta", -1.0)
             if (
                 getattr(self, "pilot_fallback", "best") == "best"
                 and self.tools.best_pilot_code
+                and best_delta >= 0.0
             ):
                 ui.info(
                     f"Pilot Gate: Revisions exhausted without strict sign pass ({summary}). "
-                    f"Proceeding to full evaluation with best pilot candidate (Δ={self.tools.best_pilot_delta:+.2f})."
+                    f"Proceeding to full evaluation with best non-negative pilot candidate (Δ={best_delta:+.2f})."
                 )
             else:
-                ui.warn(
-                    f"Pilot Gate: Candidate failed all {self.tools.pilot_runs_used} pilot revisions ({summary}). Aborting rollout."
+                abort_detail = (
+                    f"all {self.tools.pilot_runs_used} pilot revisions regressed (best Δ={best_delta:+.2f} < 0.0)"
+                    if self.tools.best_pilot_code and best_delta < 0.0
+                    else f"failed all {self.tools.pilot_runs_used} pilot revisions ({summary})"
                 )
+                ui.warn(f"Pilot Gate: Candidate {abort_detail}. Aborting rollout.")
                 try:
                     self.db_logger.save_synthesis_log(
                         log_id=f"syn_{generation}_{total_tool_calls}_pilot_abort_{int(time.time() * 1000)}",
@@ -1085,7 +1090,7 @@ class AuthorAgent:
                         repair_idx=0,
                         model=self.model,
                         thinking_content="",
-                        message_content=summary,
+                        message_content=abort_detail,
                         tool_calls_json="[]",
                         tool_results_json="[]",
                         candidate_code=self.tools.last_attempted_pilot_code or "",
@@ -1093,7 +1098,7 @@ class AuthorAgent:
                         skill_code=getattr(self.tools, "last_passed_skill_code", ""),
                         hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
                         status="PILOT_FAILED",
-                        error_diagnostic=summary,
+                        error_diagnostic=abort_detail,
                         prompt_sent="",
                         prompt_tokens=0,
                         completion_tokens=0,
@@ -1113,7 +1118,8 @@ class AuthorAgent:
                     tool_calls_made=total_tool_calls,
                     skill_code="",
                     aborted=True,
-                    abort_reason=f"PILOT_GATE_ABORT: {summary}",
+                    abort_reason=f"PILOT_GATE_ABORT: {abort_detail}",
+                    pilot_best_delta=best_delta,
                 )
 
         # Compiler-in-the-loop verification & sequential self-repair
@@ -1134,8 +1140,10 @@ class AuthorAgent:
                     code_patch = self.tools.last_passed_code
             elif not code_patch and self.tools.last_passed_code:
                 code_patch = self.tools.last_passed_code
-            elif self.tools.best_pilot_code and (
-                not code_patch or not self.tools.last_pilot_improved
+            elif (
+                self.tools.best_pilot_code
+                and (not code_patch or not self.tools.last_pilot_improved)
+                and getattr(self.tools, "best_pilot_delta", -1.0) >= 0.0
             ):
                 code_patch = self.tools.best_pilot_code
 
@@ -1246,6 +1254,28 @@ class AuthorAgent:
                                 ] or ["run"]
                     if isinstance(changed_fns, str):
                         changed_fns = [changed_fns]
+                    if (
+                        canon_mode not in ("CREATE", "REFACTOR")
+                        and len(changed_fns) > 2
+                    ):
+                        ui.warn(
+                            f"Mutation Scope: Candidate modified {len(changed_fns)} functions ({changed_fns}), exceeding limit of 2. Aborting rollout."
+                        )
+                        return SynthesisProposal(
+                            mode=mode,
+                            hypothesis=hyp,
+                            raw_code_patch=code_patch,
+                            full_policy_code=current_policy,
+                            full_macros_code="",
+                            target_functions=list(changed_fns),
+                            tool_calls_made=total_tool_calls,
+                            skill_code=skill_code,
+                            aborted=True,
+                            abort_reason=f"MUTATION_SCOPE_EXCEEDED: modified {len(changed_fns)} functions ({changed_fns}), limit is 2",
+                            pilot_best_delta=getattr(
+                                self.tools, "best_pilot_delta", 0.0
+                            ),
+                        )
                     return SynthesisProposal(
                         mode=mode,
                         hypothesis=hyp,
@@ -1345,7 +1375,11 @@ class AuthorAgent:
                     pass
 
         # Final fallback: if the model already passed dry_run_policy during the tool phase, use that verified code!
-        best_code = self.tools.last_passed_code or self.tools.best_pilot_code
+        best_code = self.tools.last_passed_code or (
+            self.tools.best_pilot_code
+            if getattr(self.tools, "best_pilot_delta", -1.0) >= 0.0
+            else None
+        )
         if best_code:
             ui.info(
                 "Using verified code from earlier passing/best dry_run_policy call."
@@ -1400,6 +1434,23 @@ class AuthorAgent:
                 if getattr(self, "tools", None) and self.tools.best_pilot_delta > -1e8
                 else 0.0
             )
+            if canon_mode not in ("CREATE", "REFACTOR") and len(changed_fns) > 2:
+                ui.warn(
+                    f"Mutation Scope: Candidate modified {len(changed_fns)} functions ({changed_fns}), exceeding limit of 2. Aborting rollout."
+                )
+                return SynthesisProposal(
+                    mode=mode,
+                    hypothesis=latest_hyp,
+                    raw_code_patch=code_patch,
+                    full_policy_code=current_policy,
+                    full_macros_code="",
+                    target_functions=list(changed_fns),
+                    tool_calls_made=total_tool_calls,
+                    skill_code=skill_code,
+                    aborted=True,
+                    abort_reason=f"MUTATION_SCOPE_EXCEEDED: modified {len(changed_fns)} functions ({changed_fns}), limit is 2",
+                    pilot_best_delta=best_delta,
+                )
             return SynthesisProposal(
                 mode=mode,
                 hypothesis=latest_hyp,

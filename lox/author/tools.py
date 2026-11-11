@@ -581,6 +581,15 @@ class AuthorToolRegistry:
                         changed_fns = [
                             fn for fn in changed_fns if fn not in set(pruned_fns)
                         ]
+                # Mutation scope check for WRITE mode
+                if self.mode not in ("CREATE", "REFACTOR") and len(changed_fns) > 2:
+                    return (
+                        f"Mutation Scope Error: You modified/added {len(changed_fns)} functions ({changed_fns}). "
+                        "In WRITE mode, you must target at most 2 functions (e.g. 1 primary method + 1 caller/helper) "
+                        "to isolate causal impact and prevent coupled cross-subsystem regressions. "
+                        "Please narrow your patch to the 1-2 essential functions (or use REFACTOR for broader rewrites).",
+                        "MUTATION_SCOPE_ERROR",
+                    )
                 # Static reachability check: ensure any non-root method in changed_fns is referenced in spliced_policy
                 if changed_fns:
                     spliced_tree = ast.parse(spliced_policy)

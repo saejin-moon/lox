@@ -546,7 +546,9 @@ def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypat
         pool.close()
 
 
-def test_pilot_fallback_best_does_not_abort(tmp_path, monkeypatch):
+def test_pilot_fallback_best_does_not_abort_on_non_negative_delta(
+    tmp_path, monkeypatch
+):
     from lox.runner.pool import PersistentEvalPool
 
     pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=10)
@@ -556,7 +558,7 @@ def test_pilot_fallback_best_does_not_abort(tmp_path, monkeypatch):
             db_path=str(tmp_path / "fallback.duckdb"),
             pilot_fallback="best",
         )
-        failing_code = """class Policy:
+        neutral_code = """class Policy:
     def run(self, state):
         while True:
             state = yield Action.WAIT
@@ -565,19 +567,20 @@ def test_pilot_fallback_best_does_not_abort(tmp_path, monkeypatch):
         def mock_call_llm(messages, allow_tools=True):
             return {
                 "role": "assistant",
-                "content": f"```yaml\nmode: FUNC_MOD_ADD\ntarget_functions: [run]\nobservation_from_db: 'test'\nmechanism: 'test'\n```\n```python\n{failing_code}```",
+                "content": f"```yaml\nmode: FUNC_MOD_ADD\ntarget_functions: [run]\nobservation_from_db: 'test'\nmechanism: 'test'\n```\n```python\n{neutral_code}```",
                 "tool_calls": [],
             }
 
         monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm)
+        # Baseline with equal performance so delta is non-negative (>= 0.0)
         baseline_runs = [
-            {"seed": 100, "max_depth": 5, "score": 500},
-            {"seed": 101, "max_depth": 5, "score": 500},
+            {"seed": 100, "max_depth": 1, "score": 0},
+            {"seed": 101, "max_depth": 1, "score": 0},
         ]
         proposal = agent.synthesize(
             mode="FUNC_MOD_ADD",
             generation=2,
-            current_policy=failing_code,
+            current_policy=neutral_code,
             pool=pool,
             baseline_runs=baseline_runs,
             max_pilot_runs=1,
