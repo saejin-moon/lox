@@ -474,6 +474,12 @@ class CompiledPolicy:
             exec(self._macro_code_obj, ns)
             mod_obj.__dict__.update(ns)
 
+        # Purge any stale `skills.*` entries from sys.modules so worker processes
+        # never retain an old skill module bound to a previous episode's ExecutionTracer.
+        for mod_key in list(sys.modules.keys()):
+            if mod_key == "skills" or mod_key.startswith("skills."):
+                sys.modules.pop(mod_key, None)
+
         # Register and execute skills modules
         skills_pkg = types.ModuleType("skills")
         sys.modules["skills"] = skills_pkg

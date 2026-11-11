@@ -18,6 +18,11 @@ from typing import Any
 
 import numpy as np
 
+from lox.core.contracts import (
+    BatchEvaluation,
+    EpisodeRun,
+    split_full_and_shard_runs,
+)
 from lox.db.summarizer import summarize_episode_ticks
 from lox.env import get_adapter
 from lox.env.actions import Action
@@ -182,6 +187,39 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     )
 
     ticks: list[dict[str, Any]] = []
+    last_inv_items: list[Any] = []
+    last_inv_summary: str = ""
+
+    def _summarize_inv(st_obj: Any) -> tuple[list[Any], str]:
+        if not hasattr(st_obj, "inventory"):
+            return [], ""
+        try:
+            raw_inv = (
+                st_obj.inventory() if callable(st_obj.inventory) else st_obj.inventory
+            )
+            if not raw_inv:
+                return [], ""
+            items_list = list(raw_inv)
+            parts: list[str] = []
+            for it in items_list[:12]:
+                ltr = getattr(it, "letter", "?")
+                nm = getattr(it, "name", "") or getattr(it, "char", "?")
+                tags = []
+                if getattr(it, "is_wielded", False):
+                    tags.append("wielded")
+                if getattr(it, "is_worn", False):
+                    tags.append("worn")
+                elif getattr(it, "is_armor", False):
+                    tags.append("unworn")
+                if getattr(it, "is_cursed", False):
+                    tags.append("cursed")
+                tag_s = f"({','.join(tags)})" if tags else ""
+                parts.append(f"{ltr}:{nm}{tag_s}")
+            return items_list, "; ".join(parts)
+        except Exception:
+            return [], ""
+
+    last_inv_items, last_inv_summary = _summarize_inv(state)
 
     for step_idx in range(1, max_steps + 1):
         try:
@@ -217,6 +255,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             search_count += 1
 
         last_active_fn = active_fn
+        prev_d = getattr(state, "depth", 1)
         next_state, done, info = harness.step(raw_act)
 
         visited_positions.add((next_state.y, next_state.x))
@@ -238,10 +277,13 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         next_sc = getattr(
             next_state, "score", len(getattr(next_state, "achievements", ())) * 100
         )
-        if next_sc >= 0:
+        if next_sc > last_score or (not done and next_sc >= 0):
             last_score = next_sc
-        last_gold = getattr(next_state, "gold", 0)
-        last_ac = getattr(next_state, "ac", 10)
+        # On the terminal tombstone frame (done=True and next_d<=0), NLE zeroes out blstats (AC=0, gold=0, XL=0).
+        # Preserve the hero's true pre-death AC, gold, XL, and max_hp from the last alive state!
+        if not done and next_d > 0:
+            last_gold = getattr(next_state, "gold", last_gold)
+            last_ac = getattr(next_state, "ac", last_ac)
         next_xl = getattr(next_state, "xp_level", 1)
         if next_xl > 0:
             last_xl = next_xl
@@ -255,6 +297,15 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         if next_turn >= last_turn:
             last_turn = next_turn
 
+        if not done and (step_idx == 1 or next_d != prev_d or step_idx % 20 == 0):
+            cur_items, cur_sum = _summarize_inv(next_state)
+            if cur_items:
+                last_inv_items, last_inv_summary = cur_items, cur_sum
+        elif done:
+            cur_items, cur_sum = _summarize_inv(state)
+            if cur_items:
+                last_inv_items, last_inv_summary = cur_items, cur_sum
+
         if record_ticks:
             raw_key = int(harness.action_bytes[-1]) if harness.action_bytes else 0
             vis_mons = ""
@@ -262,16 +313,38 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 done or step_idx % 5 == 0 or last_hp < getattr(state, "hp", 0)
             ) and hasattr(next_state, "visible_monsters"):
                 mons = next_state.visible_monsters()
+                if not mons and done and hasattr(state, "visible_monsters"):
+                    mons = state.visible_monsters()
                 if mons:
-                    vis_mons = ", ".join(
-                        f"{m.char}({m.info.name if m.info else '?'}@{m.y},{m.x})"
-                        for m in mons[:4]
-                    )
+                    mon_parts = []
+                    for m in mons[:5]:
+                        disp = (
+                            "pet"
+                            if getattr(m, "is_pet", False)
+                            else (
+                                "peaceful"
+                                if getattr(m, "is_peaceful", False)
+                                else "hostile"
+                            )
+                        )
+                        m_info = getattr(m, "info", None)
+                        diff = getattr(m_info, "difficulty", None) if m_info else None
+                        d_tag = f",d{diff}" if diff is not None else ""
+                        m_nm = getattr(m, "name", None) or (
+                            m_info.name if m_info else "?"
+                        )
+                        mon_parts.append(f"{m.char}({m_nm}[{disp}{d_tag}]@{m.y},{m.x})")
+                    vis_mons = ", ".join(mon_parts)
+            tick_inv = (
+                last_inv_summary
+                if (done or step_idx == 1 or next_d != prev_d or step_idx % 20 == 0)
+                else ""
+            )
             ticks.append(
                 {
                     "turn": last_turn,
                     "step_idx": step_idx,
-                    "depth": next_d,
+                    "depth": next_d if next_d > 0 else prev_d,
                     "dungeon_num": getattr(next_state, "dungeon_num", 0),
                     "hp": last_hp,
                     "max_hp": last_max_hp,
@@ -289,7 +362,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                     "message": getattr(next_state, "message", ""),
                     "byte_offset": len(harness.action_bytes),
                     "visible_monsters": vis_mons,
-                    "inventory_summary": "",
+                    "inventory_summary": tick_inv,
                     "achievements": len(getattr(next_state, "achievements", ())),
                 }
             )
@@ -365,92 +438,106 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-    # Check tactical blunder flags at death
-    is_starved = "starv" in death_msg.lower() or "starv" in end_reason.lower()
+    # Check tactical blunder flags at death using the last alive inventory snapshot
+    death_low = f"{death_msg} {end_reason}".lower()
+    is_starved = (
+        "starv" in death_low or "lack of food" in death_low or "faint" in death_low
+    )
     starved_with_food = False
     died_unarmored = False
 
-    if hasattr(state, "inventory"):
+    if not last_inv_items and hasattr(state, "inventory"):
+        last_inv_items, last_inv_summary = _summarize_inv(state)
+
+    if last_inv_items:
         try:
-            inv = state.inventory()
             has_food = any(
-                getattr(it, "oclass", None) == 7 or getattr(it, "char", "") == "%"
-                for it in inv
+                getattr(it, "is_food", False)
+                or getattr(it, "oclass", None) == 7
+                or getattr(it, "char", "") == "%"
+                for it in last_inv_items
             )
             starved_with_food = bool(is_starved and has_food)
             has_armor = any(
                 getattr(it, "is_armor", False) or getattr(it, "oclass", None) == 3
-                for it in inv
+                for it in last_inv_items
             )
-            died_unarmored = bool(last_ac >= 10 and has_armor)
+            died_unarmored = bool(
+                not info.get("is_ascended") and last_ac >= 10 and has_armor
+            )
         except Exception:
             pass
+
+    if isinstance(milestones, dict):
+        milestones["final_inventory"] = last_inv_summary
+        milestones["final_ac_true"] = last_ac
 
     total_steps = max(1, harness.step_count)
     pct_wait = round((wait_count / total_steps) * 100.0, 2)
     pct_search = round((search_count / total_steps) * 100.0, 2)
 
-    # Cap stored ticks per run at 500 (first 100 + every Nth + last 150) so memory never explodes on 25k-step runs
-    if len(ticks) > 500:
-        mid = ticks[100:-150]
-        stride = max(1, len(mid) // 250)
-        compact_ticks = ticks[:100] + mid[::stride][:250] + ticks[-150:]
-    else:
-        compact_ticks = ticks
+    # Preserve 100% full, lossless ticks for exact SQL window queries and action aggregations
+    full_ticks = ticks
 
-    return {
-        "triggered": True,
-        "is_shard": is_shard,
-        "shard_id": str(task.get("shard_id", "")),
-        "run_id": run_id,
-        "seed": seed,
-        "role": role,
-        "depth": state.depth,
-        "max_depth": max_depth,
-        "score": last_score,
-        "achievements": len(getattr(state, "achievements", ()))
-        if hasattr(state, "achievements")
-        else 0,
-        "turns": last_turn,
-        "steps": harness.step_count,
-        "xp_level": last_xl,
-        "final_hp": last_hp,
-        "max_hp": last_max_hp,
-        "final_ac": last_ac,
-        "gold": last_gold,
-        "end_reason": end_reason,
-        "death_message": death_msg,
-        "summary_digest": summary_digest,
-        "game_log": game_log,
-        "milestones": milestones,
-        "auto_esc_count": runner.auto_esc_count,
-        "subgen_preemptions": runner.subgen_preemptions,
-        "policy_exceptions": runner.policy_exceptions,
-        "unique_tiles": len(visited_positions),
-        "pct_wait": pct_wait,
-        "pct_search": pct_search,
-        "starved_with_food": starved_with_food,
-        "died_unarmored": died_unarmored,
-        "stairs_down_found": stairs_down_found,
-        "triggered_functions": dict(runner.tracer.fn_calls),
-        "functions_triggered": dict(runner.tracer.fn_calls),
-        "fn_turns": dict(runner.tracer.fn_turns),
-        "function_turns": dict(runner.tracer.fn_turns),
-        "last_active_function": last_active_fn,
-        "action_bytes": bytes(harness.action_bytes),
-        "wall_ms": round(wall_ms, 2),
-        "ticks": compact_ticks,
-        "registered_params": {
-            k: {
-                "name": p.name,
-                "default": p.default,
-                "min_val": p.min_val,
-                "max_val": p.max_val,
-                "is_int": p.is_int,
-            }
-            for k, p in runner.tracer.registered_params.items()
-        },
-    }
+    return EpisodeRun(
+        {
+            "triggered": True,
+            "is_shard": is_shard,
+            "shard_id": str(task.get("shard_id", "")),
+            "run_id": run_id,
+            "seed": seed,
+            "role": role,
+            "depth": state.depth,
+            "max_depth": max_depth,
+            "score": last_score,
+            "achievements": len(getattr(state, "achievements", ()))
+            if hasattr(state, "achievements")
+            else 0,
+            "turns": last_turn,
+            "steps": harness.step_count,
+            "xp_level": last_xl,
+            "final_xp_level": last_xl,
+            "final_hp": last_hp,
+            "max_hp": last_max_hp,
+            "final_max_hp": last_max_hp,
+            "final_ac": last_ac,
+            "gold": last_gold,
+            "end_reason": end_reason,
+            "death_message": death_msg,
+            "summary_digest": summary_digest,
+            "game_log": game_log,
+            "milestones": milestones,
+            "auto_esc_count": runner.auto_esc_count
+            + int(getattr(harness, "prompt_aborts", 0)),
+            "subgen_preemptions": runner.subgen_preemptions,
+            "policy_exceptions": runner.policy_exceptions,
+            "unique_tiles": len(visited_positions),
+            "pct_wait": pct_wait,
+            "pct_search": pct_search,
+            "starved_with_food": starved_with_food,
+            "died_unarmored": died_unarmored,
+            "stairs_down_found": stairs_down_found,
+            "triggered_functions": dict(runner.tracer.fn_calls),
+            "functions_triggered": dict(runner.tracer.fn_calls),
+            "fn_turns": dict(runner.tracer.fn_turns),
+            "function_turns": dict(runner.tracer.fn_turns),
+            "last_active_function": last_active_fn,
+            "action_bytes": bytes(harness.action_bytes),
+            "step_byte_offsets": list(getattr(harness, "step_byte_offsets", ())),
+            "wall_ms": round(wall_ms, 2),
+            "ticks": full_ticks,
+            "registered_params": {
+                k: {
+                    "name": p.name,
+                    "default": p.default,
+                    "min_val": p.min_val,
+                    "max_val": p.max_val,
+                    "is_int": p.is_int,
+                }
+                for k, p in runner.tracer.registered_params.items()
+            },
+        }
+    )
 
 
 class PersistentEvalPool:
@@ -789,38 +876,42 @@ class PersistentEvalPool:
 
         wall_sec = time.perf_counter() - t0
         sps = total_steps / max(1e-6, wall_sec)
-        full_runs = [r for r in triggered_runs if not r.get("is_shard")]
+        full_runs, shard_runs = split_full_and_shard_runs(triggered_runs)
         stat_runs = full_runs if full_runs else triggered_runs
         depths = [r["max_depth"] for r in stat_runs]
         scores = [r["score"] for r in stat_runs]
         turns = [r["turns"] for r in stat_runs]
 
-        return {
-            "batch_id": batch_id,
-            "runs": triggered_runs,
-            "episodes_recorded": len(triggered_runs),
-            "episodes_discarded": discarded_count,
-            "raw_episodes_run": raw_done,
-            "avg_depth": float(np.mean(depths)) if depths else 0.0,
-            "p90_depth": float(np.percentile(depths, 90)) if depths else 0.0,
-            "max_depth": (
-                int(np.max([r["max_depth"] for r in triggered_runs]))
-                if triggered_runs
-                else 0
-            ),
-            "avg_score": float(np.mean(scores)) if scores else 0.0,
-            "max_score": (
-                int(np.max([r["score"] for r in triggered_runs]))
-                if triggered_runs
-                else 0
-            ),
-            "avg_turns": float(np.mean(turns)) if turns else 0.0,
-            "steps_per_sec": round(sps, 1),
-            "wall_sec": round(wall_sec, 2),
-            "early_stopped": early_stopped,
-            "unreachable_abort": unreachable_abort,
-            "registered_params": registered_params,
-        }
+        return BatchEvaluation(
+            {
+                "batch_id": batch_id,
+                "runs": triggered_runs,
+                "full_runs": full_runs,
+                "shard_runs": shard_runs,
+                "episodes_recorded": len(triggered_runs),
+                "episodes_discarded": discarded_count,
+                "raw_episodes_run": raw_done,
+                "avg_depth": float(np.mean(depths)) if depths else 0.0,
+                "p90_depth": float(np.percentile(depths, 90)) if depths else 0.0,
+                "max_depth": (
+                    int(np.max([r["max_depth"] for r in triggered_runs]))
+                    if triggered_runs
+                    else 0
+                ),
+                "avg_score": float(np.mean(scores)) if scores else 0.0,
+                "max_score": (
+                    int(np.max([r["score"] for r in triggered_runs]))
+                    if triggered_runs
+                    else 0
+                ),
+                "avg_turns": float(np.mean(turns)) if turns else 0.0,
+                "steps_per_sec": round(sps, 1),
+                "wall_sec": round(wall_sec, 2),
+                "early_stopped": early_stopped,
+                "unreachable_abort": unreachable_abort,
+                "registered_params": registered_params,
+            }
+        )
 
     def evaluate_tasks(
         self,

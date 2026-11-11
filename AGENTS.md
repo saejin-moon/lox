@@ -37,6 +37,8 @@ Welcome to **LOX**, an autonomous, high-throughput empirical policy synthesis en
 
 ```
 lox/
+├── core/
+│   └── contracts.py        # Typed EpisodeRun, BatchEvaluation, CandidatePackage, invariant guards
 ├── env/
 │   ├── actions.py          # 1-to-1 Action IntEnum, key(), seq(), DIR_DELTAS
 │   ├── state.py            # Lazy zero-copy GameState, NLE C LUTs, Numba BFS & A*
@@ -75,6 +77,7 @@ tests/
 ├── test_lang_instrument.py # Python 3.11+ features, sandbox security, tracer, loop guard, splicing
 ├── test_db_summarizer.py   # RLE summarizer, outlier marker, Ochiai/Liblit, DuckDB logger & tools
 ├── test_modes_and_eval.py  # Trigger filtering, unreachable circuit breaker, hypothesis CS, SPSA, mock campaign
+├── test_codebase_hardening.py # Typed contracts, alias synchronization, zero shard leakage, MAP-Elites isolation
 └── test_author_and_ui.py   # Author YAML/code parser, macro execution tracing, ConsoleUI rendering
 ```
 

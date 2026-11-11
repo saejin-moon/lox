@@ -37,8 +37,16 @@ def _find_byte_offset(
     pred_turn: int | None = None,
     pred_depth: int | None = None,
     default_offset: int = 0,
+    step_byte_offsets: list[int] | None = None,
 ) -> int:
-    """Finds exact byte_offset from tick list matching step/turn/depth boundaries."""
+    """Finds exact byte_offset from step_byte_offsets or tick list matching step/turn/depth boundaries."""
+    if (
+        pred_step is not None
+        and step_byte_offsets
+        and 0 <= pred_step < len(step_byte_offsets)
+    ):
+        return int(step_byte_offsets[pred_step])
+
     if not ticks:
         return default_offset
 
@@ -127,6 +135,7 @@ def extract_shards_from_runs(
         summary = str(r.get("summary_digest", ""))
         depth = int(r.get("max_depth", r.get("depth", 1)))
         ticks = r.get("ticks") or []
+        step_offsets = r.get("step_byte_offsets")
 
         # 1. Pre-Death Windows (30 steps before fatal encounter)
         is_starv = "starv" in end_reason.lower()
@@ -139,7 +148,10 @@ def extract_shards_from_runs(
             ratio = cut_step / float(steps)
             default_cut = max(5, min(len(b_bytes) - 5, int(len(b_bytes) * ratio)))
             cut_idx = _find_byte_offset(
-                ticks, pred_step=cut_step, default_offset=default_cut
+                ticks,
+                pred_step=cut_step,
+                default_offset=default_cut,
+                step_byte_offsets=step_offsets,
             )
             cut_idx = max(1, min(len(b_bytes) - 2, cut_idx))
             ctx = f"pre_death:{end_reason[:30]}"

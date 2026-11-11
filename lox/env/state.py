@@ -43,6 +43,104 @@ class MonsterInfo:
     flags2: int
     flags3: int
     attacks: tuple[tuple[int, int, int, int], ...] = ()
+    geno: int = 0
+
+    # --- 1-to-1 NLE C `monflag.h` bitmask properties ---
+    @property
+    def is_acidic(self) -> bool:
+        return bool(self.flags1 & 0x08000000)
+
+    @property
+    def is_poisonous(self) -> bool:
+        return bool(self.flags1 & 0x10000000)
+
+    @property
+    def is_undead(self) -> bool:
+        return bool(self.flags2 & 0x00000002)
+
+    @property
+    def is_were(self) -> bool:
+        return bool(self.flags2 & 0x00000004)
+
+    @property
+    def is_human(self) -> bool:
+        return bool(self.flags2 & 0x00000008)
+
+    @property
+    def is_elf(self) -> bool:
+        return bool(self.flags2 & 0x00000010)
+
+    @property
+    def is_dwarf(self) -> bool:
+        return bool(self.flags2 & 0x00000020)
+
+    @property
+    def is_gnome(self) -> bool:
+        return bool(self.flags2 & 0x00000040)
+
+    @property
+    def is_orc(self) -> bool:
+        return bool(self.flags2 & 0x00000080)
+
+    @property
+    def is_demon(self) -> bool:
+        return bool(self.flags2 & 0x00000100)
+
+    @property
+    def is_giant(self) -> bool:
+        return bool(self.flags2 & 0x00002000)
+
+    @property
+    def is_shapeshifter(self) -> bool:
+        return bool(self.flags2 & 0x00004000)
+
+    @property
+    def is_peaceful_race(self) -> bool:
+        return bool(self.flags2 & 0x00200000)
+
+    @property
+    def is_domestic(self) -> bool:
+        return bool(self.flags2 & 0x00400000)
+
+    @property
+    def conveys_fire_res(self) -> bool:
+        return bool(self.conveys_mask & 0x01)
+
+    @property
+    def conveys_cold_res(self) -> bool:
+        return bool(self.conveys_mask & 0x02)
+
+    @property
+    def conveys_sleep_res(self) -> bool:
+        return bool(self.conveys_mask & 0x04)
+
+    @property
+    def conveys_disint_res(self) -> bool:
+        return bool(self.conveys_mask & 0x08)
+
+    @property
+    def conveys_shock_res(self) -> bool:
+        return bool(self.conveys_mask & 0x10)
+
+    @property
+    def conveys_poison_res(self) -> bool:
+        return bool(self.conveys_mask & 0x20)
+
+    @property
+    def conveys_stone_flag(self) -> bool:
+        return bool(self.conveys_mask & 0x80)
+
+    @property
+    def conveys_see_invis(self) -> bool:
+        return bool(self.flags1 & 0x01000000)
+
+    @property
+    def conveys_teleport(self) -> bool:
+        return bool(self.flags1 & 0x02000000)
+
+    @property
+    def conveys_teleport_control(self) -> bool:
+        return bool(self.flags1 & 0x04000000)
 
 
 # 1-to-1 NetHack object class ASCII character symbols and names
@@ -100,6 +198,7 @@ class ObjectInfo:
     delay: int
     color: int
     prob: int
+    oprop: int = 0
 
 
 class _CallableList(list):
@@ -119,6 +218,14 @@ class InventoryItem:
     oclass: int
     char: str
     quantity: int
+    info: ObjectInfo | None = None
+    corpse_monster: MonsterInfo | None = None
+
+    @property
+    def is_corpse(self) -> bool:
+        return self.corpse_monster is not None or (
+            0 <= self.glyph < _MAX_GLYPH and bool(_IS_BODY_LUT[self.glyph])
+        )
 
     @property
     def is_weapon(self) -> bool:
@@ -290,6 +397,10 @@ _MG_STATUE: int = int(getattr(nh, "MG_STATUE", 0))
 _MG_INVIS: int = int(getattr(nh, "MG_INVIS", 0))
 
 
+_MON_INFO_BY_NAME: dict[str, MonsterInfo] = {}
+_OBJ_INFO_BY_NAME: dict[str, ObjectInfo] = {}
+
+
 def _make_mon_info(mid: int) -> MonsterInfo | None:
     if not (0 <= mid < nh.NUMMONS):
         return None
@@ -303,7 +414,7 @@ def _make_mon_info(mid: int) -> MonsterInfo | None:
             for a in mattk_raw
             if int(getattr(a, "aatyp", 0)) != 0 or int(getattr(a, "adtyp", 0)) != 0
         )
-        return MonsterInfo(
+        info = MonsterInfo(
             mon_id=mid,
             name=pm.mname or "",
             symbol=msym,
@@ -322,7 +433,11 @@ def _make_mon_info(mid: int) -> MonsterInfo | None:
             flags2=int(pm.mflags2),
             flags3=int(pm.mflags3),
             attacks=attacks,
+            geno=int(getattr(pm, "geno", 0)),
         )
+        if info.name:
+            _MON_INFO_BY_NAME[info.name.lower()] = info
+        return info
     except Exception:
         return None
 
@@ -335,7 +450,7 @@ def _make_obj_info(oid: int) -> ObjectInfo | None:
         oclass = ord(oc.oc_class) if isinstance(oc.oc_class, str) else int(oc.oc_class)
         name = nh.OBJ_NAME(oc)
         descr = nh.OBJ_DESCR(oc)
-        return ObjectInfo(
+        info = ObjectInfo(
             obj_id=oid,
             name=name or "",
             descr=descr,
@@ -347,7 +462,13 @@ def _make_obj_info(oid: int) -> ObjectInfo | None:
             delay=int(oc.oc_delay),
             color=int(oc.oc_color),
             prob=int(oc.oc_prob),
+            oprop=int(getattr(oc, "oc_oprop", 0)),
         )
+        if info.name:
+            _OBJ_INFO_BY_NAME[info.name.lower()] = info
+        if info.descr:
+            _OBJ_INFO_BY_NAME[info.descr.lower()] = info
+        return info
     except Exception:
         return None
 
@@ -716,13 +837,28 @@ class WorldMemory:
                 and 0 <= sx < floor.remembered_obj_glyphs.shape[1]
             ):
                 act_upper = action_name.upper() if action_name else ""
-                if any(tok in act_upper for tok in ("PICKUP", "EAT", "COMMA")):
-                    floor.remembered_obj_glyphs[sy, sx] = 0
-
                 msg_low = (
                     str(state.message).lower() if hasattr(state, "message") else ""
                 )
                 if (
+                    "you see no objects here" in msg_low
+                    or "feel no objects here" in msg_low
+                ):
+                    floor.remembered_obj_glyphs[sy, sx] = 0
+                elif any(tok in act_upper for tok in ("PICKUP", "EAT", "COMMA")):
+                    if not any(
+                        abort_tok in msg_low
+                        for abort_tok in (
+                            "never mind",
+                            "don't have",
+                            "nothing here",
+                            "there are ",
+                            "you see here",
+                            "objects here",
+                        )
+                    ):
+                        floor.remembered_obj_glyphs[sy, sx] = 0
+                elif (
                     len(self.pos_history) >= 2
                     and self.pos_history[-1] != self.pos_history[-2]
                 ):
@@ -733,6 +869,9 @@ class WorldMemory:
                             "objects here",
                             "things that are here",
                             "you feel here",
+                            "there is a ",
+                            "there is an ",
+                            "there are ",
                         )
                     ):
                         floor.remembered_obj_glyphs[sy, sx] = 0
@@ -1141,6 +1280,8 @@ class GameState:
                 sp = desc.find(" ")
                 first_word = desc[:sp] if sp != -1 else desc
                 qty = int(first_word) if first_word.isdigit() else 1
+                o_info = _OBJ_INFO_BY_GLYPH[g] if 0 <= g < _MAX_GLYPH else None
+                c_mon = _CORPSE_MON_BY_GLYPH[g] if 0 <= g < _MAX_GLYPH else None
                 items.append(
                     InventoryItem(
                         letter=letter,
@@ -1149,6 +1290,8 @@ class GameState:
                         oclass=oc,
                         char=ch,
                         quantity=qty,
+                        info=o_info,
+                        corpse_monster=c_mon,
                     )
                 )
             self._inventory_cache = _CallableList(items)
@@ -1216,10 +1359,47 @@ class GameState:
         return None
 
     @staticmethod
+    def monster_info_by_name(name: str) -> MonsterInfo | None:
+        """O(1) lookup of a monster's C `permonst` struct by monster or corpse string."""
+        if not name:
+            return None
+        s = name.lower().strip()
+        for prefix in (
+            "a ",
+            "an ",
+            "the ",
+            "blessed ",
+            "uncursed ",
+            "cursed ",
+            "partly eaten ",
+            "corpse of a ",
+            "corpse of an ",
+            "corpse of ",
+        ):
+            if s.startswith(prefix):
+                s = s[len(prefix) :].strip()
+        if s.endswith(" corpse"):
+            s = s[:-7].strip()
+        elif s.endswith(" corpses") and len(s) > 8:
+            s = s[:-8].strip()
+        return _MON_INFO_BY_NAME.get(s)
+
+    @staticmethod
     def object_info(glyph: int) -> ObjectInfo | None:
         if 0 <= glyph < _MAX_GLYPH:
             return _OBJ_INFO_BY_GLYPH[glyph]
         return None
+
+    @staticmethod
+    def object_info_by_name(name: str) -> ObjectInfo | None:
+        """O(1) lookup of an object's C `objclass` struct by name or description."""
+        if not name:
+            return None
+        s = name.lower().strip()
+        for prefix in ("a ", "an ", "the ", "blessed ", "uncursed ", "cursed "):
+            if s.startswith(prefix):
+                s = s[len(prefix) :].strip()
+        return _OBJ_INFO_BY_NAME.get(s)
 
     @staticmethod
     def cmap_name(glyph: int) -> str | None:
@@ -1636,17 +1816,23 @@ class GameState:
                             break
                     if not parsed_name:
                         parsed_name = "corpse" if is_corpse else "item"
+                    corpse_mon = (
+                        self.monster_info_by_name(parsed_name) if is_corpse else None
+                    )
+                    o_info = (
+                        None if is_corpse else self.object_info_by_name(parsed_name)
+                    )
                     objs.append(
                         VisibleObject(
                             y=hy,
                             x=hx,
                             glyph=0,
-                            char="%" if is_corpse else "?",
-                            color=7,
+                            char="%" if is_corpse else (o_info.char if o_info else "?"),
+                            color=o_info.color if o_info else 7,
                             is_corpse=is_corpse,
-                            corpse_monster=None,
+                            corpse_monster=corpse_mon,
                             name=parsed_name,
-                            info=None,
+                            info=o_info,
                         )
                     )
 

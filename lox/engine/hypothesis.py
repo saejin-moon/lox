@@ -27,20 +27,25 @@ def progression_metric(run: dict[str, Any]) -> float:
     - `unique_tiles` (0.10 * min(1.0, unique_tiles / 60.0) exploration coverage)
     """
     d = float(run.get("max_depth", run.get("depth", 1)))
-    xl = max(0.0, min(float(run.get("xp_level", 1)), 30.0) - 1.0) * 0.12
+    raw_xl = run.get("xp_level")
+    if raw_xl is None:
+        raw_xl = run.get("final_xp_level", 1)
+    xl = max(0.0, min(float(raw_xl or 1), 30.0) - 1.0) * 0.12
     ac_val = float(run.get("final_ac", 10))
     ac_bonus = max(0.0, 10.0 - ac_val) * 0.04
     sc = math.log1p(max(0.0, float(run.get("score", 0)))) * 0.06
 
     # Intermediate exploration signals (critical on Dlvl 1 before descent)
-    stairs_bonus = (
-        0.20
-        if (
-            run.get("stairs_down_found")
-            or run.get("milestones", {}).get("stairs_down_found")
+    has_stairs = bool(
+        run.get("stairs_down_found")
+        or (
+            isinstance(run.get("milestones"), dict)
+            and run["milestones"].get("stairs_down_found")
         )
-        else 0.0
+        or d > 1.0
+        or "'>'" in str(run.get("summary_digest", ""))
     )
+    stairs_bonus = 0.20 if has_stairs else 0.0
     tiles = float(
         run.get(
             "unique_tiles",
@@ -214,7 +219,7 @@ def evaluate_paired_hypothesis(
     baseline_runs: list[dict[str, Any]],
     alpha: float = 0.05,
     benchmark: str = "nethack",
-    mode: str = "FUNC_MOD_ADD",
+    mode: str = "WRITE",
 ) -> dict[str, Any]:
     """
     Evaluates a candidate policy batch against the baseline batch on triggered seeds.
@@ -312,7 +317,7 @@ def evaluate_paired_hypothesis(
 
     # Structural refactoring: sole purpose is code modularization into skills without regression.
     # Behavioral parity gate: allows neutral seed variance but prevents catastrophic regression.
-    if mode == "STRUCTURAL_REFACTOR":
+    if str(mode).upper() in ("REFACTOR", "STRUCTURAL_REFACTOR", "STRUCTURAL_REWRITE"):
         refactor_reasons: list[str] = []
         if mean_d < -0.05:
             refactor_reasons.append(f"Regressive mean delta ({mean_d:+.3f})")

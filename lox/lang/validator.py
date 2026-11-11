@@ -17,6 +17,27 @@ class PolicyValidationError(Exception):
     """Raised when policy or macro code contains syntax errors or forbidden sandbox escapes."""
 
 
+MODE_ALIASES: dict[str, str] = {
+    "CREATE": "CREATE",
+    "FULL_WRITE": "CREATE",
+    "WRITE": "WRITE",
+    "FUNC_MOD_ADD": "WRITE",
+    "REFACTOR": "REFACTOR",
+    "STRUCTURAL_REFACTOR": "REFACTOR",
+    "STRUCTURAL_REWRITE": "REFACTOR",
+    "PARAM_TUNE": "PARAM_TUNE",
+    "MACRO_WRITE": "MACRO_WRITE",
+}
+
+
+def normalize_mode(mode: str | None) -> str:
+    """Normalizes legacy or lowercase mode names to canonical (`CREATE`, `WRITE`, `REFACTOR`, `PARAM_TUNE`, `MACRO_WRITE`)."""
+    if not mode:
+        return "WRITE"
+    u = str(mode).strip().upper()
+    return MODE_ALIASES.get(u, u)
+
+
 ALLOWED_IMPORT_MODULES: frozenset[str] = frozenset(
     {
         "math",
@@ -256,8 +277,42 @@ def splice_functions_into_policy(
                 self_attrs_referenced.add(sub.attr)
 
     patch_methods: dict[str, ast.FunctionDef] = {}
+    patch_class_assigns: dict[str, ast.stmt] = {}
     patch_top_funcs: dict[str, ast.FunctionDef] = {}
     patch_top_extras: list[ast.stmt] = []
+
+    def _assign_target_name(stmt: ast.stmt) -> str | None:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            t = stmt.targets[0]
+            if isinstance(t, ast.Name):
+                return t.id
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            return stmt.target.id
+        return None
+
+    def _dedup_assigns_keep_last(stmts: list[ast.stmt]) -> list[ast.stmt]:
+        last_idx_by_name: dict[str, int] = {}
+        seen_imports: set[str] = set()
+        for idx, st in enumerate(stmts):
+            nm = _assign_target_name(st)
+            if nm is not None:
+                last_idx_by_name[nm] = idx
+        cleaned: list[ast.stmt] = []
+        for idx, st in enumerate(stmts):
+            nm = _assign_target_name(st)
+            if nm is not None and last_idx_by_name.get(nm) != idx:
+                continue
+            if isinstance(st, (ast.Import, ast.ImportFrom)):
+                imp_src = ast.unparse(st).strip()
+                if imp_src in seen_imports:
+                    continue
+                seen_imports.add(imp_src)
+            cleaned.append(st)
+        return cleaned
+
+    base_tree.body = _dedup_assigns_keep_last(base_tree.body)
+    if target_class is not None:
+        target_class.body = _dedup_assigns_keep_last(target_class.body)
 
     for node in patch_tree.body:
         if isinstance(node, ast.ClassDef):
@@ -268,10 +323,14 @@ def splice_functions_into_policy(
                     if isinstance(item, ast.FunctionDef):
                         patch_methods[item.name] = item
                     elif isinstance(item, (ast.Assign, ast.AnnAssign)):
-                        target_class.body.insert(0, item)
+                        c_nm = _assign_target_name(item)
+                        if c_nm is not None:
+                            patch_class_assigns[c_nm] = item
+                        else:
+                            target_class.body.insert(0, item)
             else:
                 patch_top_extras.append(node)
-        elif isinstance(node, ast.FunctionDef):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             has_self = bool(node.args.args and node.args.args[0].arg == "self")
             if has_self and target_class is not None:
                 patch_methods[node.name] = node
@@ -306,7 +365,20 @@ def splice_functions_into_policy(
                 base_tree.body.append(fn_node)
         return ast.unparse(base_tree), changed
 
-    # Merge any top-level imports, constants, or helper classes before target_class
+    # Merge any class-level assignments in-place onto target_class.body
+    if patch_class_assigns:
+        existing_cls_assigns = {
+            _assign_target_name(st): idx
+            for idx, st in enumerate(target_class.body)
+            if _assign_target_name(st) is not None
+        }
+        for c_nm, c_stmt in reversed(list(patch_class_assigns.items())):
+            if c_nm in existing_cls_assigns:
+                target_class.body[existing_cls_assigns[c_nm]] = c_stmt
+            else:
+                target_class.body.insert(0, c_stmt)
+
+    # Merge any top-level imports, constants, or helper classes before target_class (replacing constants in-place!)
     existing_top_src = {
         ast.unparse(stmt).strip()
         for stmt in base_tree.body
@@ -317,14 +389,29 @@ def splice_functions_into_policy(
         for idx, stmt in enumerate(base_tree.body)
         if isinstance(stmt, ast.ClassDef)
     }
+    existing_top_assigns = {
+        _assign_target_name(stmt): idx
+        for idx, stmt in enumerate(base_tree.body)
+        if _assign_target_name(stmt) is not None
+    }
     for extra in reversed(patch_top_extras):
         if isinstance(extra, ast.ClassDef):
             if extra.name in existing_top_classes:
                 base_tree.body[existing_top_classes[extra.name]] = extra
             else:
                 base_tree.body.insert(0, extra)
-        elif ast.unparse(extra).strip() not in existing_top_src:
-            base_tree.body.insert(0, extra)
+        else:
+            t_nm = _assign_target_name(extra)
+            if t_nm is not None and t_nm in existing_top_assigns:
+                base_tree.body[existing_top_assigns[t_nm]] = extra
+            elif ast.unparse(extra).strip() not in existing_top_src:
+                base_tree.body.insert(0, extra)
+                if t_nm is not None:
+                    existing_top_assigns = {
+                        _assign_target_name(s): i
+                        for i, s in enumerate(base_tree.body)
+                        if _assign_target_name(s) is not None
+                    }
 
     # Compute which methods in patch_methods are genuinely new or modified compared to target_class
     existing_methods: dict[str, ast.FunctionDef] = {
@@ -425,14 +512,217 @@ def splice_functions_into_policy(
             patch_methods.keys()
         )
 
-    # When a caller entrypoint (`run`/`step`/`act`) was modified alongside specific subroutines,
+    # When a caller entrypoint (`run`/`step`/`act`/`dispatch`) was modified alongside specific subroutines,
     # exclude root entrypoints from `changed_names` so conditional trigger filtering tracks the subroutines!
-    root_entrypoints = {"run", "step", "act", "__init__"}
+    root_entrypoints = {"run", "step", "act", "dispatch", "step_dispatch", "__init__"}
     non_root_changed = [fn for fn in changed_names if fn not in root_entrypoints]
     if non_root_changed:
         changed_names = non_root_changed
 
     return ast.unparse(base_tree), changed_names
+
+
+def prune_extracted_skill_functions(
+    policy_code: str, skill_code: str
+) -> tuple[str, list[str]]:
+    """
+    During `REFACTOR` mode, removes top-level functions or `Policy` methods from `policy_code`
+    that were extracted into `skill_code` and are either imported from `skills.*`
+    or no longer called directly in `policy_code`.
+    Returns `(pruned_policy_code, pruned_fn_names)`.
+    """
+    if not policy_code or not skill_code:
+        return policy_code, []
+    try:
+        pol_tree = ast.parse(policy_code)
+        skl_tree = ast.parse(skill_code)
+    except Exception:
+        return policy_code, []
+
+    skill_fn_names = {
+        n.name
+        for n in skl_tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if not skill_fn_names:
+        return policy_code, []
+
+    imported_names: set[str] = set()
+    for node in pol_tree.body:
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "skills"
+        ):
+            for alias in node.names:
+                imported_names.add(alias.name)
+                if alias.asname:
+                    imported_names.add(alias.asname)
+
+    called_bare_names: set[str] = set()
+    called_self_attrs: set[str] = set()
+    for node in pol_tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in skill_fn_names
+        ):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                if isinstance(sub.func, ast.Name):
+                    called_bare_names.add(sub.func.id)
+                elif (
+                    isinstance(sub.func, ast.Attribute)
+                    and isinstance(sub.func.value, ast.Name)
+                    and sub.func.value.id == "self"
+                ):
+                    called_self_attrs.add(sub.func.attr)
+
+    pruned_names: list[str] = []
+    new_body: list[ast.stmt] = []
+    for node in pol_tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in skill_fn_names
+        ):
+            if node.name in imported_names or node.name not in called_bare_names:
+                pruned_names.append(node.name)
+                continue
+        elif isinstance(node, ast.ClassDef) and node.name in ("Policy", "Agent"):
+            new_cls_body: list[ast.stmt] = []
+            for item in node.body:
+                if (
+                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name in skill_fn_names
+                    and item.name
+                    not in (
+                        "run",
+                        "step",
+                        "act",
+                        "dispatch",
+                        "step_dispatch",
+                        "__init__",
+                    )
+                ):
+                    if item.name not in called_self_attrs:
+                        pruned_names.append(item.name)
+                        continue
+                new_cls_body.append(item)
+            node.body = new_cls_body or [ast.Pass()]
+        new_body.append(node)
+
+    pol_tree.body = new_body
+    return ast.unparse(pol_tree), pruned_names
+
+
+def audit_policy_ast_hygiene(policy_code: str) -> list[str]:
+    """
+    Performs a zero-heuristic static AST hygiene audit on `policy_code`, detecting:
+    1. Duplicate top-level variable or function definitions
+    2. Duplicate class-level attribute or method definitions
+    3. Name shadowing between module-level functions and `Policy` methods with mismatched arity
+    4. Dead/unreferenced helper methods on `Policy`
+    """
+    if not policy_code or not policy_code.strip():
+        return []
+    try:
+        tree = ast.parse(policy_code)
+    except Exception:
+        return []
+
+    warnings: list[str] = []
+    top_assign_counts: dict[str, int] = {}
+    top_fn_counts: dict[str, int] = {}
+    top_fn_arity: dict[str, int] = {}
+
+    policy_cls: ast.ClassDef | None = None
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            nm = node.targets[0].id
+            top_assign_counts[nm] = top_assign_counts.get(nm, 0) + 1
+        elif isinstance(node, ast.FunctionDef):
+            top_fn_counts[node.name] = top_fn_counts.get(node.name, 0) + 1
+            top_fn_arity[node.name] = len(node.args.args)
+        elif isinstance(node, ast.ClassDef) and node.name in ("Policy", "Agent"):
+            policy_cls = node
+
+    dup_top = [f"`{k}` ({v}x)" for k, v in top_assign_counts.items() if v > 1]
+    if dup_top:
+        warnings.append(
+            f"Duplicate top-level constant definitions (later overwrites earlier): {', '.join(dup_top)}"
+        )
+
+    dup_top_fns = [f"`{k}` ({v}x)" for k, v in top_fn_counts.items() if v > 1]
+    if dup_top_fns:
+        warnings.append(
+            f"Duplicate top-level function definitions: {', '.join(dup_top_fns)}"
+        )
+
+    if policy_cls is not None:
+        cls_assign_counts: dict[str, int] = {}
+        cls_methods: dict[str, ast.FunctionDef] = {}
+        cls_method_counts: dict[str, int] = {}
+        for item in policy_cls.body:
+            if (
+                isinstance(item, ast.Assign)
+                and len(item.targets) == 1
+                and isinstance(item.targets[0], ast.Name)
+            ):
+                nm = item.targets[0].id
+                cls_assign_counts[nm] = cls_assign_counts.get(nm, 0) + 1
+            elif isinstance(item, ast.FunctionDef):
+                cls_methods[item.name] = item
+                cls_method_counts[item.name] = cls_method_counts.get(item.name, 0) + 1
+
+        dup_cls_assigns = [
+            f"`Policy.{k}` ({v}x)" for k, v in cls_assign_counts.items() if v > 1
+        ]
+        if dup_cls_assigns:
+            warnings.append(
+                f"Duplicate class attribute assignments: {', '.join(dup_cls_assigns)}"
+            )
+
+        dup_cls_methods = [
+            f"`Policy.{k}` ({v}x)" for k, v in cls_method_counts.items() if v > 1
+        ]
+        if dup_cls_methods:
+            warnings.append(
+                f"Duplicate class method definitions: {', '.join(dup_cls_methods)}"
+            )
+
+        # Check shadowing between top-level functions and Policy methods
+        for m_name, m_node in cls_methods.items():
+            if m_name in top_fn_arity:
+                m_non_self = len([a for a in m_node.args.args if a.arg != "self"])
+                t_arity = top_fn_arity[m_name]
+                warnings.append(
+                    f"Name shadowing: `{m_name}` is defined both as a top-level function ({t_arity} arg(s)) "
+                    f"and as `Policy.{m_name}(self, ...)` ({m_non_self} non-self arg(s)). Consolidate to avoid calling the wrong version."
+                )
+
+        # Check dead/unreferenced methods on Policy
+        called_attrs: set[str] = set()
+        for sub in ast.walk(policy_cls):
+            if (
+                isinstance(sub, ast.Attribute)
+                and isinstance(sub.value, ast.Name)
+                and sub.value.id == "self"
+            ):
+                called_attrs.add(sub.attr)
+        dead_methods = [
+            m_name
+            for m_name in cls_methods
+            if m_name not in ("run", "step", "act", "__init__")
+            and m_name not in called_attrs
+        ]
+        if dead_methods:
+            warnings.append(
+                f"Dead/unreferenced methods on `Policy` (never accessed via `self.<method>`): {', '.join(f'`{m}`' for m in dead_methods)}"
+            )
+
+    return warnings
 
 
 def check_macro_contracts(policy_code: str, macros_code: str) -> list[str]:

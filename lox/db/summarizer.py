@@ -53,10 +53,14 @@ def summarize_episode_ticks(
     visited_positions: set[tuple[int, int]] = set()
     max_composite_progress = -1.0
     last_progress_turn = 0
+    action_counts: Counter[str] = Counter()
 
     for t in ticks:
         d = int(t.get("depth", 1))
         turn = int(t.get("turn", 0))
+        act_name = str(t.get("action_name", "")).strip()
+        if act_name:
+            action_counts[act_name] += 1
         ac = int(t.get("ac", 10))
         xl = int(t.get("xp_level", 1))
         cur_hp = int(t.get("hp", 0))
@@ -393,6 +397,7 @@ def summarize_episode_ticks(
         "stagnation_turns": stagnation_turns,
         "top_stagnation_fn": top_stagnation_fn,
         "stagnation_fn_turns": stagnation_fn_turns,
+        "action_counts": dict(action_counts.most_common(40)),
     }
     return summary_digest, game_log, milestones
 
@@ -674,6 +679,14 @@ def build_batch_contrast_digest(
     if not runs:
         return "No runs recorded yet."
 
+    clean_runs = [
+        r
+        for r in runs
+        if not r.get("is_shard") and not str(r.get("run_id", "")).startswith("shard_")
+    ]
+    if clean_runs:
+        runs = clean_runs
+
     outliers = [r for r in runs if r.get("is_outlier_good")]
     normals = [r for r in runs if not r.get("is_outlier_good")]
 
@@ -718,6 +731,128 @@ def build_batch_contrast_digest(
         f"{k}: {v} ({v * 100.0 / len(runs):.1f}%)" for k, v in end_counts.most_common(5)
     )
     lines.append(f"\n- **Termination Breakdown**: {top_ends}")
+
+    # Macro-Category Binding Constraints Rollup & Depth-Tier Mortality Matrix
+    macro_cats: Counter[str] = Counter()
+    combat_specialist_counts: Counter[str] = Counter()
+    friendly_fire_deaths = 0
+    hostile_combat_deaths = 0
+    tier_deaths: dict[str, Counter[str]] = {
+        "Dlvl 1-3 (Early)": Counter(),
+        "Dlvl 4-7 (Mid-Early / Mines)": Counter(),
+        "Dlvl 8+ (Deep Frontier)": Counter(),
+    }
+    tier_totals: Counter[str] = Counter()
+
+    _PET_PEACEFUL_KEYWORDS = (
+        "little dog",
+        "dog",
+        "large dog",
+        "kitten",
+        "housecat",
+        "large cat",
+        "pony",
+        "horse",
+        "warhorse",
+        "watchman",
+        "watch captain",
+        "shopkeeper",
+        "priest",
+        "aligned priest",
+        "oracle",
+    )
+
+    for r in runs:
+        er = str(r.get("end_reason", "ended")).strip()
+        er_l = er.lower()
+        d_msg_l = str(r.get("death_message", "")).lower()
+        comb_l = f"{er_l} {d_msg_l}"
+        last_fn = str(r.get("last_active_function", "root") or "root")
+        d_val = int(r.get("depth", r.get("max_depth", 1)) or 1)
+
+        if d_val <= 3:
+            tier_key = "Dlvl 1-3 (Early)"
+        elif d_val <= 7:
+            tier_key = "Dlvl 4-7 (Mid-Early / Mines)"
+        else:
+            tier_key = "Dlvl 8+ (Deep Frontier)"
+        tier_totals[tier_key] += 1
+
+        if er_l == "max_steps":
+            cat = "Step Truncation (max_steps)"
+        elif "starv" in comb_l or "faint" in comb_l or "lack of food" in comb_l:
+            cat = "Starvation / Fainting"
+        elif (
+            "food poisoning" in comb_l
+            or "tainted" in comb_l
+            or "illness" in comb_l
+            or "diseased" in comb_l
+            or "poisoned by a rotted" in comb_l
+        ):
+            cat = "Illness / Tainted Corpse / Poison"
+        elif (
+            "trap" in comb_l
+            or "dart" in comb_l
+            or "falling rock" in comb_l
+            or "land mine" in comb_l
+            or "rolling boulder" in comb_l
+            or "drown" in comb_l
+            or "lava" in comb_l
+            or "boiling" in comb_l
+        ):
+            cat = "Traps / Environment"
+        elif (
+            "killed by" in comb_l
+            or "petrified" in comb_l
+            or "turned to stone" in comb_l
+            or "slime" in comb_l
+            or "explosion" in comb_l
+        ):
+            cat = "Combat / Monster Deaths"
+            combat_specialist_counts[last_fn] += 1
+            if any(pk in comb_l for pk in _PET_PEACEFUL_KEYWORDS):
+                friendly_fire_deaths += 1
+            else:
+                hostile_combat_deaths += 1
+        elif er_l == "ascended":
+            cat = "Ascended"
+        else:
+            cat = "Other / Misc"
+
+        macro_cats[cat] += 1
+        tier_deaths[tier_key][er] += 1
+
+    lines.append("\n### 🎯 Macro-Category Binding Constraints Rollup:")
+    for cat_name, cat_cnt in macro_cats.most_common():
+        cat_pct = cat_cnt * 100.0 / max(1, len(runs))
+        extra = ""
+        if cat_name == "Combat / Monster Deaths" and cat_cnt > 0:
+            spec_str = ", ".join(
+                f"`{fn}`: {c}" for fn, c in combat_specialist_counts.most_common(4)
+            )
+            extra = (
+                f" — Hostile: {hostile_combat_deaths}, "
+                f"Pet/Peaceful Friendly-Fire: {friendly_fire_deaths} "
+                f"| Active Specialist at Death: [{spec_str}]"
+            )
+        lines.append(f"- **{cat_name}**: {cat_cnt}/{len(runs)} ({cat_pct:.1f}%){extra}")
+
+    tier_lines = []
+    for t_key in (
+        "Dlvl 1-3 (Early)",
+        "Dlvl 4-7 (Mid-Early / Mines)",
+        "Dlvl 8+ (Deep Frontier)",
+    ):
+        t_tot = tier_totals[t_key]
+        if t_tot > 0:
+            top_t_causes = ", ".join(
+                f"{k} ({v})" for k, v in tier_deaths[t_key].most_common(3)
+            )
+            tier_lines.append(
+                f"  * **{t_key}** ({t_tot} runs, {t_tot * 100.0 / len(runs):.1f}%): {top_t_causes}"
+            )
+    if tier_lines:
+        lines.append("- **Depth-Tier Mortality Matrix**:\n" + "\n".join(tier_lines))
 
     # Dynamic failure telemetry & environmental diagnostics
     max_d = int(batch_stats.get("max_depth", 1))
@@ -1019,13 +1154,167 @@ def build_batch_contrast_digest(
     if achieved_ms:
         lines.append(f"- **Ascension & Endgame Milestones**: {', '.join(achieved_ms)}.")
 
+    # Action Primitive & Terminal Inventory Capability Audit
+    batch_action_counts: Counter[str] = Counter()
+    unexplored_primitives = {
+        "QUAFF": ("quaff",),
+        "READ": ("read",),
+        "ZAP": ("zap",),
+        "THROW_OR_FIRE": ("throw", "fire"),
+        "APPLY": ("apply",),
+        "PRAY": ("pray",),
+        "ENGRAVE": ("engrave",),
+        "UP": ("up",),
+    }
+    unused_potions_runs = 0
+    unused_scrolls_runs = 0
+    unused_wands_runs = 0
+    unused_ranged_runs = 0
+    unused_food_runs = 0
+    lethal_runs = [
+        r for r in runs if str(r.get("end_reason", "")) not in ("max_steps", "ascended")
+    ]
+
+    for r in runs:
+        ms = _extract_run_milestones(r)
+        ac_dict = ms.get("action_counts") or {}
+        for act_k, act_v in ac_dict.items():
+            batch_action_counts[str(act_k).lower()] += int(act_v)
+
+    for r in lethal_runs:
+        ms = _extract_run_milestones(r)
+        fin_inv = str(ms.get("final_inventory", "") or "").lower()
+        if not fin_inv and r.get("ticks"):
+            fin_inv = str((r["ticks"][-1]).get("inventory_summary", "") or "").lower()
+        if "potion" in fin_inv:
+            unused_potions_runs += 1
+        if "scroll" in fin_inv:
+            unused_scrolls_runs += 1
+        if "wand" in fin_inv:
+            unused_wands_runs += 1
+        if any(
+            w in fin_inv
+            for w in (
+                "dagger",
+                "dart",
+                "arrow",
+                "bolt",
+                "spear",
+                "shuriken",
+                "bow",
+                "sling",
+            )
+        ):
+            unused_ranged_runs += 1
+        if any(
+            f in fin_inv
+            for f in (
+                "ration",
+                "lichen",
+                "tripe",
+                "pancake",
+                "wafer",
+                "melon",
+                "apple",
+                "pear",
+            )
+        ):
+            unused_food_runs += 1
+
+    if batch_action_counts:
+        tot_act = max(1, sum(batch_action_counts.values()))
+        top_acts = ", ".join(
+            f"`{k}`: {v:,} ({v * 100.0 / tot_act:.1f}%)"
+            for k, v in batch_action_counts.most_common(8)
+        )
+        zero_caps = []
+        for cap_label, cap_keys in unexplored_primitives.items():
+            cap_total = sum(batch_action_counts.get(k, 0) for k in cap_keys)
+            if cap_total == 0:
+                zero_caps.append(f"`{cap_label}` (0 turns)")
+        lines.append("\n### 🛠️ Action Primitive & Terminal Inventory Capability Audit:")
+        lines.append(f"- **Top Action Primitives Executed**: {top_acts}")
+        if zero_caps:
+            lines.append(
+                f"- **Zero-Usage Tactical/Survival Primitives Across Entire Batch**: {', '.join(zero_caps)}"
+            )
+        if lethal_runs:
+            n_leth = len(lethal_runs)
+            inv_parts = []
+            if unused_potions_runs > 0:
+                inv_parts.append(
+                    f"Potions held at death: {unused_potions_runs}/{n_leth} deaths"
+                )
+            if unused_scrolls_runs > 0:
+                inv_parts.append(
+                    f"Scrolls held at death: {unused_scrolls_runs}/{n_leth} deaths"
+                )
+            if unused_wands_runs > 0:
+                inv_parts.append(
+                    f"Wands held at death: {unused_wands_runs}/{n_leth} deaths"
+                )
+            if unused_ranged_runs > 0:
+                inv_parts.append(
+                    f"Projectiles/Ranged weapons held at death: {unused_ranged_runs}/{n_leth} deaths"
+                )
+            if unused_food_runs > 0:
+                inv_parts.append(
+                    f"Comestibles held at death: {unused_food_runs}/{n_leth} deaths"
+                )
+            if inv_parts:
+                lines.append(
+                    f"- **Unused Inventory Items Carried at Moment of Death**: {' | '.join(inv_parts)}."
+                )
+
+    # 3 Concrete Lethal Pre-Mortem Trace Exemplars
+    if lethal_runs:
+        cause_freq = Counter(str(r.get("end_reason", "ended")) for r in lethal_runs)
+        seen_exemplar_causes: set[str] = set()
+        exemplars: list[dict[str, Any]] = []
+        for r in sorted(
+            lethal_runs,
+            key=lambda x: (
+                cause_freq[str(x.get("end_reason", "ended"))],
+                int(x.get("max_depth", 1)),
+            ),
+            reverse=True,
+        ):
+            c_str = str(r.get("end_reason", "ended"))
+            if c_str not in seen_exemplar_causes or len(exemplars) < 3:
+                exemplars.append(r)
+                seen_exemplar_causes.add(c_str)
+            if len(exemplars) >= 3:
+                break
+
+        if exemplars:
+            lines.append(
+                "\n### 💀 Concrete Lethal Pre-Mortem Trace Exemplars (Final 5 Messages & State):"
+            )
+            for ex in exemplars:
+                ms = _extract_run_milestones(ex)
+                fin_inv = str(ms.get("final_inventory", "") or "")
+                if not fin_inv and ex.get("ticks"):
+                    fin_inv = str((ex["ticks"][-1]).get("inventory_summary", "") or "")
+                g_log = str(ex.get("game_log", "") or "").strip().splitlines()
+                tail_log = (
+                    "\n".join(g_log[-5:]) if g_log else str(ex.get("death_message", ""))
+                )
+                lines.append(
+                    f"- **Run `{ex.get('run_id')}`** (Seed={ex.get('seed')}, Dlvl={ex.get('depth', ex.get('max_depth', 1))}, "
+                    f"XL={ex.get('final_xp_level', 1)}, HP={ex.get('final_hp', 0)}/{ex.get('final_max_hp', 0)}, "
+                    f"AC={ex.get('final_ac', 10)}, ActiveFn=`{ex.get('last_active_function', 'root')}`, "
+                    f"End=`{ex.get('end_reason', 'ended')}`):\n"
+                    f"  * **Terminal Inventory**: `{fin_inv[:180] if fin_inv else 'n/a'}`\n"
+                    f"  * **Final 5 Game Log Messages**:\n```text\n{tail_log}\n```"
+                )
+
     # Domain-agnostic chronic stagnation & livelock sink telemetry
     chronic_runs = 0
     recurrence_values: list[float] = []
     for r in runs:
         ms = _extract_run_milestones(r)
-        s_ratio = float(ms.get("stagnation_ratio", 0.0))
-        rec_r = float(ms.get("recurrence_rate", 0.0))
+        s_ratio = float(ms.get("stagnation_ratio") or 0.0)
+        rec_r = float(ms.get("recurrence_rate") or 0.0)
         if s_ratio >= 0.50:
             chronic_runs += 1
         if rec_r > 0.0:
@@ -1033,8 +1322,8 @@ def build_batch_contrast_digest(
 
     chronic_rate = chronic_runs / float(max(1, len(runs)))
     top_livelock_fns = sorted(
-        [fs for fs in fn_stats if fs.get("stagnation_turns", 0) > 0],
-        key=lambda x: x.get("stagnation_turns", 0),
+        [fs for fs in fn_stats if (fs.get("stagnation_turns") or 0) > 0],
+        key=lambda x: x.get("stagnation_turns") or 0,
         reverse=True,
     )[:3]
 
@@ -1053,19 +1342,23 @@ def build_batch_contrast_digest(
             )
         elif avg_rec >= 0.85 and top_livelock_fns:
             primary_sink = top_livelock_fns[0]["function_name"]
+            p_stag_turns = int(top_livelock_fns[0].get("stagnation_turns") or 0)
+            p_stag_share = float(top_livelock_fns[0].get("stagnation_share") or 0.0)
             lines.append(
                 "- **PRIMARY BOTTLENECK: COMPACT LIMIT CYCLE / FRONTIER STALEMATE**:\n"
                 f"  * High recurrence ({avg_rec:.2f}) indicates the hero is ping-ponging between visited tiles or blocked against an obstacle.\n"
-                f"  * Top Function Active during Stagnation: `{primary_sink}` ({top_livelock_fns[0].get('stagnation_turns', 0):,} stalled turns, {top_livelock_fns[0].get('stagnation_share', 0.0) * 100:.1f}% of stalled turns)."
+                f"  * Top Function Active during Stagnation: `{primary_sink}` ({p_stag_turns:,} stalled turns, {p_stag_share * 100:.1f}% of stalled turns)."
             )
         elif top_livelock_fns:
             lines.append(
                 "- **Functions Active During Zero-Progress Stagnation (by turn count)**:"
             )
             for l_fs in top_livelock_fns:
+                l_turns = int(l_fs.get("stagnation_turns") or 0)
+                l_share = float(l_fs.get("stagnation_share") or 0.0)
                 lines.append(
-                    f"  * `{l_fs['function_name']}`: {l_fs.get('stagnation_turns', 0):,} stagnation turns "
-                    f"({l_fs.get('stagnation_share', 0.0) * 100:.1f}% of stalled turns in batch)"
+                    f"  * `{l_fs['function_name']}`: {l_turns:,} stagnation turns "
+                    f"({l_share * 100:.1f}% of stalled turns in batch)"
                 )
 
     # Sample top 2 Outlier Good Run summaries right in the digest

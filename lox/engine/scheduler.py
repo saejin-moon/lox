@@ -1,16 +1,36 @@
 """
 Hybrid Mode Scheduler (`ModeScheduler`).
-Schedules the 4 policy modification modes (`FULL_WRITE`, `FUNC_MOD_ADD`, `PARAM_TUNE`, `MACRO_WRITE`):
-1. Generation 0 (or empty policy): `FULL_WRITE`
-2. Configurable cycle (`func_mod_interval=3` -> `PARAM_TUNE`, `macro_interval=5` -> `MACRO_WRITE`)
-3. Also tracks Extreme-Value UCB bandit credit (`record_outcome`) so mode selection can
-   dynamically adapt based on empirical progression yield per compute minute.
+Schedules the 3 core policy synthesis modes (`CREATE`, `WRITE`, `REFACTOR`) plus optional `PARAM_TUNE` / `MACRO_WRITE`:
+1. Generation 0 (or empty policy): `CREATE` (formerly `FULL_WRITE`)
+2. Focused synthesis / modification: `WRITE` (formerly `FUNC_MOD_ADD`)
+3. Modular skill extraction when `policy.py` grows large: `REFACTOR` (formerly `STRUCTURAL_REFACTOR`)
+4. Optional `PARAM_TUNE` / `MACRO_WRITE` at configured intervals.
 """
 
 from __future__ import annotations
 
 import math
 from collections import deque
+
+MODE_ALIASES: dict[str, str] = {
+    "CREATE": "CREATE",
+    "FULL_WRITE": "CREATE",
+    "WRITE": "WRITE",
+    "FUNC_MOD_ADD": "WRITE",
+    "REFACTOR": "REFACTOR",
+    "STRUCTURAL_REFACTOR": "REFACTOR",
+    "STRUCTURAL_REWRITE": "REFACTOR",
+    "PARAM_TUNE": "PARAM_TUNE",
+    "MACRO_WRITE": "MACRO_WRITE",
+}
+
+
+def normalize_mode(mode: str | None) -> str:
+    """Normalizes legacy or lowercase mode names to canonical (`CREATE`, `WRITE`, `REFACTOR`, `PARAM_TUNE`, `MACRO_WRITE`)."""
+    if not mode:
+        return "WRITE"
+    u = str(mode).strip().upper()
+    return MODE_ALIASES.get(u, u)
 
 
 class ModeScheduler:
@@ -26,23 +46,23 @@ class ModeScheduler:
         self.macro_every = int(macro_every)
         self.use_bandit_after_gen = int(use_bandit_after_gen)
         self.history: dict[str, deque[float]] = {
-            "FUNC_MOD_ADD": deque(maxlen=10),
+            "WRITE": deque(maxlen=10),
             "PARAM_TUNE": deque(maxlen=10),
             "MACRO_WRITE": deque(maxlen=10),
-            "STRUCTURAL_REFACTOR": deque(maxlen=10),
+            "REFACTOR": deque(maxlen=10),
         }
         self.counts: dict[str, int] = {
-            "FUNC_MOD_ADD": 0,
+            "WRITE": 0,
             "PARAM_TUNE": 0,
             "MACRO_WRITE": 0,
-            "STRUCTURAL_REFACTOR": 0,
+            "REFACTOR": 0,
         }
         self._func_mods_since_tune = 0
         self._promoted_since_tune = 0
         self._gens_since_macro = 0
         self._last_tune_gen = 0
         self._last_macro_gen = 0
-        self.gens_since_refactor = 0
+        self.gens_since_refactor = 999
 
     def select_mode(
         self,
@@ -54,24 +74,19 @@ class ModeScheduler:
         policy_line_count: int = 0,
     ) -> str:
         if forced_mode:
-            return forced_mode.upper()
+            return normalize_mode(forced_mode)
 
         if generation == 0 or not has_policy:
             self._promoted_since_tune = 1
             self.gens_since_refactor = 0
-            return "FULL_WRITE"
+            return "CREATE"
 
         self.gens_since_refactor += 1
 
-        if policy_line_count >= 550 and self.gens_since_refactor >= 5:
+        if policy_line_count >= 450 and self.gens_since_refactor >= 4:
             self.gens_since_refactor = 0
-            self.counts["STRUCTURAL_REFACTOR"] += 1
-            return "STRUCTURAL_REFACTOR"
-
-        if consecutive_failures > 0 and consecutive_failures % 3 == 0:
-            self.gens_since_refactor = 0
-            self.counts["STRUCTURAL_REFACTOR"] += 1
-            return "STRUCTURAL_REFACTOR"
+            self.counts["REFACTOR"] += 1
+            return "REFACTOR"
 
         self._gens_since_macro += 1
 
@@ -113,7 +128,7 @@ class ModeScheduler:
         # Optional Extreme-Value UCB bandit override after sufficient warmup generations
         total_pulls = sum(self.counts.values())
         if generation >= self.use_bandit_after_gen and total_pulls >= 6:
-            candidates = ["FUNC_MOD_ADD"]
+            candidates = ["WRITE"]
             if (
                 self.macro_every > 0
                 and self._gens_since_macro >= max(6, self.macro_every)
@@ -125,7 +140,7 @@ class ModeScheduler:
             max_credit = max(
                 (max(self.history[m]) if self.history[m] else 0.0) for m in candidates
             )
-            best_m = "FUNC_MOD_ADD"
+            best_m = "WRITE"
             best_ucb = -1e9
             for m in candidates:
                 q_m = max(self.history[m]) if self.history[m] else 0.1
@@ -138,7 +153,7 @@ class ModeScheduler:
                     best_ucb = ucb
                     best_m = m
             self.counts[best_m] += 1
-            if best_m == "FUNC_MOD_ADD":
+            if best_m == "WRITE":
                 self._func_mods_since_tune += 1
             elif best_m == "PARAM_TUNE":
                 self._func_mods_since_tune = 0
@@ -150,10 +165,10 @@ class ModeScheduler:
             return best_m
 
         self._func_mods_since_tune += 1
-        self.counts["FUNC_MOD_ADD"] += 1
-        return "FUNC_MOD_ADD"
+        self.counts["WRITE"] += 1
+        return "WRITE"
 
-    def record_promotion(self, mode: str = "FUNC_MOD_ADD") -> None:
+    def record_promotion(self, mode: str = "WRITE") -> None:
         """Records that a candidate policy was promoted, enabling PARAM_TUNE."""
         self._promoted_since_tune += 1
 
@@ -164,9 +179,10 @@ class ModeScheduler:
         wall_sec: float,
         passed: bool = False,
     ) -> None:
-        if passed and mode in ("FUNC_MOD_ADD", "STRUCTURAL_REFACTOR", "FULL_WRITE"):
+        canon = normalize_mode(mode)
+        if passed and canon in ("WRITE", "REFACTOR", "CREATE"):
             self._promoted_since_tune += 1
-        if mode in self.history:
+        if canon in self.history:
             minutes = max(0.05, wall_sec / 60.0)
             credit = max(0.0, float(mean_delta)) / minutes
-            self.history[mode].append(credit)
+            self.history[canon].append(credit)

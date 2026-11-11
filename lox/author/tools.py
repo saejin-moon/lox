@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 
 from lox.author.prompts import FULL_ACTION_DOCS, POLICY_LANG_DOCS
+from lox.core.contracts import CandidatePackage
 from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db
@@ -28,7 +29,13 @@ from lox.db.shards import extract_shards_from_runs
 from lox.env.harness import NetHackHarness
 from lox.lang.compiler import compile_policy_package
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
-from lox.lang.validator import is_ast_equivalent, splice_functions_into_policy
+from lox.lang.validator import (
+    audit_policy_ast_hygiene,
+    is_ast_equivalent,
+    normalize_mode,
+    prune_extracted_skill_functions,
+    splice_functions_into_policy,
+)
 
 
 def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
@@ -76,13 +83,8 @@ class AuthorToolRegistry:
         self.benchmark = str(benchmark)
         self.max_steps = max_steps
         self.current_policy_code: str = ""
-        self.last_passed_code: str = ""
-        self.last_passed_skill_name: str | None = None
-        self.last_passed_skill_code: str | None = None
-        self.best_pilot_code: str = ""
-        self.best_pilot_skill_name: str | None = None
-        self.best_pilot_skill_code: str | None = None
-        self.best_pilot_delta: float = -1e9
+        self.last_passed_pkg: CandidatePackage = CandidatePackage()
+        self.best_pilot_pkg: CandidatePackage = CandidatePackage()
         self.pool: Any = None
         self.baseline_runs: list[dict[str, Any]] = []
         self.pilot_runs_used: int = 0
@@ -94,6 +96,63 @@ class AuthorToolRegistry:
         self.last_base_depths: list[float] = []
         self.skills: dict[str, str] = {}
         self.generation: int = 0
+        self.mode: str = "WRITE"
+
+    @property
+    def last_passed_code(self) -> str:
+        return self.last_passed_pkg.code
+
+    @last_passed_code.setter
+    def last_passed_code(self, val: str) -> None:
+        self.last_passed_pkg.code = str(val or "")
+
+    @property
+    def last_passed_skill_name(self) -> str | None:
+        return self.last_passed_pkg.skill_name or None
+
+    @last_passed_skill_name.setter
+    def last_passed_skill_name(self, val: str | None) -> None:
+        self.last_passed_pkg.skill_name = str(val or "")
+
+    @property
+    def last_passed_skill_code(self) -> str | None:
+        return self.last_passed_pkg.skill_code or None
+
+    @last_passed_skill_code.setter
+    def last_passed_skill_code(self, val: str | None) -> None:
+        self.last_passed_pkg.skill_code = str(val or "")
+
+    @property
+    def best_pilot_code(self) -> str:
+        return self.best_pilot_pkg.code
+
+    @best_pilot_code.setter
+    def best_pilot_code(self, val: str) -> None:
+        self.best_pilot_pkg.code = str(val or "")
+
+    @property
+    def best_pilot_skill_name(self) -> str | None:
+        return self.best_pilot_pkg.skill_name or None
+
+    @best_pilot_skill_name.setter
+    def best_pilot_skill_name(self, val: str | None) -> None:
+        self.best_pilot_pkg.skill_name = str(val or "")
+
+    @property
+    def best_pilot_skill_code(self) -> str | None:
+        return self.best_pilot_pkg.skill_code or None
+
+    @best_pilot_skill_code.setter
+    def best_pilot_skill_code(self, val: str | None) -> None:
+        self.best_pilot_pkg.skill_code = str(val or "")
+
+    @property
+    def best_pilot_delta(self) -> float:
+        return self.best_pilot_pkg.pilot_delta
+
+    @best_pilot_delta.setter
+    def best_pilot_delta(self, val: float) -> None:
+        self.best_pilot_pkg.pilot_delta = float(val)
 
     def configure_generation(
         self,
@@ -104,6 +163,7 @@ class AuthorToolRegistry:
         skills: dict[str, str] | None = None,
         generation: int = 0,
         benchmark: str | None = None,
+        mode: str = "WRITE",
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
         self.pool = pool
@@ -113,16 +173,12 @@ class AuthorToolRegistry:
         self.pilot_episodes = pilot_episodes
         self.last_pilot_improved = False
         self.last_pilot_summary = ""
-        self.last_passed_code = ""
-        self.last_passed_skill_name = None
-        self.last_passed_skill_code = None
-        self.best_pilot_code = ""
-        self.best_pilot_skill_name = None
-        self.best_pilot_skill_code = None
-        self.best_pilot_delta = -1e9
+        self.last_passed_pkg = CandidatePackage()
+        self.best_pilot_pkg = CandidatePackage()
         self.last_cand_depths = []
         self.last_base_depths = []
         self.generation = int(generation)
+        self.mode = normalize_mode(mode)
         if skills is not None:
             self.skills = dict(skills)
         if benchmark is not None:
@@ -487,8 +543,11 @@ class AuthorToolRegistry:
             and skill_code.strip() == self.last_passed_skill_code.strip()
         )
 
+        has_replay = bool(str(replay_run_id or "").strip())
+
         if (
             not is_macro
+            and not has_replay
             and self.last_passed_code
             and self.last_pilot_improved
             and (
@@ -503,20 +562,6 @@ class AuthorToolRegistry:
                 f"PASSED (cached: {self.last_pilot_summary})",
             )
 
-        if (
-            not is_macro
-            and not smoke_only
-            and self.last_passed_code
-            and self.last_pilot_improved
-            and skill_matches
-        ):
-            return (
-                f"Pilot verification ALREADY PASSED in this generation ({self.last_pilot_summary})! "
-                "The engine has already recorded your passing candidate code. "
-                "DO NOT run further pilot tests. Conclude your turn immediately and output your final ```yaml ... ``` hypothesis and ```python ... ``` code block.",
-                f"PASSED (verified: {self.last_pilot_summary})",
-            )
-
         if is_macro:
             return self._verify_macro_on_real_states(code)
 
@@ -529,6 +574,14 @@ class AuthorToolRegistry:
                 else:
                     spliced_policy = policy_code
                     changed_fns = []
+                if self.mode == "REFACTOR" and skill_code:
+                    spliced_policy, pruned_fns = prune_extracted_skill_functions(
+                        spliced_policy, skill_code
+                    )
+                    if pruned_fns:
+                        changed_fns = [
+                            fn for fn in changed_fns if fn not in set(pruned_fns)
+                        ]
                 # Static reachability check: ensure any non-root method in changed_fns is referenced in spliced_policy
                 if changed_fns:
                     spliced_tree = ast.parse(spliced_policy)
@@ -542,7 +595,15 @@ class AuthorToolRegistry:
                     unreferenced = [
                         fn
                         for fn in changed_fns
-                        if fn not in ("run", "step", "act", "__init__")
+                        if fn
+                        not in (
+                            "run",
+                            "step",
+                            "act",
+                            "__init__",
+                            "dispatch",
+                            "step_dispatch",
+                        )
                         and fn not in called_attrs
                     ]
                     if unreferenced:
@@ -642,6 +703,8 @@ class AuthorToolRegistry:
             sample_acts = " -> ".join(actions_taken[:10])
 
             warn_lines: list[str] = []
+            for h_warn in audit_policy_ast_hygiene(spliced_policy):
+                warn_lines.append(f"- AST HYGIENE WARNING: {h_warn}")
             if locked_door_stalls >= 2:
                 warn_lines.append(
                     f"- DOOR STALL TELEMETRY: Attempted Action.OPEN on locked door {locked_door_stalls} times! "
@@ -680,6 +743,7 @@ class AuthorToolRegistry:
             if (
                 not is_macro
                 and not smoke_only
+                and not has_replay
                 and self.pool is not None
                 and self.pilot_runs_used < self.max_pilot_runs
             ):
@@ -718,7 +782,7 @@ class AuthorToolRegistry:
                             not in str(r.get("summary_digest", "")).lower()
                         )
                     ]
-                    if self.baseline_runs:
+                    if self.baseline_runs and self.mode != "REFACTOR":
                         max_sh = min(40, max(1, target_eps // 3))
                         pilot_shards = extract_shards_from_runs(
                             self.baseline_runs,
@@ -857,6 +921,9 @@ class AuthorToolRegistry:
                 cand_shard_depths: list[float] = []
                 base_shard_depths: list[float] = []
                 deltas: list[float] = []
+                paired_regressions: list[
+                    tuple[float, int, dict[str, Any], dict[str, Any]]
+                ] = []
 
                 for r in p_runs:
                     s = int(r["seed"])
@@ -874,6 +941,7 @@ class AuthorToolRegistry:
                                 wins += 1
                             elif d_val < -1e-6:
                                 losses += 1
+                                paired_regressions.append((d_val, s, r, br))
                             else:
                                 ties += 1
                     else:
@@ -888,6 +956,7 @@ class AuthorToolRegistry:
                                 wins += 1
                             elif d_val < -1e-6:
                                 losses += 1
+                                paired_regressions.append((d_val, s, r, br))
                             else:
                                 ties += 1
 
@@ -977,6 +1046,44 @@ class AuthorToolRegistry:
                         f"seed={b_seed}, Dlvl={b_d}, Steps={b_steps} | Log: {b_glog}"
                     )
 
+                regressions_block = ""
+                if paired_regressions:
+                    reg_lines = []
+                    for d_val, s_id, cand_r, base_r in sorted(
+                        paired_regressions, key=lambda x: x[0]
+                    )[:3]:
+                        b_d_val = base_r.get("max_depth", 1)
+                        b_xl_val = base_r.get("final_xp_level", 1)
+                        b_ac_val = base_r.get("final_ac", 10)
+                        b_st_val = base_r.get("steps", 0)
+                        b_end_val = base_r.get("end_reason", "ended")
+                        c_d_val = cand_r.get("max_depth", 1)
+                        c_xl_val = cand_r.get("final_xp_level", 1)
+                        c_ac_val = cand_r.get("final_ac", 10)
+                        c_st_val = cand_r.get("steps", 0)
+                        c_fn_val = cand_r.get("last_active_function", "root")
+                        c_end_val = cand_r.get("end_reason", "ended")
+                        c_glog_lines = (
+                            str(cand_r.get("game_log", "") or "").strip().splitlines()
+                        )
+                        c_tail = (
+                            " / ".join(c_glog_lines[-3:])
+                            if c_glog_lines
+                            else str(cand_r.get("death_message", ""))
+                        )
+                        if len(c_tail) > 260:
+                            c_tail = "..." + c_tail[-260:]
+                        reg_lines.append(
+                            f"  - Seed {s_id} (Δ={d_val:+.2f}): Baseline [Dlvl={b_d_val}, XL={b_xl_val}, AC={b_ac_val}, Steps={b_st_val}, End='{b_end_val}'] "
+                            f"-> Candidate [Dlvl={c_d_val}, XL={c_xl_val}, AC={c_ac_val}, Steps={c_st_val}, ActiveFn=`{c_fn_val}`, End='{c_end_val}'] | "
+                            f"Candidate Pre-Mortem: {c_tail}"
+                        )
+                    regressions_block = (
+                        "• Paired Seed Regressions (Candidate < Baseline — inspect ticks via `latest_pilot_ticks`):\n"
+                        + "\n".join(reg_lines)
+                        + "\n"
+                    )
+
                 if self.baseline_runs and not p_runs:
                     improved = False
                     raw_run_cnt = pilot_res.get("raw_episodes_run", 0)
@@ -996,31 +1103,57 @@ class AuthorToolRegistry:
                     else:
                         p_sign = 1.0
 
-                    # Tie-aware directional pilot validation
-                    improved = (
-                        wins > losses
-                        and mean_delta >= -1e-6
-                        and (
-                            p_sign <= 0.20
-                            or delta_depth >= 0.04
-                            or wins >= losses + 2
-                            or mean_delta >= 0.03
+                    if self.mode == "REFACTOR":
+                        crashes = sum(
+                            1 for r in p_runs if r.get("end_reason") == "crash"
                         )
-                    )
-                    summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f} (p_sign={p_sign:.3f})"
-                    paired_line = (
-                        f"• Paired vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | "
-                        f"Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth}) | "
-                        f"Sign-Test p: {p_sign:.4f}\n"
-                    )
-                    verdict_line = (
-                        ">>> PILOT VERDICT: POSITIVE DIRECTIONAL PILOT SIGNAL over baseline."
-                        if improved
-                        else (
-                            f">>> PILOT VERDICT: INSUFFICIENT OR FLAT SIGNAL VS BASELINE ({wins}W/{losses}L, p_sign={p_sign:.3f}). "
-                            "STOP! Do NOT submit noisy code. Refine your code or call query_db/query_wiki before submitting!"
+                        max_allowed_losses = wins + max(2, int(len(p_runs) * 0.10))
+                        improved = (
+                            crashes == 0
+                            and mean_delta >= -0.05
+                            and losses <= max_allowed_losses
                         )
-                    )
+                        summary_short = (
+                            f"Parity {wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f}"
+                        )
+                        paired_line = (
+                            f"• Refactor Behavioral Parity vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | "
+                            f"Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth})\n"
+                        )
+                        verdict_line = (
+                            ">>> PILOT VERDICT: REFACTOR BEHAVIORAL PARITY VERIFIED (0 crashes, non-inferior progression)."
+                            if improved
+                            else (
+                                f">>> PILOT VERDICT: REFACTOR PARITY FAILED ({wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f}, crashes={crashes}). "
+                                "Ensure your extracted skill module preserves exact baseline behavior!"
+                            )
+                        )
+                    else:
+                        # Tie-aware directional pilot validation
+                        improved = (
+                            wins > losses
+                            and mean_delta >= -1e-6
+                            and (
+                                p_sign <= 0.20
+                                or delta_depth >= 0.04
+                                or wins >= losses + 2
+                                or mean_delta >= 0.03
+                            )
+                        )
+                        summary_short = f"{wins}W/{losses}L/{ties}T, Δ={delta_depth:+.2f} (p_sign={p_sign:.3f})"
+                        paired_line = (
+                            f"• Paired vs Baseline: {wins} Wins / {losses} Losses / {ties} Ties | "
+                            f"Δ Depth: {delta_depth:+.2f} (Avg Depth: {c_avg_depth:.2f} vs Baseline: {b_avg_depth:.2f}, Max Depth: {c_max_depth}) | "
+                            f"Sign-Test p: {p_sign:.4f}\n"
+                        )
+                        verdict_line = (
+                            ">>> PILOT VERDICT: POSITIVE DIRECTIONAL PILOT SIGNAL over baseline."
+                            if improved
+                            else (
+                                f">>> PILOT VERDICT: INSUFFICIENT OR FLAT SIGNAL VS BASELINE ({wins}W/{losses}L, p_sign={p_sign:.3f}). "
+                                "STOP! Do NOT submit noisy code. Refine your code or call query_db/query_wiki before submitting!"
+                            )
+                        )
                 else:
                     # In FULL_WRITE (Gen 0) or without existing baseline runs:
                     # Initial policy is valid as long as it executes episodes without crashing!
@@ -1037,25 +1170,27 @@ class AuthorToolRegistry:
                     )
 
                 score_key = float(mean_delta) if deltas else float(delta_depth)
+                cand_pkg = CandidatePackage(
+                    code=code,
+                    skill_name=str(skill_name or ""),
+                    skill_code=str(skill_code or ""),
+                    pilot_delta=score_key,
+                    pilot_summary=summary_short,
+                    improved=improved,
+                    skills_snapshot=dict(cand_skills),
+                )
                 if (
-                    not self.best_pilot_code
-                    or score_key >= self.best_pilot_delta
+                    not self.best_pilot_pkg.is_populated
+                    or score_key >= self.best_pilot_pkg.pilot_delta
                     or improved
                 ):
-                    self.best_pilot_delta = max(self.best_pilot_delta, score_key)
-                    self.best_pilot_code = code
-                    if skill_name and skill_code:
-                        self.best_pilot_skill_name = str(skill_name)
-                        self.best_pilot_skill_code = skill_code
+                    self.best_pilot_pkg = cand_pkg
 
                 if improved:
                     self.last_pilot_improved = True
-                    self.last_passed_code = code
-                    if skill_name and skill_code:
-                        self.last_passed_skill_name = str(skill_name)
-                        self.last_passed_skill_code = skill_code
+                    self.last_passed_pkg = cand_pkg
                 else:
-                    if not self.last_passed_code:
+                    if not self.last_passed_pkg.is_populated:
                         self.last_pilot_improved = False
                 self.last_pilot_summary = summary_short
 
@@ -1097,9 +1232,7 @@ class AuthorToolRegistry:
                         parent_policy_id="none",
                         candidate_policy_id=pilot_cand_id,
                         target_functions=target_fns or [],
-                        runs=[
-                            {k: v for k, v in r.items() if k != "ticks"} for r in p_runs
-                        ],
+                        runs=p_runs,
                         episodes_discarded=pilot_res.get("episodes_discarded", 0),
                         batch_metrics=pilot_res,
                         verdict=pilot_verdict,
@@ -1171,6 +1304,7 @@ class AuthorToolRegistry:
                         if door_stalls > 0
                         else ""
                     )
+                    + (f"{regressions_block}" if regressions_block else "")
                     + f"• Worst / Stalled Pilot Runs:\n{worst_logs_str}\n"
                     f"• Best Pilot Run: {best_log_str}\n"
                     + (f"{research_hints_block}" if research_hints_block else "")

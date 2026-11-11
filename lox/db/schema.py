@@ -275,7 +275,8 @@ WHERE batch_id = (
       AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
     ORDER BY generation DESC, created_at DESC
     LIMIT 1
-);
+)
+AND run_id NOT LIKE 'shard_%';
 
 CREATE OR REPLACE VIEW champion_function_stats AS
 SELECT * FROM function_stats
@@ -299,6 +300,10 @@ WHERE batch_id = (
     ORDER BY created_at DESC
     LIMIT 1
 );
+
+CREATE OR REPLACE VIEW latest_pilot_ticks AS
+SELECT * FROM ticks
+WHERE run_id IN (SELECT run_id FROM latest_pilot_runs);
 """
 
 

@@ -204,12 +204,8 @@ class Policy:
 
 def test_mode_scheduler_and_end_to_end_mock_campaign(tmp_path):
     sched = ModeScheduler(param_tune_every=3, macro_every=5)
-    assert (
-        sched.select_mode(0, has_policy=False, has_tunable_params=False) == "FULL_WRITE"
-    )
-    assert (
-        sched.select_mode(1, has_policy=True, has_tunable_params=True) == "FUNC_MOD_ADD"
-    )
+    assert sched.select_mode(0, has_policy=False, has_tunable_params=False) == "CREATE"
+    assert sched.select_mode(1, has_policy=True, has_tunable_params=True) == "WRITE"
     assert (
         sched.select_mode(3, has_policy=True, has_tunable_params=True) == "PARAM_TUNE"
     )

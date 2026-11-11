@@ -814,14 +814,14 @@ def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
     # 4. ModeScheduler PARAM_TUNE Gating on Promoted Modifications
     sched = ModeScheduler(param_tune_every=2)
     m1 = sched.select_mode(generation=1, has_policy=True, has_tunable_params=True)
-    assert m1 == "FUNC_MOD_ADD"
+    assert m1 == "WRITE"
 
     # Generation 2 without any promotions should NOT tune
     m2 = sched.select_mode(generation=2, has_policy=True, has_tunable_params=True)
-    assert m2 == "FUNC_MOD_ADD"
+    assert m2 == "WRITE"
 
     # After recording a promotion, generation 3 should select PARAM_TUNE
-    sched.record_promotion("FUNC_MOD_ADD")
+    sched.record_promotion("WRITE")
     m3 = sched.select_mode(generation=3, has_policy=True, has_tunable_params=True)
     assert m3 == "PARAM_TUNE"
 
@@ -1066,12 +1066,16 @@ class Policy:
     )
     assert "self.new_attr = 30" in spliced
 
-    # 4. ModeScheduler does not lock into STRUCTURAL_REFACTOR on consecutive_failures == 4
+    # 4. ModeScheduler triggers REFACTOR when policy_line_count >= 450 and gens_since_refactor >= 4
     sched = ModeScheduler(macro_every=0)
-    mode_at_3 = sched.select_mode(generation=3, has_policy=True, consecutive_failures=3)
-    assert mode_at_3 == "STRUCTURAL_REFACTOR"
-    mode_at_4 = sched.select_mode(generation=4, has_policy=True, consecutive_failures=4)
-    assert mode_at_4 != "STRUCTURAL_REFACTOR"
+    mode_at_3 = sched.select_mode(
+        generation=3, has_policy=True, consecutive_failures=3, policy_line_count=500
+    )
+    assert mode_at_3 == "REFACTOR"
+    mode_at_4 = sched.select_mode(
+        generation=4, has_policy=True, consecutive_failures=4, policy_line_count=500
+    )
+    assert mode_at_4 != "REFACTOR"
 
     # 5. AuthorToolRegistry.query_policy_docs("policy") returns current_policy_code
     db_p = str(tmp_path / "pass6_tools.duckdb")

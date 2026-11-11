@@ -16,6 +16,8 @@ from lox.env.actions import normalize_action_to_bytes
 from lox.env.state import (
     _IS_CMAP_LUT,
     _IS_DOORWAY_GLYPH_LUT,
+    _IS_IRON_BARS_OR_TREE_LUT,
+    _IS_OBJECT_LUT,
     _IS_OPEN_DOOR_GLYPH_LUT,
     GameState,
     WorldMemory,
@@ -94,6 +96,7 @@ class NetHackHarness:
         self.current_seed: int = 0
         self.action_bytes = bytearray()
         self.step_byte_offsets: list[int] = []
+        self.prompt_aborts: int = 0
         self._last_raw_tuple: tuple[np.ndarray, ...] = ()
         self.done: bool = False
         self.mem: WorldMemory = WorldMemory()
@@ -152,8 +155,10 @@ class NetHackHarness:
                     b = ASCII_SPACE
                 elif prog[2] == 1:
                     b = ASCII_ESC
+                    self.prompt_aborts += 1
                 elif prog[1] == 1:
                     b = ASCII_N
+                    self.prompt_aborts += 1
                 else:
                     b = ASCII_SPACE
             self.action_bytes.append(b)
@@ -177,6 +182,7 @@ class NetHackHarness:
         )
         self.action_bytes.clear()
         self.step_count = 0
+        self.prompt_aborts = 0
         self.done = False
         self.mem.reset()
 
@@ -314,6 +320,8 @@ class NetHackHarness:
         )
         self.action_bytes.clear()
         self.step_count = 0
+        self.prompt_aborts = 0
+        self.step_byte_offsets = [0]
         self.done = False
         self.mem.reset()
 
@@ -322,6 +330,8 @@ class NetHackHarness:
             len(buf) if stop_at_byte_idx is None else min(len(buf), stop_at_byte_idx)
         )
         bl_idx = self._idx_map["blstats"]
+        glyphs_idx = self._idx_map["glyphs"]
+        chars_idx = self._idx_map["chars"]
         step_ctr = 0
         for i in range(limit):
             b = int(buf[i])
@@ -341,9 +351,9 @@ class NetHackHarness:
             fl = self.mem.get_floor(dnum, dlvl)
             if 0 <= by < 21 and 0 <= bx < 79:
                 fl.visited[by, bx] = True
-                fl.visit_count[by, bx] += 1
-                if fl.remembered_chars[by, bx] == 0:
-                    fl.remembered_chars[by, bx] = ord(".")
+                fl.visit_count[by, sx_clamped := bx] += 1
+                if fl.remembered_chars[by, sx_clamped] == 0:
+                    fl.remembered_chars[by, sx_clamped] = ord(".")
             if b == ord("s"):
                 fl.searched_counts[
                     max(0, by - 1) : min(21, by + 2), max(0, bx - 1) : min(79, bx + 2)
@@ -356,27 +366,28 @@ class NetHackHarness:
                     floor_changed = True
                     self.mem.stair_graph[prev] = now
                     self.mem.stair_graph[now] = prev
-                    st_prev = GameState(obs_tuple, step_count=step_ctr, mem=self.mem)
-                    self.mem.update(st_prev)
 
             in_moveloop = self._in_moveloop(obs_tuple)
             if in_moveloop or floor_changed:
-                glyphs = obs_tuple[self._idx_map["glyphs"]]
-                chars = obs_tuple[self._idx_map["chars"]]
-                y0, y1 = max(0, by - 1), min(21, by + 2)
-                x0, x1 = max(0, bx - 1), min(79, bx + 2)
-                sub_g = glyphs[y0:y1, x0:x1]
-                sub_c = chars[y0:y1, x0:x1]
-                sub_cmap = _IS_CMAP_LUT[sub_g]
-                sub_mask = sub_cmap & (sub_c != 0) & (sub_c != ord(" "))
-                fl.remembered_chars[y0:y1, x0:x1][sub_mask] = sub_c[sub_mask]
-                sub_open_door = sub_cmap & _IS_OPEN_DOOR_GLYPH_LUT[sub_g]
-                fl.remembered_chars[y0:y1, x0:x1][sub_open_door] = ord(".")
-                sub_doorway = sub_cmap & _IS_DOORWAY_GLYPH_LUT[sub_g]
-                fl.door_mask[y0:y1, x0:x1][sub_doorway] = True
+                glyphs = obs_tuple[glyphs_idx]
+                chars = obs_tuple[chars_idx]
+                is_cmap = _IS_CMAP_LUT[glyphs]
+                cmap_mask = is_cmap & (chars != 0) & (chars != ord(" "))
+                fl.remembered_chars[cmap_mask] = chars[cmap_mask]
+                open_door_mask = is_cmap & _IS_OPEN_DOOR_GLYPH_LUT[glyphs]
+                fl.remembered_chars[open_door_mask] = ord(".")
+                impassable_cmap = is_cmap & _IS_IRON_BARS_OR_TREE_LUT[glyphs]
+                fl.remembered_chars[impassable_cmap] = ord("|")
+                doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
+                fl.door_mask[doorway_mask] = True
+                fl.door_mask[is_cmap & (~_IS_DOORWAY_GLYPH_LUT[glyphs])] = False
+                fl.remembered_obj_glyphs[is_cmap] = 0
+                obj_mask = _IS_OBJECT_LUT[glyphs]
+                fl.remembered_obj_glyphs[obj_mask] = glyphs[obj_mask]
 
             if in_moveloop and not self._waiting_for_space(obs_tuple):
                 step_ctr += 1
+                self.step_byte_offsets.append(len(self.action_bytes))
             if self.done:
                 break
 

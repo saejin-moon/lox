@@ -132,12 +132,15 @@ def main() -> None:
         "--mode",
         default=None,
         choices=[
+            "CREATE",
+            "WRITE",
+            "REFACTOR",
             "FULL_WRITE",
             "FUNC_MOD_ADD",
             "PARAM_TUNE",
             "STRUCTURAL_REFACTOR",
         ],
-        help="Optional override to force a specific modification mode",
+        help="Optional override to force a specific modification mode (CREATE, WRITE, REFACTOR)",
     )
     parser.add_argument(
         "--no-early-stop",

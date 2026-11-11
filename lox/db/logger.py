@@ -13,6 +13,11 @@ from typing import Any
 
 import pyarrow as pa
 
+from lox.core.contracts import (
+    EpisodeRun,
+    normalize_episode_run,
+    split_full_and_shard_runs,
+)
 from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
 from lox.db.summarizer import compute_function_stats, mark_outlier_good_runs
 from lox.ui.console import ui
@@ -24,7 +29,7 @@ class BatchDatabaseLogger:
     def __init__(
         self,
         db_path: str = DEFAULT_DB_PATH,
-        max_tick_runs_per_batch: int = 25,
+        max_tick_runs_per_batch: int = 1000,
     ):
         self.db_path = db_path
         self.max_tick_runs_per_batch = max_tick_runs_per_batch
@@ -49,9 +54,18 @@ class BatchDatabaseLogger:
         `batches`, `runs`, `ticks` (tail-sampled), and `function_stats` to DuckDB.
         Returns the computed `function_stats` rows.
         """
-        mark_outlier_good_runs(runs)
+        norm_runs: list[EpisodeRun] = [normalize_episode_run(r) for r in runs]
+        full_runs, _ = split_full_and_shard_runs(norm_runs)
+        stat_runs = full_runs if full_runs else norm_runs
+        mark_outlier_good_runs(stat_runs)
+        for r, er in zip(runs, norm_runs):
+            if r is not er and isinstance(r, dict):
+                r["is_outlier_good"] = er.get("is_outlier_good", False)
+                r["outlier_z_score"] = er.get("outlier_z_score", 0.0)
+                r["batch_percentile"] = er.get("batch_percentile", 0.0)
+        runs = norm_runs
         fn_stats = compute_function_stats(batch_id, generation, runs)
-        outlier_count = sum(1 for r in runs if r.get("is_outlier_good"))
+        outlier_count = sum(1 for r in stat_runs if r.get("is_outlier_good"))
         batch_metrics["outlier_count"] = outlier_count
 
         con = connect_db(self.db_path, read_only=False)
@@ -265,6 +279,24 @@ class BatchDatabaseLogger:
                     )
                     con.unregister("_temp_ticks")
 
+                    # Prune ticks from old, superseded non-champion, non-pilot, non-outlier batches
+                    # so `ticks` stays fast while preserving 100% full ticks for champion, recent, pilot, and outlier runs.
+                    con.execute(
+                        """
+                        DELETE FROM ticks
+                        WHERE run_id NOT IN (SELECT run_id FROM champion_runs)
+                          AND run_id NOT IN (SELECT run_id FROM latest_pilot_runs)
+                          AND run_id NOT IN (
+                              SELECT run_id FROM runs
+                              WHERE is_outlier_good = TRUE
+                                 OR batch_id IN (
+                                     SELECT batch_id FROM batches
+                                     ORDER BY created_at DESC LIMIT 4
+                                 )
+                          )
+                        """
+                    )
+
             if fn_stats:
                 con.execute(
                     "DELETE FROM function_stats WHERE batch_id = ?", (batch_id,)
@@ -319,6 +351,190 @@ class BatchDatabaseLogger:
             con.close()
 
         return fn_stats
+
+    def load_champion_baseline(
+        self, batch_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """
+        Loads the champion baseline package from DuckDB:
+        - Resolves latest promoted batch if `batch_id` is None
+        - Loads policy code, macros code, and registered params
+        - Loads 100% full-episode baseline runs (zero shards) into normalized `EpisodeRun` objects
+        - Populates `ticks` (or step byte offsets) for all runs
+        - Loads function stats and batch stats
+        Returns None if no promoted batches exist.
+        """
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            target_batch_id = batch_id
+            target_gen = 0
+            prom_pol_id = ""
+            prom_policy_code = ""
+            prom_macros_code = ""
+            registered_params: dict[str, Any] = {}
+
+            if target_batch_id is None:
+                prom_row = con.execute(
+                    """
+                    SELECT p.policy_id, p.policy_code, p.macros_code, p.params_json, b.batch_id, b.generation
+                    FROM policies p
+                    JOIN batches b ON b.candidate_policy_id = p.policy_id
+                    WHERE p.is_promoted = TRUE
+                      AND b.mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
+                    ORDER BY b.generation DESC, b.created_at DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not prom_row:
+                    return None
+                (
+                    prom_pol_id,
+                    prom_policy_code,
+                    prom_macros_code,
+                    prom_params_json,
+                    target_batch_id,
+                    target_gen,
+                ) = prom_row
+                if prom_params_json:
+                    try:
+                        registered_params = json.loads(prom_params_json)
+                    except Exception:
+                        registered_params = {}
+            else:
+                pol_row = con.execute(
+                    """
+                    SELECT p.policy_id, p.policy_code, p.macros_code, p.params_json, b.generation
+                    FROM policies p
+                    JOIN batches b ON b.candidate_policy_id = p.policy_id
+                    WHERE b.batch_id = ?
+                    LIMIT 1
+                    """,
+                    (target_batch_id,),
+                ).fetchone()
+                if pol_row:
+                    (
+                        prom_pol_id,
+                        prom_policy_code,
+                        prom_macros_code,
+                        prom_params_json,
+                        target_gen,
+                    ) = pol_row
+                    if prom_params_json:
+                        try:
+                            registered_params = json.loads(prom_params_json)
+                        except Exception:
+                            registered_params = {}
+
+            run_cur = con.execute(
+                """
+                SELECT run_id, seed, depth, max_depth, score, turns, steps, xp_level,
+                       final_hp, max_hp, final_ac, gold, end_reason, death_message,
+                       is_outlier_good, outlier_z_score, batch_percentile,
+                       summary_digest, game_log, triggered_functions, last_active_function,
+                       action_bytes, milestones_json, unique_tiles, pct_wait, pct_search,
+                       starved_with_food, died_unarmored, auto_esc_count,
+                       subgen_preemptions, policy_exceptions
+                FROM runs
+                WHERE batch_id = ? AND run_id NOT LIKE 'shard_%'
+                """,
+                (target_batch_id,),
+            )
+            run_cols = [d[0] for d in run_cur.description]
+            baseline_by_seed: dict[int, EpisodeRun] = {}
+            run_by_id: dict[str, EpisodeRun] = {}
+            for r_tup in run_cur.fetchall():
+                r_dict = dict(zip(run_cols, r_tup))
+                er = normalize_episode_run(r_dict)
+                er["ticks"] = []
+                baseline_by_seed[int(er["seed"])] = er
+                run_by_id[str(er["run_id"])] = er
+
+            if run_by_id:
+                try:
+                    tick_cur = con.execute(
+                        """
+                        SELECT t.run_id, t.step_idx, t.turn, t.depth, t.byte_offset, t.active_function
+                        FROM ticks t
+                        JOIN runs r ON t.run_id = r.run_id
+                        WHERE r.batch_id = ? AND r.run_id NOT LIKE 'shard_%'
+                        ORDER BY t.run_id, t.step_idx
+                        """,
+                        (target_batch_id,),
+                    )
+                    for (
+                        tr_id,
+                        t_step,
+                        t_turn,
+                        t_depth,
+                        t_boff,
+                        t_fn,
+                    ) in tick_cur.fetchall():
+                        rd = run_by_id.get(str(tr_id))
+                        if rd is not None:
+                            rd["ticks"].append(
+                                {
+                                    "step_idx": int(t_step or 0),
+                                    "turn": int(t_turn or 0),
+                                    "depth": int(t_depth or 1),
+                                    "byte_offset": int(t_boff or 0),
+                                    "active_function": str(t_fn or ""),
+                                }
+                            )
+                except Exception:
+                    pass
+
+            baseline_runs = list(baseline_by_seed.values())
+
+            fs_cur = con.execute(
+                """
+                SELECT batch_id, generation, function_name, episodes_triggered,
+                       trigger_rate, total_calls, total_turns_active,
+                       avg_depth_when_triggered, death_rate_while_active,
+                       ochiai_good_run_score, liblit_failure_score,
+                       stagnation_turns, stagnation_share, livelock_score
+                FROM function_stats WHERE batch_id = ?
+                """,
+                (target_batch_id,),
+            )
+            fs_cols = [d[0] for d in fs_cur.description]
+            fn_stats = []
+            for t in fs_cur.fetchall():
+                fs_dict = dict(zip(fs_cols, t))
+                fs_dict["stagnation_turns"] = int(fs_dict.get("stagnation_turns") or 0)
+                fs_dict["stagnation_share"] = float(
+                    fs_dict.get("stagnation_share") or 0.0
+                )
+                fs_dict["livelock_score"] = float(fs_dict.get("livelock_score") or 0.0)
+                fn_stats.append(fs_dict)
+
+            b_cur = con.execute(
+                "SELECT * FROM batches WHERE batch_id = ?",
+                (target_batch_id,),
+            )
+            b_cols = [d[0] for d in b_cur.description]
+            b_row = b_cur.fetchone()
+            batch_stats = dict(zip(b_cols, b_row)) if b_row else {}
+
+            max_gen_row = con.execute("SELECT MAX(generation) FROM batches").fetchone()
+            max_gen = (
+                int(max_gen_row[0])
+                if (max_gen_row and max_gen_row[0] is not None)
+                else int(target_gen or 0)
+            )
+
+            return {
+                "batch_id": target_batch_id,
+                "generation": int(target_gen or 0),
+                "max_generation": max_gen,
+                "policy_id": prom_pol_id,
+                "policy_code": prom_policy_code,
+                "macros_code": prom_macros_code,
+                "params": registered_params,
+                "baseline_runs": baseline_runs,
+                "fn_stats": fn_stats,
+                "batch_stats": batch_stats,
+            }
+        finally:
+            con.close()
 
     def save_policy(
         self,

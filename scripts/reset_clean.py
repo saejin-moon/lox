@@ -43,6 +43,7 @@ def reset_clean(
                 "policies",
                 "experiments",
                 "discoveries",
+                "synthesis_logs",
             ]:
                 con.execute(f"DELETE FROM {table}")
                 print(f"Cleared table `{table}`")

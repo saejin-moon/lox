@@ -22,7 +22,12 @@ from lox.author.tools import OPENAI_TOOL_SPECS, AuthorToolRegistry
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH
 from lox.lang.macros import DEFAULT_MACROS_PATH
-from lox.lang.validator import is_ast_equivalent, splice_functions_into_policy
+from lox.lang.validator import (
+    is_ast_equivalent,
+    normalize_mode,
+    prune_extracted_skill_functions,
+    splice_functions_into_policy,
+)
 from lox.ui.console import ui
 
 load_dotenv()
@@ -474,7 +479,12 @@ class AuthorAgent:
         )
         self._execute_tool_call(1, "query_wiki", {"query": "Excalibur", "top_k": 1})
 
-        if mode == "FULL_WRITE" or not current_policy.strip():
+        canon_mode = (
+            "MACRO_WRITE"
+            if str(mode).strip().upper() == "MACRO_WRITE"
+            else normalize_mode(mode)
+        )
+        if canon_mode == "CREATE" or not current_policy.strip():
             code = """class Policy:
     def __init__(self):
         self.visited = set()
@@ -557,7 +567,7 @@ class AuthorAgent:
             except Exception:
                 pass
             return SynthesisProposal(
-                mode="FULL_WRITE",
+                mode=mode,
                 hypothesis=hyp,
                 raw_code_patch=code,
                 full_policy_code=code,
@@ -566,7 +576,7 @@ class AuthorAgent:
                 tool_calls_made=2,
             )
 
-        if mode == "MACRO_WRITE":
+        if canon_mode == "MACRO_WRITE":
             macro_code = '''def build_walkable_mask(state):
     """Returns a boolean (21, 79) mask of standard walkable floor, corridor, stair, and door tiles."""
     return (
@@ -596,7 +606,7 @@ class AuthorAgent:
                 tool_calls_made=2,
             )
 
-        # FUNC_MOD_ADD mock
+        # WRITE / REFACTOR mock
         patch = """def handle_combat(self, state):
     hp_thresh = self.param("retreat_hp", 0.30, 0.1, 0.6)
     if state.hp / max(1, state.max_hp) < hp_thresh and state.turn > 10:
@@ -611,13 +621,13 @@ class AuthorAgent:
 """
         spliced, changed = splice_functions_into_policy(current_policy, patch)
         hyp = {
-            "mode": "FUNC_MOD_ADD",
+            "mode": mode,
             "target_functions": changed,
             "observation_from_db": "Outlier good runs survived melee by quaffing healing potions at low HP.",
             "mechanism": "Adds healing potion quaff check to handle_combat.",
         }
         return SynthesisProposal(
-            mode="FUNC_MOD_ADD",
+            mode=mode,
             hypothesis=hyp,
             raw_code_patch=patch,
             full_policy_code=spliced,
@@ -652,6 +662,12 @@ class AuthorAgent:
         if self.provider == "mock":
             return self._synthesize_mock(mode=mode, current_policy=current_policy)
 
+        canon_mode = (
+            "MACRO_WRITE"
+            if str(mode).strip().upper() == "MACRO_WRITE"
+            else normalize_mode(mode)
+        )
+
         self.tools.current_policy_code = current_policy
         self.tools.last_passed_code = ""
         self.tools.skills = dict(skills) if skills else {}
@@ -664,10 +680,11 @@ class AuthorAgent:
             skills=skills,
             generation=generation,
             benchmark=self.benchmark,
+            mode=canon_mode,
         )
         if max_tool_turns is None:
             max_tool_turns = (
-                24 if mode == "FULL_WRITE" else max(18, max_pilot_runs + 10)
+                24 if canon_mode == "CREATE" else max(18, max_pilot_runs + 10)
             )
 
         sys_prompt = build_system_prompt(self.db_path)
@@ -733,11 +750,11 @@ class AuthorAgent:
                 _, found_code = self.extract_yaml_and_python(msg_text)
 
                 # Turn 1 Mandatory Investigation Enforcement:
-                # In FUNC_MOD_ADD and STRUCTURAL_REFACTOR modes, Turn 1 is strictly reserved for Empirical Research.
+                # In WRITE and REFACTOR modes, Turn 1 is strictly reserved for Empirical Research.
                 # If candidate code is output on Turn 1 without having called query_db or query_wiki, block auto-pilot and enforce research.
                 if (
                     turn_idx == 1
-                    and mode in ("FUNC_MOD_ADD", "STRUCTURAL_REFACTOR")
+                    and canon_mode in ("WRITE", "REFACTOR")
                     and found_code
                     and not ({"query_db", "query_wiki"} & research_tools_called)
                 ):
@@ -777,15 +794,34 @@ class AuthorAgent:
                     and needs_pilot
                     and self.tools.pilot_runs_used < self.tools.max_pilot_runs
                     and turn_idx < max_tool_turns
-                    and mode != "MACRO_WRITE"
+                    and canon_mode != "MACRO_WRITE"
                 ):
                     total_tool_calls += 1
                     t0 = time.perf_counter()
+                    auto_s_name = (
+                        str((latest_hyp or {}).get("skill_module", ""))
+                        or getattr(self.tools, "last_passed_skill_name", None)
+                        or getattr(self.tools, "best_pilot_skill_name", None)
+                    )
+                    auto_s_code = self.extract_skill_code(
+                        clean_text,
+                        latest_hyp or {},
+                        fallback_skill_code=(
+                            getattr(self.tools, "last_passed_skill_code", None)
+                            or getattr(self.tools, "best_pilot_skill_code", None)
+                            or ""
+                        ),
+                        fallback_skill_name=auto_s_name,
+                    )
                     pilot_res, pilot_summary = self.tools.dry_run_policy(
-                        code=found_code
+                        code=found_code,
+                        skill_name=auto_s_name if auto_s_name else None,
+                        skill_code=auto_s_code if auto_s_code else None,
                     )
                     elapsed_ms = (time.perf_counter() - t0) * 1000.0
                     arg_disp = f"auto-pilot ({len(found_code.splitlines())} lines)"
+                    if auto_s_name:
+                        arg_disp += f", skill={auto_s_name}"
                     ui.tool_call(
                         turn_idx,
                         "dry_run_policy",
@@ -810,8 +846,8 @@ class AuthorAgent:
                                 [{"pilot_summary": pilot_summary}]
                             ),
                             candidate_code=found_code,
-                            skill_name=str((latest_hyp or {}).get("skill_module", "")),
-                            skill_code=self.extract_skill_code(clean_text, latest_hyp),
+                            skill_name=str(auto_s_name or ""),
+                            skill_code=str(auto_s_code or ""),
                             hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
                             status="PILOT_IMPROVED"
                             if self.tools.last_pilot_improved
@@ -833,15 +869,6 @@ class AuthorAgent:
                         )
                     except Exception:
                         pass
-                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                    arg_disp = f"auto-pilot ({len(found_code.splitlines())} lines)"
-                    ui.tool_call(
-                        turn_idx,
-                        "dry_run_policy",
-                        arg_disp,
-                        pilot_summary,
-                        elapsed_ms,
-                    )
 
                     if (
                         "COMPILE_ERROR" in pilot_res
@@ -917,7 +944,7 @@ class AuthorAgent:
                     and not self.tools.last_pilot_improved
                     and self.tools.pilot_runs_used < self.tools.max_pilot_runs
                     and turn_idx < max_tool_turns - 1
-                    and mode == "FUNC_MOD_ADD"
+                    and canon_mode == "WRITE"
                     and (
                         not found_code
                         or found_code.strip() != last_attempted_code.strip()
@@ -1033,7 +1060,7 @@ class AuthorAgent:
         if (
             self.tools.pilot_runs_used > 0
             and not self.tools.last_pilot_improved
-            and mode not in ("MACRO_WRITE", "FULL_WRITE")
+            and canon_mode not in ("MACRO_WRITE", "CREATE")
         ):
             summary = self.tools.last_pilot_summary or "insufficient signal"
             if (
@@ -1171,12 +1198,14 @@ class AuthorAgent:
                 skill_code = self.extract_skill_code(
                     final_content,
                     hyp,
-                    fallback_skill_code=getattr(
-                        self.tools, "last_passed_skill_code", ""
-                    )
-                    or "",
-                    fallback_skill_name=getattr(
-                        self.tools, "last_passed_skill_name", None
+                    fallback_skill_code=(
+                        getattr(self.tools, "last_passed_skill_code", None)
+                        or getattr(self.tools, "best_pilot_skill_code", None)
+                        or ""
+                    ),
+                    fallback_skill_name=(
+                        getattr(self.tools, "last_passed_skill_name", None)
+                        or getattr(self.tools, "best_pilot_skill_name", None)
                     ),
                 )
                 if is_macro_mode:
@@ -1197,13 +1226,25 @@ class AuthorAgent:
                         skill_code=skill_code,
                     )
                 else:
-                    if mode == "FULL_WRITE" or not current_policy.strip():
+                    if canon_mode == "CREATE" or not current_policy.strip():
                         spliced_policy = code_patch
                         changed_fns = hyp.get("target_functions") or ["run"]
                     else:
                         spliced_policy, changed_fns = splice_functions_into_policy(
                             current_policy, code_patch
                         )
+                        if canon_mode == "REFACTOR" and skill_code:
+                            spliced_policy, pruned_fns = (
+                                prune_extracted_skill_functions(
+                                    spliced_policy, skill_code
+                                )
+                            )
+                            if pruned_fns:
+                                changed_fns = [
+                                    fn
+                                    for fn in changed_fns
+                                    if fn not in set(pruned_fns)
+                                ] or ["run"]
                     if isinstance(changed_fns, str):
                         changed_fns = [changed_fns]
                     return SynthesisProposal(
@@ -1314,9 +1355,15 @@ class AuthorAgent:
             skill_code = self.extract_skill_code(
                 final_content,
                 latest_hyp,
-                fallback_skill_code=getattr(self.tools, "last_passed_skill_code", "")
-                or "",
-                fallback_skill_name=getattr(self.tools, "last_passed_skill_name", None),
+                fallback_skill_code=(
+                    getattr(self.tools, "last_passed_skill_code", None)
+                    or getattr(self.tools, "best_pilot_skill_code", None)
+                    or ""
+                ),
+                fallback_skill_name=(
+                    getattr(self.tools, "last_passed_skill_name", None)
+                    or getattr(self.tools, "best_pilot_skill_name", None)
+                ),
             )
             if is_macro_mode:
                 merged_macros, macro_names = self.tools.macro_lib.merge_macros(
@@ -1332,13 +1379,21 @@ class AuthorAgent:
                     tool_calls_made=total_tool_calls,
                     skill_code=skill_code,
                 )
-            if mode == "FULL_WRITE" or not current_policy.strip():
+            if canon_mode == "CREATE" or not current_policy.strip():
                 spliced_policy = code_patch
                 changed_fns = latest_hyp.get("target_functions") or ["run"]
             else:
                 spliced_policy, changed_fns = splice_functions_into_policy(
                     current_policy, code_patch
                 )
+                if canon_mode == "REFACTOR" and skill_code:
+                    spliced_policy, pruned_fns = prune_extracted_skill_functions(
+                        spliced_policy, skill_code
+                    )
+                    if pruned_fns:
+                        changed_fns = [
+                            fn for fn in changed_fns if fn not in set(pruned_fns)
+                        ] or ["run"]
             if isinstance(changed_fns, str):
                 changed_fns = [changed_fns]
             best_delta = (

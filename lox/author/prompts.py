@@ -15,6 +15,11 @@ import json
 from typing import Any
 
 from lox.db.schema import get_schema_markdown
+from lox.lang.validator import (
+    audit_policy_ast_hygiene,
+    extract_module_outline,
+    normalize_mode,
+)
 
 FULL_ACTION_DOCS = r"""### Complete NetHack Action Command Index
 - Movement: `Action.N` ('k'), `Action.S` ('j'), `Action.E` ('l'), `Action.W` ('h'), `Action.NE` ('u'), `Action.NW` ('y'), `Action.SE` ('n'), `Action.SW` ('b')
@@ -76,7 +81,7 @@ POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
   import skills.navigation as nav
   ```
 - **Authoring Skills**:
-  - In `FUNC_MOD_ADD` or `STRUCTURAL_REFACTOR`, you can create or update a modular skill module by specifying `skill_module: "mod_name"` in your YAML hypothesis and providing the skill code.
+  - In `WRITE` or `REFACTOR`, you can create or update a modular skill module by specifying `skill_module: "mod_name"` in your YAML hypothesis and providing the skill code.
   - When testing with `dry_run_policy(code=..., skill_name="mod_name", skill_code="...")`, the engine validates both together.
   - Skill modules have access to the same sandboxed stdlib, macros, and NetHack primitives (`Action`, `seq`, `DIR_DELTAS`, `GameState`, `bfs_distance_grid`, `astar_next_step`, etc.).
   - Methods in `class Policy` can delegate cleanly to skill functions: `act = melee_strike(self, state)` or `act = nav.step_frontier(state, self.visited)`.
@@ -124,21 +129,23 @@ Every turn, `state` exposes 100% of NetHack's observation arrays, terminal scree
 - **Hero Inventory (`state.inventory -> list[InventoryItem]`)**:
   Each `item` in `state.inventory` has:
   - `item.letter` (`'a'..'z'`), `item.name` (full description string, e.g. `'a +1 long sword (weapon in hand)'`, `'2 food rations'`), `item.quantity` (`int`).
-  - Helper properties: `item.is_weapon`, `item.is_armor`, `item.is_food`, `item.is_worn`, `item.is_wielded`, `item.is_potion`, `item.is_scroll`, `item.is_wand`, `item.is_ring`, `item.is_amulet`, `item.is_tool`.
+  - Helper properties: `item.is_weapon`, `item.is_armor`, `item.is_food`, `item.is_corpse`, `item.is_worn`, `item.is_wielded`, `item.is_potion`, `item.is_scroll`, `item.is_wand`, `item.is_ring`, `item.is_amulet`, `item.is_tool`.
   - Status: `item.is_blessed`, `item.is_uncursed`, `item.is_cursed`.
+  - C struct metadata: `item.info` (`ObjectInfo | None`: `name`, `descr`, `weight`, `cost`, `delay`, `oprop`) and `item.corpse_monster` (`MonsterInfo | None` if `is_corpse`).
 - **Visible Monsters (`state.visible_monsters() -> list[VisibleMonster]`) and Adjacent Hostiles (`state.adjacent_hostiles() -> list[VisibleMonster]`)**:
   Each `m` in `state.visible_monsters()` has:
   - `m.y`, `m.x`, `m.name`, `m.char`, `m.color`.
   - `m.is_hostile` (`not (is_pet or is_peaceful)`), `m.is_adjacent_to(state.y, state.x)` (8-way Chebyshev adjacency—monsters attack diagonally as well as orthogonally!), `m.is_pet`, `m.is_peaceful`, `m.is_statue`, `m.is_invisible`.
-  - `m.info`: `m.info.difficulty`, `m.info.ac`, `m.info.speed`, `m.info.level`, `m.info.nutrition`, `m.info.attacks` tuple.
+  - `m.info` (`MonsterInfo` 1-to-1 C `permonst` struct): `m.info.difficulty`, `m.info.ac`, `m.info.speed`, `m.info.level`, `m.info.mr`, `m.info.nutrition`, `m.info.weight`, `m.info.size`, `m.info.resistances_mask`, `m.info.conveys_mask`, `m.info.flags1`, `m.info.flags2`, and C bitmask properties: `is_acidic`, `is_poisonous`, `is_undead`, `is_were`, `is_human`, `is_elf`, `is_dwarf`, `is_gnome`, `is_orc`, `is_demon`, `is_giant`, `is_shapeshifter`, `is_domestic`, `conveys_poison_res`, `conveys_fire_res`, `conveys_cold_res`, `conveys_sleep_res`, `conveys_shock_res`, `conveys_disint_res`, `conveys_stone_flag`, `conveys_see_invis`, `conveys_teleport`, `conveys_teleport_control`.
   `state.adjacent_hostiles()` returns all visible hostile monsters in the 8 Chebyshev adjacent squares around the hero.
 - **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`) and Objects Here (`state.objects_here() -> list[VisibleObject]`)**:
   `state.visible_objects()` returns all visible items on the floor (including items on the hero's tile `(state.y, state.x)`).
   `state.objects_here()` returns only items directly on the hero's tile `(state.y, state.x)` (e.g. to inspect before pickup or eating).
   Each `o` in `state.visible_objects()` / `state.objects_here()` has:
   - `o.y`, `o.x`, `o.name`, `o.char`, `o.color`.
-  - `o.is_corpse`, `o.is_food`, `o.is_weapon`, `o.is_armor`.
-  - `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`): inspect nutrition, safe/poisonous flags.
+  - `o.is_corpse`, `o.is_food`, `o.is_weapon`, `o.is_armor`, `o.is_potion`, `o.is_scroll`, `o.is_wand`.
+  - `o.info` (`ObjectInfo | None`: `name`, `descr`, `weight`, `cost`, `delay`, `oprop`) and `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`: inspect `nutrition`, `is_poisonous`, `is_acidic`, `is_undead`, `is_were`, `conveys_poison_res`, etc. directly from C `permonst` without hardcoding monster name lists!).
+  - You can also look up any monster or object by name in O(1) via `state.monster_info_by_name(name)` and `state.object_info_by_name(name)`.
 - **Status Flags**:
   `state.is_blind`, `state.is_confused`, `state.is_stunned`, `state.is_hallucinating`, `state.is_levitating`,
   `state.is_food_poisoned`, `state.is_terminally_ill`, `state.is_stoning`, `state.is_slimed`, `state.is_strangled`, `state.condition_mask`.
@@ -246,11 +253,24 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    GROUP BY action_name ORDER BY freq DESC LIMIT 8;
    ```
 
-3. **Outlier & Failure Trace Inspection Query**:
+3. **Outlier & Failure Trace Inspection Query (Full Lossless Ticks & Specialist Attribution)**:
    ```sql
-   -- Compare top outlier runs vs worst failures in the active champion batch
-   SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, end_reason, summary_digest
+   -- 3A. Compare top outlier runs vs worst failures in the active champion batch
+   SELECT run_id, seed, depth, max_depth, final_ac, final_xp_level, turns, last_active_function, end_reason, summary_digest
    FROM champion_runs ORDER BY max_depth DESC, turns DESC LIMIT 5;
+
+   -- 3B. Inspect exact step-by-step pre-mortem ticks (100% full lossless ticks with inventory & monster alignment)
+   SELECT turn, depth, hp, max_hp, ac, active_function, action_name, message, visible_monsters, inventory_summary
+   FROM champion_ticks
+   WHERE run_id = '<run_id_from_champion_runs>'
+   ORDER BY turn DESC LIMIT 20;
+
+   -- 3C. Inspect ticks from your most recent dry_run_policy pilot batch
+   SELECT r.seed, t.turn, t.depth, t.hp, t.ac, t.active_function, t.action_name, t.message, t.visible_monsters, t.inventory_summary
+   FROM latest_pilot_ticks t
+   JOIN latest_pilot_runs r ON t.run_id = r.run_id
+   WHERE r.seed = 42
+   ORDER BY t.turn DESC LIMIT 20;
    ```
 
 4. **Behavioral, Tactical & Safety Diagnostic Query**:
@@ -305,11 +325,19 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 
 
 def _format_context_scoped_policy(current_policy: str, batch_digest: str = "") -> str:
+    hygiene_warns = audit_policy_ast_hygiene(current_policy)
+    hygiene_block = ""
+    if hygiene_warns:
+        hygiene_block = (
+            "### ⚠️ Policy AST Hygiene Diagnostics:\n"
+            + "\n".join(f"- {w}" for w in hygiene_warns)
+            + "\n\n"
+        )
     lines = current_policy.splitlines()
-    if len(lines) <= 650:
-        return f"### Current `policy.py`:\n```python\n{current_policy}\n```"
-
-    from lox.lang.validator import extract_module_outline
+    if len(lines) <= 1200:
+        return (
+            f"{hygiene_block}### Current `policy.py`:\n```python\n{current_policy}\n```"
+        )
 
     outline = extract_module_outline(current_policy, module_name="policy.py")
 
@@ -445,9 +473,14 @@ def build_user_prompt(
         else ""
     )
     digest_block = f"\n{batch_digest}\n" if batch_digest else ""
+    canon_mode = (
+        "MACRO_WRITE"
+        if str(mode).strip().upper() == "MACRO_WRITE"
+        else normalize_mode(mode)
+    )
 
-    if mode == "FULL_WRITE":
-        return f"""### Generation {generation} — Mode: `FULL_WRITE` (Initial Baseline Synthesis)
+    if canon_mode == "CREATE":
+        return f"""### Generation {generation} — Mode: `CREATE` (Initial Baseline Synthesis)
 {discoveries_block}{failures_block}You are bootstrapping the policy from a **completely clean slate** (no pre-written policy is provided).
 Your task:
 1. Use multiple tool calls (`query_db` on `expert_runs` / `expert_ticks`, `query_wiki`, `query_policy_docs`) to study successful NetHack runs, early-game survival mechanics, dungeon navigation, door opening/kicking, stair descent, combat, and food/corpse consumption.
@@ -461,7 +494,7 @@ Your task:
 5. Output:
    - A `yaml` hypothesis block describing your architecture:
      ```yaml
-     mode: FULL_WRITE
+     mode: CREATE
      target_functions: [run]
      binding_constraint: "Initial baseline bootstrap"
      verified_c_rule: "Core survival & navigation rules identified via expert_runs and wiki"
@@ -471,7 +504,7 @@ Your task:
    - Your complete `class Policy:` implementation in a single ```python ... ``` block.
 """
 
-    if mode == "MACRO_WRITE":
+    if canon_mode == "MACRO_WRITE":
         return f"""### Generation {generation} — Mode: `MACRO_WRITE` (Reusable Macro Library Synthesis)
 {digest_block}{exp_block}{discoveries_block}{failures_block}
 {macros_docs}
@@ -497,35 +530,35 @@ Your task:
    - Your macro function definition(s) in a single ```python ... ``` block. (Note: `MACRO_WRITE` commits directly to `macros.py` and immediately advances to the next generation).
 """
 
-    if mode == "STRUCTURAL_REFACTOR":
-        return f"""### Generation {generation} — Mode: `STRUCTURAL_REFACTOR` (Subsystem Modularization into Skills)
+    if canon_mode == "REFACTOR":
+        return f"""### Generation {generation} — Mode: `REFACTOR` (Subsystem Modularization into Skills)
 {digest_block}{exp_block}{discoveries_block}{failures_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 
-### Scientific Protocol for `STRUCTURAL_REFACTOR`:
-The policy has grown into a large monolith (or reached a structural plateau). Your **primary objective** in this generation is **mandatory modular decomposition into `skills/<module>.py`**.
+### Scientific Protocol for `REFACTOR`:
+The policy has grown into a large monolith (or reached a structural threshold). Your **primary objective** in this generation is **mandatory modular decomposition into `skills/<module>.py`**.
 
 1. **Stage 1: Mandatory Subsystem Extraction**:
    - You **MUST** extract at least one cohesive subsystem out of `policy.py` into a separate module under `skills/<module>.py` (e.g. `skills/combat.py`, `skills/navigation.py`, `skills/nutrition.py`, or `skills/equipment.py`).
-   - In `policy.py`, import the extracted methods or classes (e.g. `from skills.combat import handle_combat`).
+   - In `policy.py`, import the extracted methods or functions (e.g. `from skills.combat import handle_combat`) and remove the extracted method bodies from `class Policy` (or delegate cleanly so `policy.py` shrinks).
    - You must specify `skill_module: "<name>"` in your YAML hypothesis block.
 
-2. **Stage 2: CRITICAL INVARIANT: Zero Behavioral Regression**:
+2. **Stage 2: CRITICAL INVARIANT: Zero Behavioral Regression (Behavioral Parity Gate)**:
    - Refactoring is for **code modularization and architectural hygiene, NOT unverified behavioral experimentation**.
    - Do **NOT** rewrite navigation rules, change descent gates, or alter survival thresholds while refactoring!
    - Keep the extracted skill's logic **behaviorally identical** to the existing working implementation in `policy.py`.
-   - Structural refactors are evaluated against a **Behavioral Parity Gate** (must maintain performance without regression). Breaking working logic will result in immediate rejection.
+   - `REFACTOR` candidates are evaluated against a **Behavioral Parity Gate** (0 crashes and non-inferior progression vs baseline). Breaking working logic will result in immediate rejection.
 
 3. **Stage 3: Verification with `dry_run_policy`**:
    - Test your candidate policy and extracted skill module using:
      `dry_run_policy(code=policy_code, skill_name="<name>", skill_code=skill_module_code)`
-   - Verify that imports resolve cleanly, there are zero syntax or attribute errors, and the policy completes the pilot without behavioral regression.
+   - Verify that imports resolve cleanly, there are zero syntax or attribute errors, and the policy passes the Behavioral Parity Gate.
 
 4. **Stage 4: Commit Output**:
    - Output a `yaml` block detailing the modular extraction:
      ```yaml
-     mode: STRUCTURAL_REFACTOR
+     mode: REFACTOR
      target_functions: [run]
      skill_module: "extracted_skill_name"
      binding_constraint: "Monolithic code modularization"
@@ -537,52 +570,44 @@ The policy has grown into a large monolith (or reached a structural plateau). Yo
    - Block 2: Output your new/updated skill module in a second ```python ... ``` block labeled with `# skill_module: <name>`.
 """
 
-    # Default: FUNC_MOD_ADD
-    return f"""### Generation {generation} — Mode: `FUNC_MOD_ADD` (Targeted Single-Skill Addition / Modification)
+    # Default: WRITE
+    return f"""### Generation {generation} — Mode: `WRITE` (Targeted Single-Skill Addition / Modification)
 {digest_block}{exp_block}{discoveries_block}{failures_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 
-### Scientific Investigation & Modification Protocol for `FUNC_MOD_ADD`:
+### Scientific Investigation & 4-Step Deductive Protocol for `WRITE`:
 
-1. **Stage 1: MANDATORY Empirical Research (Turn 1)**:
+1. **Step 1: MANDATORY Empirical Research (Turn 1) — Macro-Constraint & Specialist Attribution**:
    - **DO NOT OUTPUT CODE ON TURN 1.**
-   - Before writing or modifying any code, you MUST use your research tools to investigate the previous batch:
-     * **The Binding Constraint Rule**: Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint). Never spend a generation fixing a 2% edge case when 70% of runs died to the same primary cause.
-     * **Mechanistic Trace Inversion via `query_wiki`**: Every event in NetHack (messages, status changes, deaths) is governed by an exact C function. Isolate the exact message string from the final 3 lines of `game_log` (e.g. "You feel hungry", "The door resists", "The jackal bites!"), strip proper nouns, and pass that phrase to `query_wiki(query=...)` to learn the exact C rule that caused it.
-     * Call `query_db(sql=...)` to inspect the failed runs, stall causes, or death reasons from the previous batch (`runs` table), or compare with how experts handled this stage in `expert_runs` / `expert_ticks`.
-   - Ground your hypothesis in empirical game facts, not blind intuition.
+   - Inspect the **Macro-Category Binding Constraints Rollup**, **Depth-Tier Mortality Matrix**, **Per-Function Attribution Table**, and **Action Primitive & Terminal Inventory Capability Audit** in the Batch Digest above.
+   - Identify the #1 macro-category killing or stalling runs (e.g. `Combat / Monster Deaths`, `Step Truncation (max_steps)`, `Starvation / Fainting`, `Illness / Tainted Corpse / Poison`) and which specialist function (`last_active_function` / `active_function`) was in control.
+   - Check the **Action Primitive & Terminal Inventory Capability Audit**: if runs are dying with unused potions, scrolls, wands, or ranged weapons while `QUAFF`, `READ`, `ZAP`, or `THROW` have `0` turns across the batch, consider unlocking that survival/tactical capability!
 
-2. **Stage 2: Focus on 1 Primary Skill or Modular Subsystem**:
+2. **Step 2: Pre-Mortem & Full-Tick Trace to Exact Code Line**:
+   - Inspect the **Concrete Lethal Pre-Mortem Trace Exemplars** in the digest and run `query_db` on `champion_ticks` (which stores **100% full, lossless step-by-step ticks** with `inventory_summary` and `visible_monsters` tagged `[pet|peaceful|hostile,dN]`) to trace the exact 10–20 turns before death or stall.
+   - Cross-reference those ticks with the exact lines of `Current policy.py` (or `read_skill(...)`) to pinpoint the exact conditional branch, missing guard, or threshold that caused the specialist function to make the wrong decision.
+
+3. **Step 3: C-Mechanic & Expert Verification (`query_wiki` / `expert_runs`)**:
+   - Isolate the exact message or monster/item name from `game_log` and call `query_wiki(query=...)` or `query_db` on `expert_runs` / `expert_ticks` to verify the exact NetHack 3.6.6 C mechanic before writing code.
    - Target **1 primary skill** (1 specialist method in `Policy`, OR an external module under `skills/<skill_module>.py`).
-   - If adding or updating a modular skill module, specify `skill_module: "<name>"` in your YAML hypothesis and import it in `policy.py` (e.g. `from skills.combat import melee_strike`).
-   - Modifying 1 method costs only 150 triggered episodes and isolates causal attribution; modifying multiple unrelated methods inflates rollout budgets and couples unrelated bugs.
-   - **Anti-Hallucination & Dungeon Context Anchor**: Anchor your reasoning to your current dungeon depth (`state.depth`). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. If the hero is bumping into walls, inspect `get_passable_mask` and verify `ord('-')` and `ord('|')` are strictly marked False.
-   - NetHack is an interrupt-driven survival loop: specialist methods (`explore_step`, `handle_combat`, `handle_nutrition`, etc.) must return an action or `None` on each tick and rely on persistent attributes on `self` (`self.target_tile`, `self.pos_history = collections.deque(maxlen=8)`) to avoid 2-tile ping-pong oscillations.
 
-3. **Stage 3: 30-Episode Pilot Verification (`dry_run_policy`)**:
+4. **Step 4: Paired Seed Counterfactual Verification (`dry_run_policy`)**:
    - Test your candidate code using `dry_run_policy(code=..., skill_name="<name>", skill_code="...")`.
-   - It runs a **30-episode parallel pilot test** against the current baseline on 16 workers in ~1s, reporting paired Wins/Losses/Ties and the exact logs of the worst stalled runs.
-   - Any episode that does NOT call your modified/added method or skill is immediately discarded (`triggered == False`). Ensure your method is called by `run()`.
+   - If the pilot reports any **Paired Seed Regressions (`Candidate < Baseline`)**, inspect the side-by-side seed comparison (`Baseline [Dlvl, XL, AC, Steps, End] -> Candidate [Dlvl, XL, AC, Steps, ActiveFn, End]`) and query `latest_pilot_ticks` for that seed (`WHERE r.seed = <seed>`) to see why your change hurt that seed before revising!
 
-4. **Stage 4: Pilot Failure Protocol (If Pilot Fails)**:
-   - If `dry_run_policy` returns `PILOT_FAILED`, **STOP! Do NOT blindly guess another code variation.**
-   - Inspect the failed pilot logs and behavioral critic warnings.
-   - Call `query_wiki` or `query_db` to look up the exact mechanic that caused the failure before synthesizing a revised method. You have up to 5 pilot revisions per generation.
-
-5. **Stage 5: Pre-Submission Invariant Checklist**:
-   - Before outputting code, mentally verify all 4 invariants:
-     * *Generator Invariant*: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
-     * *State Persistence*: Specialist methods must update `self.*` attributes (e.g. `self.target_tile`, `self.tried_doors`) to prevent 2-tile ping-pong oscillations.
-     * *Passability Mask*: `get_passable_mask` must never mark `ord('-')` (horizontal wall) or `ord('|')` (vertical wall) as passable.
-     * *Trigger Reachability*: Any modified or newly added specialist method must be called from `run()`.
+5. **Pre-Submission Invariant Checklist**:
+   - *Generator Invariant*: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
+   - *State Persistence*: Specialist methods must update `self.*` attributes (e.g. `self.target_tile`, `self.tried_doors`) to prevent 2-tile ping-pong oscillations.
+   - *Passability & 8-Way Adjacency*: Never mark `ord('-')`, `ord('|')`, or `ord(' ')` as passable; prefer `state.mem.passable_mask`. Always check 8-way adjacency (`max(abs(dy), abs(dx)) == 1` or `state.adjacent_hostiles()`).
+   - *Trigger Reachability*: Any modified or newly added specialist method must be called from `run()` / `dispatch()`.
 
 6. **Output Format (Once Ready to Test or Submit)**:
    - Output a `yaml` hypothesis block detailing your qualitative causal hypothesis and skill spec:
      ```yaml
-     mode: FUNC_MOD_ADD
+     mode: WRITE
      target_functions: [method_you_modified_or_added]
-     binding_constraint: "Largest single failure cause from batch digest (e.g. 74% starved on Dlvl 1)"
+     binding_constraint: "Largest single macro-category failure cause from batch digest"
      verified_c_rule: "Exact C engine rule discovered via query_wiki/query_db"
      mechanism: "Exact behavioral change introduced by your skill modification"
      state_persistence: "What self.* attributes prevent oscillation and track targets"

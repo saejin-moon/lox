@@ -240,3 +240,56 @@ def test_fatal_replay_bytes_and_step_guard():
             harness2.close()
     finally:
         harness.close()
+
+
+def test_c_symbol_table_bitflags_and_replay_full_memory():
+    """Verify 1-to-1 C permonst/objclass properties, name lookups, and full-grid replay memory."""
+    harness = NetHackHarness(max_steps=200)
+    try:
+        st = harness.reset(seed=42)
+        # Verify InventoryItem carries ObjectInfo from C objclass table
+        inv = st.inventory
+        assert len(inv) > 0
+        assert any(it.info is not None and it.info.weight >= 0 for it in inv)
+
+        # Verify 1-to-1 C permonst bitmask properties via monster_info_by_name
+        bee = st.monster_info_by_name("a killer bee corpse")
+        assert bee is not None
+        assert bee.is_poisonous is True
+        assert bee.conveys_poison_res is True
+
+        acid_blob = st.monster_info_by_name("acid blob")
+        assert acid_blob is not None
+        assert acid_blob.is_acidic is True
+
+        zombie = st.monster_info_by_name("human zombie")
+        assert zombie is not None
+        assert zombie.is_undead is True
+
+        tengu = st.monster_info_by_name("tengu")
+        assert tengu is not None
+        assert tengu.conveys_teleport is True
+        assert tengu.conveys_teleport_control is True
+
+        # Verify object_info_by_name exposes oprop
+        speed_boots = st.object_info_by_name("speed boots")
+        assert speed_boots is not None
+        assert speed_boots.oprop > 0
+
+        # Step a few times and verify replay_bytes reconstructs full room remembered_chars (not just 3x3)
+        st, _, _ = harness.step(Action.WAIT)
+        live_remembered_count = int(np.count_nonzero(harness.mem.remembered_chars))
+        rec_bytes = bytes(harness.action_bytes)
+
+        harness2 = NetHackHarness(max_steps=200)
+        try:
+            harness2.replay_bytes(seed=42, recorded_bytes=rec_bytes)
+            replay_remembered_count = int(
+                np.count_nonzero(harness2.mem.remembered_chars)
+            )
+            assert replay_remembered_count == live_remembered_count
+            assert len(harness2.step_byte_offsets) >= 2
+        finally:
+            harness2.close()
+    finally:
+        harness.close()

@@ -743,3 +743,230 @@ def test_full_ascension_telemetry_digest():
     assert "Ascension & Endgame Milestones" in digest
     assert "Minetown Altar Found: 1 runs" in digest
     assert "Castle Drawbridge: 1 runs" in digest
+
+
+def test_autonomous_intelligence_and_deductive_parity_overhaul(tmp_path):
+    """Verify all 10 components of the Autonomous Intelligence & Deductive Parity Overhaul."""
+
+    from lox.author.prompts import _format_context_scoped_policy
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.db.summarizer import build_batch_contrast_digest, summarize_episode_ticks
+    from lox.env.harness import NetHackHarness
+    from lox.lang.compiler import compile_policy_package
+    from lox.lang.validator import (
+        audit_policy_ast_hygiene,
+        normalize_mode,
+        prune_extracted_skill_functions,
+        splice_functions_into_policy,
+    )
+
+    # 1. Mode normalization (CREATE, WRITE, REFACTOR)
+    assert normalize_mode("FULL_WRITE") == "CREATE"
+    assert normalize_mode("CREATE") == "CREATE"
+    assert normalize_mode("FUNC_MOD_ADD") == "WRITE"
+    assert normalize_mode("WRITE") == "WRITE"
+    assert normalize_mode("STRUCTURAL_REFACTOR") == "REFACTOR"
+    assert normalize_mode("REFACTOR") == "REFACTOR"
+
+    # 2. ExecutionTracer attributes active turns to specialist called by dispatch()
+    pol_dispatch = """
+class Policy:
+    def handle_combat(self, state):
+        if state.turn < 2:
+            return Action.WAIT
+        return None
+
+    def explore_level(self, state):
+        return Action.SEARCH
+
+    def dispatch(self, state):
+        act = self.handle_combat(state)
+        if act is not None:
+            return act
+        return self.explore_level(state)
+
+    def run(self, state):
+        while True:
+            act = self.dispatch(state)
+            state = yield act
+"""
+    compiled = compile_policy_package(pol_dispatch)
+    h = NetHackHarness(max_steps=10)
+    try:
+        st = h.reset(seed=42)
+        runner = compiled.create_runner()
+        act1, fn1 = runner.next_action(st)
+        st, _, _ = h.step(act1)
+        assert fn1 == "handle_combat"
+        assert runner.tracer.fn_turns.get("handle_combat", 0) == 1
+        assert runner.tracer.fn_turns.get("dispatch", 0) == 0
+    finally:
+        h.close()
+
+    # 3. sys.modules["skills.*"] cache purge across runner instances & prune_extracted_skill_functions
+    skill_v1 = """
+def custom_skill_step(policy, state):
+    return Action.WAIT
+"""
+    skill_v2 = """
+def custom_skill_step(policy, state):
+    return Action.SEARCH
+"""
+    pol_with_skill = """
+from skills.nav_mod import custom_skill_step
+
+class Policy:
+    def custom_skill_step(self, state):
+        return Action.WAIT
+
+    def run(self, state):
+        while True:
+            state = yield custom_skill_step(self, state)
+"""
+    pruned_pol, pruned_names = prune_extracted_skill_functions(pol_with_skill, skill_v1)
+    assert "custom_skill_step" in pruned_names
+    assert "def custom_skill_step" not in pruned_pol
+
+    comp1 = compile_policy_package(pruned_pol, skills={"nav_mod": skill_v1})
+    comp2 = compile_policy_package(pruned_pol, skills={"nav_mod": skill_v2})
+    h = NetHackHarness(max_steps=10)
+    try:
+        st = h.reset(seed=42)
+        r1 = comp1.create_runner()
+        a1, _ = r1.next_action(st)
+        r2 = comp2.create_runner()
+        a2, _ = r2.next_action(st)
+        assert a1 != a2
+    finally:
+        h.close()
+
+    # 4. In-place AST constant splicing & deduplication + AST hygiene warnings
+    dup_policy = """
+SAFE_LIST = ("lichen",)
+SAFE_LIST = ("lichen", "newt")
+
+class Policy:
+    def __init__(self):
+        self.x = 1
+
+    def dead_helper(self, state):
+        return Action.WAIT
+
+    def run(self, state):
+        while True:
+            state = yield Action.SEARCH
+"""
+    warns = audit_policy_ast_hygiene(dup_policy)
+    assert any("SAFE_LIST" in w for w in warns)
+    assert any("dead_helper" in w for w in warns)
+
+    patch_const = """
+SAFE_LIST = ("lichen", "newt", "gecko")
+
+def run(self, state):
+    while True:
+        state = yield Action.WAIT
+"""
+    spliced_const, _ = splice_functions_into_policy(dup_policy, patch_const)
+    assert spliced_const.count("SAFE_LIST =") == 1
+    assert "gecko" in spliced_const
+
+    # 5. Macro-Category Rollup, Depth-Tier Mortality Matrix, Capability Audit & Pre-Mortem Exemplars
+    raw_ticks = [
+        {
+            "turn": i,
+            "depth": 1,
+            "hp": 10,
+            "max_hp": 14,
+            "ac": 9,
+            "xp_level": 1,
+            "y": 10,
+            "x": 10 + (i % 2),
+            "action_name": "SEARCH" if i % 2 == 0 else "WAIT",
+            "active_function": "handle_combat",
+            "message": "The little dog bites!" if i == 4 else "",
+            "visible_monsters": "little dog@(10,11)[pet,d1]",
+            "inventory_summary": "a:2 food rations, d:a potion of healing",
+        }
+        for i in range(1, 6)
+    ]
+    digest_str, game_log_str, ms_dict = summarize_episode_ticks(raw_ticks)
+    assert "action_counts" in ms_dict
+    assert ms_dict["action_counts"]["SEARCH"] == 2
+
+    sample_runs = [
+        {
+            "run_id": "r_combat_1",
+            "seed": 301,
+            "depth": 2,
+            "max_depth": 2,
+            "final_xp_level": 2,
+            "final_hp": 0,
+            "final_max_hp": 16,
+            "final_ac": 9,
+            "turns": 120,
+            "steps": 120,
+            "last_active_function": "handle_combat",
+            "end_reason": "killed by a little dog",
+            "death_message": "You are killed by a little dog.",
+            "game_log": "[T118 D2 N] You hit the little dog.\n[T120 D2 N] The little dog bites! You die...",
+            "summary_digest": digest_str,
+            "milestones": {
+                **ms_dict,
+                "final_inventory": "a:2 food rations, d:a potion of healing",
+            },
+            "ticks": raw_ticks,
+        }
+    ]
+    b_digest = build_batch_contrast_digest(
+        {"batch_id": "b_test_new", "max_depth": 2, "avg_depth": 2.0, "p90_depth": 2.0},
+        sample_runs,
+        [],
+    )
+    assert "Macro-Category Binding Constraints Rollup" in b_digest
+    assert "Pet/Peaceful Friendly-Fire: 1" in b_digest
+    assert "Depth-Tier Mortality Matrix" in b_digest
+    assert "Action Primitive & Terminal Inventory Capability Audit" in b_digest
+    assert "`QUAFF` (0 turns)" in b_digest
+    assert "Potions held at death: 1/1 deaths" in b_digest
+    assert "Concrete Lethal Pre-Mortem Trace Exemplars" in b_digest
+
+    # 6. Lossless ticks persistence & latest_pilot_ticks view
+    db_file = str(tmp_path / "lossless.duckdb")
+    con = init_db(db_file)
+    con.close()
+    logger = BatchDatabaseLogger(db_file)
+    logger.save_batch(
+        batch_id="pilot_test_01",
+        generation=1,
+        mode="PILOT",
+        parent_policy_id="none",
+        candidate_policy_id="pol_pilot_01",
+        target_functions=["handle_combat"],
+        runs=sample_runs,
+        episodes_discarded=0,
+        batch_metrics={"avg_depth": 2.0, "max_depth": 2},
+        verdict={"passed": False, "mean_delta": -0.1},
+    )
+    con = connect_db(db_file, read_only=True)
+    try:
+        pilot_ticks_cnt = con.execute(
+            "SELECT COUNT(*) FROM latest_pilot_ticks"
+        ).fetchone()[0]
+        inv_val = con.execute(
+            "SELECT inventory_summary FROM latest_pilot_ticks LIMIT 1"
+        ).fetchone()[0]
+        assert pilot_ticks_cnt == 5
+        assert "potion of healing" in inv_val
+    finally:
+        con.close()
+
+    # 7. Prompt threshold raised to 1200 lines
+    long_pol = "class Policy:\n" + "\n".join(
+        f"    def fn_{i}(self, state):\n        return None" for i in range(400)
+    )
+    assert 700 <= len(long_pol.splitlines()) <= 1150
+    formatted_pol = _format_context_scoped_policy(long_pol)
+    assert "### Current `policy.py`:" in formatted_pol
+    assert "def fn_399" in formatted_pol

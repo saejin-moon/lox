@@ -49,11 +49,12 @@ class ExecutionTracer:
         "fn_turns",
         "call_stack",
         "active_fn",
+        "_turn_fn_locked",
         "registered_params",
         "param_overrides",
     )
 
-    _ROOT_FNS = frozenset({"run", "step", "act", "root"})
+    _ROOT_FNS = frozenset({"run", "step", "act", "root", "dispatch", "step_dispatch"})
 
     def __init__(
         self,
@@ -67,6 +68,7 @@ class ExecutionTracer:
         self.fn_turns: dict[str, int] = {}
         self.call_stack: list[list[Any]] = []
         self.active_fn: str = "root"
+        self._turn_fn_locked: bool = False
         self.registered_params: dict[str, TunableParam] = {}
         self.param_overrides: dict[str, float] = (
             dict(param_overrides) if param_overrides else {}
@@ -79,6 +81,7 @@ class ExecutionTracer:
         self.fn_turns.clear()
         self.call_stack.clear()
         self.active_fn = "root"
+        self._turn_fn_locked = False
 
     def enter_fn(
         self, fn_name: str, has_value_return: bool = False, is_gen: bool = False
@@ -86,7 +89,11 @@ class ExecutionTracer:
         self.call_stack.append([fn_name, self.total_turns, False])
         if not has_value_return:
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
-            if is_gen or fn_name in self._ROOT_FNS:
+            if is_gen:
+                self.active_fn = fn_name
+                if fn_name not in self._ROOT_FNS:
+                    self._turn_fn_locked = True
+            elif fn_name in self._ROOT_FNS and not self._turn_fn_locked:
                 self.active_fn = fn_name
 
     def on_return(self, fn_name: str, val: Any) -> Any:
@@ -95,31 +102,43 @@ class ExecutionTracer:
         )
         if not is_noop:
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
-            if self.call_stack:
-                self.call_stack[-1][2] = True
-            if (
-                not isinstance(val, (bool, set, dict))
+            is_action_like = (
+                not isinstance(val, (bool, float, set, dict, list, tuple))
                 and type(val).__name__ != "ndarray"
-            ):
-                self.active_fn = fn_name
+            )
+            if is_action_like:
+                if self.call_stack:
+                    self.call_stack[-1][2] = True
+                if not self._turn_fn_locked:
+                    self.active_fn = fn_name
         return val
 
     def exit_fn(self, fn_name: str) -> None:
+        returned_non_noop = False
         if self.call_stack:
             top_frame = self.call_stack.pop()
             top_fn = top_frame[0]
+            returned_non_noop = bool(top_frame[2])
             if top_fn != fn_name:
                 while self.call_stack and self.call_stack[-1][0] != fn_name:
                     self.call_stack.pop()
                 if self.call_stack and self.call_stack[-1][0] == fn_name:
-                    self.call_stack.pop()
+                    matched_frame = self.call_stack.pop()
+                    returned_non_noop = bool(matched_frame[2])
 
         if not self.call_stack:
             return
 
         caller_fn = self.call_stack[-1][0]
-        if caller_fn not in self._ROOT_FNS:
-            self.active_fn = caller_fn
+        if returned_non_noop:
+            if caller_fn in self._ROOT_FNS and fn_name not in self._ROOT_FNS:
+                self.active_fn = fn_name
+                self._turn_fn_locked = True
+            elif not self._turn_fn_locked and caller_fn not in self._ROOT_FNS:
+                self.active_fn = caller_fn
+        else:
+            if not self._turn_fn_locked:
+                self.active_fn = caller_fn
 
     def record_turn_yield(self) -> str:
         """Called by the runner each time the policy yields an action to the harness."""
@@ -127,6 +146,7 @@ class ExecutionTracer:
         self.total_turns += 1
         fn = self.active_fn
         self.fn_turns[fn] = self.fn_turns.get(fn, 0) + 1
+        self._turn_fn_locked = False
         if self.call_stack:
             self.active_fn = self.call_stack[-1][0]
         else:

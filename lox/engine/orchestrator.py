@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 
 from lox.author.agent import AuthorAgent
+from lox.core.contracts import assert_baseline_invariants
 from lox.datasets.download_experts import ingest_expert_runs_into_duckdb
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
@@ -33,7 +34,7 @@ from lox.engine.hypothesis import (
     should_stop_early_for_futility,
 )
 from lox.engine.modes import run_spsa_param_tuning
-from lox.engine.scheduler import ModeScheduler
+from lox.engine.scheduler import ModeScheduler, normalize_mode
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
@@ -55,6 +56,7 @@ class PolicyArchiveEntry:
     total_reward: float = 0.0
     baseline_runs: list[dict[str, Any]] = field(default_factory=list)
     batch_digest: str = ""
+    skills: dict[str, str] = field(default_factory=dict)
 
 
 def compute_adaptive_max_steps(
@@ -302,6 +304,7 @@ class CampaignOrchestrator:
         pilot_episodes: int = 30,
         benchmark: str = "nethack",
         pilot_fallback: str = "best",
+        workspace_dir: str | None = None,
     ):
         self.provider = provider
         self.model = model
@@ -322,7 +325,7 @@ class CampaignOrchestrator:
         self.pilot_fallback = str(pilot_fallback)
         self.target_fn_failure_counts: collections.Counter[str] = collections.Counter()
         self.policy_archive: dict[str, PolicyArchiveEntry] = {}
-        self.workspace_dir = str(Path(self.policy_path).parent)
+        self.workspace_dir = str(workspace_dir or Path(self.policy_path).parent)
 
         os.makedirs(
             os.path.dirname(os.path.abspath(self.policy_path)) or ".", exist_ok=True
@@ -384,6 +387,20 @@ class CampaignOrchestrator:
         ui.info(
             f"Committed modular skill `skills/{skill_name}.py` ({len(code.strip().splitlines())} lines)"
         )
+
+    def sync_workspace_skills(self, skills: dict[str, str]) -> None:
+        """Synchronizes data/workspace/skills/ with an exact dictionary of modular skills."""
+        skills_dir = Path(self.workspace_dir) / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        for p in skills_dir.glob("*.py"):
+            if p.name != "__init__.py" and p.stem not in skills:
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        for name, code in skills.items():
+            skill_path = skills_dir / f"{name}.py"
+            skill_path.write_text(code.strip() + "\n", encoding="utf-8")
 
     def get_recent_experiments_markdown(self, limit: int = 10) -> str:
         con = connect_db(self.db_path, read_only=True)
@@ -483,118 +500,61 @@ class CampaignOrchestrator:
 
         campaign_id = datetime.datetime.now().strftime("c%Y%m%d_%H%M%S")
         start_gen = 0
-        if current_policy and forced_mode != "FULL_WRITE":
+        if current_policy and normalize_mode(forced_mode or "WRITE") != "CREATE":
             start_gen = 1
             # Check DuckDB to see if prior generations were completed, and load baseline state
-            con = connect_db(self.db_path, read_only=True)
             try:
-                max_gen_row = con.execute(
-                    "SELECT MAX(generation) FROM batches"
-                ).fetchone()
-                last_db_gen = (
-                    max_gen_row[0]
-                    if (max_gen_row and max_gen_row[0] is not None)
-                    else None
-                )
-                if last_db_gen is not None:
-                    start_gen = int(last_db_gen) + 1
-
-                    # Load the most recent promoted policy's baseline runs from DuckDB
-                    prom_row = con.execute(
-                        """
-                        SELECT p.policy_id, p.params_json, b.batch_id
-                        FROM policies p
-                        JOIN batches b ON b.candidate_policy_id = p.policy_id
-                        WHERE p.is_promoted = TRUE
-                          AND b.mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
-                        ORDER BY b.generation DESC, b.created_at DESC LIMIT 1
-                        """
-                    ).fetchone()
-                    if prom_row:
-                        prom_pol_id, prom_params_json, prom_batch_id = prom_row
-                        current_policy_id = prom_pol_id
-                        if prom_params_json:
-                            try:
-                                registered_params.update(json.loads(prom_params_json))
-                            except Exception:
-                                pass
-
-                        run_cur = con.execute(
-                            """
-                            SELECT run_id, seed, depth, max_depth, score, turns, xp_level,
-                                   final_hp, max_hp, final_ac, gold, end_reason,
-                                   is_outlier_good, outlier_z_score, batch_percentile,
-                                   summary_digest, game_log, triggered_functions, last_active_function,
-                                   action_bytes, milestones_json
-                            FROM runs WHERE batch_id = ?
-                            """,
-                            (prom_batch_id,),
-                        )
-                        run_cols = [d[0] for d in run_cur.description]
-                        for r_tup in run_cur.fetchall():
-                            r_dict = dict(zip(run_cols, r_tup))
-                            baseline_by_seed[int(r_dict["seed"])] = r_dict
-                        baseline_runs = list(baseline_by_seed.values())
-
-                        fs_cur = con.execute(
-                            """
-                            SELECT batch_id, generation, function_name, episodes_triggered,
-                                   trigger_rate, total_calls, total_turns_active,
-                                   avg_depth_when_triggered, death_rate_while_active,
-                                   ochiai_good_run_score, liblit_failure_score
-                            FROM function_stats WHERE batch_id = ?
-                            """,
-                            (prom_batch_id,),
-                        )
-                        fs_cols = [d[0] for d in fs_cur.description]
-                        fn_stats = [dict(zip(fs_cols, t)) for t in fs_cur.fetchall()]
-
-                        b_cur = con.execute(
-                            "SELECT * FROM batches WHERE batch_id = ?",
-                            (prom_batch_id,),
-                        )
-                        b_cols = [d[0] for d in b_cur.description]
-                        b_row = b_cur.fetchone()
-                        batch_stats = dict(zip(b_cols, b_row)) if b_row else {}
-
-                        last_batch_digest = build_batch_contrast_digest(
-                            batch_stats, baseline_runs, fn_stats
-                        )
-                        ui.info(
-                            f"Resuming campaign at Generation {start_gen:03d} (loaded {len(baseline_runs)} baseline runs from promoted batch `{prom_batch_id}`)."
-                        )
-                        if baseline_runs and "descent" not in self.policy_archive:
-                            d_list = [r.get("max_depth", 1) for r in baseline_runs]
-                            self.policy_archive["descent"] = PolicyArchiveEntry(
-                                policy_id=current_policy_id,
-                                policy_code=current_policy,
-                                niche="descent",
-                                avg_depth=float(np.mean(d_list)) if d_list else 1.0,
-                                p90_depth=float(np.percentile(d_list, 90))
-                                if d_list
-                                else 1.0,
-                                max_depth=int(max(d_list)) if d_list else 1,
-                                avg_ac=float(
-                                    np.mean(
-                                        [r.get("final_ac", 10) for r in baseline_runs]
-                                    )
-                                )
-                                if baseline_runs
-                                else 10.0,
-                                avg_xl=float(
-                                    np.mean(
-                                        [r.get("xp_level", 1) for r in baseline_runs]
-                                    )
-                                )
-                                if baseline_runs
-                                else 1.0,
-                                baseline_runs=list(baseline_runs),
-                                batch_digest=last_batch_digest,
+                champ_base = self.db_logger.load_champion_baseline()
+                if champ_base:
+                    start_gen = (
+                        champ_base.get("max_generation", champ_base["generation"]) + 1
+                    )
+                    current_policy = champ_base["policy_code"] or current_policy
+                    current_policy_id = champ_base["policy_id"]
+                    if champ_base.get("params"):
+                        registered_params.update(champ_base["params"])
+                    baseline_runs = assert_baseline_invariants(
+                        champ_base["baseline_runs"]
+                    )
+                    baseline_by_seed = {
+                        int(r["seed"]): r for r in baseline_runs if "seed" in r
+                    }
+                    last_batch_digest = build_batch_contrast_digest(
+                        champ_base["batch_stats"],
+                        baseline_runs,
+                        champ_base["fn_stats"],
+                    )
+                    prom_batch_id = champ_base["batch_id"]
+                    ui.info(
+                        f"Resuming campaign at Generation {start_gen:03d} (loaded {len(baseline_runs)} baseline runs from promoted batch `{prom_batch_id}`)."
+                    )
+                    if baseline_runs and "descent" not in self.policy_archive:
+                        d_list = [r.get("max_depth", 1) for r in baseline_runs]
+                        self.policy_archive["descent"] = PolicyArchiveEntry(
+                            policy_id=current_policy_id,
+                            policy_code=current_policy,
+                            niche="descent",
+                            avg_depth=float(np.mean(d_list)) if d_list else 1.0,
+                            p90_depth=float(np.percentile(d_list, 90))
+                            if d_list
+                            else 1.0,
+                            max_depth=int(max(d_list)) if d_list else 1,
+                            avg_ac=float(
+                                np.mean([r.get("final_ac", 10) for r in baseline_runs])
                             )
-            except Exception:
-                pass
-            finally:
-                con.close()
+                            if baseline_runs
+                            else 10.0,
+                            avg_xl=float(
+                                np.mean([r.get("xp_level", 1) for r in baseline_runs])
+                            )
+                            if baseline_runs
+                            else 1.0,
+                            baseline_runs=list(baseline_runs),
+                            batch_digest=last_batch_digest,
+                            skills=self.load_workspace_skills(),
+                        )
+            except Exception as e:
+                ui.warn(f"Failed to load prior champion baseline from DuckDB: {e}")
 
         try:
             # If warm-starting from an existing policy.py without prior DB runs, evaluate a baseline batch first
@@ -617,7 +577,9 @@ class CampaignOrchestrator:
                     registered_params.update(warm_res["registered_params"])
                 for r in warm_res["runs"]:
                     baseline_by_seed[int(r["seed"])] = r
-                baseline_runs = list(baseline_by_seed.values())
+                baseline_runs = assert_baseline_invariants(
+                    list(baseline_by_seed.values())
+                )
                 warm_verdict = {
                     "passed": True,
                     "mean_delta": warm_res["avg_depth"],
@@ -683,6 +645,7 @@ class CampaignOrchestrator:
                         else 1.0,
                         baseline_runs=list(baseline_runs),
                         batch_digest=last_batch_digest,
+                        skills=self.load_workspace_skills(),
                     )
 
             consecutive_failures = 0
@@ -727,7 +690,9 @@ class CampaignOrchestrator:
                             )
                             for rr in reval_res.get("runs", []):
                                 baseline_by_seed[int(rr["seed"])] = rr
-                            baseline_runs = list(baseline_by_seed.values())
+                            baseline_runs = assert_baseline_invariants(
+                                list(baseline_by_seed.values())
+                            )
                             if self.policy_archive and "descent" in self.policy_archive:
                                 self.policy_archive["descent"].baseline_runs = list(
                                     baseline_runs
@@ -755,6 +720,7 @@ class CampaignOrchestrator:
                                         avg_xl=champ_entry.avg_xl,
                                         baseline_runs=list(champ_entry.baseline_runs),
                                         batch_digest=champ_entry.batch_digest,
+                                        skills=dict(champ_entry.skills),
                                     )
                         best_niche = "descent"
                         best_score = -1e9
@@ -774,12 +740,17 @@ class CampaignOrchestrator:
                         chosen_entry.pull_count += 1
                         current_policy = chosen_entry.policy_code
                         current_policy_id = chosen_entry.policy_id
-                        baseline_runs = chosen_entry.baseline_runs
+                        baseline_runs = assert_baseline_invariants(
+                            chosen_entry.baseline_runs
+                        )
                         baseline_by_seed = {
                             int(r["seed"]): r for r in baseline_runs if "seed" in r
                         }
                         if chosen_entry.batch_digest:
                             last_batch_digest = chosen_entry.batch_digest
+                        if chosen_entry.skills:
+                            self.sync_workspace_skills(chosen_entry.skills)
+                        self.save_active_policy(current_policy)
 
                     pol_lines = (
                         len(current_policy.splitlines()) if current_policy else 0
@@ -956,6 +927,7 @@ class CampaignOrchestrator:
                                         if baseline_runs
                                         else 1.0
                                     )
+                                    curr_skills = self.load_workspace_skills()
                                     tuned_entry = PolicyArchiveEntry(
                                         policy_id=cand_id,
                                         policy_code=current_policy,
@@ -967,6 +939,7 @@ class CampaignOrchestrator:
                                         avg_xl=u_xl,
                                         baseline_runs=list(baseline_runs),
                                         batch_digest=last_batch_digest,
+                                        skills=curr_skills,
                                     )
                                     if chosen_niche in self.policy_archive:
                                         self.policy_archive[chosen_niche] = tuned_entry
@@ -981,6 +954,7 @@ class CampaignOrchestrator:
                                         avg_xl=u_xl,
                                         baseline_runs=list(baseline_runs),
                                         batch_digest=last_batch_digest,
+                                        skills=curr_skills,
                                     )
                         else:
                             ui.warn(verdict["reason"])
@@ -1011,7 +985,7 @@ class CampaignOrchestrator:
                     )
                     if mode == "MACRO_WRITE":
                         ui.gen_header(gen=gen, mode="MACRO_WRITE", target_episodes=0)
-                    elif mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR"):
+                    elif normalize_mode(mode) == "CREATE":
                         ui.gen_header(
                             gen=gen,
                             mode=mode,
@@ -1020,7 +994,7 @@ class CampaignOrchestrator:
                     else:
                         ui.gen_header(
                             gen=gen,
-                            mode="FUNC_MOD_ADD",
+                            mode=mode,
                             target_episodes=self.func_mod_episodes_per_fn,
                         )
 
@@ -1164,7 +1138,8 @@ class CampaignOrchestrator:
                         )
                         continue
 
-                    # --- MODE 1 (`FULL_WRITE`) & MODE 3 (`FUNC_MOD_ADD` / `STRUCTURAL_REFACTOR`) ---
+                    # --- MODE 1 (`CREATE`) & MODE 3 (`WRITE` / `REFACTOR`) ---
+                    canon_prop_mode = normalize_mode(proposal.mode)
                     declared_targets = proposal.hypothesis.get("target_functions") or []
                     if isinstance(declared_targets, str):
                         declared_targets = [declared_targets]
@@ -1179,12 +1154,12 @@ class CampaignOrchestrator:
                     chosen_targets = declared_targets or raw_targets
                     target_fns = (
                         []
-                        if proposal.mode in ("FULL_WRITE", "STRUCTURAL_REFACTOR")
+                        if canon_prop_mode in ("CREATE", "REFACTOR")
                         else chosen_targets
                     )
                     target_eps = (
                         self.full_write_episodes
-                        if proposal.mode == "FULL_WRITE"
+                        if canon_prop_mode == "CREATE"
                         else self.func_mod_episodes_per_fn
                     )
 
@@ -1231,7 +1206,7 @@ class CampaignOrchestrator:
                             + base_remaining_seeds
                         )
 
-                        if proposal.mode == "FUNC_MOD_ADD":
+                        if canon_prop_mode == "WRITE":
                             eval_shards = extract_shards_from_runs(
                                 baseline_runs,
                                 max_shards=min(40, max(10, target_eps // 3)),
@@ -1267,7 +1242,7 @@ class CampaignOrchestrator:
                     early_stop_cb = None
                     if (
                         self.early_stopping
-                        and proposal.mode == "FUNC_MOD_ADD"
+                        and canon_prop_mode == "WRITE"
                         and (baseline_by_seed or base_shard_runs)
                     ):
                         min_p = min(60, max(20, target_eps // 4))
@@ -1298,11 +1273,11 @@ class CampaignOrchestrator:
                         macros_code=proposal.full_macros_code,
                         target_episodes=target_eps,
                         target_functions=target_fns
-                        if proposal.mode == "FUNC_MOD_ADD"
+                        if canon_prop_mode == "WRITE"
                         else None,
                         priority_seeds=priority_seeds,
                         unconditional_seeds=unconditional_seeds
-                        if proposal.mode == "FUNC_MOD_ADD"
+                        if canon_prop_mode == "WRITE"
                         else None,
                         seed_start=seed_base + gen * 10000,
                         record_ticks=True,
@@ -1318,7 +1293,7 @@ class CampaignOrchestrator:
 
                     cand_id = f"pol_{batch_id}"
 
-                    if proposal.mode == "FULL_WRITE" or not baseline_runs:
+                    if canon_prop_mode == "CREATE" or not baseline_runs:
                         verdict = {
                             "passed": bool(eval_res["episodes_recorded"] > 0),
                             "mean_delta": eval_res["avg_depth"],
@@ -1358,7 +1333,9 @@ class CampaignOrchestrator:
                             )
                             for br in backfill_res["runs"]:
                                 baseline_by_seed[int(br["seed"])] = br
-                            baseline_runs = list(baseline_by_seed.values())
+                            baseline_runs = assert_baseline_invariants(
+                                list(baseline_by_seed.values())
+                            )
                             self.db_logger.save_batch(
                                 batch_id=f"{batch_id}_base_backfill",
                                 generation=gen,
@@ -1486,14 +1463,17 @@ class CampaignOrchestrator:
                         }
                         if full_promoted:
                             baseline_by_seed.update(full_promoted)
-                            baseline_runs = list(baseline_by_seed.values())
+                            baseline_runs = assert_baseline_invariants(
+                                list(baseline_by_seed.values())
+                            )
 
                         last_batch_digest = build_batch_contrast_digest(
-                            eval_res, eval_res["runs"], fn_stats
+                            eval_res, baseline_runs or eval_res["runs"], fn_stats
                         )
 
                         # Update Quality-Diversity (MAP-Elites) policy archive using clean non-shard baseline runs
                         clean_archive_runs = list(baseline_runs)
+                        curr_skills = dict(self.load_workspace_skills())
                         stat_pool = (
                             clean_archive_runs
                             if clean_archive_runs
@@ -1504,7 +1484,10 @@ class CampaignOrchestrator:
                             if stat_pool
                             else float(eval_res["avg_depth"])
                         )
-                        if "descent" in self.policy_archive:
+                        if canon_prop_mode == "REFACTOR":
+                            # Refactor establishes a new structural baseline across all archive niches
+                            self.policy_archive.clear()
+                        elif "descent" in self.policy_archive:
                             c_depth = max(
                                 c_depth, self.policy_archive["descent"].avg_depth
                             )
@@ -1544,6 +1527,7 @@ class CampaignOrchestrator:
                             avg_xl=c_xl,
                             baseline_runs=clean_archive_runs,
                             batch_digest=last_batch_digest,
+                            skills=curr_skills,
                         )
                         if chosen_niche in self.policy_archive:
                             self.policy_archive[chosen_niche] = self.policy_archive[
@@ -1565,6 +1549,7 @@ class CampaignOrchestrator:
                                 avg_xl=c_xl,
                                 baseline_runs=clean_archive_runs,
                                 batch_digest=last_batch_digest,
+                                skills=curr_skills,
                             )
                         if "survivability" not in self.policy_archive or (
                             (
@@ -1585,6 +1570,7 @@ class CampaignOrchestrator:
                                 avg_xl=c_xl,
                                 baseline_runs=clean_archive_runs,
                                 batch_digest=last_batch_digest,
+                                skills=curr_skills,
                             )
 
                         is_new_record = (
