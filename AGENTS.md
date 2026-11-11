@@ -11,7 +11,7 @@ Welcome to **LOX**, an autonomous, high-throughput empirical policy synthesis en
    - It provides a **pure 1-to-1 connection** between policy yields and native NLE C actions (`Action` enum, `key(ch)`, `seq(...)` multi-keystroke sequences) and exposes the complete NetHack game state lazily via `GameState` (`blstats`, 21×79 screen grids, inventory, and direct C symbol table queries over `nle.nethack.permonst` and `nle.nethack.objclass`).
 2. **Near-Full Python Policy Language & Modular Skills Library**:
    - Policies (`data/workspace/policy.py`) and modular skill packages (`data/workspace/skills/`) support full Python 3.11+ syntax (`class`, generators `yield` / `yield from`, `match/case`, comprehensions, `@dataclass`, closures, type hints, and safe stdlib modules `math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
-   - Compile-time AST instrumentation (`PolicyInstrumentTransformer` & `ExecutionTracer`) injects `<1 µs` per-function call tracking, per-function turn attribution, loop-watchdog protection (`PolicyLoopError`), and tunable parameter hooks (`self.param(name, default, min_val, max_val)`).
+   - Compile-time AST instrumentation (`PolicyInstrumentTransformer` & `ExecutionTracer`) injects `<1 µs` per-function call tracking, per-function turn attribution, loop-watchdog protection (`PolicyLoopError`), and parameter hooks (`self.param(name, default, min_val, max_val)`).
    - Text/naming prompts: `state.in_text_prompt` and safety fallback auto-`ESC` prevent interactive naming traps from stalling policies.
 3. **Go-Explore Outlier Good-Run Attribution & Multi-Table DuckDB**:
    - Every evaluation batch computes statistical progression scores across all recorded episodes and flags top-performing statistical exceptions with `is_outlier_good = TRUE` (`outlier_z_score`, `batch_percentile`).
@@ -24,10 +24,9 @@ Welcome to **LOX**, an autonomous, high-throughput empirical policy synthesis en
    - **Pilot Revision Budget & Fallback**: Up to 4 pilot revision attempts per generation (`--pilot-revisions 4`). When all pilot revisions fail the strict sign test, `LOX` falls back to the highest-scoring candidate (`--pilot-fallback best`) if and only if its delta is non-negative ($\Delta \ge 0.0$); known regressive pilots ($\Delta < 0.0$) abort the rollout immediately to preserve compute.
    - **Mutation Scope Guard**: In `WRITE` / `FUNC_MOD_ADD` mode, candidates are constrained to at most 2 functions to isolate causal impact and eliminate cross-subsystem regressions.
    - **Modification Modes**:
-     - `FULL_WRITE`: Synthesizes `class Policy` from scratch on Generation 0 without a pre-fed starter policy.
-     - `FUNC_MOD_ADD`: Splices targeted methods onto `Policy` or evolves modular packages in `skills/`; untriggered episodes are discarded.
-     - `STRUCTURAL_REFACTOR`: Triggered when monolithic policies grow large, modularizing logic into `data/workspace/skills/`.
-     - `PARAM_TUNE`: Optional numerical threshold tuner (run every 100 generations or disabled).
+     - `CREATE`: Synthesizes `class Policy` from scratch on Generation 0 without a pre-fed starter policy.
+     - `WRITE`: Splices targeted methods onto `Policy` or evolves modular packages in `skills/` (max 2 functions); untriggered episodes are discarded.
+     - `REFACTOR`: Triggered when monolithic policies grow large (>= 450 lines), modularizing logic into `data/workspace/skills/`.
 5. **Parameter-Free Hypothesis Testing**:
    - The Author Agent states a qualitative causal YAML hypothesis (`observation_from_db`, `mechanism`, `target_functions`) without guessing numerical effect sizes.
    - Candidate policies are evaluated via **Anytime-Valid Empirical Bernstein Confidence Sequences** (`[ci_lower, ci_upper]`), **One-Sided Paired Wilcoxon Signed-Rank Tests** (`wilcoxon_p < 0.05`), and **Sequential Futility Early Stopping**.

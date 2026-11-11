@@ -108,25 +108,7 @@ def main() -> None:
         "--func-mod-episodes",
         type=int,
         default=150,
-        help="Triggered episodes per modified/added function in FUNC_MOD_ADD mode (default: 150)",
-    )
-    parser.add_argument(
-        "--param-tune-episodes",
-        type=int,
-        default=100,
-        help="Episodes per SPSA validation batch in PARAM_TUNE mode (default: 100)",
-    )
-    parser.add_argument(
-        "--param-tune-every",
-        type=int,
-        default=100,
-        help="Run PARAM_TUNE every N generations (default: 100)",
-    )
-    parser.add_argument(
-        "--macro-every",
-        type=int,
-        default=0,
-        help="Run MACRO_WRITE every N generations (default: 0)",
+        help="Triggered episodes per modified/added function in WRITE mode (default: 150)",
     )
     parser.add_argument(
         "--mode",
@@ -137,7 +119,6 @@ def main() -> None:
             "REFACTOR",
             "FULL_WRITE",
             "FUNC_MOD_ADD",
-            "PARAM_TUNE",
             "STRUCTURAL_REFACTOR",
         ],
         help="Optional override to force a specific modification mode (CREATE, WRITE, REFACTOR)",
@@ -200,9 +181,6 @@ def main() -> None:
         max_steps=args.max_steps,
         full_write_episodes=args.full_write_episodes,
         func_mod_episodes_per_fn=args.func_mod_episodes,
-        param_tune_episodes=args.param_tune_episodes,
-        param_tune_every=args.param_tune_every,
-        macro_every=args.macro_every,
         early_stopping=not args.no_early_stop,
         max_repair_turns=args.max_repairs,
         pilot_revisions=args.pilot_revisions,

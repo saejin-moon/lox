@@ -1,6 +1,6 @@
 """
 LOX Campaign Orchestrator.
-Coordinates the 4 Modification Modes (`FULL_WRITE`, `MACRO_WRITE`, `FUNC_MOD_ADD`, `PARAM_TUNE`),
+Coordinates the 3 Modification Modes (`CREATE`, `WRITE`, `REFACTOR`),
 the Persistent NLE Worker Pool, the Multi-Table DuckDB Logger & Outlier Summarizer,
 and the Stateless Author Agent.
 """
@@ -33,7 +33,6 @@ from lox.engine.hypothesis import (
     evaluate_paired_hypothesis,
     should_stop_early_for_futility,
 )
-from lox.engine.modes import run_spsa_param_tuning
 from lox.engine.scheduler import ModeScheduler, normalize_mode
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.runner.pool import PersistentEvalPool
@@ -293,11 +292,8 @@ class CampaignOrchestrator:
         role: str = "val-hum-law-fem",
         workers: int = 8,
         max_steps: int = 5000,
-        full_write_episodes: int = 10000,
-        func_mod_episodes_per_fn: int = 1000,
-        param_tune_episodes: int = 100,
-        param_tune_every: int = 100,
-        macro_every: int = 0,
+        full_write_episodes: int = 250,
+        func_mod_episodes_per_fn: int = 150,
         early_stopping: bool = True,
         max_repair_turns: int = 5,
         pilot_revisions: int = 4,
@@ -305,6 +301,7 @@ class CampaignOrchestrator:
         benchmark: str = "nethack",
         pilot_fallback: str = "best",
         workspace_dir: str | None = None,
+        **kwargs: Any,
     ):
         self.provider = provider
         self.model = model
@@ -317,7 +314,6 @@ class CampaignOrchestrator:
         self.max_steps = max_steps
         self.full_write_episodes = full_write_episodes
         self.func_mod_episodes_per_fn = func_mod_episodes_per_fn
-        self.param_tune_episodes = param_tune_episodes
         self.early_stopping = early_stopping
         self.pilot_revisions = pilot_revisions
         self.pilot_episodes = pilot_episodes
@@ -349,10 +345,7 @@ class CampaignOrchestrator:
             benchmark=benchmark,
             pilot_fallback=pilot_fallback,
         )
-        self.scheduler = ModeScheduler(
-            param_tune_every=param_tune_every,
-            macro_every=macro_every,
-        )
+        self.scheduler = ModeScheduler()
         self.pool = PersistentEvalPool(
             workers=workers,
             role=role,
@@ -758,234 +751,18 @@ class CampaignOrchestrator:
                     mode = self.scheduler.select_mode(
                         generation=gen,
                         has_policy=bool(current_policy),
-                        has_tunable_params=bool(
-                            registered_params or "param(" in current_policy
-                        ),
                         forced_mode=forced_mode,
                         consecutive_failures=consecutive_failures,
                         policy_line_count=pol_lines,
                     )
 
-                    # --- MODE 4: ZERO-LLM PARAMETER FINETUNING (CRN-SPSA) ---
-                    if mode == "PARAM_TUNE":
-                        ui.gen_header(
-                            gen=gen,
-                            mode="PARAM_TUNE",
-                            target_episodes=self.param_tune_episodes,
-                            target_fns=list(registered_params.keys()) or ["all_params"],
-                        )
-                        # If registered_params not yet populated in memory, run 1 quick episode to collect them
-                        if not registered_params and current_policy:
-                            probe = self.pool.evaluate_batch(
-                                batch_id=f"{batch_id}_probe",
-                                policy_code=current_policy,
-                                macros_code=self.macro_lib.load_code(),
-                                target_episodes=1,
-                                max_steps=active_max_steps,
-                                record_ticks=False,
-                                show_progress=False,
-                            )
-                            registered_params.update(probe.get("registered_params", {}))
-
-                        spsa_res = run_spsa_param_tuning(
-                            pool=self.pool,
-                            batch_id=batch_id,
-                            policy_code=current_policy,
-                            macros_code=self.macro_lib.load_code(),
-                            registered_params=registered_params,
-                            baseline_runs=baseline_runs,
-                            validation_episodes=self.param_tune_episodes,
-                            seed=seed_base + gen * 100,
-                            skills=self.load_workspace_skills(),
-                            benchmark=self.benchmark,
-                            max_steps=active_max_steps,
-                        )
-                        verdict = spsa_res["verdict"]
-                        val_batch = spsa_res["val_result"]
-                        if val_batch is not None:
-                            cand_id = f"pol_{batch_id}"
-                            fn_stats = self.db_logger.save_batch(
-                                batch_id=batch_id,
-                                generation=gen,
-                                mode="PARAM_TUNE",
-                                parent_policy_id=current_policy_id,
-                                candidate_policy_id=cand_id,
-                                target_functions=list(registered_params.keys()),
-                                runs=val_batch["runs"],
-                                episodes_discarded=val_batch["episodes_discarded"],
-                                batch_metrics=val_batch,
-                                verdict=verdict,
-                            )
-                            ui.batch_summary(val_batch, verdict)
-                            self.scheduler.record_outcome(
-                                "PARAM_TUNE",
-                                verdict.get("mean_delta", 0.0),
-                                val_batch.get("wall_sec", 1.0),
-                            )
-                            self.db_logger.save_experiment(
-                                experiment_id=f"exp_{batch_id}",
-                                generation=gen,
-                                batch_id=batch_id,
-                                mode="PARAM_TUNE",
-                                target_functions=list(registered_params.keys()),
-                                hypothesis={
-                                    "mode": "PARAM_TUNE",
-                                    "target_functions": list(registered_params.keys()),
-                                    "observation_from_db": "CRN-SPSA parameter optimization",
-                                    "mechanism": f"Optimized params: {spsa_res['optimized_params']}",
-                                },
-                                verdict=verdict,
-                            )
-                            self.db_logger.save_policy(
-                                policy_id=cand_id,
-                                generation=gen,
-                                mode="PARAM_TUNE",
-                                policy_code=spsa_res["new_policy_code"]
-                                or current_policy,
-                                macros_code=spsa_res.get("new_macros_code")
-                                or self.macro_lib.load_code(),
-                                params=spsa_res["optimized_params"],
-                                avg_depth=val_batch["avg_depth"],
-                                max_depth=val_batch["max_depth"],
-                                is_promoted=bool(verdict["passed"]),
-                            )
-                            if verdict["passed"]:
-                                current_policy = spsa_res["new_policy_code"]
-                                current_policy_id = cand_id
-                                self.save_active_policy(current_policy)
-                                if spsa_res.get("new_macros_code"):
-                                    self.macro_lib.save_code(
-                                        spsa_res["new_macros_code"]
-                                    )
-                                for pk, pval in spsa_res["optimized_params"].items():
-                                    if pk in registered_params:
-                                        if isinstance(registered_params[pk], dict):
-                                            registered_params[pk]["default"] = float(
-                                                pval
-                                            )
-                                        else:
-                                            registered_params[pk].default = float(pval)
-                                full_promoted = {
-                                    int(r["seed"]): r
-                                    for r in val_batch["runs"]
-                                    if not r.get("is_shard")
-                                }
-                                if full_promoted:
-                                    baseline_by_seed.update(full_promoted)
-                                    baseline_runs = list(baseline_by_seed.values())
-                                last_batch_digest = build_batch_contrast_digest(
-                                    val_batch, val_batch["runs"], fn_stats
-                                )
-                                # Update policy_archive with tuned parameters so next gen doesn't revert them
-                                if self.policy_archive:
-                                    d_pool = (
-                                        [r.get("max_depth", 1) for r in baseline_runs]
-                                        if baseline_runs
-                                        else [val_batch.get("avg_depth", 1.0)]
-                                    )
-                                    u_depth = (
-                                        float(np.mean(d_pool))
-                                        if d_pool
-                                        else float(val_batch["avg_depth"])
-                                    )
-                                    if "descent" in self.policy_archive:
-                                        u_depth = max(
-                                            u_depth,
-                                            self.policy_archive["descent"].avg_depth,
-                                        )
-                                    u_p90 = (
-                                        float(np.percentile(d_pool, 90))
-                                        if d_pool
-                                        else float(val_batch["p90_depth"])
-                                    )
-                                    u_max = (
-                                        int(max(d_pool))
-                                        if d_pool
-                                        else int(val_batch["max_depth"])
-                                    )
-                                    u_ac = (
-                                        float(
-                                            np.mean(
-                                                [
-                                                    r.get("final_ac", 10)
-                                                    for r in baseline_runs
-                                                ]
-                                            )
-                                        )
-                                        if baseline_runs
-                                        else 10.0
-                                    )
-                                    u_xl = (
-                                        float(
-                                            np.mean(
-                                                [
-                                                    r.get("xp_level", 1)
-                                                    for r in baseline_runs
-                                                ]
-                                            )
-                                        )
-                                        if baseline_runs
-                                        else 1.0
-                                    )
-                                    curr_skills = self.load_workspace_skills()
-                                    tuned_entry = PolicyArchiveEntry(
-                                        policy_id=cand_id,
-                                        policy_code=current_policy,
-                                        niche=chosen_niche,
-                                        avg_depth=u_depth,
-                                        p90_depth=u_p90,
-                                        max_depth=u_max,
-                                        avg_ac=u_ac,
-                                        avg_xl=u_xl,
-                                        baseline_runs=list(baseline_runs),
-                                        batch_digest=last_batch_digest,
-                                        skills=curr_skills,
-                                    )
-                                    if chosen_niche in self.policy_archive:
-                                        self.policy_archive[chosen_niche] = tuned_entry
-                                    self.policy_archive["descent"] = PolicyArchiveEntry(
-                                        policy_id=cand_id,
-                                        policy_code=current_policy,
-                                        niche="descent",
-                                        avg_depth=u_depth,
-                                        p90_depth=u_p90,
-                                        max_depth=u_max,
-                                        avg_ac=u_ac,
-                                        avg_xl=u_xl,
-                                        baseline_runs=list(baseline_runs),
-                                        batch_digest=last_batch_digest,
-                                        skills=curr_skills,
-                                    )
-                        else:
-                            ui.warn(verdict["reason"])
-                            self.scheduler.record_outcome(
-                                "PARAM_TUNE", 0.0, 1.0, passed=False
-                            )
-                            self.db_logger.save_experiment(
-                                experiment_id=f"exp_{batch_id}_noop",
-                                generation=gen,
-                                batch_id=batch_id,
-                                mode="PARAM_TUNE",
-                                target_functions=list(registered_params.keys()),
-                                hypothesis={
-                                    "mode": "PARAM_TUNE",
-                                    "target_functions": list(registered_params.keys()),
-                                    "observation_from_db": "CRN-SPSA parameter optimization",
-                                    "mechanism": verdict["reason"],
-                                },
-                                verdict=verdict,
-                            )
-                        continue
-
-                    # --- MODES 1, 2, 3: STATELESS AUTHOR AGENT SYNTHESIS ---
+                    # --- STATELESS AUTHOR AGENT SYNTHESIS ---
                     recent_exps = self.get_recent_experiments_markdown(limit=10)
                     recent_discoveries = self.db_logger.get_recent_discoveries(limit=12)
                     recent_failures = self.db_logger.get_recent_failed_experiments(
                         limit=8
                     )
-                    if mode == "MACRO_WRITE":
-                        ui.gen_header(gen=gen, mode="MACRO_WRITE", target_episodes=0)
-                    elif normalize_mode(mode) == "CREATE":
+                    if normalize_mode(mode) == "CREATE":
                         ui.gen_header(
                             gen=gen,
                             mode=mode,
@@ -1084,61 +861,7 @@ class CampaignOrchestrator:
 
                     ui.hypothesis_box(proposal.hypothesis)
 
-                    # --- MODE 2: MACRO_WRITE (Skip Rollout & Advance Immediately) ---
-                    if proposal.mode == "MACRO_WRITE":
-                        ui.info(
-                            f"Committed macro(s) {proposal.target_functions} to `{self.macros_path}`. "
-                            "Skipping rollout and starting next generation."
-                        )
-                        self.scheduler.record_outcome("MACRO_WRITE", 0.0, 1.0)
-                        self.db_logger.save_experiment(
-                            experiment_id=f"exp_{batch_id}",
-                            generation=gen,
-                            batch_id=batch_id,
-                            mode="MACRO_WRITE",
-                            target_functions=proposal.target_functions,
-                            hypothesis=proposal.hypothesis,
-                            verdict={
-                                "passed": True,
-                                "mean_delta": 0.0,
-                                "ci_lower": 0.0,
-                                "ci_upper": 0.0,
-                                "wilcoxon_p": 1.0,
-                                "wins": 0,
-                                "losses": 0,
-                                "ties": 0,
-                                "reason": "Macro committed directly to macros.py",
-                            },
-                        )
-                        self.db_logger.save_policy(
-                            policy_id=f"pol_{batch_id}",
-                            generation=gen,
-                            mode="MACRO_WRITE",
-                            policy_code=current_policy,
-                            macros_code=proposal.full_macros_code,
-                            params={
-                                k: (
-                                    p.get("default", 0.0)
-                                    if isinstance(p, dict)
-                                    else getattr(p, "default", 0.0)
-                                )
-                                for k, p in registered_params.items()
-                            },
-                            avg_depth=float(
-                                np.mean([r.get("max_depth", 1) for r in baseline_runs])
-                            )
-                            if baseline_runs
-                            else 1.0,
-                            max_depth=int(
-                                max([r.get("max_depth", 1) for r in baseline_runs])
-                            )
-                            if baseline_runs
-                            else 1,
-                            is_promoted=True,
-                        )
-                        continue
-
-                    # --- MODE 1 (`CREATE`) & MODE 3 (`WRITE` / `REFACTOR`) ---
+                    # --- CANDIDATE EVALUATION (`CREATE`, `WRITE`, `REFACTOR`) ---
                     canon_prop_mode = normalize_mode(proposal.mode)
                     declared_targets = proposal.hypothesis.get("target_functions") or []
                     if isinstance(declared_targets, str):

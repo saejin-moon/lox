@@ -38,7 +38,7 @@ class ExecutionTracer:
     - Conditional Episode Filtering (`did episode trigger modified function X?`)
     - Per-function dwell-time and mortality attribution (`function_stats` table)
     - Zero-yield infinite loop protection (`tick_loop()`)
-    - Parameter overrides during `PARAM_TUNE` (`get_param()`)
+    - Parameter registration and overrides (`get_param()`)
     """
 
     __slots__ = (

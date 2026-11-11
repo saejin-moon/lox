@@ -717,7 +717,7 @@ def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
     3. ingest_expert_runs_into_duckdb populates expert_ticks with depth >= 2 rows.
     4. WorldMemory normalizes open doors to ord('.') in remembered_chars, sets door_mask = True,
        exposes passable_mask and adjacent_hostiles(), and astar_next_step avoids diagonal steps on door_mask.
-    5. ModeScheduler only triggers PARAM_TUNE when at least one modification has been promoted.
+    5. ModeScheduler triggers REFACTOR based on policy line count and cadence.
     """
     from lox.datasets.download_experts import ingest_expert_runs_into_duckdb
     from lox.engine.scheduler import ModeScheduler
@@ -811,19 +811,19 @@ def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
     )
     assert step in ((1, 0), (0, 1)), f"Expected orthogonal entry, got {step}"
 
-    # 4. ModeScheduler PARAM_TUNE Gating on Promoted Modifications
-    sched = ModeScheduler(param_tune_every=2)
-    m1 = sched.select_mode(generation=1, has_policy=True, has_tunable_params=True)
+    # 4. ModeScheduler REFACTOR Gating on Line Count and Cadence
+    sched = ModeScheduler()
+    m1 = sched.select_mode(generation=1, has_policy=True, policy_line_count=200)
     assert m1 == "WRITE"
 
-    # Generation 2 without any promotions should NOT tune
-    m2 = sched.select_mode(generation=2, has_policy=True, has_tunable_params=True)
+    # Generation 2 with small policy should remain WRITE
+    m2 = sched.select_mode(generation=2, has_policy=True, policy_line_count=300)
     assert m2 == "WRITE"
 
-    # After recording a promotion, generation 3 should select PARAM_TUNE
-    sched.record_promotion("WRITE")
-    m3 = sched.select_mode(generation=3, has_policy=True, has_tunable_params=True)
-    assert m3 == "PARAM_TUNE"
+    # Generation 4 with policy_line_count >= 450 triggers REFACTOR
+    sched.gens_since_refactor = 4
+    m4 = sched.select_mode(generation=4, has_policy=True, policy_line_count=460)
+    assert m4 == "REFACTOR"
 
 
 def test_pass5_deep_audit_fixes(tmp_path: Path) -> None:
@@ -1067,7 +1067,7 @@ class Policy:
     assert "self.new_attr = 30" in spliced
 
     # 4. ModeScheduler triggers REFACTOR when policy_line_count >= 450 and gens_since_refactor >= 4
-    sched = ModeScheduler(macro_every=0)
+    sched = ModeScheduler()
     mode_at_3 = sched.select_mode(
         generation=3, has_policy=True, consecutive_failures=3, policy_line_count=500
     )

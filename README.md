@@ -46,7 +46,7 @@ Most game-playing agents depend on human-engineered domain scaffolding: hardcode
 
 2. **Near-Full Python 3.11+ Policy Language & Modular Skills ([`lox/lang/`](lox/lang/))**:
    - The Author Agent writes standard Python 3.11+ in `data/workspace/policy.py` and modular skill packages in `data/workspace/skills/`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
-   - Compile-time AST instrumentation ([`PolicyInstrumentTransformer`](lox/lang/instrument.py) and [`ExecutionTracer`](lox/lang/instrument.py)) injects `<1 µs` per-function call tracking, per-function turn attribution, zero-yield loop protection ([`PolicyLoopError`](lox/lang/instrument.py)), and tunable parameter hooks (`self.param(name, default, min_val, max_val)`).
+   - Compile-time AST instrumentation ([`PolicyInstrumentTransformer`](lox/lang/instrument.py) and [`ExecutionTracer`](lox/lang/instrument.py)) injects `<1 µs` per-function call tracking, per-function turn attribution, zero-yield loop protection ([`PolicyLoopError`](lox/lang/instrument.py)), and parameter hooks (`self.param(name, default, min_val, max_val)`).
    - Automatic naming prompt fallback: exposes `state.in_text_prompt` / `state.in_naming_prompt` directly to policy state and features a safety fallback auto-`ESC` in the execution runner to prevent unhandled text prompts (e.g. `Call a scroll: `) from stalling policies.
 
 ---
@@ -66,15 +66,15 @@ Most game-playing agents depend on human-engineered domain scaffolding: hardcode
                                         │ Emits Causal YAML Hypothesis + Python Code
                                         ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│             HYBRID MODE SCHEDULER & QUALITY-DIVERSITY BEHAVIOR ARCHIVE           │
-│  ┌────────────┐ ┌──────────────┐ ┌──────────────┐ ┌────────────┐ ┌─────────────┐ │
-│  │   CREATE   │ │    WRITE     │ │   REFACTOR   │ │ PARAM_TUNE │ │ MACRO_WRITE │ │
-│  │  250 eps   │ │150 trig eps  │ │   200 eps    │ │ (CRN-SPSA) │ │  (Optional  │ │
-│  │  (Gen 0)   │ │  (Max 2 fns) │ │ (>=450 lines)│ │(every 100g)│ │  Library)   │ │
-│  └─────┬──────┘ └──────┬───────┘ └──────┬───────┘ └─────┬──────┘ └──────┬──────┘ │
-└────────┼───────────────┼────────────────┼───────────────┼───────────────┼────────┘
-         │               │ (Instant Gen) │               │               │
-         ▼               ▼               ▼               ▼               ▼
+│                   MODE SCHEDULER & QUALITY-DIVERSITY BEHAVIOR ARCHIVE            │
+│       ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐          │
+│       │     CREATE      │    │      WRITE      │    │    REFACTOR     │          │
+│       │  250 episodes   │    │ 150 trig eps    │    │  200 episodes   │          │
+│       │  (Bootstrap)    │    │  (Max 2 fns)    │    │  (>=450 lines)  │          │
+│       └────────┬────────┘    └────────┬────────┘    └────────┬────────┘          │
+└────────────────┼──────────────────────┼──────────────────────┼───────────────────┘
+                 │                      │                      │
+                 ▼                      ▼                      ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │             PERSISTENT MULTI-CORE WORKER POOL (NLE & Craftax Adapters)           │
 │  • Direct C / Numba Step Execution (120k–285k+ steps/sec across worker cores)    │
@@ -108,8 +108,6 @@ Mode scheduling is governed by [`ModeScheduler`](lox/engine/scheduler.py):
 | **`CREATE`** | `250` episodes | 30-episode live smoke test | Synthesizes `class Policy` from scratch on Generation 0 (or when starting fresh). Writes full class definition with core survival/navigation loops. |
 | **`WRITE`** | `150` triggered episodes + `40` shards | 4 × 30-episode pilot revision loop | The iterative workhorse mode. Surgically adds or modifies targeted methods on `Policy`. **Mutation Scope Guard:** Strictly limited to at most 2 functions (1 primary method + 1 caller/helper) to isolate causality and prevent cross-subsystem regressions. Untriggered episodes (`triggered == False`) are discarded. |
 | **`REFACTOR`** | `200` episodes | Behavioral preservation gate ($\bar{d} \ge -0.015$, $\text{losses} \le \text{wins} + 5$) | Triggered automatically when `policy.py` reaches $\ge 450$ lines (every $\ge 4$ generations). Modularizes monolithic methods into external skill packages under `data/workspace/skills/`. Multi-function restructuring is permitted. |
-| **`PARAM_TUNE`** | `100` paired episodes (`0` LLM tokens) | Paired CRN validation batch | Zero-LLM parameter optimizer using Common Random Numbers Simultaneous Perturbation Stochastic Approximation (CRN-SPSA). Optimizes numeric arguments declared via `self.param(name, default, min, max)` and bakes winning constants into the AST. Runs every 100 generations. |
-| **`MACRO_WRITE`** | `0` episodes (instant advance) | Static syntax & AST validation | Optional mode for synthesizing domain-agnostic macros in `macros.py` (disabled by default, `--macro-every 0`). |
 
 ---
 
@@ -280,9 +278,9 @@ lox/
 │   └── tools.py            # AuthorToolRegistry: query_db, query_wiki, query_policy_docs, dry_run_policy
 ├── engine/
 │   ├── hypothesis.py       # Empirical Bernstein Confidence Sequences, Wilcoxon Signed-Rank, Futility Early Stopping
-│   ├── modes.py            # CRN-SPSA parameter optimizer & AST constant baker
+│   ├── modes.py            # ModeConfig & canonical mode configurations
 │   ├── orchestrator.py     # End-to-end CampaignOrchestrator, Adaptive Horizon & Status Reporter
-│   └── scheduler.py        # Hybrid ModeScheduler (CREATE, WRITE, REFACTOR, PARAM_TUNE)
+│   └── scheduler.py        # ModeScheduler (CREATE, WRITE, REFACTOR)
 └── ui/
     └── console.py          # Compact ANSI console UI with single-line progress & summary tables
 scripts/

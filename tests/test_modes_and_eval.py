@@ -1,9 +1,9 @@
 """
-Tests for the 4 Modification Modes (`FULL_WRITE`, `MACRO_WRITE`, `FUNC_MOD_ADD`, `PARAM_TUNE`),
+Tests for the 3 Modification Modes (`CREATE`, `WRITE`, `REFACTOR`),
 Conditional Episode Trigger Filtering (discarding untriggered episodes),
 Unreachable Function Circuit Breaker, Parameter-Free Hypothesis Evaluator
 (Confidence Sequences + Wilcoxon Signed-Rank + Early Futility Stopping),
-CRN-SPSA Parameter Tuning, and End-to-End Mock Campaign Orchestration.
+and End-to-End Mock Campaign Orchestration.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from lox.engine.hypothesis import (
     evaluate_paired_hypothesis,
     should_stop_early_for_futility,
 )
-from lox.engine.modes import bake_params_into_policy_ast, run_spsa_param_tuning
 from lox.engine.orchestrator import CampaignOrchestrator
 from lox.engine.scheduler import ModeScheduler
 from lox.runner.pool import PersistentEvalPool
@@ -153,67 +152,29 @@ def test_parameter_free_hypothesis_testing_and_early_stopping():
     assert verdict_bad_refactor["passed"] is False
 
 
-def test_spsa_param_tuning_and_ast_baking():
-    code = """
-class Policy:
-    def __init__(self):
-        self.retreat_hp = self.param("retreat_hp", 0.25, 0.05, 0.80)
-        self.search_cap = self.param("search_cap", 8, 2, 20)
+def test_mode_scheduler_refactor_cadence_and_line_count():
+    sched = ModeScheduler()
+    # Gen 0 bootstraps
+    assert sched.select_mode(0, has_policy=False) == "CREATE"
 
-    def run(self, state):
-        while True:
-            if state.hp / max(1, state.max_hp) < self.retreat_hp:
-                yield Action.WAIT
-            else:
-                yield Action.SEARCH
-            state = self.state
-"""
-    baked = bake_params_into_policy_ast(code, {"retreat_hp": 0.42, "search_cap": 12})
-    assert "0.42" in baked
-    assert "12" in baked
+    # Small policy remains WRITE
+    assert sched.select_mode(1, has_policy=True, policy_line_count=200) == "WRITE"
+    assert sched.select_mode(2, has_policy=True, policy_line_count=350) == "WRITE"
 
-    pool = PersistentEvalPool(workers=2, max_steps=15)
-    try:
-        base_batch = pool.evaluate_batch(
-            batch_id="spsa_base",
-            policy_code=code,
-            macros_code="",
-            target_episodes=6,
-            seed_start=800,
-            record_ticks=False,
-            show_progress=False,
-        )
-        spsa_res = run_spsa_param_tuning(
-            pool=pool,
-            batch_id="spsa_test",
-            policy_code=code,
-            macros_code="",
-            registered_params=base_batch["registered_params"],
-            baseline_runs=base_batch["runs"],
-            iterations=1,
-            episodes_per_eval=4,
-            validation_episodes=6,
-            seed=900,
-        )
-        assert "optimized_params" in spsa_res
-        assert "retreat_hp" in spsa_res["optimized_params"]
-        assert "verdict" in spsa_res
-    finally:
-        pool.close()
+    # Line count >= 450 triggers REFACTOR when gens_since_refactor >= 4
+    sched.gens_since_refactor = 4
+    assert sched.select_mode(4, has_policy=True, policy_line_count=460) == "REFACTOR"
+
+    # Cooldown prevents immediate consecutive refactor
+    assert sched.select_mode(5, has_policy=True, policy_line_count=460) == "WRITE"
 
 
 def test_mode_scheduler_and_end_to_end_mock_campaign(tmp_path):
-    sched = ModeScheduler(param_tune_every=3, macro_every=5)
-    assert sched.select_mode(0, has_policy=False, has_tunable_params=False) == "CREATE"
-    assert sched.select_mode(1, has_policy=True, has_tunable_params=True) == "WRITE"
-    assert (
-        sched.select_mode(3, has_policy=True, has_tunable_params=True) == "PARAM_TUNE"
-    )
-    assert (
-        sched.select_mode(5, has_policy=True, has_tunable_params=True) == "MACRO_WRITE"
-    )
+    sched = ModeScheduler()
+    assert sched.select_mode(0, has_policy=False) == "CREATE"
+    assert sched.select_mode(1, has_policy=True) == "WRITE"
 
-    # End-to-end 3-generation mock campaign (`FULL_WRITE` -> `FUNC_MOD_ADD` -> `MACRO_WRITE`)
+    # End-to-end 3-generation mock campaign (`CREATE` -> `WRITE` -> `WRITE`)
     db_path = str(tmp_path / "campaign.duckdb")
     policy_path = str(tmp_path / "policy.py")
     macros_path = str(tmp_path / "macros.py")
@@ -228,9 +189,6 @@ def test_mode_scheduler_and_end_to_end_mock_campaign(tmp_path):
         max_steps=20,
         full_write_episodes=6,
         func_mod_episodes_per_fn=6,
-        param_tune_episodes=6,
-        param_tune_every=4,
-        macro_every=2,
     )
     res = orch.run_campaign(max_generations=3, target_depth=99.0, seed_base=2000)
     assert res["active_policy_code"] != ""
@@ -245,35 +203,3 @@ def test_mode_scheduler_and_end_to_end_mock_campaign(tmp_path):
         assert n_exps == 3
     finally:
         con.close()
-
-
-def test_bandit_anti_starvation_and_macro_cooldown():
-    sched = ModeScheduler(param_tune_every=4, macro_every=6, use_bandit_after_gen=2)
-    # Prime counts and give MACRO_WRITE a high historical credit
-    sched.counts["FULL_WRITE"] = 1
-    sched.counts["FUNC_MOD_ADD"] = 4
-    sched.counts["PARAM_TUNE"] = 2
-    sched.counts["MACRO_WRITE"] = 1
-    sched.history["MACRO_WRITE"] = [50.0]
-    sched.history["FUNC_MOD_ADD"] = [1.0]
-    sched.history["PARAM_TUNE"] = [1.0]
-    sched._last_macro_gen = 6
-    sched._gens_since_macro = 0  # Just ran MACRO_WRITE at gen 6
-
-    # Gen 7: MACRO_WRITE must NOT be picked because cooldown (>= 6 gens) is active
-    mode = sched.select_mode(7, has_policy=True, has_tunable_params=False)
-    assert mode != "MACRO_WRITE"
-
-    # Across gens 8 to 11, MACRO_WRITE remains ineligible despite high UCB
-    for g in range(8, 12):
-        m = sched.select_mode(g, has_policy=True, has_tunable_params=False)
-        assert m != "MACRO_WRITE"
-
-    # At gen 13 (7 gens after gen 6), MACRO_WRITE becomes eligible and is selected
-    sched._gens_since_macro = 7
-    m13 = sched.select_mode(13, has_policy=True, has_tunable_params=False)
-    assert m13 == "MACRO_WRITE"
-
-    # Immediately on gen 14, MACRO_WRITE cannot be selected consecutively
-    m14 = sched.select_mode(14, has_policy=True, has_tunable_params=False)
-    assert m14 != "MACRO_WRITE"

@@ -25,13 +25,11 @@ MODE_ALIASES: dict[str, str] = {
     "REFACTOR": "REFACTOR",
     "STRUCTURAL_REFACTOR": "REFACTOR",
     "STRUCTURAL_REWRITE": "REFACTOR",
-    "PARAM_TUNE": "PARAM_TUNE",
-    "MACRO_WRITE": "MACRO_WRITE",
 }
 
 
 def normalize_mode(mode: str | None) -> str:
-    """Normalizes legacy or lowercase mode names to canonical (`CREATE`, `WRITE`, `REFACTOR`, `PARAM_TUNE`, `MACRO_WRITE`)."""
+    """Normalizes legacy or lowercase mode names to canonical (`CREATE`, `WRITE`, `REFACTOR`)."""
     if not mode:
         return "WRITE"
     u = str(mode).strip().upper()

@@ -243,19 +243,3 @@ def defend(self, state):
         smoke_only=True,
     )
     assert "PASSED" in status or "VALID" in status
-
-
-def test_spsa_keyword_args_and_zero_gain_short_circuit():
-    from lox.engine.modes import bake_params_into_policy_ast
-
-    policy_code = """
-class Policy:
-    def __init__(self):
-        self.flee_hp = self.param("flee_hp", default=0.25, min_val=0.10, max_val=0.70)
-        self.wait_steps = self.param("wait_steps", 5, 1, 20)
-"""
-    updated = bake_params_into_policy_ast(
-        policy_code, {"flee_hp": 0.45, "wait_steps": 10}
-    )
-    assert "0.45" in updated
-    assert "10" in updated

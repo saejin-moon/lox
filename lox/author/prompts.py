@@ -4,7 +4,7 @@ In System Prompt:
 - Complete Policy Language Specification (Python 3.11+, GameState API, 1-to-1 Action Map, Macros, Tunable Params)
 - Complete DuckDB Schema (`runs`, `ticks`, `batches`, `function_stats`, `experiments`, `expert_runs`, `expert_ticks`)
 In User Prompt:
-- Active Modification Mode (`FULL_WRITE`, `MACRO_WRITE`, `FUNC_MOD_ADD`)
+- Active Modification Mode (`CREATE`, `WRITE`, `REFACTOR`)
 - Batch Contrast Digest (`is_outlier_good = TRUE` runs vs normal runs), Function Stats, and Recent Experiment Lab Notebook.
 """
 
@@ -73,8 +73,8 @@ POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
     2. If a helper method is a normal function that returns an `Action` or `None`, call it as `act = self.helper(state)` and then `state = yield act`.
     3. If a helper method is itself a generator (contains `yield`), call it via `state = yield from self.sub_gen(state)` and end `sub_gen` with `return state`. Never write `yield self.sub_gen(state)` without `from`!
 - **Supported Python**: Full Python 3.11+ syntax (`if/elif/else`, `for`, `while`, `try/except`, list/dict/set comprehensions, `@dataclass`, helper classes, recursion, `match/case`, lambdas). Pre-loaded in globals: `math`, `collections` (`deque`, `defaultdict`, `Counter`), `heapq`, `itertools`, `functools`, `re`, `enum`, `dataclasses`, `numpy` (`np`), `random`, `copy`, `bisect`.
-- **Tunable Parameters (`self.param`)**:
-  Declare numeric thresholds/weights via `self.param("name", default, min_val, max_val)` (e.g. `self.param("heal_hp_ratio", 0.35, 0.10, 0.80)`). During `PARAM_TUNE` generations, the engine optimizes all registered parameters automatically via SPSA!
+- **Configurable Parameters (`self.param`)**:
+  You can declare numeric thresholds/weights via `self.param("name", default, min_val, max_val)` (e.g. `self.param("heal_hp_ratio", 0.35, 0.10, 0.80)`).
 
 #### 2. Modular Subsystems & Skill Modules (`skills/<module>.py`)
 - **Hierarchical Modularization**: Monolithic policy classes with dozens of methods become fragile and difficult to maintain. You can modularize domain capabilities into external skill files under `data/workspace/skills/<module>.py` (e.g. `skills/combat.py`, `skills/nutrition.py`, `skills/navigation.py`, `skills/identification.py`).
@@ -480,18 +480,14 @@ def build_user_prompt(
         else ""
     )
     digest_block = f"\n{batch_digest}\n" if batch_digest else ""
-    canon_mode = (
-        "MACRO_WRITE"
-        if str(mode).strip().upper() == "MACRO_WRITE"
-        else normalize_mode(mode)
-    )
+    canon_mode = normalize_mode(mode)
 
     if canon_mode == "CREATE":
         return f"""### Generation {generation} — Mode: `CREATE` (Initial Baseline Synthesis)
 {discoveries_block}{failures_block}You are bootstrapping the policy from a **completely clean slate** (no pre-written policy is provided).
 Your task:
 1. Use multiple tool calls (`query_db` on `expert_runs` / `expert_ticks`, `query_wiki`, `query_policy_docs`) to study successful NetHack runs, early-game survival mechanics, dungeon navigation, door opening/kicking, stair descent, combat, and food/corpse consumption.
-2. Design a well-structured, modular `class Policy:` with clear methods (e.g. `run(self, state)`, `update_memory(self, state)`, `handle_combat(self, state)`, `handle_nutrition(self, state)`, `explore_level(self, state)`, etc.) and tunable thresholds declared via `self.param("name", default, min_val, max_val)`.
+2. Design a well-structured, modular `class Policy:` with clear methods (e.g. `run(self, state)`, `update_memory(self, state)`, `handle_combat(self, state)`, `handle_nutrition(self, state)`, `explore_level(self, state)`, etc.).
 3. Pre-Submission Invariant Checklist:
    - Generator Invariant: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
    - State Persistence: Specialist methods must update `self.*` attributes to prevent oscillations.
@@ -509,32 +505,6 @@ Your task:
      state_persistence: "Self.* attributes used for memory and navigation"
      ```
    - Your complete `class Policy:` implementation in a single ```python ... ``` block.
-"""
-
-    if canon_mode == "MACRO_WRITE":
-        return f"""### Generation {generation} — Mode: `MACRO_WRITE` (Reusable Macro Library Synthesis)
-{digest_block}{exp_block}{discoveries_block}{failures_block}
-{macros_docs}
-
-{_format_context_scoped_policy(current_policy, batch_digest)}
-
-### Scientific Protocol for `MACRO_WRITE`:
-1. **Stage 1 (Empirical Investigation)**:
-   - Use `query_db` (on `runs` and `expert_runs`) and `query_wiki` to identify common subroutines that multiple policy skills need (e.g. door breaching, tactical retreat chokepoint detection, item identification/quaffing, inventory management, pathfinding around dangerous tiles).
-2. **Stage 2 (Macro Implementation)**:
-   - Write one or more clean, well-documented helper functions or generator subroutines (`def macro_name(state, ...):`) to add to `macros.py`.
-   - Macros must be pure, robust functions or generators with clear docstrings and type hints.
-3. **Stage 3 (Verification)**:
-   - Verify candidate macros with `dry_run_policy(code=..., is_macro=True)`. This runs real-state replay across diverse dungeon states to verify the macro does not crash or yield invalid actions.
-4. **Stage 4 (Commit Output)**:
-   - Output a `yaml` block listing the macro names and purpose:
-     ```yaml
-     mode: MACRO_WRITE
-     target_functions: [your_macro_name]
-     observation_from_db: "Why this macro is needed based on current runs"
-     mechanism: "How the macro works and how policy.py can call it"
-     ```
-   - Your macro function definition(s) in a single ```python ... ``` block. (Note: `MACRO_WRITE` commits directly to `macros.py` and immediately advances to the next generation).
 """
 
     if canon_mode == "REFACTOR":

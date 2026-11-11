@@ -1,22 +1,13 @@
 """
-The 4 Modification Modes of LOX & CRN-SPSA Parameter Optimizer:
-1. `FULL_WRITE`: Initial full policy synthesis (default: 10,000 episodes).
-2. `FUNC_MOD_ADD`: Targeted function modification/addition (default: 1,000 triggered episodes per function).
-3. `MACRO_WRITE`: Reusable macro synthesis in `macros.py` (default: 0 episodes -> immediate next gen).
-4. `PARAM_TUNE`: Zero-order CRN-SPSA parameter finetuning over `self.param(...)` declarations (0 LLM tokens).
+The Policy Modification Modes of LOX:
+1. `CREATE`: Initial full policy synthesis (default: 250 episodes).
+2. `WRITE`: Targeted function modification/addition (default: 150 triggered episodes, max 2 functions).
+3. `REFACTOR`: Subsystem modularization into `data/workspace/skills/` (default: 200 episodes).
 """
 
 from __future__ import annotations
 
-import ast
 from dataclasses import dataclass
-from typing import Any
-
-import numpy as np
-
-from lox.engine.hypothesis import evaluate_paired_hypothesis, progression_metric
-from lox.runner.pool import PersistentEvalPool
-from lox.ui.console import ui
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,400 +21,34 @@ class ModeConfig:
 
 
 MODES: dict[str, ModeConfig] = {
+    "CREATE": ModeConfig(
+        name="CREATE",
+        episodes_per_unit=250,
+        requires_llm=True,
+        requires_trigger_filter=False,
+    ),
+    "WRITE": ModeConfig(
+        name="WRITE",
+        episodes_per_unit=150,
+        requires_llm=True,
+        requires_trigger_filter=True,
+    ),
+    "REFACTOR": ModeConfig(
+        name="REFACTOR",
+        episodes_per_unit=200,
+        requires_llm=True,
+        requires_trigger_filter=False,
+    ),
     "FULL_WRITE": ModeConfig(
-        name="FULL_WRITE",
-        episodes_per_unit=10000,
+        name="CREATE",
+        episodes_per_unit=250,
         requires_llm=True,
         requires_trigger_filter=False,
     ),
     "FUNC_MOD_ADD": ModeConfig(
-        name="FUNC_MOD_ADD",
-        episodes_per_unit=1000,
+        name="WRITE",
+        episodes_per_unit=150,
         requires_llm=True,
         requires_trigger_filter=True,
     ),
-    "MACRO_WRITE": ModeConfig(
-        name="MACRO_WRITE",
-        episodes_per_unit=0,
-        requires_llm=True,
-        requires_trigger_filter=False,
-    ),
-    "PARAM_TUNE": ModeConfig(
-        name="PARAM_TUNE",
-        episodes_per_unit=500,
-        requires_llm=False,
-        requires_trigger_filter=False,
-    ),
 }
-
-
-class _ParamConstantUpdater(ast.NodeTransformer):
-    """Updates default values inside `self.param("name", default, ...)` or `param("name", default, ...)` calls."""
-
-    def __init__(self, new_defaults: dict[str, float | int]):
-        super().__init__()
-        self.new_defaults = new_defaults
-
-    def visit_Call(self, node: ast.Call) -> ast.Call:
-        self.generic_visit(node)
-        is_param_call = False
-        if isinstance(node.func, ast.Name) and node.func.id == "param":
-            is_param_call = True
-        elif isinstance(node.func, ast.Attribute) and node.func.attr == "param":
-            is_param_call = True
-
-        if (
-            is_param_call
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-        ):
-            p_name = node.args[0].value
-            if p_name in self.new_defaults:
-                val = self.new_defaults[p_name]
-                if len(node.args) >= 2:
-                    node.args[1] = ast.Constant(value=val)
-                else:
-                    for kw in node.keywords:
-                        if kw.arg == "default":
-                            kw.value = ast.Constant(value=val)
-                            break
-        return node
-
-
-def bake_params_into_policy_ast(
-    policy_code: str,
-    optimized_params: dict[str, float | int],
-) -> str:
-    """Rewrites `self.param(name, default, ...)` calls in `policy_code` with `optimized_params`."""
-    if not optimized_params or not policy_code.strip():
-        return policy_code
-    try:
-        tree = ast.parse(policy_code)
-        tree = _ParamConstantUpdater(optimized_params).visit(tree)
-        ast.fix_missing_locations(tree)
-        return ast.unparse(tree)
-    except Exception:
-        return policy_code
-
-
-def run_spsa_param_tuning(
-    pool: PersistentEvalPool,
-    batch_id: str,
-    policy_code: str,
-    macros_code: str,
-    registered_params: dict[str, dict[str, Any]],
-    baseline_runs: list[dict[str, Any]],
-    iterations: int = 5,
-    minibatch_size: int = 24,
-    validation_episodes: int = 100,
-    seed: int = 777,
-    episodes_per_eval: int | None = None,
-    skills: dict[str, str] | None = None,
-    benchmark: str = "nethack",
-    max_steps: int | None = None,
-) -> dict[str, Any]:
-    """
-    Simultaneous Perturbation Stochastic Approximation with Common Random Numbers (CRN-SPSA).
-    Perturbs all `self.param(...)` thresholds simultaneously in normalized [0, 1]^p space,
-    evaluates theta+ and theta- on the EXACT same seed mini-batch (Common Random Numbers),
-    follows the empirical gradient, and validates the final parameter vector against baseline.
-    """
-    if episodes_per_eval is not None:
-        minibatch_size = int(episodes_per_eval)
-    eff_max_steps = int(max_steps if max_steps is not None else pool.max_steps)
-    if not registered_params:
-        return {
-            "tuned": False,
-            "optimized_params": {},
-            "new_policy_code": policy_code,
-            "val_result": None,
-            "verdict": {
-                "passed": False,
-                "mean_delta": 0.0,
-                "ci_lower": 0.0,
-                "ci_upper": 0.0,
-                "wilcoxon_p": 1.0,
-                "wins": 0,
-                "losses": 0,
-                "ties": 0,
-                "reason": "No self.param(...) declarations found in policy.",
-            },
-        }
-
-    param_names = sorted(registered_params.keys())
-    p_dim = len(param_names)
-    rng = np.random.default_rng(seed)
-
-    # Normalize initial defaults to [0, 1]^p
-    mins = np.array(
-        [float(registered_params[k]["min_val"]) for k in param_names], dtype=np.float64
-    )
-    maxs = np.array(
-        [float(registered_params[k]["max_val"]) for k in param_names], dtype=np.float64
-    )
-    spans = np.maximum(1e-6, maxs - mins)
-    defaults = np.array(
-        [float(registered_params[k]["default"]) for k in param_names], dtype=np.float64
-    )
-    is_ints = [bool(registered_params[k].get("is_int", False)) for k in param_names]
-
-    theta = np.clip((defaults - mins) / spans, 0.0, 1.0)
-    best_theta = theta.copy()
-    best_gain = 0.0
-
-    def _denorm(vec: np.ndarray) -> dict[str, float | int]:
-        out: dict[str, float | int] = {}
-        raw = mins + np.clip(vec, 0.0, 1.0) * spans
-        for i, k in enumerate(param_names):
-            if is_ints[i]:
-                out[k] = int(round(float(raw[i])))
-            else:
-                out[k] = round(float(raw[i]), 4)
-        return out
-
-    base_by_seed = {int(r["seed"]): progression_metric(r) for r in baseline_runs}
-    base_seeds = (
-        [int(r["seed"]) for r in baseline_runs]
-        if baseline_runs
-        else list(range(10000, 10200))
-    )
-    shards: list[Any] = []
-
-    # Spall SPSA standard gain schedule
-    c0 = 0.12
-    a0 = 0.18
-    A = max(1.0, 0.1 * iterations)
-    alpha_exp = 0.602
-    gamma_exp = 0.101
-
-    shard_base_mb = 0.0
-    if shards:
-        base_shard_tasks = [
-            {
-                "seed": sh.seed,
-                "run_id": f"{batch_id}_spsa_base_s{idx:05d}",
-                "role": pool.role,
-                "max_steps": 150,
-                "policy_code": policy_code,
-                "macros_code": macros_code,
-                "target_functions": [],
-                "param_overrides": _denorm(theta),
-                "record_ticks": False,
-                "replay_bytes": sh.action_bytes,
-                "post_replay_max_steps": 150,
-                "is_priority_seed": True,
-                "enforce_trigger": False,
-                "skills": skills,
-                "benchmark": benchmark,
-            }
-            for idx, sh in enumerate(shards[:minibatch_size], 1)
-        ]
-        base_shard_runs = pool.evaluate_tasks(base_shard_tasks)
-        shard_base_mb = (
-            float(np.mean([progression_metric(r) for r in base_shard_runs]))
-            if base_shard_runs
-            else 0.0
-        )
-
-    for k in range(iterations):
-        ui.status(
-            f"CRN-SPSA tuning parameters iterate {k + 1}/{iterations} (evaluating mini-batches on Common Random Numbers)..."
-        )
-        ck = c0 / ((k + 1.0) ** gamma_exp)
-        ak = a0 / ((k + 1.0 + A) ** alpha_exp)
-        # Random Subspace SPSA (Spall, 1992): if parameter dimension > 6,
-        # perturb a random subset of 4 parameters per iteration to prevent high-variance divergence
-        if p_dim > 6:
-            subspace_k = min(4, p_dim)
-            active_indices = rng.choice(p_dim, size=subspace_k, replace=False)
-            delta_vec = np.zeros(p_dim, dtype=np.float64)
-            delta_vec[active_indices] = rng.choice([-1.0, 1.0], size=subspace_k)
-        else:
-            delta_vec = rng.choice([-1.0, 1.0], size=p_dim)
-
-        theta_plus = np.clip(theta + ck * delta_vec, 0.0, 1.0)
-        theta_minus = np.clip(theta - ck * delta_vec, 0.0, 1.0)
-
-        # Common Random Numbers: evaluate theta_plus and theta_minus on the exact same mini-batch concurrently
-        mb_seeds = [
-            int(s)
-            for s in rng.choice(
-                base_seeds, size=min(minibatch_size, len(base_seeds)), replace=False
-            )
-        ]
-        if shards:
-            j_base_mb = shard_base_mb
-        else:
-            j_base_mb = (
-                float(np.mean([base_by_seed[s] for s in mb_seeds if s in base_by_seed]))
-                if base_by_seed
-                else 0.0
-            )
-
-        p_overrides = _denorm(theta_plus)
-        m_overrides = _denorm(theta_minus)
-
-        if shards:
-            eval_shards = shards[:minibatch_size]
-            p_tasks = [
-                {
-                    "seed": sh.seed,
-                    "run_id": f"{batch_id}_spsa_{k}p_s{idx:05d}",
-                    "role": pool.role,
-                    "max_steps": 150,
-                    "policy_code": policy_code,
-                    "macros_code": macros_code,
-                    "target_functions": [],
-                    "param_overrides": p_overrides,
-                    "record_ticks": False,
-                    "replay_bytes": sh.action_bytes,
-                    "post_replay_max_steps": 150,
-                    "is_priority_seed": True,
-                    "enforce_trigger": False,
-                    "skills": skills,
-                    "benchmark": benchmark,
-                }
-                for idx, sh in enumerate(eval_shards, 1)
-            ]
-            m_tasks = [
-                {
-                    "seed": sh.seed,
-                    "run_id": f"{batch_id}_spsa_{k}m_s{idx:05d}",
-                    "role": pool.role,
-                    "max_steps": 150,
-                    "policy_code": policy_code,
-                    "macros_code": macros_code,
-                    "target_functions": [],
-                    "param_overrides": m_overrides,
-                    "record_ticks": False,
-                    "replay_bytes": sh.action_bytes,
-                    "post_replay_max_steps": 150,
-                    "is_priority_seed": True,
-                    "enforce_trigger": False,
-                    "skills": skills,
-                    "benchmark": benchmark,
-                }
-                for idx, sh in enumerate(eval_shards, 1)
-            ]
-        else:
-            p_tasks = [
-                {
-                    "seed": s,
-                    "run_id": f"{batch_id}_spsa_{k}p_r{idx:05d}",
-                    "role": pool.role,
-                    "max_steps": eff_max_steps,
-                    "policy_code": policy_code,
-                    "macros_code": macros_code,
-                    "target_functions": [],
-                    "param_overrides": p_overrides,
-                    "record_ticks": False,
-                    "skills": skills,
-                    "benchmark": benchmark,
-                }
-                for idx, s in enumerate(mb_seeds, 1)
-            ]
-            m_tasks = [
-                {
-                    "seed": s,
-                    "run_id": f"{batch_id}_spsa_{k}m_r{idx:05d}",
-                    "role": pool.role,
-                    "max_steps": eff_max_steps,
-                    "policy_code": policy_code,
-                    "macros_code": macros_code,
-                    "target_functions": [],
-                    "param_overrides": m_overrides,
-                    "record_ticks": False,
-                    "skills": skills,
-                    "benchmark": benchmark,
-                }
-                for idx, s in enumerate(mb_seeds, 1)
-            ]
-
-        all_results = pool.evaluate_tasks(p_tasks + m_tasks)
-        plus_runs = [r for r in all_results if f"_spsa_{k}p_" in r.get("run_id", "")]
-        minus_runs = [r for r in all_results if f"_spsa_{k}m_" in r.get("run_id", "")]
-
-        j_plus = (
-            float(np.mean([progression_metric(r) for r in plus_runs]))
-            if plus_runs
-            else 0.0
-        )
-        j_minus = (
-            float(np.mean([progression_metric(r) for r in minus_runs]))
-            if minus_runs
-            else 0.0
-        )
-
-        gain_plus = j_plus - j_base_mb
-        gain_minus = j_minus - j_base_mb
-
-        if gain_plus > best_gain:
-            best_gain = gain_plus
-            best_theta = theta_plus.copy()
-        if gain_minus > best_gain:
-            best_gain = gain_minus
-            best_theta = theta_minus.copy()
-
-        grad = np.zeros_like(theta)
-        active_mask = delta_vec != 0.0
-        if np.any(active_mask):
-            grad[active_mask] = ((j_plus - j_minus) / (2.0 * ck)) * (
-                1.0 / delta_vec[active_mask]
-            )
-        theta = np.clip(theta + ak * grad, 0.0, 1.0)
-
-    if best_gain <= 0.0:
-        return {
-            "tuned": False,
-            "optimized_params": _denorm(theta),
-            "new_policy_code": policy_code,
-            "new_macros_code": macros_code,
-            "val_result": None,
-            "verdict": {
-                "passed": False,
-                "mean_delta": 0.0,
-                "ci_lower": 0.0,
-                "ci_upper": 0.0,
-                "wilcoxon_p": 1.0,
-                "wins": 0,
-                "losses": 0,
-                "ties": len(baseline_runs),
-                "reason": "CRN-SPSA found zero positive gradient over mini-batches (best_gain <= 0.0). Skipped validation rollout to save compute.",
-            },
-        }
-
-    cand_params = _denorm(best_theta)
-    new_policy_code = bake_params_into_policy_ast(policy_code, cand_params)
-    new_macros_code = (
-        bake_params_into_policy_ast(macros_code, cand_params)
-        if macros_code.strip()
-        else macros_code
-    )
-
-    val_seeds = base_seeds[: min(validation_episodes, len(base_seeds))]
-    val_result = pool.evaluate_batch(
-        batch_id=batch_id,
-        policy_code=new_policy_code,
-        macros_code=new_macros_code,
-        target_episodes=len(val_seeds) if val_seeds else validation_episodes,
-        priority_seeds=val_seeds,
-        param_overrides=cand_params,
-        record_ticks=True,
-        show_progress=True,
-        skills=skills,
-        benchmark=benchmark,
-        max_steps=eff_max_steps,
-    )
-    verdict = evaluate_paired_hypothesis(
-        val_result["runs"], baseline_runs, benchmark=benchmark
-    )
-
-    return {
-        "tuned": True,
-        "optimized_params": cand_params,
-        "new_policy_code": new_policy_code,
-        "new_macros_code": new_macros_code,
-        "val_result": val_result,
-        "verdict": verdict,
-    }

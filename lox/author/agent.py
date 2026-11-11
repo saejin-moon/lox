@@ -479,11 +479,7 @@ class AuthorAgent:
         )
         self._execute_tool_call(1, "query_wiki", {"query": "Excalibur", "top_k": 1})
 
-        canon_mode = (
-            "MACRO_WRITE"
-            if str(mode).strip().upper() == "MACRO_WRITE"
-            else normalize_mode(mode)
-        )
+        canon_mode = normalize_mode(mode)
         if canon_mode == "CREATE" or not current_policy.strip():
             code = """class Policy:
     def __init__(self):
@@ -575,36 +571,6 @@ class AuthorAgent:
                 tool_calls_made=2,
             )
 
-        if canon_mode == "MACRO_WRITE":
-            macro_code = '''def build_walkable_mask(state):
-    """Returns a boolean (21, 79) mask of standard walkable floor, corridor, stair, and door tiles."""
-    return (
-        (state.chars == ord('.'))
-        | (state.chars == ord('#'))
-        | (state.chars == ord('>'))
-        | (state.chars == ord('<'))
-        | (state.chars == ord('+'))
-        | (state.chars == ord('_'))
-        | (state.chars == ord('{'))
-    )
-'''
-            merged_macros, names = self.tools.macro_lib.merge_macros(macro_code)
-            hyp = {
-                "mode": "MACRO_WRITE",
-                "target_functions": names,
-                "observation_from_db": "Extracted reusable walkable mask builder into macros.py.",
-                "mechanism": "Adds build_walkable_mask(state) to macros.py.",
-            }
-            return SynthesisProposal(
-                mode="MACRO_WRITE",
-                hypothesis=hyp,
-                raw_code_patch=macro_code,
-                full_policy_code=current_policy,
-                full_macros_code=merged_macros,
-                target_functions=names,
-                tool_calls_made=2,
-            )
-
         # WRITE / REFACTOR mock
         patch = """def handle_combat(self, state):
     hp_thresh = self.param("retreat_hp", 0.30, 0.1, 0.6)
@@ -661,11 +627,7 @@ class AuthorAgent:
         if self.provider == "mock":
             return self._synthesize_mock(mode=mode, current_policy=current_policy)
 
-        canon_mode = (
-            "MACRO_WRITE"
-            if str(mode).strip().upper() == "MACRO_WRITE"
-            else normalize_mode(mode)
-        )
+        canon_mode = normalize_mode(mode)
 
         self.tools.current_policy_code = current_policy
         self.tools.last_passed_code = ""
@@ -793,7 +755,6 @@ class AuthorAgent:
                     and needs_pilot
                     and self.tools.pilot_runs_used < self.tools.max_pilot_runs
                     and turn_idx < max_tool_turns
-                    and canon_mode != "MACRO_WRITE"
                 ):
                     total_tool_calls += 1
                     t0 = time.perf_counter()
@@ -913,7 +874,6 @@ class AuthorAgent:
                     not found_code
                     and not self.tools.last_passed_code
                     and turn_idx < max_tool_turns
-                    and mode != "MACRO_WRITE"
                 ):
                     if (
                         self.tools.pilot_runs_used > 0
@@ -1059,7 +1019,7 @@ class AuthorAgent:
         if (
             self.tools.pilot_runs_used > 0
             and not self.tools.last_pilot_improved
-            and canon_mode not in ("MACRO_WRITE", "CREATE")
+            and canon_mode != "CREATE"
         ):
             summary = self.tools.last_pilot_summary or "insufficient signal"
             best_delta = getattr(self.tools, "best_pilot_delta", -1.0)
@@ -1123,8 +1083,6 @@ class AuthorAgent:
                 )
 
         # Compiler-in-the-loop verification & sequential self-repair
-        is_macro_mode = mode == "MACRO_WRITE"
-
         for repair_idx in range(self.max_repair_turns + 1):
             hyp, code_patch = self.extract_yaml_and_python(final_content)
             if hyp:
@@ -1161,7 +1119,7 @@ class AuthorAgent:
                 )
                 diag, status = self.tools.dry_run_policy(
                     code=code_patch,
-                    is_macro=is_macro_mode,
+                    is_macro=False,
                     seed=42,
                     max_turns=50,
                     smoke_only=True,
@@ -1215,77 +1173,50 @@ class AuthorAgent:
                         or getattr(self.tools, "best_pilot_skill_name", None)
                     ),
                 )
-                if is_macro_mode:
-                    merged_macros, macro_names = self.tools.macro_lib.merge_macros(
-                        code_patch
+                if canon_mode == "CREATE" or not current_policy.strip():
+                    spliced_policy = code_patch
+                    changed_fns = hyp.get("target_functions") or ["run"]
+                else:
+                    spliced_policy, changed_fns = splice_functions_into_policy(
+                        current_policy, code_patch
                     )
-                    targets = hyp.get("target_functions") or macro_names
-                    if isinstance(targets, str):
-                        targets = [targets]
+                    if canon_mode == "REFACTOR" and skill_code:
+                        spliced_policy, pruned_fns = prune_extracted_skill_functions(
+                            spliced_policy, skill_code
+                        )
+                        if pruned_fns:
+                            changed_fns = [
+                                fn for fn in changed_fns if fn not in set(pruned_fns)
+                            ] or ["run"]
+                if isinstance(changed_fns, str):
+                    changed_fns = [changed_fns]
+                if canon_mode not in ("CREATE", "REFACTOR") and len(changed_fns) > 2:
+                    ui.warn(
+                        f"Mutation Scope: Candidate modified {len(changed_fns)} functions ({changed_fns}), exceeding limit of 2. Aborting rollout."
+                    )
                     return SynthesisProposal(
                         mode=mode,
                         hypothesis=hyp,
                         raw_code_patch=code_patch,
                         full_policy_code=current_policy,
-                        full_macros_code=merged_macros,
-                        target_functions=list(targets),
-                        tool_calls_made=total_tool_calls,
-                        skill_code=skill_code,
-                    )
-                else:
-                    if canon_mode == "CREATE" or not current_policy.strip():
-                        spliced_policy = code_patch
-                        changed_fns = hyp.get("target_functions") or ["run"]
-                    else:
-                        spliced_policy, changed_fns = splice_functions_into_policy(
-                            current_policy, code_patch
-                        )
-                        if canon_mode == "REFACTOR" and skill_code:
-                            spliced_policy, pruned_fns = (
-                                prune_extracted_skill_functions(
-                                    spliced_policy, skill_code
-                                )
-                            )
-                            if pruned_fns:
-                                changed_fns = [
-                                    fn
-                                    for fn in changed_fns
-                                    if fn not in set(pruned_fns)
-                                ] or ["run"]
-                    if isinstance(changed_fns, str):
-                        changed_fns = [changed_fns]
-                    if (
-                        canon_mode not in ("CREATE", "REFACTOR")
-                        and len(changed_fns) > 2
-                    ):
-                        ui.warn(
-                            f"Mutation Scope: Candidate modified {len(changed_fns)} functions ({changed_fns}), exceeding limit of 2. Aborting rollout."
-                        )
-                        return SynthesisProposal(
-                            mode=mode,
-                            hypothesis=hyp,
-                            raw_code_patch=code_patch,
-                            full_policy_code=current_policy,
-                            full_macros_code="",
-                            target_functions=list(changed_fns),
-                            tool_calls_made=total_tool_calls,
-                            skill_code=skill_code,
-                            aborted=True,
-                            abort_reason=f"MUTATION_SCOPE_EXCEEDED: modified {len(changed_fns)} functions ({changed_fns}), limit is 2",
-                            pilot_best_delta=getattr(
-                                self.tools, "best_pilot_delta", 0.0
-                            ),
-                        )
-                    return SynthesisProposal(
-                        mode=mode,
-                        hypothesis=hyp,
-                        raw_code_patch=code_patch,
-                        full_policy_code=spliced_policy,
-                        full_macros_code=self.tools.macro_lib.load_code(),
+                        full_macros_code="",
                         target_functions=list(changed_fns),
                         tool_calls_made=total_tool_calls,
                         skill_code=skill_code,
+                        aborted=True,
+                        abort_reason=f"MUTATION_SCOPE_EXCEEDED: modified {len(changed_fns)} functions ({changed_fns}), limit is 2",
+                        pilot_best_delta=getattr(self.tools, "best_pilot_delta", 0.0),
                     )
+                return SynthesisProposal(
+                    mode=mode,
+                    hypothesis=hyp,
+                    raw_code_patch=code_patch,
+                    full_policy_code=spliced_policy,
+                    full_macros_code=self.tools.macro_lib.load_code(),
+                    target_functions=list(changed_fns),
+                    tool_calls_made=total_tool_calls,
+                    skill_code=skill_code,
+                )
 
             if repair_idx < self.max_repair_turns:
                 ui.warn(
@@ -1398,20 +1329,6 @@ class AuthorAgent:
                     or getattr(self.tools, "best_pilot_skill_name", None)
                 ),
             )
-            if is_macro_mode:
-                merged_macros, macro_names = self.tools.macro_lib.merge_macros(
-                    code_patch
-                )
-                return SynthesisProposal(
-                    mode=mode,
-                    hypothesis=latest_hyp,
-                    raw_code_patch=code_patch,
-                    full_policy_code=current_policy,
-                    full_macros_code=merged_macros,
-                    target_functions=list(macro_names),
-                    tool_calls_made=total_tool_calls,
-                    skill_code=skill_code,
-                )
             if canon_mode == "CREATE" or not current_policy.strip():
                 spliced_policy = code_patch
                 changed_fns = latest_hyp.get("target_functions") or ["run"]
