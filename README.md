@@ -2,54 +2,56 @@
 
 > **Architectural Motto:** *"Hard Code Nothing."*
 
-`LOX` is an autonomous neuro-symbolic program synthesis engine that writes, tests, attributes, and evolves executable Python control policies and reusable macro libraries for long-horizon environments from first principles. It supports both the **NetHack Learning Environment (NLE)** and the **Crafter / Craftax** survival benchmark.
+`LOX` is an autonomous neuro-symbolic program synthesis engine that designs, verifies, attributes, and evolves executable Python control policies and modular skill libraries for long-horizon environments from first principles. It is engineered primarily for the **NetHack Learning Environment (NLE)** and also supports the **Crafter / Craftax** survival benchmark.
 
-Standard deep reinforcement learning trains opaque neural weights over billions of environment frames, and online LLM agents pay a high latency and token cost on every single turn. `LOX` places the language model in the **outer scientific loop** and compiled Python 3.11+ in the **inner execution loop**:
+Standard reinforcement learning optimizes millions of opaque neural weights across billions of environment steps, frequently stalling on NetHack's combinatorial item systems, non-linear puzzles, and permadeath traps. Conversely, step-by-step LLM game agents pay an impractical latency (1–3s/action) and financial cost ($50–$200/game) that prohibits statistical verification.
 
-- **Inner Loop (CPU / Numba)**: Compiled Python 3.11+ generator policies execute directly against the C/Python environment harness at **120,000 to 280,000+ steps/sec** across worker cores (`0` LLM tokens per step). The harness utilizes lean observation channels (eliminating redundant C-level rasterization), handles pagination (`--More--`) transparently, passes interactive prompts (`[yn]`, `[ynq]`) directly to policies with watchdog protection, and exposes zero-turn stall telemetry (`state.turn_advanced`, `state.consecutive_stalls`).
-- **Outer Loop (Stateless Scientist LLM)**: Between evaluation batches, a stateless Author Agent queries a multi-table **DuckDB** warehouse (`runs`, `ticks`, `function_stats`, `discoveries`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Strategy Knowledge Base**. It isolates the active policy's top binding constraint, verifies environment rules against C struct tables (`permonst`, `objclass`) and Wiki articles, tests candidate code in an **8 x 30-episode execution-guided pilot loop** (`dry_run_policy`) with behavioral stall telemetry and prefix-replay shards, and promotes the best candidate to sequential statistical hypothesis testing without hard-aborting on pilot noise.
+`LOX` resolves this fundamental tradeoff by placing the language model in the **outer scientific loop** and compiled Python 3.11+ in the **inner execution loop**:
+
+- **Inner Execution Loop (CPU / Numba)**: Compiled Python 3.11+ generator policies execute directly against the C/Python environment harness at **120,000 to 285,000+ steps/sec** across multi-core worker pools (`0` LLM tokens per action). The harness uses lean observation buffers, handles pagination (`--More--`) transparently, passes interactive decision prompts (`[yn]`, `[ynq]`, getlin) directly to policies with watchdog protection, and exposes zero-turn action stall telemetry (`state.turn_advanced`, `state.consecutive_stalls`).
+- **Outer Scientific Loop (Stateless Scientist LLM)**: Between evaluation batches, a stateless Author Agent queries an 8-table **DuckDB** analytical warehouse (`runs`, `ticks`, `function_stats`, `discoveries`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Strategy Knowledge Base** (SQLite FTS5 BM25). It diagnoses empirical bottlenecks, checks game mechanics against C struct tables (`permonst`, `objclass`), tests candidate revisions in an **8 × 30-episode execution-guided pilot loop** (`dry_run_policy`) with prefix-replay shards and behavioral telemetry, and promotes candidates to full rollouts governed by parameter-free sequential hypothesis testing.
 
 ---
 
 ## Table of Contents
 
 1. [Core Architectural Philosophy ("Hard Code Nothing")](#1-core-architectural-philosophy-hard-code-nothing)
-2. [System Architecture & Dataflow](#2-system-architecture--dataflow)
-3. [Autonomous Epistemic Discovery & Scientific System Prompt](#3-autonomous-epistemic-discovery--scientific-system-prompt)
-4. [Multi-Benchmark Architecture: NetHack & Craftax](#4-multi-benchmark-architecture-nethack--craftax)
-5. [Zero-Turn Stall Telemetry & Interactive Prompt Passthrough](#5-zero-turn-stall-telemetry--interactive-prompt-passthrough)
-6. [Prefix-Replay Evaluation Shards & Spatial WorldMemory](#6-prefix-replay-evaluation-shards--spatial-worldmemory)
-7. [The Five Modification Modes, MAP-Elites Archive & Library Learning](#7-the-five-modification-modes-map-elites-archive--library-learning)
-8. [Multi-Table DuckDB Schema & Epistemic Persistence](#8-multi-table-duckdb-schema--epistemic-persistence)
-9. [Parameter-Free Sequential Hypothesis Testing](#9-parameter-free-sequential-hypothesis-testing)
-10. [Long-Horizon Scaling & Unattended Multi-Week Operations](#10-long-horizon-scaling--unattended-multi-week-operations)
-11. [Repository Structure](#11-repository-structure)
-12. [Quickstart & CLI Usage](#12-quickstart--cli-usage)
-13. [References & Citations](#13-references--citations)
+2. [System Architecture & Lifecycle](#2-system-architecture--lifecycle)
+3. [Autonomous Epistemic Discovery & System Prompt](#3-autonomous-epistemic-discovery--system-prompt)
+4. [Harness Architecture & High-Throughput Telemetry](#4-harness-architecture--high-throughput-telemetry)
+5. [Prefix-Replay Checkpoint Shards & Spatial WorldMemory](#5-prefix-replay-checkpoint-shards--spatial-worldmemory)
+6. [Modification Modes, Pilot Fallback & MAP-Elites Archive](#6-modification-modes-pilot-fallback--map-elites-archive)
+7. [DuckDB Analytical Schema & Fault Attribution](#7-duckdb-analytical-schema--fault-attribution)
+8. [Parameter-Free Sequential Hypothesis Testing](#8-parameter-free-sequential-hypothesis-testing)
+9. [Long-Horizon Scaling & Unattended Operations](#9-long-horizon-scaling--unattended-operations)
+10. [Repository Structure](#10-repository-structure)
+11. [Quickstart & CLI Usage](#11-quickstart--cli-usage)
+12. [References & Citations](#12-references--citations)
 
 ---
 
 ## 1. Core Architectural Philosophy ("Hard Code Nothing")
 
-Most game-playing LLM agents depend on human-engineered domain wrappers: hardcoded monster threat tiers, pre-written corpse nutrition tables, built-in auto-explore routines, or fixed phase guides injected into the prompt. Those shortcuts help on Dungeon Level 1 but create a hard ceiling whenever the agent hits mechanics the human author did not pre-script.
+Most game-playing agents rely on human-engineered scaffolding: hardcoded monster threat rankings, pre-scripted nutrition tables, built-in pathfinding macros, or hand-tuned phase guides. While these heuristics ease progress through early levels, they create an impenetrable barrier once the agent encounters un-scripted mechanics.
 
-`LOX` enforces a strict boundary between the **Architect** (the domain-agnostic execution and evaluation harness) and the **Author** (the evolving policy and macro codebase):
+`LOX` strictly enforces a separation between the **Architect** (the domain-agnostic execution and evaluation engine) and the **Author** (the self-synthesizing policy and modular skill codebase):
 
-1. **Zero Hardcoded Strategy in the Harness ([`lox/env/`](lox/env/))**:
-   - The harness contains **zero** game heuristics, **zero** monster/corpse/item lists, and **zero** hidden macro adapters.
-   - It provides a **1-to-1 connection** between policy yields and native environment actions ([`Action`](lox/env/actions.py) / [`CraftaxAction`](lox/env/craftax/actions.py), [`key(ch)`](lox/env/actions.py) raw ASCII bytes, and [`seq(...)`](lox/env/actions.py) multi-keystroke sequences).
-   - It exposes the game state lazily via [`GameState`](lox/env/state.py): all 27 `blstats` fields, `BL_MASK_*` status bitmasks, 21x79 or 48x48 grids (`glyphs`, `chars`, `colors`, `specials`), inventory slots, and pre-indexed C symbol table lookups over `nle.nethack.permonst` (`state.mon_info(y, x)`) and `nle.nethack.objclass` (`state.obj_info(glyph)`), paired with Numba-JIT grid topology primitives in [`lox/env/grid_utils.py`](lox/env/grid_utils.py).
-   - **Lean Observation Keys by Default**: Omits heavy unused C rasterization buffers (`screen_descriptions`, `misc`) by default to achieve **280,000+ steps/sec** while retaining full `tty_*` terminal line access.
-   - **Interactive Prompt Passthrough**: Decouples pagination `--More--` (auto-cleared with `SPACE`) from true decision prompts (`in_yn_function`, `in_getlin`), allowing policies to respond interactively across steps with a 3-step safety watchdog.
-   - **Zero-Turn Stall Protection**: Automatically tracks `state.turn_advanced` and `state.consecutive_stalls`. Episodes with $\ge 100$ consecutive zero-turn steps (e.g. repeated bump into peaceful monsters or overweight corpses) are truncated as `stalled_zero_turn` to protect simulation throughput.
+1. **Zero Domain Heuristics in the Harness ([`lox/env/`](lox/env/))**:
+   - The harness contains **zero** monster, corpse, or item lists, and **zero** hidden macro adapters.
+   - It provides a **1-to-1 connection** between policy yields and native environment actions ([`Action`](lox/env/actions.py) / [`CraftaxAction`](lox/env/craftax/actions.py), [`key(ch)`](lox/env/actions.py) raw ASCII characters, and [`seq(...)`](lox/env/actions.py) multi-keystroke action sequences).
+   - Game state is exposed lazily via [`GameState`](lox/env/state.py): 27 `blstats` fields, `BL_MASK_*` status bitmasks, 21×79 screen grids (`glyphs`, `chars`, `colors`, `specials`), inventory items, and pre-indexed C symbol table queries over `nle.nethack.permonst` (`state.mon_info(y, x)`) and `nle.nethack.objclass` (`state.obj_info(glyph)`), paired with Numba-JIT spatial topology primitives in [`lox/env/grid_utils.py`](lox/env/grid_utils.py).
+   - **Lean Observation Channels**: Bypasses redundant C-level rasterization buffers (`screen_descriptions`, `misc`) by default to reach **285,000+ steps/sec** while retaining complete `tty_*` terminal line access.
+   - **Interactive Prompt Passthrough**: Decouples pagination (`--More--`, auto-cleared with `SPACE`) from true decision prompts (`in_yn_function`, `in_getlin`), allowing policies to respond interactively across steps with a 3-step watchdog.
+   - **Zero-Turn Action Stall Guard**: Automatically tracks `state.turn_advanced` and `state.consecutive_stalls`. Runaway action loops (e.g. repeated bump into peaceful monsters or overweight containers) are truncated after 100 consecutive zero-turn steps with reason `stalled_zero_turn`.
+
 2. **Near-Full Python 3.11+ Policy Language & Modular Skills ([`lox/lang/`](lox/lang/))**:
    - The Author Agent writes standard Python 3.11+ in `data/workspace/policy.py` and modular skill packages in `data/workspace/skills/`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
-   - Compile-time AST instrumentation ([`PolicyInstrumentTransformer`](lox/lang/instrument.py) and [`ExecutionTracer`](lox/lang/instrument.py)) adds `<1 us` per-function call tracking, per-function turn attribution, zero-yield loop protection ([`PolicyLoopError`](lox/lang/instrument.py)), and tunable numerical parameter hooks (`self.param(name, default, min_val, max_val)`).
-   - Automatic text/naming prompt dismissal: exposes `state.in_text_prompt` / `state.in_naming_prompt` directly to policy state and features a safety fallback auto-`ESC` in the execution runner to prevent unhandled text prompts (e.g. `Call a scroll: `) from trapping policies.
+   - Compile-time AST instrumentation ([`PolicyInstrumentTransformer`](lox/lang/instrument.py) and [`ExecutionTracer`](lox/lang/instrument.py)) injects `<1 µs` per-function call tracking, per-function turn attribution, zero-yield loop protection ([`PolicyLoopError`](lox/lang/instrument.py)), and tunable parameter hooks (`self.param(name, default, min_val, max_val)`).
+   - Automatic naming prompt fallback: exposes `state.in_text_prompt` / `state.in_naming_prompt` directly to policy state and features a safety fallback auto-`ESC` in the execution runner to prevent unhandled text prompts (e.g. `Call a scroll: `) from stalling policies.
 
 ---
 
-## 2. System Architecture & Dataflow
+## 2. System Architecture & Lifecycle
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────────┐
@@ -58,7 +60,7 @@ Most game-playing LLM agents depend on human-engineered domain wrappers: hardcod
 │  • Dynamic User Prompt: Mode Instructions + Active Code + Contrastive Digest     │
 │  • Epistemic Memory: Verified Breakthroughs (discoveries) & Rejected Hypotheses  │
 │  • Tools: query_db(sql) | query_wiki(q) | query_policy_docs(t) | dry_run_policy  │
-│  • Execution-Guided Pilot Loop: Up to 8 revisions x 30 paired episodes (~0.8s)   │
+│  • Execution-Guided Pilot Loop: Up to 8 revisions × 30 paired episodes (~0.8s)   │
 │    with Best-Candidate Fallback (no auto-abort) + Behavioral Critic Telemetry    │
 └───────────────────────────────────────┬──────────────────────────────────────────┘
                                         │ Emits Causal YAML Hypothesis + Python Code
@@ -75,11 +77,11 @@ Most game-playing LLM agents depend on human-engineered domain wrappers: hardcod
          ▼               ▼               ▼               ▼               ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │             PERSISTENT MULTI-CORE WORKER POOL (NLE & Craftax Adapters)           │
-│  • Direct C / Numba Step Execution (50k-121k+ steps/sec across workers)          │
+│  • Direct C / Numba Step Execution (120k–285k+ steps/sec across worker cores)    │
 │  • Adaptive Horizon: Dynamically scales 5,000 -> 50,000 steps matching depth     │
 │  • 3-Tier Stratified Shards: Frontier (>=P90), Mid-Band, Foundation (up to 400s) │
 │  • Conditional Trigger Filter: discards episodes where target_fn call_count == 0 │
-│  • Preemptive Generator Interrupt: aborts macro on HP drop, hostiles, or prompts  │
+│  • Preemptive Generator Interrupt: aborts macro on HP drop, hostiles, or prompts │
 │  • Unreachable Function Circuit Breaker + Sequential Futility Early Stopping     │
 └───────────────────────────────────────┬──────────────────────────────────────────┘
                                         │ Recorded Triggered Episodes + Replay Bytes
@@ -90,117 +92,110 @@ Most game-playing LLM agents depend on human-engineered domain wrappers: hardcod
 │  • Go-Explore Outlier Good-Run Marker (is_outlier_good = TRUE via Z-score / IQR) │
 │  • Spectrum-Based Function Attribution (Ochiai Good-Run & Liblit Failure Scores) │
 │  • Epistemic Breakthroughs (discoveries) & Milestone Checkpoint Archiver         │
-│  • Automated Telemetry Pruning (keeps DB nimble during 5k+ generation campaigns) │
+│  • Automated Telemetry Pruning (keeps DB nimble during 5,000+ generation runs)   │
 │  • Consolidated Human Ascensions & Expert Traces (expert_runs & expert_ticks)    │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Autonomous Epistemic Discovery & Scientific System Prompt
+## 3. Autonomous Epistemic Discovery & System Prompt
 
-Instead of feeding the LLM human strategy guides for different dungeon depths, `LOX` structures the Author Agent's system prompt ([`lox/author/prompts.py`](lox/author/prompts.py)) as a domain-general **epistemic discovery loop** grounded in recent program synthesis and world-modeling research:
+Rather than feeding human strategy manuals into the context window, `LOX` structures the Author Agent's system prompt ([`lox/author/prompts.py`](lox/author/prompts.py)) as an autonomous **epistemic discovery cycle**:
 
-1. **Binding Constraint Diagnosis (Theory of Bottlenecks)**:
-   - Before proposing code, the agent queries `runs`, `ticks`, and `function_stats` to isolate the single highest-frequency cause of death or stagnation holding back the current policy distribution (`avg_depth`, `p90_depth`, `max_depth`). It must record this empirical bottleneck in the YAML `binding_constraint` field.
-2. **Contrastive Trajectory Attribution (Outliers & Experts vs. Failures)**:
-   - Every generation receives an automated contrastive telemetry digest ([`build_batch_contrast_digest`](lox/db/summarizer.py)) comparing the top 10% outlier trajectories (`is_outlier_good = TRUE`) and verified human ascensions (`expert_runs`, `expert_ticks`) against bottom-decile stalled or dead runs (`end_reason`, `killer_name`, `active_function` at death).
-3. **Epistemic Grounding ("Wiki-Before-Write" & C-Struct Inspection)**:
-   - The agent is prohibited from guessing hidden game mechanics (e.g., monster speed, MR, corpse intrinsics, diagonal doorway constraints, or multi-keystroke command syntax). It queries the offline NetHack 3.6.6 Wiki (`query_wiki`) and runtime C symbol tables (`state.mon_info(y, x)`, `state.obj_info(glyph)`), and states the verified mechanic in the YAML `verified_c_rule` field.
+1. **Binding Constraint Diagnosis**:
+   - The agent queries `runs`, `ticks`, and `function_stats` to identify the dominant cause of death or stagnation (`avg_depth`, `p90_depth`, `max_depth`). It records this finding in the YAML `binding_constraint` field.
+2. **Contrastive Trajectory Attribution**:
+   - Every generation prompt includes a contrastive telemetry digest ([`build_batch_contrast_digest`](lox/db/summarizer.py)) comparing the top 10% outlier trajectories (`is_outlier_good = TRUE`) and verified human ascensions (`expert_runs`, `expert_ticks`) against bottom-decile failed runs (`end_reason`, `killer_name`, `active_function` at death).
+3. **Epistemic Grounding ("Wiki-Before-Write")**:
+   - The agent is prevented from hallucinating game mechanics. It consults the offline NetHack 3.6.6 Wiki (`query_wiki`) and C symbol tables (`state.mon_info(y, x)`, `state.obj_info(glyph)`), documenting verified mechanics in the YAML `verified_c_rule` field.
 4. **Epistemic Persistence (`discoveries` & Failure Memory)**:
-   - Promoted breakthroughs with verified C rules are saved into the `discoveries` table and rendered into every subsequent generation prompt under `### Verified Campaign Discoveries (Do Not Regress)`.
-   - Past rejected hypotheses are rendered under `### Recent Rejected Hypotheses (Do NOT Repeat)` to prevent cyclic re-testing of failed ideas.
-5. **Subsumption & Preemption Priority Architecture**:
-   - Policies structure `run(self, state)` as an ordered priority dispatcher (multi-turn prompt safety -> immediate survival -> active engagement -> progression & descent -> frontier exploration -> fallback). Multi-step generator skills are checked for preemption conditions (`state.adjacent_hostiles()`, `state.hp_ratio`, `state.in_yn_prompt`) so exploration or item management yields control the instant a higher-priority threat appears.
-6. **Execution-Guided Pilot Loop with Behavioral Critic & Complexity Ratchet**:
-   - During `dry_run_policy`, the candidate runs across 30 paired baseline episodes (including failure seeds and prefix shards) in ~0.8 seconds. The tool returns per-seed progression deltas, function call counts, and behavioral stall metrics (`avg_unique_tiles`, `stall_rate`, `pct_WAIT`, `pct_SEARCH`). An anti-complexity ratchet rejects speculative bloat that adds lines of code without improving triggered progression.
+   - Statistically verified breakthroughs are recorded in `discoveries` and rendered under `### Verified Campaign Discoveries (Do Not Regress)`.
+   - Past rejected hypotheses are displayed under `### Recent Rejected Hypotheses (Do NOT Repeat)` to prevent cyclic re-testing of failed approaches.
+5. **Subsumption & Preemption Architecture**:
+   - Policies structure `run(self, state)` as an ordered priority dispatcher (multi-turn prompts -> immediate survival -> active combat -> progression & descent -> frontier exploration -> fallback). Subroutines yield control immediately when priority threats emerge (`state.adjacent_hostiles()`, `state.hp_ratio`, `state.in_yn_prompt`).
+6. **Execution-Guided Pilot Loop**:
+   - In `dry_run_policy`, candidates run across 30 paired baseline episodes in ~0.8s. The critic evaluates progression deltas, call counts, and stall telemetry (`avg_unique_tiles`, `stall_rate`, `pct_WAIT`, `pct_SEARCH`). Speculative bloat is pruned via an anti-complexity ratchet.
 
 ---
 
-## 4. Multi-Benchmark Architecture: NetHack & Craftax
+## 4. Harness Architecture & High-Throughput Telemetry
 
-`LOX` uses a unified [`BenchmarkAdapter`](lox/env/base.py) protocol that decouples environment mechanics from policy compilation and statistical hypothesis testing:
+LOX achieves **285,000+ steps/second** on multi-core CPU instances through clean architectural separation:
 
-### 4.1 NetHack Learning Environment (`--benchmark nethack`)
-- **Engine**: Direct C++ `nle.nethack.Nethack` instance with automatic `--More--` pause dismissal.
-- **State Representation**: 21x79 grids, 27 `blstats` fields, status masks (`BL_MASK_BLIND`, `BL_MASK_CONF`, `BL_MASK_FOODPOIS`, `BL_MASK_GRAB`, etc.), inventory vectors, and C `permonst`/`objclass` metadata.
-- **Progression Metric**: Continuous composite index over max dungeon depth (`max_depth`), experience level (`xp_level`), armor class improvement (`10 - final_ac`), log-scaled score, and pre-death shard survival.
-
-### 4.2 Crafter / Craftax Survival Benchmark (`--benchmark craftax`)
-- **Engine**: Pure deterministic Crafter/Craftax survival engine with 17 discrete actions.
-- **Facing Direction Mechanics**: `LEFT`, `RIGHT`, `UP`, and `DOWN` orient the player; `Action.DO` and `PLACE_*` act on the faced coordinate `(y + dy, x + dx)`.
-- **Full 22-Achievement Survival Tech Tree**: Wood gathering, crafting table placement, wooden pickaxe crafting, stone mining, furnace placement, stone pickaxe, iron mining, iron smelting, weapon crafting, hostile mob combat, and thirst/hunger/energy maintenance.
-- **Progression Metric**: Total survival achievements unlocked plus health and survival duration bonuses.
+- **Lean Observations**: By default, `LEAN_OBSERVATION_KEYS` requests only the 15 necessary observation buffers from NLE (omitting `screen_descriptions` and `misc`). This eliminates expensive string formatting in C while preserving full terminal grids (`tty_chars`, `tty_colors`, `tty_cursor`).
+- **Zero-Turn Stall Detection**: In NetHack, invalid actions (e.g., walking into a solid wall, trying to eat an un-edible item) return a valid observation but consume 0 turns (`blstats[21]` does not advance). LOX tracks `state.turn_advanced`, `state.consecutive_stalls`, and `state.time_delta`, terminating runaway loops at 100 consecutive zero-turn steps with reason `stalled_zero_turn`.
+- **Interactive Prompt Passthrough**: Pure pagination prompts (`--More--`) are dismissed instantly via `SPACE`. Real decision prompts (`in_yn_function`, `in_getlin`) are passed through to the policy along with the prompt query string (`state.yn_prompt_query`), protected by a 3-step safety watchdog.
 
 ---
 
-## 5. Prefix-Replay Evaluation Shards & Spatial WorldMemory
+## 5. Prefix-Replay Checkpoint Shards & Spatial WorldMemory
 
 ### 5.1 3-Tier Stratified Checkpoint Prefix Shards ([`lox/db/shards.py`](lox/db/shards.py))
-Evaluating mid-game combat or deeper dungeon tactics from turn 0 wastes thousands of steps on early exploration. `LOX` extracts up to 40 stratified **Checkpoint Prefix Shards** directly from recorded baseline `action_bytes`:
+Evaluating mid-game combat from turn 0 wastes thousands of steps on early floor exploration. LOX extracts up to 40 stratified **Checkpoint Prefix Shards** directly from baseline action bytes:
 1. **Pre-Death Windows**: Sliced 30 turns before a fatal encounter (`end_reason == 'died'`).
 2. **Pre-Stall Windows**: Sliced 5 turns before detected oscillation or timeout stagnation.
 3. **Floor-Entry Checkpoints**: Sliced at the exact turn the hero arrives on a deeper dungeon floor (`depth >= 2`).
 
-Shards are dynamically stratified to focus compute where discovery happens:
-- **Frontier Tier (≥ P90 Depth, up to 55%)**: Deepest floor entries and pre-death encounters. Deep floor entries (`depth >= 5`) receive an extended **400-step evaluation horizon**.
+Shards are dynamically stratified across three tiers:
+- **Frontier Tier (≥ P90 Depth, up to 55%)**: Deepest floor entries and critical encounters. Deep floor entries (`depth >= 5`) receive an extended **400-step evaluation horizon**.
 - **Mid-Band Tier (Mean Depth to P90 Depth, up to 30%)**: Intermediate progression checkpoints.
 - **Foundation Tier (< Mean Depth, remaining 15%)**: Shallow robustness checkpoints.
 
-During `FUNC_MOD_ADD` evaluation and `dry_run_policy` pilots, workers replay prefix bytes in microseconds (`harness.replay_bytes`), reset the post-replay step counter and execution tracer, and hand control to the candidate policy. Candidate shards are paired strictly against baseline shards on the exact same prefix (`seed >= 1,000,000`), and surviving a fatal pre-death shard awards a direct survival bonus in [`progression_metric`](lox/engine/hypothesis.py).
+Workers replay prefix action bytes in microseconds (`harness.replay_bytes`), reset execution counters, and hand control to the candidate policy. Surviving a fatal pre-death shard earns a direct survival bonus in the composite progression metric.
 
 ### 5.2 Dynamic Spatial WorldMemory & Numba Topology ([`lox/env/state.py`](lox/env/state.py), [`lox/env/grid_utils.py`](lox/env/grid_utils.py))
-Every [`GameState`](lox/env/state.py) maintains a persistent per-episode [`WorldMemory`](lox/env/state.py) (`state.mem`) that tracks per-floor spatial state and preserves terrain features even when occluded by the hero `@`, monsters, or objects:
+Every [`GameState`](lox/env/state.py) maintains a persistent per-episode [`WorldMemory`](lox/env/state.py) (`state.mem`) that tracks spatial features across levels even when occluded:
 - `visited` & `visit_count`: 2D grids tracking explored tiles and per-tile visit frequency.
-- `passable_mask` & `door_mask`: Dynamically updated walkability and closed-door masks that remember walkable floor tiles when monsters step onto them and block locked doors until unlocked or kicked open.
-- `remembered_chars`: Persistent map memory that preserves underlying terrain (`'>'`, `'<'`, `'_'`, `'{'`, `'+'`, `'#'`, `'.'`) when the hero `'@'` or a monster occupies the tile, preventing stair/altar occlusion loops. Trees and iron bars are normalized to `'|'`, while ice and lowered drawbridges are normalized to `'.'`.
-- `kv`: Persistent dictionary on `state.mem.kv` (and exposed via `state.kv`) synchronized across floor transitions and replay shards for tracking items, altars, and shop locations.
+- `passable_mask` & `door_mask`: Dynamically updated walkability and closed-door masks that remember walkable floor tiles when monsters step onto them and track locked doors.
+- `remembered_chars`: Preserves underlying terrain (`'>'`, `'<'`, `'_'`, `'{'`, `'+'`, `'#'`, `'.'`) when occluded by the hero `@` or monsters, preventing stair/altar occlusion loops.
+- `kv`: Persistent dictionary on `state.mem.kv` (and `state.kv`) synchronized across floor transitions and replay shards for tracking items, altars, and shop locations.
 - `recent_messages`: Ring buffer of recent non-empty message tuples `(turn, dlvl, message)` exposed via `state.recent_messages`.
-- `searched_counts`: 2D counter incremented around `(y, x)` on `Action.SEARCH` to guide dead-end secret door searches.
+- `searched_counts`: 2D counter incremented around `(y, x)` on `Action.SEARCH` to guide secret door searches.
 - `stair_graph`: Bidirectional inter-floor dictionary mapping `(dlvl, y, x)` stair coordinates across levels.
-- `pos_history` & `is_oscillating`: Bounded coordinate history (`deque(maxlen=32)`) and automatic 2-step/3-step cycle detector.
+- `pos_history` & `is_oscillating`: Bounded coordinate history (`deque(maxlen=32)`) and automatic cycle detector.
 - **Numba-JIT Spatial Helpers** ([`lox/env/grid_utils.py`](lox/env/grid_utils.py)):
-  - `state.bfs_distance_map(sources, passable)` -> 2D int32 distance grid in `<50 us`.
-  - `state.pathfind_step_to(target_y, target_x, passable, cost_grid)` -> 8-way A* first-step `(dy, dx)` with cardinal preference at doorway transitions.
+  - `state.bfs_distance_map(sources, passable)` -> 2D int32 distance grid in `<50 µs`.
+  - `state.pathfind_step_to(target_y, target_x, passable, cost_grid)` -> 8-way A* first-step `(dy, dx)` with cardinal preference at doorways.
   - `flood_fill_rooms(passable_mask)` -> Connected room component labeling.
   - `find_chokepoints(passable_mask)` -> Boolean mask of 1-tile-wide corridor and doorway bottlenecks for tactical positioning.
   - `line_of_sight_mask(y, x, opaque_mask, max_range)` -> 8-direction raycast visibility mask for ranged wand/missile alignment.
 
 ---
 
-## 6. The Core Modification Modes, MAP-Elites Archive & Modular Skills
+## 6. Modification Modes, Pilot Fallback & MAP-Elites Archive
 
 | Mode | Episode Budget | Verification Gate | Purpose |
 | :--- | :--- | :--- | :--- |
-| **`FULL_WRITE`** | `250` episodes | 30-episode live smoke test | Synthesizes `class Policy` from scratch on Generation 0 without a pre-fed starter policy. |
-| **`FUNC_MOD_ADD`** | `150` triggered eps / fn + `40` shards | 8 x 30-episode pilot revision loop | Surgically adds or modifies targeted methods on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)); untriggered episodes are discarded (`triggered == False`). |
-| **`STRUCTURAL_REFACTOR`** | `200` episodes | 8 x 30-episode pilot revision loop | Triggered when `policy.py` exceeds 550 lines or during stagnation to break large monolithic logic into modular files under `data/workspace/skills/`. |
-| **`PARAM_TUNE`** | `0` LLM tokens (`CRN-SPSA`) | Paired CRN validation batch | Optional numerical threshold tuner (run every 100 generations or disabled); tunes `self.param(name, default, min, max)` and bakes winning constants into the AST. |
+| **`FULL_WRITE`** | `250` episodes | 30-episode live smoke test | Synthesizes `class Policy` from scratch on Generation 0 without a starter policy. |
+| **`FUNC_MOD_ADD`** | `150` triggered eps / fn + `40` shards | 8 × 30-episode pilot revision loop | Surgically splices or modifies targeted methods on `Policy` ([`splice_functions_into_policy`](lox/lang/validator.py)); untriggered episodes are discarded. |
+| **`STRUCTURAL_REFACTOR`** | `200` episodes | Behavioral preservation gate | Triggered when `policy.py` exceeds 550 lines or during stagnation to break monolithic code into modular packages under `data/workspace/skills/`. |
+| **`PARAM_TUNE`** | `0` LLM tokens (`CRN-SPSA`) | Paired CRN validation batch | Optional numerical threshold optimizer (every 100 generations); tunes `self.param(name, default, min, max)` and bakes winning constants into the AST. |
 
 ### MAP-Elites Behavioral Archive ([`lox/engine/orchestrator.py`](lox/engine/orchestrator.py))
-To preserve stepping-stone adaptations without reverting promoted gains, `CampaignOrchestrator` maintains a quality-diversity archive across three behavioral niches:
+To preserve stepping-stone adaptations without reverting promoted gains, `CampaignOrchestrator` maintains an archive across three behavioral niches:
 - `descent`: Champion policy maximizing mean and 90th-percentile dungeon depth (`avg_depth`, `p90_depth`).
 - `combat_ac`: Elite policy minimizing armor class (`avg_ac`) while maintaining non-regressing depth.
 - `progression_xl`: Elite policy maximizing experience level (`avg_xl`) while maintaining non-regressing depth.
 
-### Modular Skills Architecture (`data/workspace/skills/`)
-Reusable domain capabilities (such as `skills/navigation.py`, `skills/combat.py`, and `skills/survival.py`) are maintained directly as clean, imported Python modules within the workspace. The Author Agent can inspect, refactor, and import from `skills.*` directly, eliminating duplicate legacy macro abstractions and enabling seamless modular skill evolution.
-
-### Pilot Fallback & Calibration (`scripts/calibrate_pilot.py`)
-Rather than prematurely aborting generations when all pilot revision attempts fail to pass the strict sign test, `LOX` employs `--pilot-fallback best` to promote the highest-progression candidate to the full 150-seed rollout, where Sequential Futility Early Stopping ($U_n \le 0.0$ at $n=60$) guards compute without discarding potentially breakthrough policies. The revision budget can be inspected and calibrated at any time via `uv run python scripts/calibrate_pilot.py --db-path data/lox.duckdb`.
+### Pilot Fallback & Calibration ([`scripts/calibrate_pilot.py`](scripts/calibrate_pilot.py))
+Rather than aborting generations when all pilot revisions fail the strict sign test, LOX applies `--pilot-fallback best` to promote the highest-progression candidate to the full 150-seed rollout. Sequential Futility Early Stopping ($U_n \le 0.0$ at $n=60$) guards compute without discarding breakthrough candidates. Calibration metrics can be inspected at any time:
+```bash
+uv run python scripts/calibrate_pilot.py --db-path data/lox.duckdb
+```
 
 ---
 
-## 7. Multi-Table DuckDB Schema & Epistemic Persistence
+## 7. DuckDB Analytical Schema & Fault Attribution
 
-All experimental telemetry and reference human ascensions are stored in a single DuckDB analytical database (`data/lox.duckdb`, defined in [`lox/db/schema.py`](lox/db/schema.py)):
+All experimental telemetry and reference human ascensions are stored in a single DuckDB database (`data/lox.duckdb`, defined in [`lox/db/schema.py`](lox/db/schema.py)):
 
 1. **`batches`**: Per-generation summary (`batch_id`, `generation`, `mode`, `target_functions`, `avg_depth`, `p90_depth`, `max_depth`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `seeds_evaluated`, `is_early_stopped`, `pilot_best_delta`).
-2. **`runs`**: Episode-level telemetry (`run_id`, `seed`, `max_depth`, `final_hp`, `final_ac`, `xp_level`, `score`, `turns`, `end_reason`, `death_message`, `summary_digest`, `game_log`, `milestones_json`, `is_outlier_good`, `outlier_z_score`, `auto_esc_count`, `subgen_preemptions`, `policy_exceptions`, `unique_tiles`, `pct_wait`, `pct_search`, `starved_with_food`, `died_unarmored`, `action_bytes`).
+2. **`runs`**: Episode telemetry (`run_id`, `seed`, `max_depth`, `final_hp`, `final_ac`, `xp_level`, `score`, `turns`, `end_reason`, `death_message`, `summary_digest`, `game_log`, `milestones_json`, `is_outlier_good`, `outlier_z_score`, `auto_esc_count`, `subgen_preemptions`, `policy_exceptions`, `unique_tiles`, `pct_wait`, `pct_search`, `starved_with_food`, `died_unarmored`, `action_bytes`).
 3. **`ticks`**: Tail-sampled turn traces (`run_id`, `turn`, `dlvl`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `active_function`, `message`, `nearby_monsters`).
-4. **`function_stats`**: Spectrum-based fault and success attribution per policy method (`episodes_triggered`, `total_calls`, `total_turns_active`, `ochiai_good_run_score`, `liblit_failure_score`, `stagnation_turns`, `stagnation_share`, `livelock_score`).
-5. **`policies`**: Versioned snapshots of every candidate and promoted `policy_code` and `macros_code`.
-6. **`experiments`**: Causal hypotheses, binding constraints, verified C rules, pilot diagnostics, statistical verdicts, and rollout efficiency (`seeds_evaluated`, `is_early_stopped`, `pilot_best_delta`).
+4. **`function_stats`**: Spectrum-based fault attribution per method (`episodes_triggered`, `total_calls`, `total_turns_active`, `ochiai_good_run_score`, `liblit_failure_score`, `stagnation_turns`, `stagnation_share`, `livelock_score`).
+5. **`policies`**: Versioned snapshots of every candidate and promoted policy and skill file.
+6. **`experiments`**: Causal hypotheses, binding constraints, verified C rules, pilot diagnostics, and statistical verdicts.
 7. **`discoveries`**: Validated campaign breakthroughs (`discovery_id`, `generation`, `batch_id`, `mode`, `target_functions`, `binding_constraint`, `verified_c_rule`, `mechanism`, `mean_delta`, `avg_depth`, `p90_depth`, `max_depth`, `created_at`).
 8. **`expert_runs`** & **`expert_ticks`**: Real human NetHack ascensions (`archive.alt.org` xlogfile + dumplogs) and NLE reference trajectories stored in the exact same schema as `runs` and `ticks`.
 
@@ -208,7 +203,7 @@ All experimental telemetry and reference human ascensions are stored in a single
 
 ## 8. Parameter-Free Sequential Hypothesis Testing
 
-The Author Agent never guesses numerical effect sizes. It emits a structured qualitative YAML hypothesis before its Python code block:
+The Author Agent never guesses numerical effect sizes. It emits a structured qualitative YAML hypothesis before its Python code:
 
 ```yaml
 mode: FUNC_MOD_ADD
@@ -224,19 +219,18 @@ observation_from_db: "Outlier runs reaching Dlvl 4+ execute Action.DOWN within 1
 mechanism: "Check state.is_on_stairs_down before pathfinding so the policy yields Action.DOWN immediately when standing on '>'."
 ```
 
-Candidate policies are evaluated on paired seeds against the active baseline using objective statistical gates in [`lox/engine/hypothesis.py`](lox/engine/hypothesis.py):
-1. **Sequential Futility Early Stopping**: If after $n \ge 60$ paired triggered seeds the 95% Empirical Bernstein Confidence Sequence upper bound satisfies $U_n \le 0.0$, evaluation terminates early to save compute.
+Candidate policies are evaluated on paired seeds against the active baseline using objective statistical criteria in [`lox/engine/hypothesis.py`](lox/engine/hypothesis.py):
+1. **Sequential Futility Early Stopping**: If after $n \ge 60$ paired triggered seeds the 95% Empirical Bernstein Confidence Sequence upper bound satisfies $U_n \le 0.0$, rollout halts immediately to preserve compute.
 2. **Positive Mean Progression Delta**: $\bar{d} \ge -0.005$ and strictly more improved seeds than regressed seeds ($\text{wins} > \text{losses}$).
-3. **Decisive-Pair Statistical Significance**: Either the 95% Confidence Sequence lower bound $L_N > 0.0$, the one-sided Paired Wilcoxon Signed-Rank p-value satisfies $p < 0.05$, or the decisive subset ($|\Delta| > 10^{-6}$) achieves a positive confidence sequence ($L_{dec} > 0.0$ or $\text{wins} \ge 2 \times \text{losses}$ with $\bar{d}_{dec} \ge 0.15$). This eliminates the *tie-dilution trap* where 60–80% trajectory ties on mature baselines previously crushed statistical power for modular skill patches.
-4. **Tie-Aware Directional Pilot Filtering**: Pilot evaluation in `dry_run_policy` verifies directional signal ($\text{wins} > \text{losses}$, $\bar{d} \ge 0$, and $p_{sign} \le 0.20$ or $\Delta_{depth} \ge 0.04$ or $\text{wins} \ge \text{losses} + 2$) preventing high tie rates from rejecting viable candidates before full rollouts.
-5. **Decoupled Structural Refactor Gate**: Evaluates `STRUCTURAL_REFACTOR` on architectural modularization and behavioral preservation ($\bar{d} \ge -0.015$, $\text{losses} \le \text{wins} + 5$) rather than demanding statistically significant score superiority ($p < 0.05$), enabling modular skill extraction into `skills/` without rejection.
-6. **Pure Objective Telemetry & Declared Target Integrity**: Harness eliminates prescriptive armchair heuristics and function bans, presenting pure raw distributions (termination tables, RLE timelines, stagnation turns) and preserving declared hypothesis targets (e.g. `run`) without stripping.
+3. **Decisive-Pair Statistical Significance**: Either the 95% Confidence Sequence lower bound $L_N > 0.0$, the one-sided Paired Wilcoxon Signed-Rank test satisfies $p < 0.05$, or the decisive subset ($|\Delta| > 10^{-6}$) achieves positive significance ($L_{dec} > 0.0$ or $\text{wins} \ge 2 \times \text{losses}$ with $\bar{d}_{dec} \ge 0.15$). This eliminates the *tie-dilution trap* where 60–80% trajectory ties on mature baselines crush statistical power for modular patches.
+4. **Tie-Aware Directional Pilot Filtering**: Pilot validation verifies directional signal ($\text{wins} > \text{losses}$, $\bar{d} \ge 0$, and $p_{sign} \le 0.20$ or $\Delta_{depth} \ge 0.04$ or $\text{wins} \ge \text{losses} + 2$).
+5. **Decoupled Structural Refactor Gate**: Evaluates `STRUCTURAL_REFACTOR` on architectural modularization and behavioral preservation ($\bar{d} \ge -0.015$, $\text{losses} \le \text{wins} + 5$) rather than demanding strict statistical superiority ($p < 0.05$), enabling modular skill extraction without premature rejection.
 
 ---
 
-## 9. Long-Horizon Scaling & Unattended Multi-Week Operations
+## 9. Long-Horizon Scaling & Unattended Operations
 
-Scaling an autonomous campaign to thousands of generations (and depths > 20 towards ascension) introduces unique challenges: false timeouts on deep levels, memory bloat, monolithic policy code, and network/process hiccups. `LOX` implements automated safeguards:
+Scaling an autonomous campaign to thousands of generations (and depths > 20 towards ascension) requires robust safeguards:
 
 ### 9.1 Adaptive Step Horizon Scaling
 Early policies need short horizons to fail fast; deep policies need tens of thousands of steps to clear the Quest, Castle, and Gehennom. [`compute_adaptive_max_steps`](lox/engine/orchestrator.py) dynamically scales the episode horizon based on baseline depth milestones:
@@ -253,12 +247,12 @@ Multi-step generator skills (such as tactical pathfinding, lock picking, or food
 
 ### 9.3 Telemetry Pruning & Milestone Checkpointing
 - **Pruning**: Every 20 generations, [`prune_old_telemetry`](lox/db/logger.py) removes detailed turn-level `ticks` and failed `runs` older than 20 generations, executing a DuckDB `CHECKPOINT` to keep file size compact and query speeds under 100ms.
-- **Checkpoints**: Whenever a candidate achieves a new record average depth, record max depth, or an ascension, `data/workspace/checkpoints/gen_XXXX_dYY.YY/` archives `policy.py`, `macros.py`, and `meta.json`.
+- **Checkpoints**: Whenever a candidate achieves a new record average depth, record max depth, or an ascension, `data/workspace/checkpoints/gen_XXXX_dYY.YY/` archives `policy.py`, `skills/`, and `meta.json`.
 
-### 9.4 Fault-Tolerant Unattended Operations
-- **Transient Logging**: The generation loop catches unexpected transient exceptions, logs full stack traces to `data/workspace/campaign_errors.log`, sleeps briefly, and advances to the next generation without crashing the campaign.
+### 9.4 Fault-Tolerant Unattended Execution
+- **Transient Exception Recovery**: The generation loop catches unexpected exceptions, logs full stack traces to `data/workspace/campaign_errors.log`, sleeps briefly, and advances to the next generation without terminating the campaign.
 - **Live Markdown Dashboard**: Atomically updates [`data/workspace/STATUS.md`](data/workspace/STATUS.md) on every generation with campaign uptime, generation progress, progression overview tables, promoted discoveries, and diversity archive stats.
-- **Read-Only Check-In CLI**: [`scripts/status_lox.py`](scripts/status_lox.py) queries DuckDB with `read_only=True` to inspect depth velocity, recent promotions, and recent discoveries while `run_lox.py` is actively evaluating.
+- **Read-Only Check-In CLI**: [`scripts/status_lox.py`](scripts/status_lox.py) queries DuckDB with `read_only=True` to inspect depth velocity, recent promotions, and discoveries while `run_lox.py` is actively evaluating.
 
 ---
 
@@ -266,87 +260,98 @@ Multi-step generator skills (such as tactical pathfinding, lock picking, or food
 
 ```text
 lox/
+├── core/
+│   └── contracts.py        # Typed EpisodeRun, BatchEvaluation, CandidatePackage contracts
 ├── env/
-│   ├── base.py             # BenchmarkAdapter protocol & registry
 │   ├── actions.py          # 1-to-1 Action IntEnum, key(), seq(), DIR_DELTAS
-│   ├── state.py            # Lazy zero-copy GameState, WorldMemory, NLE C LUTs
+│   ├── base.py             # BenchmarkAdapter protocol & registry
+│   ├── craftax/            # CraftaxAdapter, 17 actions, 22-achievement ruleset
 │   ├── grid_utils.py       # Numba-JIT BFS, A*, room flood-fill, chokepoints, LOS raycasting
-│   ├── harness.py          # Direct C++ NLE harness & microsecond byte replay
-│   ├── nethack/            # NetHackAdapter & knowledge base integration
-│   └── craftax/            # CraftaxAdapter, 17 actions, 22-achievement survival ruleset
+│   ├── harness.py          # Direct C++ NLE harness, lean observations, byte replay & watchdog
+│   ├── nethack/            # NetHackAdapter & composite progression index
+│   └── state.py            # Lazy zero-copy GameState, WorldMemory, C struct LUTs, stall tracking
 ├── lang/
-│   ├── validator.py        # Python 3.11+ AST sandbox validator, function splicer & contract linter
+│   ├── compiler.py         # Compiles policy.py + skills into PolicyRunner instances
 │   ├── instrument.py       # ExecutionTracer, TunableParam, PolicyInstrumentTransformer
-│   ├── macros.py           # MacroLibrary manager & MacroHarvester bottom-up library learning
-│   └── compiler.py         # Compiles macros.py + policy.py + skills into PolicyRunner instances
+│   ├── macros.py           # Persistent MacroLibrary manager
+│   └── validator.py        # Python 3.11+ AST sandbox validator, function splicer & contract linter
 ├── db/
-│   ├── schema.py           # 8-table DuckDB schema initialization & read/write connections
+│   ├── logger.py           # High-throughput DuckDB batch logger with tail-based tick sampling
+│   ├── schema.py           # 8-table DuckDB analytical schema initialization & connections
 │   ├── shards.py           # 3-tier PrefixShard extractor (Frontier, Mid-Band, Foundation)
-│   ├── summarizer.py       # RLE timeline compressor, stall analyzer, Ochiai/Liblit attribution
-│   └── logger.py           # High-throughput DuckDB batch logger with tail-based tick sampling
+│   └── summarizer.py       # RLE timeline compressor, stall analyzer, Ochiai/Liblit attribution
 ├── datasets/
-│   ├── wiki.py             # Offline NetHack 3.6.6 Wiki SQLite FTS5 BM25 search engine
-│   └── download_experts.py # Compiles NAO human ascensions & NLE traces into expert_runs / expert_ticks
+│   ├── download_experts.py # Compiles NAO human ascensions & NLE traces into expert_runs / expert_ticks
+│   └── wiki.py             # Offline NetHack 3.6.6 Wiki SQLite FTS5 BM25 search engine
 ├── runner/
 │   └── pool.py             # Persistent multi-core worker pool & conditional trigger filter
 ├── author/
+│   ├── agent.py            # Stateless ReAct AuthorAgent with compiler-in-the-loop self-repair
 │   ├── prompts.py          # Epistemic System Prompt, dynamic User Prompt & Contrastive Digest
-│   ├── tools.py            # AuthorToolRegistry: query_db, query_wiki, query_policy_docs, dry_run_policy
-│   └── agent.py            # Stateless ReAct AuthorAgent with compiler-in-the-loop self-repair
+│   └── tools.py            # AuthorToolRegistry: query_db, query_wiki, query_policy_docs, dry_run_policy
 ├── engine/
-│   ├── hypothesis.py       # Confidence Sequences, Wilcoxon Signed-Rank, Futility Early Stopping
+│   ├── hypothesis.py       # Empirical Bernstein Confidence Sequences, Wilcoxon Signed-Rank, Futility Early Stopping
 │   ├── modes.py            # CRN-SPSA parameter optimizer & AST constant baker
-│   ├── scheduler.py        # Hybrid cadence + Extreme-Value UCB mode scheduler
-│   └── orchestrator.py     # End-to-end CampaignOrchestrator, Adaptive Horizon & Status Reporter
+│   ├── orchestrator.py     # End-to-end CampaignOrchestrator, Adaptive Horizon & Status Reporter
+│   └── scheduler.py        # Hybrid cadence + Extreme-Value UCB mode scheduler
 └── ui/
     └── console.py          # Compact ANSI console UI with single-line progress & summary tables
 scripts/
-├── run_lox.py              # Main CLI entrypoint for running synthesis campaigns
-├── status_lox.py           # Morning/evening read-only check-in dashboard CLI
-├── reset_clean.py          # Resets campaign to Gen 0 while preserving expert corpus & wiki
-├── download_experts.py     # Populates expert_runs and expert_ticks in data/lox.duckdb
+├── build_strategy_wiki.py  # Indexes high-level NetHack strategy & mechanics articles into wiki_index.db
 ├── build_wiki_db.py        # Builds data/wiki_index.db from data/nethackwikidata.json
-└── build_strategy_wiki.py  # Indexes high-level NetHack strategy & mechanics articles into wiki_index.db
+├── calibrate_pilot.py      # Calibrates pilot revision budget and evaluates transfer rates from DuckDB
+├── download_experts.py     # Downloads and populates expert_runs and expert_ticks in data/lox.duckdb
+├── reset_clean.py          # Resets campaign to Gen 0 while preserving expert corpus & wiki
+├── run_lox.py              # Main CLI entrypoint for running synthesis campaigns
+└── status_lox.py           # Morning/evening read-only check-in dashboard CLI
 tests/
-├── test_overhaul_verification.py       # End-to-end regression suite (Passes 1-8 checks)
+├── test_author_and_ui.py   # Author YAML/code parser, macro verification, pilot revisions
+├── test_codebase_hardening.py # Typed contracts, alias synchronization, zero shard leakage
+├── test_db_summarizer.py   # RLE summarizer, outlier marker, Ochiai/Liblit, DuckDB logger
+├── test_harness_speed.py   # 1-to-1 actions, GameState queries, replay bit-identity
+├── test_lang_instrument.py # Python 3.11+ features, tracer, loop guard, splicing
+├── test_modes_and_eval.py  # Trigger filtering, hypothesis testing, SPSA tuning
+├── test_overhaul_verification.py       # End-to-end regression suite
 ├── test_skill_graph_and_adapters.py    # Multi-benchmark adapter and skill compilation tests
-├── test_todo_architectural_overhaul.py # Spatial WorldMemory and prefix shard extraction tests
-├── test_harness_speed.py               # 1-to-1 actions, GameState queries, replay bit-identity
-├── test_lang_instrument.py             # Python 3.11+ features, tracer, loop guard, splicing
-├── test_db_summarizer.py               # RLE summarizer, outlier marker, Ochiai/Liblit, DuckDB logger
-├── test_modes_and_eval.py              # Trigger filtering, hypothesis testing, SPSA tuning
-└── test_author_and_ui.py               # Author YAML/code parser, macro verification, pilot revisions
+├── test_stall_and_prompt_passthrough.py# Stall telemetry, truncation, and prompt passthrough tests
+└── test_todo_architectural_overhaul.py # Spatial WorldMemory and prefix shard extraction tests
 ```
 
 ---
 
 ## 11. Quickstart & CLI Usage
 
-### 1. Run Linting & Automated Tests
-Always use `uv` and `ruff`:
+### 1. Installation, Linting & Automated Tests
+LOX uses [`uv`](https://docs.astral.sh/uv/) for dependency management:
 ```bash
+# Clone the repository
+git clone git@github.com:saejin-moon/lox.git
+cd lox
+
+# Install dependencies into .venv
+uv sync
+
+# Run linter, formatter checks, and full test suite
 uv run ruff check --fix .
 uv run ruff format .
 uv run pytest -v
 ```
 
-### 2. Build the Offline Wiki & Ingest Expert Ascensions (Optional)
+### 2. Build Offline Wiki & Ingest Human Ascensions (Optional)
+*Note: The orchestrator automatically performs this if databases are missing.*
 ```bash
 uv run python scripts/build_wiki_db.py
 uv run python scripts/build_strategy_wiki.py
 uv run python scripts/download_experts.py --max-ascensions 50
 ```
 
-### 3. Reset Workspace to Clean Gen 0 State (Optional)
-Resets active policies and run telemetry while keeping `expert_runs`, `expert_ticks`, and `data/wiki_index.db` intact:
+### 3. Launch an Autonomous Campaign
+Export your preferred LLM provider API key:
 ```bash
-uv run python scripts/reset_clean.py
-```
+export OPENROUTER_API_KEY="sk-or-v1-..."
+# or export OPENAI_API_KEY="..."
 
-### 4. Launch an Autonomous Campaign (Standard / Interactive)
-Ensure `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`) is configured in `.env` or exported in your shell:
-
-```bash
+# Run interactive synthesis campaign
 uv run python scripts/run_lox.py \
   --provider openrouter \
   --model z-ai/glm-5.3-flash:nitro \
@@ -355,14 +360,11 @@ uv run python scripts/run_lox.py \
   --generations 50
 ```
 
-### 5. Launch a Multi-Day / 5,000-Generation Unattended Campaign
-For multi-week unattended progression, run inside a detached `tmux` session:
-
+### 4. Launch Long-Horizon Unattended Operations
+For multi-day runs, launch inside a detached `tmux` session:
 ```bash
-# 1. Create a tmux session
 tmux new -s lox
 
-# 2. Launch 5,000 generations targeting full dungeon depth
 uv run python scripts/run_lox.py \
   --provider openrouter \
   --model z-ai/glm-5.3-flash:nitro \
@@ -370,23 +372,22 @@ uv run python scripts/run_lox.py \
   --target-depth 50.0 \
   --workers 16
 
-# 3. Detach with Ctrl+B then D
+# Detach: Ctrl+B then D
 ```
 
-### 6. Monitor Active Campaigns While Running
-Safely inspect progress without interrupting workers:
-
+### 5. Monitor Active Campaigns
+Inspect campaign status without disturbing workers:
 ```bash
-# CLI summary of recent activity and depth velocity
+# Read-only check-in CLI
 uv run python scripts/status_lox.py --since-hours 12
 
-# Calibrate pilot revision budget and inspect attempt promotion transfer rates
+# Calibrate pilot revision budget from empirical DuckDB history
 uv run python scripts/calibrate_pilot.py --db-path data/lox.duckdb
 
-# View the latest generated markdown status report
+# Live status dashboard
 cat data/workspace/STATUS.md
 
-# Monitor transient error logs (if any)
+# Monitor errors (if any)
 tail -f data/workspace/campaign_errors.log
 ```
 
