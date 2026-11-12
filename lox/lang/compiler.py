@@ -53,9 +53,11 @@ from lox.env.state import (
 )
 from lox.lang.bt import (
     ActionLeaf,
+    BehaviorNode,
     BehaviorTree,
     Blackboard,
     ConditionLeaf,
+    Inverter,
     NodeStatus,
     PrioritySelector,
     Sequence,
@@ -226,11 +228,13 @@ def _build_base_namespace(tracer: ExecutionTracer) -> dict[str, Any]:
         "bfs_distance_grid": bfs_distance_grid,
         "astar_next_step": astar_next_step,
         # Behavior Tree Components
+        "BehaviorNode": BehaviorNode,
         "BehaviorTree": BehaviorTree,
         "PrioritySelector": PrioritySelector,
         "Sequence": Sequence,
         "ActionLeaf": ActionLeaf,
         "ConditionLeaf": ConditionLeaf,
+        "Inverter": Inverter,
         "Blackboard": Blackboard,
         "NodeStatus": NodeStatus,
         # Decorator no-op for `@macro`
@@ -567,4 +571,71 @@ def compile_policy_package(
         macros_code=macros_code,
         skills_tuple=skills_tuple,
         max_loop_ticks=max_loop_ticks,
+    )
+
+
+def compile_bt_subtree(code: str, filename: str = "subtree.py") -> Any:
+    """Validates and executes a standalone Behavior Tree subtree, returning the root node or instance."""
+    tree = validate_python_code(code, filename=filename)
+    tracer = ExecutionTracer()
+    ns = _build_base_namespace(tracer)
+    mod_obj = sys.modules.get("lox_policy")
+    if mod_obj is None:
+        mod_obj = types.ModuleType("lox_policy")
+        sys.modules["lox_policy"] = mod_obj
+    mod_obj.__dict__.update(ns)
+
+    exec(compile(tree, filename=filename, mode="exec"), ns)
+    mod_obj.__dict__.update(ns)
+
+    for preferred in ("subtree", "root", "tree", "node", "policy"):
+        if preferred in ns:
+            cand = ns[preferred]
+            if isinstance(cand, (BehaviorTree, BehaviorNode)):
+                return cand
+            if not inspect.isclass(cand) and (
+                hasattr(cand, "tick") or hasattr(cand, "step")
+            ):
+                return cand
+
+    bt_trees = [v for v in ns.values() if isinstance(v, BehaviorTree)]
+    if bt_trees:
+        return bt_trees[-1]
+
+    composites = [
+        v for v in ns.values() if isinstance(v, (PrioritySelector, Sequence, Inverter))
+    ]
+    if composites:
+        return composites[-1]
+
+    leaves = [v for v in ns.values() if isinstance(v, BehaviorNode)]
+    if leaves:
+        return leaves[-1]
+
+    user_classes = [
+        v
+        for v in ns.values()
+        if inspect.isclass(v)
+        and getattr(v, "__module__", None) == "lox_policy"
+        and (hasattr(v, "tick") or hasattr(v, "step") or hasattr(v, "run"))
+    ]
+    for cls in reversed(user_classes):
+        try:
+            return cls()
+        except Exception:
+            pass
+
+    user_fns = [
+        v
+        for k, v in ns.items()
+        if not k.startswith("_")
+        and callable(v)
+        and not inspect.isclass(v)
+        and getattr(v, "__module__", None) == "lox_policy"
+    ]
+    if user_fns:
+        return user_fns[-1]
+
+    raise PolicyValidationError(
+        "No BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, or Policy class found in subtree code."
     )

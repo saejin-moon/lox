@@ -263,3 +263,199 @@ buggy_node = ActionLeaf(faulty_action)
     is_valid, diag = meta.verify_policy(syntax_error_code, steps=5)
     assert is_valid is False
     assert "PolicyValidationError" in diag or "TypeError" in diag
+
+
+def test_swarm_worker_and_meta_dry_run_modes(tmp_path):
+    from lox.author.prompts import build_user_prompt
+    from lox.author.tools import AuthorToolRegistry
+
+    db_path = str(tmp_path / "swarm_modes.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    worker_prompt = build_user_prompt(
+        mode="SWARM_WORKER",
+        generation=1,
+        current_policy="",
+        batch_digest="Role: survival",
+    )
+    assert "PrioritySelector" in worker_prompt
+    assert "SWARM_WORKER" in worker_prompt
+    assert "no 2-function limit" in worker_prompt
+
+    meta_prompt = build_user_prompt(
+        mode="SWARM_META",
+        generation=1,
+        current_policy="",
+        batch_digest="Reports",
+    )
+    assert "SWARM_META" in meta_prompt
+    assert "BehaviorTree" in meta_prompt
+
+    tools = AuthorToolRegistry(db_path=db_path)
+    tools.configure_generation(
+        pool=None,
+        baseline_runs=[],
+        max_pilot_runs=0,
+        pilot_episodes=0,
+        generation=1,
+        mode="SWARM_WORKER",
+    )
+
+    # Subtree with 4 helper functions (would trigger MUTATION_SCOPE_ERROR in legacy WRITE mode)
+    # and imports `seq` BEFORE the root PrioritySelector.
+    subtree_code = """
+from lox.env.actions import Action, seq
+from lox.lang.bt import ActionLeaf, ConditionLeaf, PrioritySelector, Sequence
+
+def helper_a(st):
+    return getattr(st, "waiting_for_space", False)
+
+def helper_b(st, bb):
+    return Action.SPACE
+
+def helper_c(st):
+    return st.hp > 0
+
+def helper_d(st, bb):
+    bb.set_var("searched", True)
+    return Action.SEARCH
+
+subtree = PrioritySelector([
+    Sequence([ConditionLeaf(helper_a), ActionLeaf(helper_b)]),
+    ActionLeaf(helper_d),
+])
+"""
+    msg, status = tools.dry_run_policy(subtree_code, seed=42, max_turns=15)
+    assert status.startswith("PASSED"), msg
+    assert tools.last_pilot_improved is True
+    assert "Non-None Subtree Actions: 15/15" in msg
+
+    # Now test SWARM_META with non-empty current_policy_code (must NOT call splice or hit MUTATION_SCOPE_ERROR)
+    tools.configure_generation(
+        pool=None,
+        baseline_runs=[],
+        max_pilot_runs=0,
+        pilot_episodes=0,
+        generation=1,
+        mode="SWARM_META",
+    )
+    tools.current_policy_code = (
+        "class Policy:\n    def run(self, state):\n        yield Action.WAIT\n"
+    )
+    meta_code = """
+from lox.env.actions import Action
+from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
+
+def fn1(st):
+    return Action.SPACE if getattr(st, "waiting_for_space", False) else None
+
+def fn2(st):
+    return Action.SEARCH
+
+def fn3(st):
+    return Action.WAIT
+
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+        self.tree = BehaviorTree(
+            PrioritySelector([ActionLeaf(fn1), ActionLeaf(fn2), ActionLeaf(fn3)]),
+            blackboard=self.blackboard,
+        )
+
+    def step(self, state):
+        return self.tree.tick(state) or Action.SEARCH
+"""
+    m_msg, m_status = tools.dry_run_policy(meta_code, seed=42, max_turns=15)
+    assert m_status.startswith("PASSED"), m_msg
+    assert tools.last_pilot_improved is True
+
+
+def test_run_swarm_clean_resets_campaign_while_preserving_experts(tmp_path):
+    import subprocess
+    import sys
+
+    db_path = tmp_path / "clean_test.duckdb"
+    workspace = tmp_path / "workspace"
+    frontier = tmp_path / "frontier"
+    (workspace / "skills").mkdir(parents=True)
+    (workspace / "skills" / "legacy.py").write_text("x = 1\n")
+    (workspace / "policy.py").write_text("from skills.legacy import x\n")
+    (workspace / "macros.py").write_text("def m(): pass\n")
+    (workspace / "STATUS.md").write_text("stale status\n")
+
+    store = TheoryDocumentStore(db_path=str(workspace / "theories.lance"))
+    store.save_document(
+        generation=99,
+        agent_role="stale_worker",
+        doc_type="THEORY",
+        title="Stale Theory",
+        content="Should be removed by --clean",
+    )
+
+    con = init_db(str(db_path))
+    con.execute(
+        "INSERT INTO policies (policy_id, generation, mode, policy_code, is_promoted) "
+        "VALUES ('pol_stale', 99, 'WRITE', 'stale', TRUE)"
+    )
+    con.execute(
+        "INSERT INTO batches (batch_id, generation, mode, candidate_policy_id, episodes_recorded, avg_depth, max_depth) "
+        "VALUES ('b_stale', 99, 'WRITE', 'pol_stale', 1, 1.0, 1)"
+    )
+    con.execute(
+        "INSERT INTO expert_runs (run_id, source, role, max_depth, turns) "
+        "VALUES ('exp_keep_1', 'nao', 'Val', 20, 5000)"
+    )
+    con.close()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    res = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_swarm.py",
+            "--clean",
+            "--provider",
+            "mock",
+            "--generations",
+            "1",
+            "--workers",
+            "1",
+            "--turns-per-worker",
+            "1",
+            "--seeds",
+            "1",
+            "--db-path",
+            str(db_path),
+            "--workspace-dir",
+            str(workspace),
+            "--frontier-dir",
+            str(frontier),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert res.returncode == 0, res.stderr + "\n" + res.stdout
+    assert not (workspace / "STATUS.md").exists()
+    assert not (workspace / "skills" / "legacy.py").exists()
+
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        stale_pol = con.execute(
+            "SELECT COUNT(*) FROM policies WHERE policy_id = 'pol_stale'"
+        ).fetchone()[0]
+        stale_batch = con.execute(
+            "SELECT COUNT(*) FROM batches WHERE batch_id = 'b_stale'"
+        ).fetchone()[0]
+        kept_expert = con.execute(
+            "SELECT COUNT(*) FROM expert_runs WHERE run_id = 'exp_keep_1'"
+        ).fetchone()[0]
+        fresh_batches = con.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+        assert stale_pol == 0
+        assert stale_batch == 0
+        assert kept_expert == 1
+        assert fresh_batches == 1
+    finally:
+        con.close()

@@ -86,8 +86,29 @@ def main() -> None:
         default="val-hum-law-fem",
         help="Character role/race/alignment/gender (default: val-hum-law-fem).",
     )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help=(
+            "Reset campaign tables in DuckDB and workspace artifacts (policy.py, skills/, theories.lance) "
+            "to Generation 0 clean state before running, while preserving expert_runs and wiki."
+        ),
+    )
 
     args = parser.parse_args()
+
+    if args.clean:
+        from scripts.reset_clean import reset_clean
+
+        ui.warn(
+            f"--clean specified: Resetting workspace `{args.workspace_dir}` and campaign tables in `{args.db_path}`..."
+        )
+        reset_clean(
+            db_path=args.db_path,
+            policy_path=os.path.join(args.workspace_dir, "policy.py"),
+            macros_path=os.path.join(args.workspace_dir, "macros.py"),
+            theories_path=os.path.join(args.workspace_dir, "theories.lance"),
+        )
 
     ui.header("LOX Hierarchical Swarm Synthesis Engine")
     ui.info(

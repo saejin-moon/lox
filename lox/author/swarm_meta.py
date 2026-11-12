@@ -14,6 +14,7 @@ from lox.author.agent import AuthorAgent
 from lox.db.schema import connect_db
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
+from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
 from lox.lang.compiler import compile_policy_package
 from lox.lang.validator import validate_python_code
@@ -291,9 +292,9 @@ class SwarmMetaAgent:
                 for _ in range(steps):
                     act, _ = runner.next_action(st)
                     if act is None:
-                        continue
-                    st = harness.step(act)
-                    if harness.done:
+                        act = Action.SEARCH
+                    st, done, _ = harness.step(act)
+                    if done or harness.done:
                         break
                 return True, ""
             finally:
@@ -413,7 +414,7 @@ class Policy:
             )
 
             proposal = self.author.synthesize(
-                mode="CREATE" if not current_policy else "WRITE",
+                mode="SWARM_META",
                 generation=generation,
                 current_policy=current_policy or default_template,
                 batch_digest=meta_prompt,
@@ -430,7 +431,7 @@ class Policy:
                     f"Meta-Agent: Policy verification failed; executing self-repair turn ({repair_turns}/{max_repair_turns})...\nDiagnostic: {diag[:300]}"
                 )
                 repair_proposal = self.author.synthesize(
-                    mode="WRITE",
+                    mode="SWARM_META",
                     generation=generation,
                     current_policy=candidate_code,
                     batch_digest=f"Self-Repair Required: Master policy failed verification:\n{diag}",

@@ -27,8 +27,10 @@ from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db
 from lox.db.shards import extract_shards_from_runs
+from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
-from lox.lang.compiler import compile_policy_package
+from lox.lang.bt import BehaviorTree, Blackboard
+from lox.lang.compiler import compile_bt_subtree, compile_policy_package
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.lang.validator import (
     audit_policy_ast_hygiene,
@@ -526,6 +528,79 @@ class AuthorToolRegistry:
             "PASSED (macro)",
         )
 
+    def _dry_run_swarm_worker(
+        self,
+        code: str,
+        seed: int = 42,
+        max_turns: int = 25,
+    ) -> tuple[str, str]:
+        """Validates and smoke-tests a standalone SWARM_WORKER Behavior Tree subtree."""
+        try:
+            node = compile_bt_subtree(code)
+        except Exception as exc:
+            return (
+                f"Subtree Compilation / Validation Error:\n{type(exc).__name__}: {exc}",
+                "COMPILE_ERROR",
+            )
+
+        steps = max(10, min(40, int(max_turns)))
+        harness = NetHackHarness(max_steps=steps + 10)
+        bb = Blackboard(strict_errors=True)
+        raw_act_names: list[str] = []
+        unique_positions: set[tuple[int, int]] = set()
+        non_none_actions = 0
+
+        try:
+            state = harness.reset(seed=int(seed))
+            for _ in range(steps):
+                unique_positions.add((state.y, state.x))
+                if isinstance(node, BehaviorTree):
+                    act = node.tick(state)
+                elif hasattr(node, "tick"):
+                    try:
+                        res = node.tick(state, bb)
+                    except TypeError:
+                        res = node.tick(state)
+                    act = res[1] if isinstance(res, tuple) else res
+                elif hasattr(node, "step"):
+                    act = node.step(state)
+                else:
+                    act = node(state)
+
+                if act is not None:
+                    non_none_actions += 1
+                else:
+                    act = Action.SEARCH
+
+                state, done, info = harness.step(act)
+                raw_act_names.append(str(info.get("action_name", act)))
+                if done:
+                    break
+            unique_positions.add((state.y, state.x))
+        except Exception as exc:
+            return (
+                f"Subtree Runtime Error during smoke test:\n{type(exc).__name__}: {exc}",
+                "RUNTIME_ERROR",
+            )
+        finally:
+            harness.close()
+
+        act_counts = ", ".join(
+            f"{k}:{v}" for k, v in Counter(raw_act_names).most_common(6)
+        )
+        self.last_passed_code = code
+        self.last_pilot_improved = True
+        self.last_pilot_summary = (
+            f"Swarm subtree smoke check ({harness.step_count} steps)"
+        )
+        return (
+            f"Subtree Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
+            f"- Non-None Subtree Actions: {non_none_actions}/{harness.step_count}\n"
+            f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), UniqueTiles={len(unique_positions)}, HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"
+            f"- Action Breakdown: {{{act_counts}}}",
+            "PASSED (subtree smoke check)",
+        )
+
     def dry_run_policy(
         self,
         code: str,
@@ -578,8 +653,15 @@ class AuthorToolRegistry:
         if is_macro:
             return self._verify_macro_on_real_states(code)
 
+        if self.mode == "SWARM_WORKER":
+            return self._dry_run_swarm_worker(
+                code=code,
+                seed=seed,
+                max_turns=min(40, max(10, int(max_turns))),
+            )
+
         try:
-            if policy_code.strip():
+            if policy_code.strip() and self.mode != "SWARM_META":
                 if code.strip():
                     spliced_policy, changed_fns = splice_functions_into_policy(
                         policy_code, code
@@ -1423,6 +1505,11 @@ class AuthorToolRegistry:
                 )
 
             self.last_passed_code = code
+            if self.mode == "SWARM_META":
+                self.last_pilot_improved = True
+                self.last_pilot_summary = (
+                    f"Meta-Agent BT Policy smoke check ({harness.step_count} steps)"
+                )
             return (
                 f"Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
                 f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), UniqueTiles={len(unique_positions)}, HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"

@@ -410,6 +410,19 @@ def _format_context_scoped_policy(current_policy: str, batch_digest: str = "") -
     return f"### Current `policy.py`:\n```python\n{current_policy}\n```"
 
 
+BEHAVIOR_TREE_DOCS = """### Behavior Tree Primitives (`lox.lang.bt`)
+All Swarm subtrees and Master Policies compose reactive Behavior Trees using these exact primitives (already pre-loaded in scope, or importable via `from lox.lang.bt import ...` and `from lox.env.actions import Action, DIR_DELTAS, seq, key, repeat`):
+- **IMPORTANT IMPORT RULE**: NEVER import `macros`, `skills_common`, or unapproved modules. Only `lox.*`, `skills.*`, `numpy as np`, and allowed stdlib modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `random`, `bisect`, `copy`) are permitted.
+- `Blackboard`: `bb.get_var(key, default=None)`, `bb.set_var(key, val)`, `bb.has_var(key)` for cross-node state persistence (NEVER use raw `self.*` attributes inside shared subtrees; pass state through `bb`).
+- `ActionLeaf(fn, name="...")`: `fn(state, bb)` or `fn(state)` returns an `Action` / `seq(...)` (`NodeStatus.SUCCESS`) or `None` (`NodeStatus.FAILURE`, allowing `PrioritySelector` to fall through).
+- `ConditionLeaf(cond_fn, name="...")`: `cond_fn(state, bb)` or `cond_fn(state)` returns `bool` (`True` -> `SUCCESS`, `False` -> `FAILURE`).
+- `Sequence([child_1, child_2, ...], name="...")`: ticks left-to-right, short-circuits on `FAILURE`.
+- `PrioritySelector([child_1, child_2, ...], name="...")`: ticks left-to-right, returns the first child that does not return `FAILURE`.
+- `Inverter(child, name="...")`: inverts `SUCCESS` <-> `FAILURE`.
+- `BehaviorTree(root=root_node, blackboard=bb)`: ticks `root` and returns the resulting action (or `None`).
+"""
+
+
 def build_user_prompt(
     mode: str,
     generation: int,
@@ -491,6 +504,51 @@ def build_user_prompt(
     )
     digest_block = f"\n{batch_digest}\n" if batch_digest else ""
     canon_mode = normalize_mode(mode)
+
+    if canon_mode == "SWARM_WORKER":
+        prev_subtree_block = (
+            f"\n### Previous Turn Subtree Draft (Iterate or Fix):\n```python\n{current_policy}\n```\n"
+            if current_policy.strip()
+            else ""
+        )
+        return f"""### Generation {generation} — Mode: `SWARM_WORKER` (Behavior Tree Subtree Synthesis)
+{digest_block}{prev_subtree_block}
+{BEHAVIOR_TREE_DOCS}
+
+### Swarm Worker Protocol (Hard Code Nothing):
+1. **Standalone Behavior Tree Subtree ONLY**:
+   - Write a clean, modular Behavior Tree subtree (multiple helper functions are welcome—there is **no 2-function limit**).
+   - Assign your top-level node to `subtree` (e.g., `subtree = PrioritySelector([...], name="...")` or `subtree = ActionLeaf(...)` / `Sequence([...])`).
+   - Do **NOT** wrap your subtree in a monolithic `class Policy:` generator with `def run(self, state): yield ...`, and do **NOT** return `None` from `subtree` imports. When your branch does not apply in the current `state`, return `None` from your `ActionLeaf` function so `PrioritySelector` falls through cleanly to lower-priority categories!
+2. **Empirical Research Before Guessing**:
+   - Use `query_monster(name)`, `query_item(name)`, `query_wiki(query)`, and `query_db(sql)` on `expert_runs` / `expert_ticks` whenever you need exact NetHack 3.6.6 mechanics instead of hardcoding monster or item lists from memory.
+3. **Verify Before Finishing**:
+   - Call `dry_run_policy(code=...)` on your complete subtree snippet to verify zero syntax/import errors and clean execution on `GameState`.
+4. **Output Format**:
+   - Optional brief empirical note or YAML summary (`observation_from_db`, `mechanism`), followed by your complete Python subtree inside `<policy_code> ... </policy_code>` or a standard ```python ... ``` code block.
+"""
+
+    if canon_mode == "SWARM_META":
+        existing_policy_block = (
+            f"\n{_format_context_scoped_policy(current_policy, batch_digest)}\n"
+            if current_policy.strip()
+            else ""
+        )
+        return f"""### Generation {generation} — Mode: `SWARM_META` (Unified Behavior Tree Master Assembly)
+{digest_block}{existing_policy_block}
+{BEHAVIOR_TREE_DOCS}
+
+### Meta-Agent Assembly Protocol:
+1. **Complete `class Policy:` Wrapping `BehaviorTree`**:
+   - Integrate the specialist worker subtrees into a unified, self-contained `class Policy:` (do NOT rely on undeclared variables from worker files or import `macros` / `skills_common`).
+   - In `def __init__(self):`, initialize `self.blackboard = Blackboard()`, define/wire each priority branch (`PrioritySelector([...])`), and construct `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`.
+   - Define `def step(self, state):` returning `self.tree.tick(state) or Action.SEARCH` (or include a safe final fallback `ActionLeaf` so `step(state)` never returns `None`).
+   - Every node function invoked during `self.tree.tick(state)` must be cleanly defined inside the module or `class Policy`.
+2. **Verify Before Finishing**:
+   - Call `dry_run_policy(code=...)` on your complete `class Policy:` source to confirm clean AST compilation and multi-step execution in `NetHackHarness`.
+3. **Output Format**:
+   - Output your complete, self-contained Python `class Policy:` implementation inside `<policy_code> ... </policy_code>` tags or a standard ```python ... ``` code block.
+"""
 
     if canon_mode == "CREATE":
         return f"""### Generation {generation} — Mode: `CREATE` (Initial Baseline Synthesis)

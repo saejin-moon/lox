@@ -25,8 +25,9 @@ class NodeStatus(Enum):
 class Blackboard(dict[str, Any]):
     """Shared blackboard data store for inter-node communication and state persistence."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, strict_errors: bool = False, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.strict_errors = strict_errors
 
     def get_var(self, key: str, default: Any = None) -> Any:
         return self.get(key, default)
@@ -83,6 +84,8 @@ class ActionLeaf(BehaviorNode):
             else:
                 act = self.action_fn(state)
         except Exception:
+            if getattr(blackboard, "strict_errors", False):
+                raise
             return NodeStatus.FAILURE, None
 
         if act is not None:
@@ -115,6 +118,8 @@ class ConditionLeaf(BehaviorNode):
             else:
                 ok = bool(self.cond_fn(state))
         except Exception:
+            if getattr(blackboard, "strict_errors", False):
+                raise
             ok = False
 
         status = NodeStatus.SUCCESS if ok else NodeStatus.FAILURE

@@ -111,10 +111,36 @@ class AuthorAgent:
         candidate_code: str = "",
     ) -> str:
         """Builds a precise, category-specific, actionable repair prompt for the Author Agent."""
+        canon_mode = normalize_mode(mode)
         hdr = (
             f"Your candidate code failed the compiler/sandbox verification gate "
             f"(Attempt {repair_idx}/{max_repair_turns}):"
         )
+        if canon_mode == "SWARM_WORKER":
+            return (
+                f"{hdr}\n\n"
+                f"```\n{diag.strip()}\n```\n\n"
+                "🚨 PROBLEM: SWARM WORKER BEHAVIOR TREE SUBTREE FAILED VERIFICATION\n"
+                "REQUIRED FIX:\n"
+                "1. Emit a valid, standalone Behavior Tree subtree assigned to `subtree` "
+                "(e.g. `subtree = PrioritySelector([...])` or `subtree = ActionLeaf(...)`).\n"
+                "2. Use only permitted imports (`from lox.lang.bt import ...`, `from lox.env.actions import Action, DIR_DELTAS, seq`). "
+                "NEVER import `macros`, `skills_common`, or unapproved modules.\n"
+                "3. Do NOT wrap the subtree in monolithic `class Policy` with `def run(self, state): yield ...`.\n"
+                "4. Fix any syntax, indentation, or runtime errors and output the complete corrected subtree inside a single ```python ... ``` block."
+            )
+        if canon_mode == "SWARM_META":
+            return (
+                f"{hdr}\n\n"
+                f"```\n{diag.strip()}\n```\n\n"
+                "🚨 PROBLEM: MASTER BEHAVIOR TREE POLICY FAILED VERIFICATION\n"
+                "REQUIRED FIX:\n"
+                "1. Output a complete, self-contained `class Policy:` defining `def __init__(self):` "
+                "(with `self.blackboard = Blackboard()` and `self.tree = BehaviorTree(...)`) and "
+                "`def step(self, state): return self.tree.tick(state) or Action.SEARCH`.\n"
+                "2. Do NOT reference undeclared worker helper names or import `macros` / `skills_common`.\n"
+                "3. Output the complete corrected `class Policy:` inside a single ```python ... ``` block."
+            )
         if "UNREACHABLE" in status or "Unreachable Function" in diag:
             guidance = (
                 "🚨 PROBLEM: UNREACHABLE METHOD IN POLICY\n"
@@ -279,7 +305,23 @@ class AuthorAgent:
             )
             if not py_blocks:
                 py_blocks = re.findall(r"```\s*\n(.*?)```", text, flags=re.DOTALL)
-                py_blocks = [b for b in py_blocks if "def " in b or "class " in b]
+                py_blocks = [
+                    b
+                    for b in py_blocks
+                    if any(
+                        tok in b
+                        for tok in (
+                            "def ",
+                            "class ",
+                            "ActionLeaf",
+                            "ConditionLeaf",
+                            "PrioritySelector",
+                            "Sequence",
+                            "BehaviorTree",
+                            "subtree",
+                        )
+                    )
+                ]
 
             if py_blocks:
                 policy_candidates = [
@@ -1112,7 +1154,7 @@ class AuthorAgent:
         if (
             self.tools.pilot_runs_used > 0
             and not self.tools.last_pilot_improved
-            and canon_mode != "CREATE"
+            and canon_mode not in ("CREATE", "SWARM_WORKER", "SWARM_META")
         ):
             summary = self.tools.last_pilot_summary or "insufficient signal"
             best_delta = getattr(self.tools, "best_pilot_delta", -1.0)
@@ -1301,9 +1343,17 @@ class AuthorAgent:
                                 self.tools, "best_pilot_delta", 0.0
                             ),
                         )
-                if canon_mode == "CREATE" or not current_policy.strip():
+                if (
+                    canon_mode in ("CREATE", "SWARM_WORKER", "SWARM_META")
+                    or not current_policy.strip()
+                ):
                     spliced_policy = code_patch
-                    changed_fns = hyp.get("target_functions") or ["run"]
+                    default_target = (
+                        ["step"]
+                        if canon_mode == "SWARM_META"
+                        else (["subtree"] if canon_mode == "SWARM_WORKER" else ["run"])
+                    )
+                    changed_fns = hyp.get("target_functions") or default_target
                 else:
                     spliced_policy, changed_fns = splice_functions_into_policy(
                         current_policy, code_patch
@@ -1318,7 +1368,11 @@ class AuthorAgent:
                             ] or ["run"]
                 if isinstance(changed_fns, str):
                     changed_fns = [changed_fns]
-                if canon_mode not in ("CREATE", "REFACTOR") and len(changed_fns) > 2:
+                if (
+                    canon_mode
+                    not in ("CREATE", "REFACTOR", "SWARM_WORKER", "SWARM_META")
+                    and len(changed_fns) > 2
+                ):
                     ui.warn(
                         f"Mutation Scope: Candidate modified {len(changed_fns)} functions ({changed_fns}), exceeding limit of 2. Aborting rollout."
                     )
@@ -1458,9 +1512,17 @@ class AuthorAgent:
                     or getattr(self.tools, "best_pilot_skill_name", None)
                 ),
             )
-            if canon_mode == "CREATE" or not current_policy.strip():
+            if (
+                canon_mode in ("CREATE", "SWARM_WORKER", "SWARM_META")
+                or not current_policy.strip()
+            ):
                 spliced_policy = code_patch
-                changed_fns = latest_hyp.get("target_functions") or ["run"]
+                default_target = (
+                    ["step"]
+                    if canon_mode == "SWARM_META"
+                    else (["subtree"] if canon_mode == "SWARM_WORKER" else ["run"])
+                )
+                changed_fns = latest_hyp.get("target_functions") or default_target
             else:
                 spliced_policy, changed_fns = splice_functions_into_policy(
                     current_policy, code_patch
@@ -1480,7 +1542,10 @@ class AuthorAgent:
                 if getattr(self, "tools", None) and self.tools.best_pilot_delta > -1e8
                 else 0.0
             )
-            if canon_mode not in ("CREATE", "REFACTOR") and len(changed_fns) > 2:
+            if (
+                canon_mode not in ("CREATE", "REFACTOR", "SWARM_WORKER", "SWARM_META")
+                and len(changed_fns) > 2
+            ):
                 ui.warn(
                     f"Mutation Scope: Candidate modified {len(changed_fns)} functions ({changed_fns}), exceeding limit of 2. Aborting rollout."
                 )

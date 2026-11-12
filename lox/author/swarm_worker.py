@@ -10,7 +10,6 @@ Specializes in one of 4 functional domains:
 from __future__ import annotations
 
 import collections
-import inspect
 import random
 import traceback
 from dataclasses import dataclass, field
@@ -22,12 +21,10 @@ from lox.engine.frontier import FrontierArchive, FrontierCheckpoint
 from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
 from lox.lang.bt import (
-    ActionLeaf,
-    BehaviorNode,
     BehaviorTree,
     Blackboard,
-    ConditionLeaf,
 )
+from lox.lang.compiler import compile_bt_subtree
 from lox.ui.console import ui
 
 
@@ -151,6 +148,45 @@ class SwarmWorker:
    Query `query_monster` for exact monster stats and corpse poison/nutrition, `query_item` for items, and `query_db` for telemetry.
 """
 
+    def _build_worker_brief(
+        self,
+        generation: int,
+        checkpoint: FrontierCheckpoint | None,
+        turn: int,
+        turn_results: list[dict[str, Any]],
+        err_diag: str = "",
+    ) -> str:
+        """Builds dynamic category brief, checkpoint context, turn digest, and repair error details."""
+        parts = [self.get_role_prompt()]
+        if checkpoint is not None:
+            parts.append(
+                f"### Frontier Checkpoint Context (Gen {generation}, Turn {turn}/{self.max_turns}):\n"
+                f"- Seed: {checkpoint.seed}, Depth: {checkpoint.depth}, Prefix Steps: {checkpoint.steps}\n"
+                f"- Prior End Reason: {checkpoint.end_reason or 'active'}"
+            )
+        else:
+            parts.append(
+                f"### Fresh Seed Exploration (Gen {generation}, Turn {turn}/{self.max_turns})"
+            )
+
+        if turn_results:
+            hist = "\n".join(
+                f"- Turn {r['turn']}: {r['obs'].summary()}"
+                + (
+                    f" | Error: {str(r['error']).splitlines()[0]}"
+                    if r.get("error")
+                    else ""
+                )
+                for r in turn_results[-3:]
+            )
+            parts.append(f"### Previous Turns in This Cycle:\n{hist}")
+
+        if err_diag:
+            parts.append(
+                f"### ⚠️ Checkpoint Evaluation Failed — Repair Required:\n```\n{err_diag[:1500]}\n```"
+            )
+        return "\n\n".join(parts)
+
     def evaluate_candidate(
         self,
         code_snippet: str,
@@ -172,48 +208,9 @@ class SwarmWorker:
             start_hp = int(st.hp)
             start_depth = int(st.depth)
 
-            local_scope: dict[str, Any] = {}
-            exec(code_snippet, globals(), local_scope)
+            node = compile_bt_subtree(code_snippet)
 
-            node: Any = None
-            # 1. Prefer instantiated BehaviorTree / BehaviorNode objects
-            for candidate in local_scope.values():
-                if not inspect.isclass(candidate) and (
-                    hasattr(candidate, "tick")
-                    or hasattr(candidate, "step")
-                    or callable(candidate)
-                ):
-                    node = candidate
-                    break
-
-            # 2. If no instance found, check for Policy or Node classes to instantiate
-            if node is None:
-                builtin_bt_types = (
-                    BehaviorTree,
-                    ActionLeaf,
-                    ConditionLeaf,
-                    Blackboard,
-                    BehaviorNode,
-                )
-                for candidate in local_scope.values():
-                    if (
-                        inspect.isclass(candidate)
-                        and candidate not in builtin_bt_types
-                        and (hasattr(candidate, "step") or hasattr(candidate, "tick"))
-                    ):
-                        try:
-                            node = candidate()
-                            break
-                        except Exception:
-                            pass
-
-            if node is None:
-                return (
-                    ObservationDigest(hp_start=start_hp, depth_start=start_depth),
-                    "No BehaviorTree node (.tick(st)) or Policy class (.step(st)) found in code snippet.",
-                )
-
-            bb = Blackboard()
+            bb = Blackboard(strict_errors=True)
             action_counts: dict[str, int] = collections.defaultdict(int)
             visited_tiles: set[tuple[int, int]] = set()
 
@@ -304,13 +301,20 @@ class SwarmWorker:
                 theory_desc = f"Implements reactive {self.role} Behavior Tree logic for checkpoint depth {checkpoint.depth if checkpoint else 1}."
             else:
                 last_code = turn_results[-1]["code"] if turn_results else ""
+                brief = self._build_worker_brief(
+                    generation=generation,
+                    checkpoint=checkpoint,
+                    turn=turn,
+                    turn_results=turn_results,
+                )
                 proposal = self.author.synthesize(
-                    mode="WRITE",
+                    mode="SWARM_WORKER",
                     generation=generation,
                     current_policy=last_code,
+                    batch_digest=brief,
                     max_tool_turns=4,
                 )
-                code_snippet = proposal.raw_code_patch
+                code_snippet = proposal.raw_code_patch or proposal.full_policy_code
                 theory_desc = str(
                     proposal.hypothesis.get("mechanism")
                     or proposal.hypothesis.get("observation_from_db")
@@ -333,13 +337,23 @@ class SwarmWorker:
                 ui.warn(
                     f"Swarm Worker [{self.role}]: Checkpoint error caught; executing self-repair turn ({repair_turns}/{self.max_repair_turns})..."
                 )
+                repair_brief = self._build_worker_brief(
+                    generation=generation,
+                    checkpoint=checkpoint,
+                    turn=turn,
+                    turn_results=turn_results,
+                    err_diag=err_diag,
+                )
                 repair_proposal = self.author.synthesize(
-                    mode="WRITE",
+                    mode="SWARM_WORKER",
                     generation=generation,
                     current_policy=code_snippet,
+                    batch_digest=repair_brief,
                     max_tool_turns=2,
                 )
-                code_snippet = repair_proposal.raw_code_patch
+                code_snippet = (
+                    repair_proposal.raw_code_patch or repair_proposal.full_policy_code
+                )
                 obs, err_diag = self.evaluate_candidate(
                     code_snippet, checkpoint=checkpoint, steps=25
                 )
