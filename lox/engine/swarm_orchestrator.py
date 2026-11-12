@@ -73,7 +73,7 @@ class SwarmCampaignOrchestrator:
         # Initialize MAP-Elites Diversity Archive
         self.map_elites = MAPElitesArchive()
 
-        # Initialize Meta-Agent
+        # Initialize Meta-Agent (share live FrontierArchive so depth tiers stay in sync)
         self.meta_agent = SwarmMetaAgent(
             provider=self.provider,
             model=self.model,
@@ -81,6 +81,7 @@ class SwarmCampaignOrchestrator:
             theories_path=theories_path,
             frontier_dir=self.frontier_dir,
         )
+        self.meta_agent.frontier = self.frontier
 
         # Initialize Multi-Core Persistent Eval Pool
         self.eval_pool = PersistentEvalPool(
@@ -111,7 +112,7 @@ class SwarmCampaignOrchestrator:
 
         # 1. Dynamic Macro-Category Discovery
         categories = self.meta_agent.discover_macro_categories(
-            generation=generation, n_categories=4
+            generation=generation, n_categories=max(1, int(self.num_workers))
         )
         cat_names = [c["category_id"] for c in categories]
         ui.info(f"Gen {generation}: Active Categories: {cat_names}")

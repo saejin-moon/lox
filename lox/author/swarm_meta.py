@@ -60,16 +60,19 @@ class SwarmMetaAgent:
 
         avg_depth = 1.0
         max_depth = 1
+        avg_turns = 0.0
+        avg_tiles = 0.0
         mortality_causes: list[tuple[str, str, int]] = []
+        top_fn_turns: list[tuple[str, int, int, float]] = []
         auto_escs = 0
         died_unarmored = 0
         starved_with_food = 0
+        latest_gen: int | None = None
 
-        # Query DuckDB for recent empirical performance
+        # Query DuckDB for recent empirical performance & function turn distribution
         try:
             con = connect_db(self.db_path, read_only=True)
             try:
-                # Find latest batch generation
                 max_gen_row = con.execute("SELECT max(generation) FROM runs").fetchone()
                 latest_gen = (
                     max_gen_row[0]
@@ -78,7 +81,6 @@ class SwarmMetaAgent:
                 )
 
                 if latest_gen is not None:
-                    # Top mortality causes
                     mort_rows = con.execute(
                         """
                         SELECT end_reason, death_message, count(*) as cnt
@@ -86,7 +88,7 @@ class SwarmMetaAgent:
                         WHERE generation = ?
                         GROUP BY end_reason, death_message
                         ORDER BY cnt DESC
-                        LIMIT 5
+                        LIMIT 6
                         """,
                         [latest_gen],
                     ).fetchall()
@@ -94,12 +96,13 @@ class SwarmMetaAgent:
                         (str(r[0]), str(r[1]), int(r[2])) for r in mort_rows
                     ]
 
-                    # Aggregate diagnostic indicators
                     metrics_row = con.execute(
                         """
                         SELECT
                             coalesce(avg(depth), 1.0),
                             coalesce(max(depth), 1),
+                            coalesce(avg(turns), 0.0),
+                            coalesce(avg(unique_tiles), 0.0),
                             coalesce(sum(case when auto_esc_count > 0 then 1 else 0 end), 0),
                             coalesce(sum(case when died_unarmored then 1 else 0 end), 0),
                             coalesce(sum(case when starved_with_food then 1 else 0 end), 0)
@@ -111,142 +114,184 @@ class SwarmMetaAgent:
                     if metrics_row:
                         avg_depth = float(metrics_row[0])
                         max_depth = int(metrics_row[1])
-                        auto_escs = int(metrics_row[2])
-                        died_unarmored = int(metrics_row[3])
-                        starved_with_food = int(metrics_row[4])
+                        avg_turns = float(metrics_row[2])
+                        avg_tiles = float(metrics_row[3])
+                        auto_escs = int(metrics_row[4])
+                        died_unarmored = int(metrics_row[5])
+                        starved_with_food = int(metrics_row[6])
+
+                    fn_rows = con.execute(
+                        """
+                        SELECT function_name, episodes_triggered, total_turns_active,
+                               coalesce(liblit_failure_score, 0.0)
+                        FROM function_stats
+                        WHERE generation = ? AND total_turns_active > 0
+                        ORDER BY total_turns_active DESC
+                        LIMIT 10
+                        """,
+                        [latest_gen],
+                    ).fetchall()
+                    top_fn_turns = [
+                        (str(r[0]), int(r[1]), int(r[2]), float(r[3])) for r in fn_rows
+                    ]
             finally:
                 con.close()
         except Exception:
             pass
 
-        # Check frontier archive for available depth tiers
         frontier_depths = (
             sorted({cp.depth for cp in self.frontier.checkpoints.values()})
             if self.frontier.checkpoints
             else [1]
         )
-        active_frontier_depth = max(frontier_depths) if frontier_depths else 1
+        active_frontier_depth = max(
+            max_depth, max(frontier_depths) if frontier_depths else 1
+        )
 
-        # Formulate dynamic emergent categories based on empirical bottlenecks
         categories: list[dict[str, Any]] = []
+        if self.provider != "mock":
+            # Dynamically synthesize orthogonal specialist categories via Meta-Agent LLM
+            recent_decomps = self.theories.search_theories(
+                "CATEGORY_DECOMPOSITION", limit=2, doc_type="CATEGORY_DECOMPOSITION"
+            )
+            prev_cats_note = (
+                "\n".join(
+                    f"- Gen {d.get('generation')}: {str(d.get('content', ''))[:400]}"
+                    for d in recent_decomps
+                )
+                if recent_decomps
+                else "None yet."
+            )
+            prompt = f"""Analyze the empirical telemetry from Generation {latest_gen if latest_gen is not None else 0} and design {n_categories} orthogonal specialist worker categories for Generation {generation}.
 
-        # Category 1: Dialog & Prompt Safety (always critical if auto-ESCs triggered or early prompt traps)
-        if auto_escs > 0 or generation == 0:
-            categories.append(
-                {
-                    "category_id": "dialog_and_prompts",
-                    "name": "Dialog & Prompt Safety Specialist",
-                    "description": (
-                        f"Specialist in handling interactive text prompts, --More-- pagination, and y/n naming traps. "
-                        f"Observed {auto_escs} auto-ESC prompt dismissals in recent runs. "
-                        f"Must produce reactive ActionLeaf preventing episode stall timeouts."
-                    ),
-                    "target_depth_tier": (1, max(2, active_frontier_depth)),
-                    "target_metrics": ["auto_esc_count", "stagnation_turns"],
-                    "blackboard_keys": ["in_prompt", "dialog_resolved"],
-                }
-            )
+### Empirical Telemetry:
+- avg_depth={avg_depth:.2f}, max_depth={max_depth}, active_frontier_depth={active_frontier_depth}
+- avg_turns={avg_turns:.1f}, avg_unique_tiles={avg_tiles:.1f}
+- diagnostic_flags: auto_escs={auto_escs}, died_unarmored={died_unarmored}, starved_with_food={starved_with_food}
+- top_end_reasons: {mortality_causes}
+- top_active_functions (name, episodes, turns_active, liblit_fail): {top_fn_turns}
 
-        # Category 2: Tactical Threat & Combat (tailored to mortality and depth tier)
-        combat_focus = "early_melee"
-        if active_frontier_depth >= 4:
-            combat_focus = "ant_and_poison_defense"
-            threat_desc = (
-                f"Specialist in deep-tier hostile encounters at Dlvl >= 4 (soldier ants, floating eyes, mimics). "
-                f"Top mortality causes: {mortality_causes[:2]}. "
-                f"Must produce Behavior Tree combat subtrees implementing chokepoint kiting, dust Elbereth, and tactical retreat thresholds."
-            )
-        elif active_frontier_depth >= 2:
-            combat_focus = "pack_combat_and_kiting"
-            threat_desc = (
-                f"Specialist in mid-dungeon pack combat at Dlvl 2-3 (jackal swarms, sewer rats, orcs). "
-                f"Top mortality causes: {mortality_causes[:2]}. "
-                f"Must produce reactive combat leaf nodes targeting hostiles in 1-tile corridor chokepoints."
-            )
-        else:
-            combat_focus = "early_threat_and_flee"
-            threat_desc = (
-                "Specialist in early survival combat on Dlvl 1. "
-                "Produces low-risk melee strikes against adjacent vermin and retreat thresholds when HP <= 6."
-            )
+### Previous Category Decompositions (avoid repeating stale categories if bottlenecks shifted):
+{prev_cats_note}
 
-        categories.append(
-            {
-                "category_id": f"tactical_threat_{combat_focus}",
-                "name": f"Tactical Threat ({combat_focus.replace('_', ' ').capitalize()})",
-                "description": threat_desc,
-                "target_depth_tier": (
-                    max(1, active_frontier_depth - 1),
-                    active_frontier_depth + 1,
+### Output Format:
+Return ONLY a valid JSON array of {n_categories} objects, each with:
+- "category_id": short_snake_case_identifier (unique, descriptive of the specific empirical bottleneck)
+- "name": Human-readable title
+- "description": Concrete empirical problem & scope for this specialist (without hardcoding unverified game rules)
+- "target_depth_tier": [min_depth, max_depth]
+- "target_metrics": list of telemetry column names (e.g. ["max_depth", "unique_tiles", "turns"])
+- "blackboard_keys": list of 2-3 Blackboard variable names this branch should coordinate
+"""
+            try:
+                resp = self.author._call_llm_api(
+                    [
+                        {
+                            "role": "system",
+                            "content": "You are the LOX Meta-Agent Architect. Output strictly valid JSON.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    allow_tools=False,
+                )
+                raw_txt = str(resp.get("content") or "").strip()
+                if "```" in raw_txt:
+                    import re
+
+                    m = re.search(
+                        r"```(?:json)?\s*\n(.*?)```", raw_txt, flags=re.DOTALL
+                    )
+                    if m:
+                        raw_txt = m.group(1).strip()
+                parsed = json.loads(raw_txt)
+                if isinstance(parsed, list):
+                    for item in parsed[:n_categories]:
+                        if isinstance(item, dict) and item.get("category_id"):
+                            tier = item.get("target_depth_tier") or [
+                                1,
+                                active_frontier_depth,
+                            ]
+                            if isinstance(tier, list) and len(tier) >= 2:
+                                tier_tup = (int(tier[0]), int(tier[1]))
+                            else:
+                                tier_tup = (1, active_frontier_depth)
+                            categories.append(
+                                {
+                                    "category_id": str(item["category_id"])
+                                    .strip()
+                                    .lower()
+                                    .replace(" ", "_"),
+                                    "name": str(
+                                        item.get("name") or item["category_id"]
+                                    ),
+                                    "description": str(item.get("description") or ""),
+                                    "target_depth_tier": tier_tup,
+                                    "target_metrics": [
+                                        str(m)
+                                        for m in (
+                                            item.get("target_metrics")
+                                            or ["max_depth", "unique_tiles"]
+                                        )
+                                    ],
+                                    "blackboard_keys": [
+                                        str(k)
+                                        for k in (item.get("blackboard_keys") or [])
+                                    ],
+                                }
+                            )
+            except Exception as exc:
+                ui.warn(f"Meta-Agent LLM category discovery fallback ({exc})")
+
+        if not categories:
+            # Domain-agnostic structural fallback (mock mode or LLM parse failure)
+            generic_specs = [
+                (
+                    "progression_and_exploration",
+                    "Progression & Spatial Exploration",
+                    f"Maximizes map exploration and level transitions (current avg_tiles={avg_tiles:.1f}, avg_depth={avg_depth:.2f}).",
+                    (1, active_frontier_depth + 1),
+                    ["unique_tiles", "max_depth", "depth"],
+                    ["target_tile", "frontier_path"],
                 ),
-                "target_metrics": ["final_hp", "killed_monsters", "subgen_preemptions"],
-                "blackboard_keys": ["last_target", "danger_level", "tactical_retreat"],
-            }
-        )
+                (
+                    "risk_and_survival",
+                    "Risk & Threat Response",
+                    f"Mitigates top termination causes ({mortality_causes[:2]}) and preserves HP under hostile encounters.",
+                    (1, active_frontier_depth),
+                    ["final_hp", "turns", "killed_monsters"],
+                    ["danger_level", "last_target"],
+                ),
+                (
+                    "resource_management",
+                    "Resource & State Optimization",
+                    f"Improves resource utilization and endurance (avg_turns={avg_turns:.1f}, starved_with_food={starved_with_food}, died_unarmored={died_unarmored}).",
+                    (1, active_frontier_depth),
+                    ["turns", "final_ac", "xp_level"],
+                    ["resource_needed", "emergency_action"],
+                ),
+                (
+                    "interactive_state_handling",
+                    "Interactive State & Stall Recovery",
+                    f"Resolves blocking prompts and zero-progress stalls cleanly (auto_escs={auto_escs}).",
+                    (1, max(2, active_frontier_depth)),
+                    ["auto_esc_count", "stagnation_turns"],
+                    ["in_prompt", "stall_recovery"],
+                ),
+            ]
+            for cid, cname, cdesc, ctier, cmetrics, cbkeys in generic_specs[
+                :n_categories
+            ]:
+                categories.append(
+                    {
+                        "category_id": cid,
+                        "name": cname,
+                        "description": cdesc,
+                        "target_depth_tier": ctier,
+                        "target_metrics": cmetrics,
+                        "blackboard_keys": cbkeys,
+                    }
+                )
 
-        # Category 3: Resource & Health Optimization (nutrition, corpses, armor)
-        if starved_with_food > 0:
-            res_id = "nutrition_and_corpse_eating"
-            res_desc = (
-                f"Specialist in nutrition and emergency food consumption. "
-                f"Detected {starved_with_food} starved_with_food blunders! "
-                f"Must query corpse safety (query_monster) to eat non-poisonous corpses before rations."
-            )
-        elif died_unarmored > 0:
-            res_id = "armor_scavenging_and_ac"
-            res_desc = (
-                f"Specialist in scavenging and equipping armor to lower AC. "
-                f"Detected {died_unarmored} died_unarmored runs. "
-                f"Must prioritize equipping scavenged dwarvish/orcish armor when standing on dropped items."
-            )
-        else:
-            res_id = "intrinsic_resistances_and_hp"
-            res_desc = (
-                "Specialist in intrinsic resistance farming (poison/cold resistance from fresh corpses) "
-                "and strategic resting on staircases for HP regeneration."
-            )
-
-        categories.append(
-            {
-                "category_id": res_id,
-                "name": f"Resource & Health ({res_id.replace('_', ' ').capitalize()})",
-                "description": res_desc,
-                "target_depth_tier": (1, active_frontier_depth),
-                "target_metrics": ["final_ac", "starved_with_food", "died_unarmored"],
-                "blackboard_keys": [
-                    "hunger_level",
-                    "equipped_armor",
-                    "hp_regen_needed",
-                ],
-            }
-        )
-
-        # Category 4: Spatial Progression & Frontier Exploration
-        if active_frontier_depth >= 5:
-            nav_id = "branch_and_sokoban_navigation"
-            nav_desc = (
-                "Specialist in branch navigation (Minetown stairs, Sokoban entrance at Dlvl 5-6). "
-                "Solves corridor navigation and detects stairs down while avoiding boulder traps."
-            )
-        else:
-            nav_id = "dungeon_exploration_and_stairs"
-            nav_desc = (
-                "Specialist in BFS room exploration, kicking locked doors ('+'), and finding stairs down ('>'). "
-                "Maximizes unique_tiles visited and transitions between dungeon depths."
-            )
-
-        categories.append(
-            {
-                "category_id": nav_id,
-                "name": f"Frontier Navigation ({nav_id.replace('_', ' ').capitalize()})",
-                "description": nav_desc,
-                "target_depth_tier": (active_frontier_depth, active_frontier_depth + 2),
-                "target_metrics": ["unique_tiles", "depth", "max_depth"],
-                "blackboard_keys": ["stairs_loc", "target_tile", "room_cleared"],
-            }
-        )
-
-        # Trim or pad to requested number of categories
         categories = categories[:n_categories]
 
         # Save decomposition to LanceDB
@@ -413,11 +458,52 @@ class Policy:
                         f"**Empirical Verification**: {obs_text}\n"
                         f"```python\n{code_snip}\n```\n"
                     )
+            fn_telemetry_block = ""
+            try:
+                con = connect_db(self.db_path, read_only=True)
+                try:
+                    prev_gen_row = con.execute(
+                        "SELECT max(generation) FROM function_stats"
+                    ).fetchone()
+                    prev_gen = (
+                        prev_gen_row[0]
+                        if prev_gen_row and prev_gen_row[0] is not None
+                        else None
+                    )
+                    if prev_gen is not None:
+                        fn_rows = con.execute(
+                            """
+                            SELECT function_name, episodes_triggered, total_turns_active,
+                                   coalesce(liblit_failure_score, 0.0)
+                            FROM function_stats
+                            WHERE generation = ? AND total_turns_active > 0
+                            ORDER BY total_turns_active DESC
+                            LIMIT 12
+                            """,
+                            [prev_gen],
+                        ).fetchall()
+                        tot_turns = sum(int(r[2]) for r in fn_rows) or 1
+                        if fn_rows:
+                            fn_lines = "\n".join(
+                                f"- `{r[0]}`: {r[2]} turns ({100.0 * int(r[2]) / tot_turns:.1f}% share), "
+                                f"episodes={r[1]}, liblit_fail={float(r[3]):.3f}"
+                                for r in fn_rows
+                            )
+                            fn_telemetry_block = (
+                                f"\n### Function Turn-Share Telemetry (Gen {prev_gen} — prune/refactor nodes >30% if hijacking or looping):\n"
+                                f"{fn_lines}\n"
+                            )
+                finally:
+                    con.close()
+            except Exception:
+                pass
+
             context = "\n".join(reports_summary)
             meta_prompt = (
                 f"You are the Meta-Agent Architect. Synthesize a unified `class Policy` utilizing Behavior Trees "
                 f"(`BehaviorTree`, `PrioritySelector`, `ActionLeaf`, `ConditionLeaf`, `Blackboard`) for Generation {generation}.\n"
-                f"Integrate the specialized subtrees and findings from these category workers:\n\n{context}\n\n"
+                f"{fn_telemetry_block}\n"
+                f"Integrate the specialized subtrees and findings from these category workers, while pruning any dead or hijacking branches:\n\n{context}\n\n"
                 f"Ensure the master policy defines `class Policy` with `def __init__(self)` and `def step(self, state): return self.tree.tick(state)`."
             )
 

@@ -22,25 +22,6 @@ from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive, FrontierCheckpoint
 from lox.ui.console import ui
 
-WORKER_ROLE_DESCRIPTIONS: dict[str, str] = {
-    "dialog": (
-        "Specialist in interactive game dialogs, --More-- pagination, and text/naming prompts. "
-        "Produces reactive Behavior Tree ActionLeaf or condition checks to prevent episode stall traps."
-    ),
-    "threat": (
-        "Specialist in tactical combat and threat response. "
-        "Produces reactive Behavior Tree combat subtrees (kiting, corridor bottlenecks, retreat thresholds, melee)."
-    ),
-    "survival": (
-        "Specialist in hero survival, nutrition, and equipment. "
-        "Produces reactive Behavior Tree survival subtrees (food consumption, checking corpses for poison via query_monster, prayer, armor equipping)."
-    ),
-    "navigation": (
-        "Specialist in spatial exploration and dungeon navigation. "
-        "Produces reactive Behavior Tree navigation subtrees (BFS pathfinding, room exploration, locked door kicking, stairs descent)."
-    ),
-}
-
 
 class SwarmWorker:
     """Category-specialized worker agent that runs iterative experiments on tier checkpoints."""
@@ -79,8 +60,9 @@ class SwarmWorker:
         self.history: list[dict[str, Any]] = []
 
     def get_role_prompt(self) -> str:
-        desc = self.description or WORKER_ROLE_DESCRIPTIONS.get(
-            self.role, "General Policy Specialist"
+        desc = self.description or (
+            f"Category specialist for '{self.role}'. Synthesizes modular Behavior Tree subtrees "
+            f"grounded in empirical DuckDB telemetry and game reference queries."
         )
         metrics_hint = (
             f"\n### Target Telemetry Metrics: {self.target_metrics}"

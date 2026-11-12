@@ -79,63 +79,44 @@ class ObservationDigest:
 
 def sample_condition_fixtures(
     db_path: str,
-    role: str,
+    role: str = "",
     target_metrics: list[str] | None = None,
     generation: int = 1,
     limit: int = 2,
 ) -> list[dict[str, Any]]:
     """
     Queries DuckDB for up to `limit` recorded failure/frontier trajectories with action bytes
-    matching the worker's category (nutrition, combat, dialog, armor, or navigation).
-    Rewinds ~25 bytes before termination so candidate subtrees run on live failure states.
+    using domain-agnostic statistical stratification (recent non-trivial failure + high-depth frontier).
+    Rewinds ~25 bytes before termination so candidate subtrees run on live mid/late-game states.
     """
     if not db_path or not Path(db_path).exists() or limit <= 0:
         return []
-
-    role_l = role.lower()
-    metrics_l = " ".join(m.lower() for m in (target_metrics or []))
-    combined = f"{role_l} {metrics_l}"
-
-    if any(k in combined for k in ("nutrit", "food", "corps", "starv", "hung")):
-        where_clause = (
-            "(starved_with_food = TRUE OR lower(end_reason) LIKE '%faint%' "
-            "OR lower(end_reason) LIKE '%starv%' OR lower(end_reason) LIKE '%food%')"
-        )
-    elif any(k in combined for k in ("armor", "ac", "equip")):
-        where_clause = "(died_unarmored = TRUE OR final_ac >= 8)"
-    elif any(k in combined for k in ("dialog", "prompt", "esc")):
-        where_clause = "(auto_esc_count > 0)"
-    elif any(k in combined for k in ("threat", "combat", "flee", "poison", "ant")):
-        where_clause = (
-            "(end_reason != 'stalled_zero_turn' AND end_reason != 'active' "
-            "AND lower(end_reason) NOT LIKE '%faint%' AND lower(end_reason) NOT LIKE '%starv%')"
-        )
-    else:
-        where_clause = (
-            "(end_reason = 'stalled_zero_turn' OR pct_search > 20 OR unique_tiles < 30)"
-        )
 
     fixtures: list[dict[str, Any]] = []
     con = None
     try:
         con = connect_db(db_path, read_only=True)
         seen_runs: set[str] = set()
-        for scoped_where in (
-            f"{where_clause} AND octet_length(action_bytes) > 10",
-            "octet_length(action_bytes) > 10",
-        ):
+        queries = [
+            """
+            SELECT run_id, seed, max_depth, end_reason, action_bytes
+            FROM runs
+            WHERE octet_length(action_bytes) > 10 AND end_reason != 'active'
+            ORDER BY generation DESC, turns DESC
+            LIMIT ?
+            """,
+            """
+            SELECT run_id, seed, max_depth, end_reason, action_bytes
+            FROM runs
+            WHERE octet_length(action_bytes) > 10
+            ORDER BY max_depth DESC, turns DESC
+            LIMIT ?
+            """,
+        ]
+        for sql in queries:
             if len(fixtures) >= limit:
                 break
-            rows = con.execute(
-                f"""
-                SELECT run_id, seed, max_depth, end_reason, action_bytes
-                FROM runs
-                WHERE {scoped_where}
-                ORDER BY generation DESC, max_depth DESC, turns DESC
-                LIMIT ?
-                """,
-                [limit * 3],
-            ).fetchall()
+            rows = con.execute(sql, [max(1, limit)]).fetchall()
             for r_id, r_seed, r_depth, r_end, r_bytes in rows:
                 r_id_s = str(r_id)
                 if r_id_s in seen_runs:
@@ -194,7 +175,7 @@ def evaluate_bt_subtree(
     frontier: FrontierArchive | None = None,
     replay_fixture: dict[str, Any] | None = None,
     seed: int | None = None,
-    steps: int = 25,
+    steps: int = 150,
     baseline_policy_code: str = "",
 ) -> tuple[ObservationDigest, str]:
     """
@@ -259,9 +240,9 @@ def evaluate_bt_subtree(
                 chosen_act = cand_act
             elif baseline_runner is not None:
                 base_act, _ = baseline_runner.next_action(st)
-                chosen_act = base_act if base_act is not None else Action.SEARCH
+                chosen_act = base_act if base_act is not None else Action.WAIT
             else:
-                chosen_act = Action.SEARCH
+                chosen_act = Action.WAIT
 
             act_name = (
                 chosen_act.name if hasattr(chosen_act, "name") else str(chosen_act)

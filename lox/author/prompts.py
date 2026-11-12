@@ -544,7 +544,7 @@ Follow these 4 stages sequentially inside THIS conversation (your context, DB qu
    - For each hypothesis `Hi`:
      - Translate `Hi` into a standalone Behavior Tree subtree (multiple helper functions are welcome—there is **no 2-function limit**) assigning `subtree = PrioritySelector([...], name="...")` or `subtree = ActionLeaf(...)` / `Sequence(...)`.
      - Do **NOT** wrap your subtree in `class Policy:` with `def run(self, state): yield ...`. Return `None` from `ActionLeaf` when the branch does not apply so `PrioritySelector` falls through to lower-priority branches.
-     - Test it using `dry_run_policy(code=..., hypothesis="H1: <short mechanism label>")`!
+     - Test it using `dry_run_policy(code=..., hypothesis="H1: <short mechanism label>", max_turns=150)` (you may pass higher `max_turns` if needed for mid-game triggers; there is no 40-step cap).
      - `dry_run_policy` evaluates your subtree **directly inside the baseline master scaffold** across both the Frontier checkpoint and condition-matched failure replays, and returns exact step telemetry including `Triggered: k/N` steps.
      - If `dry_run_policy` reports a compile/runtime error OR `Triggered: 0/N` (never fired!), diagnose why and repair `Hi` immediately before moving to the next hypothesis.
    - You MUST empirically test all {k_hyp} distinct hypotheses with `dry_run_policy(..., hypothesis=...)` before finishing.
@@ -573,15 +573,17 @@ Follow these 4 stages sequentially inside THIS conversation (your context, DB qu
 {digest_block}{existing_policy_block}
 {BEHAVIOR_TREE_DOCS}
 
-### Meta-Agent Assembly Protocol:
+### Meta-Agent Assembly & Pruning Protocol:
 1. **Complete `class Policy:` Wrapping `BehaviorTree`**:
    - Integrate the specialist worker subtrees into a unified, self-contained `class Policy:` (do NOT rely on undeclared variables from worker files or import `macros` / `skills_common`).
    - In `def __init__(self):`, initialize `self.blackboard = Blackboard()`, define/wire each priority branch (`PrioritySelector([...])`), and construct `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`.
-   - Define `def step(self, state):` returning `self.tree.tick(state) or Action.SEARCH` (or include a safe final fallback `ActionLeaf` so `step(state)` never returns `None`).
+   - Define `def step(self, state):` returning `self.tree.tick(state) or Action.WAIT` (or include a safe final fallback `ActionLeaf` so `step(state)` never returns `None`).
    - Every node function invoked during `self.tree.tick(state)` must be cleanly defined inside the module or `class Policy`.
-2. **Verify Before Finishing**:
+2. **Prune Bloat & Hijacking Branches (Critical)**:
+   - Check the **Function Turn-Share Telemetry** in the brief above: if an existing node (e.g. a stall-escape or prompt loop) is consuming a disproportionate share of turns (>30%) or causing loops, or if `class Policy` has accumulated redundant/unused helpers across generations, **refactor, merge, or delete** the offending/dead branches instead of blindly appending new code onto the old policy.
+3. **Verify Before Finishing**:
    - Call `dry_run_policy(code=...)` on your complete `class Policy:` source to confirm clean AST compilation and multi-step execution in `NetHackHarness`.
-3. **Output Format**:
+4. **Output Format**:
    - Output your complete, self-contained Python `class Policy:` implementation inside `<policy_code> ... </policy_code>` tags or a standard ```python ... ``` code block.
 """
 

@@ -546,13 +546,13 @@ class AuthorToolRegistry:
         self,
         code: str,
         seed: int = 42,
-        max_turns: int = 25,
+        max_turns: int = 150,
         replay_run_id: str = "",
         replay_steps: int = 0,
         hypothesis: str = "",
     ) -> tuple[str, str]:
         """Validates and empirically tests a standalone SWARM_WORKER BT subtree across frontier + failure fixtures."""
-        steps = max(10, min(40, int(max_turns)))
+        steps = max(1, int(max_turns))
         hyp_label = (
             str(hypothesis or "").strip() or f"H{len(self.swarm_experiments) + 1}"
         )
@@ -749,7 +749,7 @@ class AuthorToolRegistry:
             return self._dry_run_swarm_worker(
                 code=code,
                 seed=seed,
-                max_turns=min(40, max(10, int(max_turns))),
+                max_turns=max(1, int(max_turns)),
                 replay_run_id=replay_run_id,
                 replay_steps=replay_steps,
                 hypothesis=hypothesis,
@@ -1545,7 +1545,7 @@ class AuthorToolRegistry:
                     f"• End Reasons: {{{end_reasons_str}}}\n"
                     f"• Dlvl 1 Progression: {dlvl1_stalls}/{len(p_runs)} runs stayed on Dlvl 1\n"
                     + (
-                        f"• DOOR STALL ALERT: {door_stalls}/{len(p_runs)} runs hit locked doors ('This door is locked.'). Use seq(Action.KICK, dir) to breach locked doors.\n"
+                        f"• DOOR STALL ALERT: {door_stalls}/{len(p_runs)} runs stalled at closed/locked doors ('This door is locked.').\n"
                         if door_stalls > 0
                         else ""
                     )
