@@ -7,6 +7,7 @@ and scannable generation/hypothesis summary tables without spamming stdout.
 from __future__ import annotations
 
 import sys
+import threading
 from typing import Any
 
 
@@ -27,6 +28,7 @@ class ConsoleUI:
         self.enabled = enabled
         self.use_color = sys.stdout.isatty() if use_color is None else use_color
         self._in_progress_line = False
+        self._lock = threading.Lock()
 
     def _c(self, color: str, text: str) -> str:
         if not self.use_color:
@@ -96,22 +98,37 @@ class ConsoleUI:
         arg_summary: str,
         result_summary: str,
         elapsed_ms: float,
+        agent_role: str = "",
     ) -> None:
         if not self.enabled:
             return
-        self._clear_progress()
+        is_swarm = agent_role not in ("", "author")
+        if is_swarm and tool_name in (
+            "query_monster",
+            "query_item",
+            "query_policy_docs",
+            "read_skill",
+        ):
+            res_low = result_summary.lower()
+            if "error" not in res_low and "not found" not in res_low:
+                return
+
         arg_clean = " ".join(arg_summary.strip().split())
         if len(arg_clean) > 42:
             arg_clean = arg_clean[:39] + "..."
         res_clean = " ".join(result_summary.strip().split())
         if len(res_clean) > 46:
             res_clean = res_clean[:43] + "..."
-        print(
-            f"  {self._c(self.DIM, f'[T{turn_idx}]')} "
-            f"{self._c(self.CYAN, f'{tool_name:<18}')} "
-            f"{self._c(self.DIM, f'({arg_clean})')} -> {res_clean} "
-            f"{self._c(self.DIM, f'[{elapsed_ms:.0f}ms]')}"
-        )
+
+        turn_tag = f"[{agent_role[:16]}:T{turn_idx}]" if is_swarm else f"[T{turn_idx}]"
+        with self._lock:
+            self._clear_progress()
+            print(
+                f"  {self._c(self.DIM, turn_tag)} "
+                f"{self._c(self.CYAN, f'{tool_name:<18}')} "
+                f"{self._c(self.DIM, f'({arg_clean})')} -> {res_clean} "
+                f"{self._c(self.DIM, f'[{elapsed_ms:.0f}ms]')}"
+            )
 
     def hypothesis_box(self, hypothesis: dict[str, Any]) -> None:
         if not self.enabled or not hypothesis:
@@ -242,29 +259,33 @@ class ConsoleUI:
         """Prints a temporary status line in place (cleared on next log)."""
         if not self.enabled:
             return
-        if self._in_progress_line:
-            sys.stdout.write("\r\033[K")
-        sys.stdout.write(f"\r  {self._c(self.DIM, '…')} {self._c(self.DIM, msg)}")
-        sys.stdout.flush()
-        self._in_progress_line = True
+        with self._lock:
+            if self._in_progress_line:
+                sys.stdout.write("\r\033[K")
+            sys.stdout.write(f"\r  {self._c(self.DIM, '…')} {self._c(self.DIM, msg)}")
+            sys.stdout.flush()
+            self._in_progress_line = True
 
     def info(self, msg: str) -> None:
         if not self.enabled:
             return
-        self._clear_progress()
-        print(f"  {self._c(self.CYAN, '•')} {msg}")
+        with self._lock:
+            self._clear_progress()
+            print(f"  {self._c(self.CYAN, '•')} {msg}")
 
     def warn(self, msg: str) -> None:
         if not self.enabled:
             return
-        self._clear_progress()
-        print(f"  {self._c(self.YELLOW, '!')} {msg}")
+        with self._lock:
+            self._clear_progress()
+            print(f"  {self._c(self.YELLOW, '!')} {msg}")
 
     def error(self, msg: str) -> None:
         if not self.enabled:
             return
-        self._clear_progress()
-        print(f"  {self._c(self.RED, '✗')} {msg}")
+        with self._lock:
+            self._clear_progress()
+            print(f"  {self._c(self.RED, '✗')} {msg}")
 
 
 ui = ConsoleUI()

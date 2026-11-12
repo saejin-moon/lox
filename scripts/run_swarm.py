@@ -108,6 +108,7 @@ def main() -> None:
             policy_path=os.path.join(args.workspace_dir, "policy.py"),
             macros_path=os.path.join(args.workspace_dir, "macros.py"),
             theories_path=os.path.join(args.workspace_dir, "theories.lance"),
+            frontier_dir=args.frontier_dir,
         )
 
     ui.header("LOX Hierarchical Swarm Synthesis Engine")

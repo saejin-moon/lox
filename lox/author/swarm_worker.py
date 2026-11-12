@@ -159,10 +159,17 @@ class SwarmWorker:
         """Builds dynamic category brief, checkpoint context, turn digest, and repair error details."""
         parts = [self.get_role_prompt()]
         if checkpoint is not None:
+            raw_log = getattr(checkpoint, "game_log", "") or ""
+            log_tail = (
+                " | ".join(raw_log.strip().splitlines()[-3:])
+                if raw_log.strip()
+                else "none"
+            )
             parts.append(
                 f"### Frontier Checkpoint Context (Gen {generation}, Turn {turn}/{self.max_turns}):\n"
-                f"- Seed: {checkpoint.seed}, Depth: {checkpoint.depth}, Prefix Steps: {checkpoint.steps}\n"
-                f"- Prior End Reason: {checkpoint.end_reason or 'active'}"
+                f"- Checkpoint: `{checkpoint.checkpoint_id}` | Seed: {checkpoint.seed} | Depth: Dlvl {checkpoint.depth} ({checkpoint.milestone})\n"
+                f"- Turns Reached: {checkpoint.turns} | Prefix Bytes: {len(checkpoint.action_bytes)}\n"
+                f"- Recent Log: {log_tail[:300]}"
             )
         else:
             parts.append(

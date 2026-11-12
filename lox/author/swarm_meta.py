@@ -418,7 +418,7 @@ class Policy:
                 generation=generation,
                 current_policy=current_policy or default_template,
                 batch_digest=meta_prompt,
-                max_tool_turns=3,
+                max_tool_turns=6,
             )
             candidate_code = proposal.full_policy_code or proposal.raw_code_patch
 

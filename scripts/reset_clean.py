@@ -17,6 +17,7 @@ def reset_clean(
     policy_path: str = POLICY_PATH,
     macros_path: str = MACROS_PATH,
     theories_path: str | None = None,
+    frontier_dir: str | None = None,
 ):
     import shutil
     from pathlib import Path
@@ -47,6 +48,13 @@ def reset_clean(
     if t_path.exists():
         shutil.rmtree(t_path)
         print(f"Cleared {t_path}")
+
+    if frontier_dir:
+        f_path = Path(frontier_dir)
+        if f_path.exists():
+            shutil.rmtree(f_path)
+            f_path.mkdir(parents=True, exist_ok=True)
+            print(f"Cleared {f_path}")
 
     if os.path.exists(db_path):
         con = duckdb.connect(db_path)

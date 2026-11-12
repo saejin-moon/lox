@@ -467,7 +467,14 @@ class AuthorAgent:
             arg_disp = str(args)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        ui.tool_call(turn_idx, name, arg_disp, summary, elapsed_ms)
+        ui.tool_call(
+            turn_idx,
+            name,
+            arg_disp,
+            summary,
+            elapsed_ms,
+            agent_role=self.agent_role,
+        )
         return out
 
     def _call_llm_api(
@@ -811,9 +818,10 @@ class AuthorAgent:
             allow_tools = turn_idx <= max_tool_turns and not getattr(
                 self.tools, "last_pilot_improved", False
             )
-            ui.status(
-                f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
-            )
+            if self.agent_role in ("", "author"):
+                ui.status(
+                    f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
+                )
             t0_turn = time.perf_counter()
             msg = self._call_llm_api(messages, allow_tools=allow_tools)
             turn_ms = (time.perf_counter() - t0_turn) * 1000.0
@@ -921,6 +929,7 @@ class AuthorAgent:
                         arg_disp,
                         pilot_summary,
                         elapsed_ms,
+                        agent_role=self.agent_role,
                     )
                     try:
                         self.db_logger.save_synthesis_log(

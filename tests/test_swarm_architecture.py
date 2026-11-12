@@ -384,6 +384,8 @@ def test_run_swarm_clean_resets_campaign_while_preserving_experts(tmp_path):
     (workspace / "policy.py").write_text("from skills.legacy import x\n")
     (workspace / "macros.py").write_text("def m(): pass\n")
     (workspace / "STATUS.md").write_text("stale status\n")
+    frontier.mkdir(parents=True)
+    (frontier / "stale_cp.json").write_text("{}")
 
     store = TheoryDocumentStore(db_path=str(workspace / "theories.lance"))
     store.save_document(
@@ -440,6 +442,7 @@ def test_run_swarm_clean_resets_campaign_while_preserving_experts(tmp_path):
     assert res.returncode == 0, res.stderr + "\n" + res.stdout
     assert not (workspace / "STATUS.md").exists()
     assert not (workspace / "skills" / "legacy.py").exists()
+    assert not (frontier / "stale_cp.json").exists()
 
     con = duckdb.connect(str(db_path), read_only=True)
     try:
@@ -453,9 +456,64 @@ def test_run_swarm_clean_resets_campaign_while_preserving_experts(tmp_path):
             "SELECT COUNT(*) FROM expert_runs WHERE run_id = 'exp_keep_1'"
         ).fetchone()[0]
         fresh_batches = con.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+        fresh_policies = con.execute("SELECT COUNT(*) FROM policies").fetchone()[0]
         assert stale_pol == 0
         assert stale_batch == 0
         assert kept_expert == 1
         assert fresh_batches == 1
+        assert fresh_policies == 1
     finally:
         con.close()
+
+
+def test_swarm_gen2_with_frontier_checkpoint_brief_and_replay(tmp_path):
+    from lox.engine.frontier import FrontierArchive
+
+    theories_path = str(tmp_path / "theories.lance")
+    frontier_dir = str(tmp_path / "frontier")
+    db_path = str(tmp_path / "test_cp_gen2.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    # Build a real action trace and save as FrontierCheckpoint (mimics Gen 1 extraction)
+    h = NetHackHarness(max_steps=40)
+    try:
+        st = h.reset(seed=42)
+        for _ in range(10):
+            st, done, _ = h.step(Action.SEARCH)
+            if done:
+                break
+        act_bytes = bytes(h.action_bytes)
+        archive = FrontierArchive(frontier_dir=frontier_dir)
+        cp = archive.add_checkpoint(
+            seed=42,
+            depth=2,
+            milestone="dlvl_2",
+            turns=int(st.turn),
+            action_bytes=act_bytes,
+            game_log="Explored room.",
+            checkpoint_id="fc_dlvl_2_seed42_g1",
+        )
+    finally:
+        h.close()
+
+    worker = SwarmWorker(
+        role="threat",
+        provider="mock",
+        db_path=db_path,
+        theories_path=theories_path,
+        frontier_dir=frontier_dir,
+        max_turns=1,
+    )
+    brief = worker._build_worker_brief(
+        generation=2,
+        checkpoint=cp,
+        turn=1,
+        turn_results=[],
+    )
+    assert "fc_dlvl_2_seed42_g1" in brief
+    assert "Dlvl 2" in brief
+
+    res = worker.run_cycle(generation=2, checkpoint=cp)
+    assert res["role"] == "threat"
+    assert res["observation"].steps_taken > 0

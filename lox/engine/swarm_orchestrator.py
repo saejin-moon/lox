@@ -194,34 +194,52 @@ class SwarmCampaignOrchestrator:
             "pilot_best_delta": 0.0,
             "total_cost_usd": 0.0,
         }
+        policy_id = f"policy_swarm_g{generation}"
+        self.db_logger.save_policy(
+            policy_id=policy_id,
+            generation=generation,
+            mode="SWARM",
+            policy_code=master_policy_code,
+            macros_code="",
+            params={},
+            avg_depth=float(batch_metrics["avg_depth"]),
+            max_depth=int(batch_metrics["max_depth"]),
+            is_promoted=True,
+        )
         log_res = self.db_logger.save_batch(
             batch_id=batch_id,
             generation=generation,
             mode="SWARM",
             parent_policy_id=f"policy_swarm_g{max(0, generation - 1)}",
-            candidate_policy_id=f"policy_swarm_g{generation}",
+            candidate_policy_id=policy_id,
             target_functions=[],
             runs=runs,
             episodes_discarded=int(batch_eval.get("episodes_discarded", 0)),
             batch_metrics=batch_metrics,
+            verdict={"passed": True, "reason": f"Swarm Generation {generation} Master"},
         )
 
         # 6. Extract New Frontier Checkpoints from High-Performing Runs
         new_cps = 0
         for ep in runs:
             ep_dict = dict(ep) if isinstance(ep, dict) else ep.__dict__
-            depth = int(ep_dict.get("depth", 1))
-            act_bytes = ep_dict.get("action_bytes", b"")
+            depth = max(int(ep_dict.get("depth", 1)), int(ep_dict.get("max_depth", 1)))
+            act_bytes = bytes(ep_dict.get("action_bytes") or b"")
             if depth >= 2 and len(act_bytes) > 0:
                 seed = int(ep_dict.get("seed", 0))
                 cp_id = f"fc_dlvl_{depth}_seed{seed}_g{generation}"
                 if cp_id not in self.frontier.checkpoints:
+                    prefix_bytes = (
+                        act_bytes[:-25]
+                        if len(act_bytes) > 35
+                        else (act_bytes[:-5] or act_bytes)
+                    )
                     self.frontier.add_checkpoint(
                         seed=seed,
                         depth=depth,
                         milestone=f"dlvl_{depth}",
                         turns=int(ep_dict.get("turns", 0)),
-                        action_bytes=act_bytes,
+                        action_bytes=prefix_bytes,
                         game_log=str(ep_dict.get("game_log", "")),
                         checkpoint_id=cp_id,
                     )
@@ -257,7 +275,7 @@ class SwarmCampaignOrchestrator:
         ui.info(
             f"Gen {generation} Complete in {elapsed:.1f}s: "
             f"Avg Depth: {avg_depth:.2f} (Max: {max_d}) | Avg Score: {avg_score:.1f} | "
-            f"New Frontier CPs: {new_cps} | DB Logged: {log_res}"
+            f"New Frontier CPs: {new_cps} | FunctionStats: {len(log_res)}"
         )
 
         return {

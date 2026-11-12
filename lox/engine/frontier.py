@@ -136,13 +136,17 @@ class FrontierArchive:
     ) -> Any:
         """
         Fast-forwards harness into checkpoint state in ~10-20ms by replaying raw action bytes.
-        Returns the resulting GameState.
+        If replaying all bytes reaches termination (e.g. a fatal run tail), automatically
+        rewinds before termination so candidate evaluation starts in a live active game state.
         """
-        harness.reset(seed=checkpoint.seed)
-        obs = None
-        for b in checkpoint.action_bytes:
-            harness.action_bytes.append(b)
-            obs, done = harness.nh.step(b)
-            if done:
-                break
-        return harness.wrap_state(obs)
+        buf = bytes(checkpoint.action_bytes or b"")
+        state = harness.replay_bytes(seed=checkpoint.seed, recorded_bytes=buf)
+        if harness.done and len(buf) > 1:
+            rewind = max(1, len(buf) - 30)
+            state = harness.replay_bytes(
+                seed=checkpoint.seed,
+                recorded_bytes=buf,
+                stop_at_byte_idx=rewind,
+            )
+        harness.step_count = 0
+        return state
