@@ -25,4 +25,8 @@ logs/
 *.log
 *.ttyrec*
 
+# Rust build artifacts
+target/
+crates/**/target/
+
 temp/

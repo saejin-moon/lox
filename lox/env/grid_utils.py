@@ -1,6 +1,7 @@
 """
-Generic Numba-accelerated 2D Grid Math & Pathfinding Utilities ("Hard Code Nothing").
-Zero game rules: pure numerical BFS distance transforms and A* delta extraction.
+High-throughput 2D Grid Math & Pathfinding Utilities ("Hard Code Nothing").
+Zero game heuristics: pure numerical BFS distance transforms and A* delta extraction.
+Accelerated via native PyO3 Rust `lox_core` when available, with seamless Numba fallback.
 """
 
 from __future__ import annotations
@@ -8,20 +9,23 @@ from __future__ import annotations
 import numba
 import numpy as np
 
+try:
+    import lox_core
+
+    HAS_RUST_CORE = True
+except ImportError:
+    HAS_RUST_CORE = False
+
 
 @numba.njit(cache=True)
-def bfs_distance_grid(
+def _numba_bfs_distance_grid(
     passable: np.ndarray,
     sy: int,
     sx: int,
     allow_diagonal: bool = True,
     no_diag: np.ndarray | None = None,
 ) -> np.ndarray:
-    """
-    Computes shortest-path step distances from (sy, sx) across any boolean `passable` 2D grid.
-    Unreachable tiles have distance -1.
-    If `no_diag` is provided, diagonal transitions into or out of True tiles are skipped.
-    """
+    """Computes shortest-path step distances from (sy, sx) using Numba JIT."""
     h, w = passable.shape
     dist = np.full((h, w), -1, dtype=np.int32)
     if not (0 <= sy < h and 0 <= sx < w):
@@ -63,8 +67,37 @@ def bfs_distance_grid(
     return dist
 
 
+def bfs_distance_grid(
+    passable: np.ndarray,
+    sy: int,
+    sx: int,
+    allow_diagonal: bool = True,
+    no_diag: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Computes shortest-path step distances from (sy, sx) across any boolean `passable` 2D grid.
+    Unreachable tiles have distance -1.
+    Delegates to SIMD-optimized `lox_core` when available, falling back to Numba.
+    """
+    if HAS_RUST_CORE:
+        try:
+            # Ensure contiguous boolean array for PyO3 numpy
+            c_passable = np.ascontiguousarray(passable, dtype=bool)
+            c_no_diag = (
+                np.ascontiguousarray(no_diag, dtype=bool)
+                if no_diag is not None
+                else None
+            )
+            return lox_core.fast_bfs_distance_grid(
+                c_passable, int(sy), int(sx), bool(allow_diagonal), c_no_diag
+            )
+        except Exception:
+            pass
+    return _numba_bfs_distance_grid(passable, sy, sx, allow_diagonal, no_diag)
+
+
 @numba.njit(cache=True)
-def astar_next_step(
+def _numba_astar_next_step(
     passable: np.ndarray,
     sy: int,
     sx: int,
@@ -73,18 +106,13 @@ def astar_next_step(
     allow_diagonal: bool = True,
     no_diag: np.ndarray | None = None,
 ) -> tuple[int, int]:
-    """
-    Returns the first step delta `(dy, dx)` along the shortest path from `(sy, sx)` to `(ty, tx)`
-    on `passable`. Returns `(0, 0)` if already at target or unreachable.
-    If `no_diag` is provided, diagonal transitions into or out of True tiles are skipped.
-    """
+    """Computes first step delta (dy, dx) using Numba JIT backwards BFS."""
     if sy == ty and sx == tx:
         return (0, 0)
     h, w = passable.shape
     if not (0 <= sy < h and 0 <= sx < w and 0 <= ty < h and 0 <= tx < w):
         return (0, 0)
 
-    # Run BFS backwards from target (ty, tx) so first step from (sy, sx) is O(1) neighbor lookup
     dist = np.full((h, w), -1, dtype=np.int32)
     dist[ty, tx] = 0
     qy = np.empty(h * w, dtype=np.int32)
@@ -139,3 +167,39 @@ def astar_next_step(
                 best_dy = dys[i]
                 best_dx = dxs[i]
     return (best_dy, best_dx)
+
+
+def astar_next_step(
+    passable: np.ndarray,
+    sy: int,
+    sx: int,
+    ty: int,
+    tx: int,
+    allow_diagonal: bool = True,
+    no_diag: np.ndarray | None = None,
+) -> tuple[int, int]:
+    """
+    Returns the first step delta `(dy, dx)` along the shortest path from `(sy, sx)` to `(ty, tx)`
+    on `passable`. Returns `(0, 0)` if already at target or unreachable.
+    Delegates to SIMD-optimized `lox_core` when available, falling back to Numba.
+    """
+    if HAS_RUST_CORE:
+        try:
+            c_passable = np.ascontiguousarray(passable, dtype=bool)
+            c_no_diag = (
+                np.ascontiguousarray(no_diag, dtype=bool)
+                if no_diag is not None
+                else None
+            )
+            return lox_core.fast_astar_next_step(
+                c_passable,
+                int(sy),
+                int(sx),
+                int(ty),
+                int(tx),
+                bool(allow_diagonal),
+                c_no_diag,
+            )
+        except Exception:
+            pass
+    return _numba_astar_next_step(passable, sy, sx, ty, tx, allow_diagonal, no_diag)

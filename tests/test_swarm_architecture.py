@@ -230,9 +230,11 @@ from lox.lang.bt import ActionLeaf
 from lox.env.actions import Action
 threat_node = ActionLeaf(lambda st: Action.SEARCH)
 """
-    delta, err = worker.evaluate_candidate(clean_code, steps=5)
+    obs, err = worker.evaluate_candidate(clean_code, steps=5)
     assert err == ""
-    assert isinstance(delta, float)
+    assert obs.survived is True
+    assert obs.steps_taken > 0
+    assert "SEARCH" in obs.actions_taken
 
     # 2. Test worker candidate evaluation: faulty runtime code returns diagnostic traceback
     buggy_code = """
@@ -241,9 +243,8 @@ def faulty_action(st):
     return 1 / 0  # ZeroDivisionError
 buggy_node = ActionLeaf(faulty_action)
 """
-    delta, err = worker.evaluate_candidate(buggy_code, steps=5)
+    obs, err = worker.evaluate_candidate(buggy_code, steps=5)
     assert "ZeroDivisionError" in err
-    assert delta < 0.0
 
     # 3. Test Meta-Agent policy verification: valid BehaviorTree code passes
     meta = SwarmMetaAgent(

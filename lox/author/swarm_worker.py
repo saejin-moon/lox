@@ -9,9 +9,11 @@ Specializes in one of 4 functional domains:
 
 from __future__ import annotations
 
+import collections
 import inspect
 import random
 import traceback
+from dataclasses import dataclass, field
 from typing import Any
 
 from lox.author.agent import AuthorAgent
@@ -27,6 +29,50 @@ from lox.lang.bt import (
     ConditionLeaf,
 )
 from lox.ui.console import ui
+
+
+@dataclass(slots=True)
+class ObservationDigest:
+    """Rich multi-dimensional empirical outcome from evaluating a candidate Behavior Tree node."""
+
+    survived: bool = False
+    steps_taken: int = 0
+    end_reason: str = ""
+    hp_start: int = 0
+    hp_end: int = 0
+    depth_start: int = 1
+    depth_end: int = 1
+    score_start: int = 0
+    score_end: int = 0
+    unique_tiles: int = 0
+    actions_taken: dict[str, int] = field(default_factory=dict)
+    dialog_resolved: bool = False
+
+    @property
+    def hp_delta(self) -> int:
+        return self.hp_end - self.hp_start
+
+    @property
+    def depth_delta(self) -> int:
+        return self.depth_end - self.depth_start
+
+    def summary(self) -> str:
+        status = (
+            "SURVIVED"
+            if self.survived
+            else f"TERMINATED ({self.end_reason or 'death'})"
+        )
+        hp_str = f"{self.hp_end}/{self.hp_start} (Δ{self.hp_delta:+d})"
+        depth_str = f"Dlvl {self.depth_end} (Δ{self.depth_delta:+d})"
+        actions_str = (
+            ", ".join(f"{k}:{v}" for k, v in sorted(self.actions_taken.items()))
+            or "none"
+        )
+        return (
+            f"Status: {status} | Steps: {self.steps_taken} | HP: {hp_str} | "
+            f"Depth: {depth_str} | Unique Tiles: {self.unique_tiles} | Actions: [{actions_str}]"
+        )
+
 
 WORKER_ROLE_DESCRIPTIONS: dict[str, str] = {
     "dialog": (
@@ -110,10 +156,10 @@ class SwarmWorker:
         code_snippet: str,
         checkpoint: FrontierCheckpoint | None = None,
         steps: int = 25,
-    ) -> tuple[float, str]:
+    ) -> tuple[ObservationDigest, str]:
         """
         Empirically evaluates candidate code directly on a frontier checkpoint or fresh seed.
-        Returns (empirical_score_delta, error_diagnostic).
+        Returns (ObservationDigest, error_diagnostic). Zero arbitrary scalar score formulas.
         """
         harness = NetHackHarness(max_steps=steps + 50)
         try:
@@ -122,9 +168,9 @@ class SwarmWorker:
             else:
                 st = harness.reset(seed=random.randint(1000, 9999))
 
-            start_score = st.score
-            start_hp = st.hp
-            start_depth = st.depth
+            start_score = int(st.score)
+            start_hp = int(st.hp)
+            start_depth = int(st.depth)
 
             local_scope: dict[str, Any] = {}
             exec(code_snippet, globals(), local_scope)
@@ -163,12 +209,16 @@ class SwarmWorker:
 
             if node is None:
                 return (
-                    -10.0,
+                    ObservationDigest(hp_start=start_hp, depth_start=start_depth),
                     "No BehaviorTree node (.tick(st)) or Policy class (.step(st)) found in code snippet.",
                 )
 
             bb = Blackboard()
+            action_counts: dict[str, int] = collections.defaultdict(int)
+            visited_tiles: set[tuple[int, int]] = set()
+
             for _ in range(steps):
+                visited_tiles.add((st.y, st.x))
                 if isinstance(node, BehaviorTree):
                     act = node.tick(st)
                 elif hasattr(node, "tick"):
@@ -183,18 +233,35 @@ class SwarmWorker:
                     act = node(st)
                 if act is None:
                     act = Action.SEARCH
+
+                act_name = act.name if hasattr(act, "name") else str(act)
+                action_counts[act_name] += 1
                 st, done, _ = harness.step(act)
                 if done:
                     break
 
-            score_gain = float(st.score - start_score)
-            hp_gain = float((st.hp - start_hp) * 5)
-            depth_gain = float((st.depth - start_depth) * 200)
-            survival_bonus = 20.0 if not harness.done else -50.0
-            return float(score_gain + hp_gain + depth_gain + survival_bonus), ""
+            visited_tiles.add((st.y, st.x))
+            obs = ObservationDigest(
+                survived=not harness.done,
+                steps_taken=harness.step_count,
+                end_reason=str(getattr(st, "end_reason", ""))
+                if harness.done
+                else "active",
+                hp_start=start_hp,
+                hp_end=int(st.hp),
+                depth_start=start_depth,
+                depth_end=int(st.depth),
+                score_start=start_score,
+                score_end=int(st.score),
+                unique_tiles=len(visited_tiles),
+                actions_taken=dict(action_counts),
+                dialog_resolved=not getattr(st, "waiting_for_space", False)
+                and not getattr(st, "in_text_prompt", False),
+            )
+            return obs, ""
         except Exception as e:
             tb = traceback.format_exc()
-            return -50.0, f"{type(e).__name__}: {e}\n{tb}"
+            return ObservationDigest(), f"{type(e).__name__}: {e}\n{tb}"
         finally:
             harness.close()
 
@@ -211,11 +278,10 @@ class SwarmWorker:
         ui.info(
             f"Swarm Worker [{self.role}]: Starting Generation {generation} cycle ({self.max_turns} turns)..."
         )
-        best_code = ""
-        best_delta = -999.0
-
         if checkpoint is None:
             checkpoint = self.frontier.sample_checkpoint()
+
+        turn_results: list[dict[str, Any]] = []
 
         for turn in range(1, self.max_turns + 1):
             theory_desc = ""
@@ -237,10 +303,11 @@ class SwarmWorker:
                     code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nnavigation_node = ActionLeaf(lambda st: Action.SEARCH)\n"
                 theory_desc = f"Implements reactive {self.role} Behavior Tree logic for checkpoint depth {checkpoint.depth if checkpoint else 1}."
             else:
+                last_code = turn_results[-1]["code"] if turn_results else ""
                 proposal = self.author.synthesize(
                     mode="WRITE",
                     generation=generation,
-                    current_policy=best_code,
+                    current_policy=last_code,
                     max_tool_turns=4,
                 )
                 code_snippet = proposal.raw_code_patch
@@ -251,7 +318,7 @@ class SwarmWorker:
                 )
 
             # Empirically evaluate candidate code on the frontier checkpoint!
-            delta, err_diag = self.evaluate_candidate(
+            obs, err_diag = self.evaluate_candidate(
                 code_snippet, checkpoint=checkpoint, steps=25
             )
 
@@ -273,39 +340,70 @@ class SwarmWorker:
                     max_tool_turns=2,
                 )
                 code_snippet = repair_proposal.raw_code_patch
-                delta, err_diag = self.evaluate_candidate(
+                obs, err_diag = self.evaluate_candidate(
                     code_snippet, checkpoint=checkpoint, steps=25
                 )
 
-            if delta > best_delta or not best_code:
-                best_delta = delta
-                best_code = code_snippet
+            turn_results.append(
+                {
+                    "turn": turn,
+                    "code": code_snippet,
+                    "obs": obs,
+                    "theory": theory_desc,
+                    "error": err_diag,
+                }
+            )
 
-            # Persist intermediate theory to LanceDB with real empirical delta
+            # Persist intermediate theory to LanceDB with real empirical observation facts
+            status_label = "OK" if not err_diag else "ERROR"
             self.theories.save_document(
                 generation=generation,
                 agent_role=self.role,
                 doc_type="THEORY",
-                title=f"{self.role.capitalize()} Theory G{generation}T{turn} (Delta: {delta:+.1f})",
+                title=f"{self.role.capitalize()} Theory G{generation}T{turn} ({status_label})",
                 content=(
                     f"### Theory: {self.role.capitalize()} Exploration (Turn {turn})\n"
                     f"{theory_desc}\n\n"
                     f"```python\n{code_snippet}\n```\n\n"
-                    f"**Checkpoint Evaluation Outcome**: Delta={delta:+.2f} | Status={'OK' if not err_diag else err_diag}"
+                    f"### Empirical Outcome:\n"
+                    f"- {obs.summary()}\n"
+                    f"- Execution: {'Clean' if not err_diag else err_diag}"
                 ),
                 tags=[self.role, f"gen_{generation}", "theory"],
             )
 
-        # Compile final reflection report with real empirical delta
+        # Select chosen subtree: prefer clean runs, prioritized by survival and progression
+        clean_runs = [r for r in turn_results if not r["error"]]
+        if clean_runs:
+            selected = max(
+                clean_runs,
+                key=lambda r: (
+                    1 if r["obs"].survived else 0,
+                    r["obs"].depth_end,
+                    r["obs"].unique_tiles,
+                ),
+            )
+        else:
+            selected = turn_results[-1]
+
+        best_code = selected["code"]
+        best_obs = selected["obs"]
+
+        # Compile final reflection report summarizing all exploration theories
+        findings_bullets = "\n".join(
+            f"- Turn {r['turn']}: {r['theory']} -> {r['obs'].summary()}"
+            for r in turn_results
+        )
         report_content = f"""# {self.role.capitalize()} Reflection Report (Generation {generation})
-## Best Verified Subtree:
+## Chosen Verified Subtree:
 ```python
 {best_code}
 ```
-## Summary of Findings:
-- Domain: {self.role}
-- Completed {self.max_turns} exploration turns.
-- Best verified score delta: {best_delta:+.2f}
+## Empirical Outcome of Chosen Subtree:
+- {best_obs.summary()}
+
+## Exploration Turn Digest:
+{findings_bullets}
 """
         report_id = self.theories.save_document(
             generation=generation,
@@ -316,13 +414,13 @@ class SwarmWorker:
             tags=[self.role, f"gen_{generation}", "reflection"],
         )
         ui.info(
-            f"Swarm Worker [{self.role}]: Completed cycle (Best Delta: {best_delta:+.2f}). Saved report: {report_id}"
+            f"Swarm Worker [{self.role}]: Completed cycle ({best_obs.summary()}). Saved report: {report_id}"
         )
 
         return {
             "role": self.role,
             "best_code": best_code,
-            "best_delta": best_delta,
+            "observation": best_obs,
             "report_id": report_id,
             "report_content": report_content,
         }

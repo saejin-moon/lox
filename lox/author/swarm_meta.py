@@ -394,10 +394,15 @@ class Policy:
             # Build synthesis prompt summarizing worker discoveries
             reports_summary = []
             for role, rep in worker_reports.items():
-                best_d = rep.get("best_delta", 0.0)
                 code_snip = rep.get("best_code", "")
+                obs = rep.get("observation")
+                obs_text = (
+                    obs.summary() if hasattr(obs, "summary") else str(obs or "verified")
+                )
                 reports_summary.append(
-                    f"### Specialist Worker: {role} (Best Delta: {best_d:+.2f})\n```python\n{code_snip}\n```\n"
+                    f"### Specialist Worker: {role}\n"
+                    f"**Empirical Verification**: {obs_text}\n"
+                    f"```python\n{code_snip}\n```\n"
                 )
             context = "\n".join(reports_summary)
             meta_prompt = (
