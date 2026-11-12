@@ -264,6 +264,16 @@ buggy_node = ActionLeaf(faulty_action)
     assert is_valid is False
     assert "PolicyValidationError" in diag or "TypeError" in diag
 
+    # 5. Test Meta-Agent policy verification: WAIT-only stalled fallback is rejected
+    wait_only_code = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state): return Action.WAIT\n"
+    )
+    is_valid, diag = meta.verify_policy(wait_only_code, steps=10)
+    assert is_valid is False
+    assert "Action.WAIT" in diag
+
 
 def test_swarm_worker_and_meta_dry_run_modes(tmp_path):
     from lox.author.prompts import build_user_prompt
@@ -291,6 +301,7 @@ def test_swarm_worker_and_meta_dry_run_modes(tmp_path):
     )
     assert "SWARM_META" in meta_prompt
     assert "BehaviorTree" in meta_prompt
+    assert "high turn-share alone is NOT hijacking" in meta_prompt
 
     tools = AuthorToolRegistry(db_path=db_path)
     tools.configure_generation(

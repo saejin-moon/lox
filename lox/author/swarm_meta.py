@@ -340,13 +340,23 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
             harness = NetHackHarness(max_steps=steps + 5)
             try:
                 st = harness.reset(seed=42)
+                non_wait_actions = 0
+                steps_run = 0
                 for _ in range(steps):
                     act, _ = runner.next_action(st)
                     if act is None:
                         act = Action.WAIT
+                    if act != Action.WAIT:
+                        non_wait_actions += 1
+                    steps_run += 1
                     st, done, _ = harness.step(act)
                     if done or harness.done:
                         break
+                if steps_run >= 10 and non_wait_actions == 0 and not harness.done:
+                    return (
+                        False,
+                        f"Policy returned only None/Action.WAIT for all {steps_run} smoke-check steps (no active branch fired).",
+                    )
                 return True, ""
             finally:
                 harness.close()
@@ -421,7 +431,9 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
                 fn_rows = con.execute(
                     """
                     SELECT function_name, episodes_triggered, total_turns_active,
-                           coalesce(liblit_failure_score, 0.0)
+                           coalesce(liblit_failure_score, 0.0),
+                           coalesce(stagnation_share, 0.0),
+                           coalesce(livelock_score, 0.0)
                     FROM function_stats
                     WHERE generation = ? AND total_turns_active > 0
                     ORDER BY total_turns_active DESC
@@ -434,11 +446,12 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
                     return ""
                 fn_lines = "\n".join(
                     f"- `{r[0]}`: {r[2]} turns ({100.0 * int(r[2]) / tot_turns:.1f}% share), "
-                    f"episodes={r[1]}, liblit_fail={float(r[3]):.3f}"
+                    f"episodes={r[1]}, stagnation_share={float(r[4]):.2f}, "
+                    f"livelock={float(r[5]):.2f}, liblit_fail={float(r[3]):.3f}"
                     for r in fn_rows
                 )
                 return (
-                    f"\n### Function Turn-Share Telemetry (Gen {prev_gen} — prune/merge any hijacking or dead branches):\n"
+                    f"\n### Function Telemetry (Gen {prev_gen} — separate healthy workhorse share from stagnation/livelock/failure):\n"
                     f"{fn_lines}\n"
                 )
             finally:
@@ -577,7 +590,7 @@ class Policy:
                 current_policy=current_policy or default_template,
                 batch_digest=meta_prompt,
                 skills=skill_modules,
-                max_tool_turns=6,
+                max_tool_turns=10,
             )
             candidate_code = proposal.full_policy_code or proposal.raw_code_patch
 
@@ -595,7 +608,7 @@ class Policy:
                     current_policy=candidate_code,
                     batch_digest=f"Self-Repair Required: Master policy failed verification:\n{diag}",
                     skills=skill_modules,
-                    max_tool_turns=2,
+                    max_tool_turns=4,
                 )
                 candidate_code = (
                     repair_proposal.full_policy_code or repair_proposal.raw_code_patch

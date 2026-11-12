@@ -581,8 +581,11 @@ Follow these 4 stages sequentially inside THIS conversation (your context, DB qu
    - In `def __init__(self):`, initialize `self.blackboard = Blackboard()`, wire the priority branches (`PrioritySelector([...])`), and construct `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`.
    - Define `def step(self, state):` returning `self.tree.tick(state) or Action.WAIT` (or include a safe final fallback `ActionLeaf` so `step(state)` never returns `None`).
    - Every node function invoked during `self.tree.tick(state)` must be cleanly defined in `policy.py` or imported from `skills.*`.
-3. **Prune & Merge Hijacking or Dead Branches**:
-   - Check the **Function Turn-Share Telemetry** in the brief above: if an existing node is hijacking turns or causing loops, or if `class Policy` has accumulated redundant/unused helpers across generations, **prune, merge, or replace** the offending/dead branches instead of blindly appending new code onto the old policy.
+3. **Prune & Merge True Hijacking or Dead Branches (Preserve Core Capabilities)**:
+   - Check the **Function Telemetry** in the brief above: **high turn-share alone is NOT hijacking** — whichever branch handles a frequent default capability will naturally carry most of the turn share.
+   - Identify true hijacking, thrashing, or broken branches via **high `stagnation_share`**, **high `livelock`**, **high `liblit_fail`**, or `dry_run_policy` traces showing repeated no-op/fallback actions without progress.
+   - **Never prune a working branch that provides a core capability unless you have verified in `dry_run_policy` that its replacement actually fires and makes progress** (not returning `None` or falling through to `Action.WAIT` / fallback).
+   - Prune dead/unused branches and merge redundant helpers instead of blindly appending new code onto the old policy.
 4. **Verify Before Finishing**:
    - Call `dry_run_policy(code=...)` on your complete `class Policy:` source to confirm clean AST compilation and multi-step execution in `NetHackHarness`.
 5. **Output Format**:
