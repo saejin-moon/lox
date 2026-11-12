@@ -48,6 +48,8 @@ class SwarmCampaignOrchestrator:
         seeds_per_batch: int = 8,
         benchmark: str = "nethack",
         role: str = "val-hum-law-fem",
+        max_steps: int = 5000,
+        frontier_min_depth: int = 2,
     ) -> None:
         self.db_path = db_path
         self.workspace_dir = Path(workspace_dir)
@@ -60,6 +62,8 @@ class SwarmCampaignOrchestrator:
         self.seeds_per_batch = seeds_per_batch
         self.benchmark = benchmark
         self.role = role
+        self.max_steps = int(max_steps)
+        self.frontier_min_depth = int(frontier_min_depth)
 
         # Initialize DuckDB tables and logger
         init_db(self.db_path)
@@ -87,7 +91,7 @@ class SwarmCampaignOrchestrator:
         self.eval_pool = PersistentEvalPool(
             workers=max(1, min(self.num_workers, 16)),
             role=self.role,
-            max_steps=5000,
+            max_steps=self.max_steps,
             benchmark=self.benchmark,
         )
 
@@ -153,8 +157,9 @@ class SwarmCampaignOrchestrator:
                 except Exception as e:
                     ui.warn(f"Worker [{c_id}] failed: {e}")
 
-        # 3. Meta-Agent Policy Synthesis & Assembly
+        # 3. Meta-Agent Policy Synthesis & Modular Skill Assembly
         policy_path = self.workspace_dir / "policy.py"
+        skills_dir = self.workspace_dir / "skills"
         current_policy = (
             policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
         )
@@ -162,9 +167,21 @@ class SwarmCampaignOrchestrator:
             generation=generation,
             worker_reports=worker_reports,
             current_policy=current_policy,
+            skills_dir=skills_dir,
         )
         policy_path.write_text(master_policy_code, encoding="utf-8")
-        ui.info(f"Gen {generation}: Master policy saved to `{policy_path}`.")
+        skills_dict = (
+            {
+                p.stem: p.read_text(encoding="utf-8")
+                for p in sorted(skills_dir.glob("*.py"))
+                if p.stem != "__init__"
+            }
+            if skills_dir.exists()
+            else {}
+        )
+        ui.info(
+            f"Gen {generation}: Master policy saved to `{policy_path}` ({len(skills_dict)} skill modules in `{skills_dir}`)."
+        )
 
         # 4. Multi-Core Evaluation Batch on PersistentEvalPool
         ui.info(
@@ -175,6 +192,7 @@ class SwarmCampaignOrchestrator:
             batch_id=f"batch_swarm_g{generation}_{int(time.time())}",
             policy_code=master_policy_code,
             macros_code="",
+            skills=skills_dict,
             target_episodes=self.seeds_per_batch,
             priority_seeds=seeds,
             record_ticks=True,
@@ -226,7 +244,7 @@ class SwarmCampaignOrchestrator:
             ep_dict = dict(ep) if isinstance(ep, dict) else ep.__dict__
             depth = max(int(ep_dict.get("depth", 1)), int(ep_dict.get("max_depth", 1)))
             act_bytes = bytes(ep_dict.get("action_bytes") or b"")
-            if depth >= 2 and len(act_bytes) > 0:
+            if depth >= self.frontier_min_depth and len(act_bytes) > 0:
                 seed = int(ep_dict.get("seed", 0))
                 cp_id = f"fc_dlvl_{depth}_seed{seed}_g{generation}"
                 if cp_id not in self.frontier.checkpoints:

@@ -570,21 +570,23 @@ Follow these 4 stages sequentially inside THIS conversation (your context, DB qu
             else ""
         )
         return f"""### Generation {generation} — Mode: `SWARM_META` (Unified Behavior Tree Master Assembly)
-{digest_block}{existing_policy_block}
+{digest_block}{existing_policy_block}{skills_block}
 {BEHAVIOR_TREE_DOCS}
 
 ### Meta-Agent Assembly & Pruning Protocol:
-1. **Complete `class Policy:` Wrapping `BehaviorTree`**:
-   - Integrate the specialist worker subtrees into a unified, self-contained `class Policy:` (do NOT rely on undeclared variables from worker files or import `macros` / `skills_common`).
-   - In `def __init__(self):`, initialize `self.blackboard = Blackboard()`, define/wire each priority branch (`PrioritySelector([...])`), and construct `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`.
+1. **Modular Skill Imports (Keep `policy.py` Lean)**:
+   - Specialist worker subtrees are saved as separate skill modules under `skills/<role>.py` (listed in `Hierarchical Skill Registry` above; inspect any full module with `read_skill(skill_name)`).
+   - Import and compose them inside `class Policy.__init__` (e.g. `from skills.<role> import subtree as <role>_subtree` or `import skills.<role>`) rather than pasting all worker helper code into `policy.py`. Keep `policy.py` a clean, lean priority coordinator!
+2. **Complete `class Policy:` Wrapping `BehaviorTree`**:
+   - In `def __init__(self):`, initialize `self.blackboard = Blackboard()`, wire the priority branches (`PrioritySelector([...])`), and construct `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`.
    - Define `def step(self, state):` returning `self.tree.tick(state) or Action.WAIT` (or include a safe final fallback `ActionLeaf` so `step(state)` never returns `None`).
-   - Every node function invoked during `self.tree.tick(state)` must be cleanly defined inside the module or `class Policy`.
-2. **Prune Bloat & Hijacking Branches (Critical)**:
-   - Check the **Function Turn-Share Telemetry** in the brief above: if an existing node (e.g. a stall-escape or prompt loop) is consuming a disproportionate share of turns (>30%) or causing loops, or if `class Policy` has accumulated redundant/unused helpers across generations, **refactor, merge, or delete** the offending/dead branches instead of blindly appending new code onto the old policy.
-3. **Verify Before Finishing**:
+   - Every node function invoked during `self.tree.tick(state)` must be cleanly defined in `policy.py` or imported from `skills.*`.
+3. **Prune & Merge Hijacking or Dead Branches**:
+   - Check the **Function Turn-Share Telemetry** in the brief above: if an existing node is hijacking turns or causing loops, or if `class Policy` has accumulated redundant/unused helpers across generations, **prune, merge, or replace** the offending/dead branches instead of blindly appending new code onto the old policy.
+4. **Verify Before Finishing**:
    - Call `dry_run_policy(code=...)` on your complete `class Policy:` source to confirm clean AST compilation and multi-step execution in `NetHackHarness`.
-4. **Output Format**:
-   - Output your complete, self-contained Python `class Policy:` implementation inside `<policy_code> ... </policy_code>` tags or a standard ```python ... ``` code block.
+5. **Output Format**:
+   - Output your complete, self-contained Python `class Policy:` coordinator inside `<policy_code> ... </policy_code>` tags or a standard ```python ... ``` code block.
 """
 
     if canon_mode == "CREATE":

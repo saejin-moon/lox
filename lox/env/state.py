@@ -1931,14 +1931,6 @@ class GameState:
             if isinstance(passable_mask, np.ndarray) and passable_mask.dtype == np.bool_
             else np.asarray(passable_mask, dtype=np.bool_)
         )
-        if no_diag is None and self.mem is not None:
-            cur_f = getattr(self.mem, "current_floor", None)
-            if (
-                cur_f is not None
-                and hasattr(cur_f, "door_mask")
-                and cur_f.door_mask.shape == p.shape
-            ):
-                no_diag = cur_f.door_mask
 
         return bfs_distance_grid(
             p,
@@ -1963,14 +1955,6 @@ class GameState:
             if isinstance(passable_mask, np.ndarray) and passable_mask.dtype == np.bool_
             else np.asarray(passable_mask, dtype=np.bool_)
         )
-        if no_diag is None and self.mem is not None:
-            cur_f = getattr(self.mem, "current_floor", None)
-            if (
-                cur_f is not None
-                and hasattr(cur_f, "door_mask")
-                and cur_f.door_mask.shape == p.shape
-            ):
-                no_diag = cur_f.door_mask
 
         return astar_next_step(
             p,

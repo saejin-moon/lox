@@ -40,9 +40,23 @@ class MAPElitesArchive:
     DEPTH_BINS = 5
     CAUTION_BINS = 4
     RESOURCE_BINS = 4
+    DEFAULT_DEPTH_THRESHOLDS = (1.5, 2.5, 3.5, 4.5)
+    DEFAULT_CAUTION_THRESHOLDS = (0.10, 0.25, 0.50)
+    DEFAULT_DENSITY_THRESHOLDS = (0.20, 0.50, 1.00)
+    DEFAULT_FITNESS_WEIGHTS = (1000.0, 250.0, 0.1, 0.05)
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        depth_thresholds: tuple[float, ...] = DEFAULT_DEPTH_THRESHOLDS,
+        caution_thresholds: tuple[float, ...] = DEFAULT_CAUTION_THRESHOLDS,
+        density_thresholds: tuple[float, ...] = DEFAULT_DENSITY_THRESHOLDS,
+        fitness_weights: tuple[float, float, float, float] = DEFAULT_FITNESS_WEIGHTS,
+    ) -> None:
         self.cells: dict[str, Elite] = {}
+        self.depth_thresholds = tuple(depth_thresholds)
+        self.caution_thresholds = tuple(caution_thresholds)
+        self.density_thresholds = tuple(density_thresholds)
+        self.fitness_weights = tuple(fitness_weights)
 
     @classmethod
     def compute_cell_id(cls, metrics: dict[str, Any]) -> tuple[str, int, int, int]:

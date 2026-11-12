@@ -36,9 +36,13 @@ class ModeScheduler:
     def __init__(
         self,
         use_bandit_after_gen: int = 50,
+        refactor_line_threshold: int = 450,
+        refactor_min_interval: int = 4,
         **kwargs: Any,
     ):
         self.use_bandit_after_gen = int(use_bandit_after_gen)
+        self.refactor_line_threshold = int(refactor_line_threshold)
+        self.refactor_min_interval = int(refactor_min_interval)
         self.history: dict[str, deque[float]] = {
             "WRITE": deque(maxlen=10),
             "REFACTOR": deque(maxlen=10),
@@ -67,7 +71,10 @@ class ModeScheduler:
 
         self.gens_since_refactor += 1
 
-        if policy_line_count >= 450 and self.gens_since_refactor >= 4:
+        if (
+            policy_line_count >= self.refactor_line_threshold
+            and self.gens_since_refactor >= self.refactor_min_interval
+        ):
             self.gens_since_refactor = 0
             self.counts["REFACTOR"] += 1
             return "REFACTOR"

@@ -7,7 +7,9 @@ queries DuckDB for causal metrics, and assembles the unified Behavior Tree polic
 from __future__ import annotations
 
 import json
+import re
 import traceback
+from pathlib import Path
 from typing import Any
 
 from lox.author.agent import AuthorAgent
@@ -321,15 +323,19 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
         )
         return categories
 
-    def verify_policy(self, code: str, steps: int = 10) -> tuple[bool, str]:
+    def verify_policy(
+        self,
+        code: str,
+        steps: int = 10,
+        skills: dict[str, str] | None = None,
+    ) -> tuple[bool, str]:
         """
-        Validates Python syntax/AST, compiles the policy, and executes a smoke test
-        in NetHackHarness for `steps` ticks to verify runtime stability.
-        Returns (is_valid, diagnostic_error_string).
+        Validates Python syntax/AST, compiles the policy (with optional skill modules),
+        and executes a smoke test in NetHackHarness for `steps` ticks.
         """
         try:
             validate_python_code(code)
-            compiled = compile_policy_package(code)
+            compiled = compile_policy_package(code, skills=skills or {})
             runner = compiled.create_runner()
             harness = NetHackHarness(max_steps=steps + 5)
             try:
@@ -337,7 +343,7 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
                 for _ in range(steps):
                     act, _ = runner.next_action(st)
                     if act is None:
-                        act = Action.SEARCH
+                        act = Action.WAIT
                     st, done, _ = harness.step(act)
                     if done or harness.done:
                         break
@@ -348,12 +354,105 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
             tb = traceback.format_exc()
             return False, f"{type(e).__name__}: {e}\n{tb}"
 
+    @staticmethod
+    def _build_skill_modules(
+        worker_reports: dict[str, dict[str, Any]],
+        skills_dir: str | Path | None = None,
+    ) -> dict[str, str]:
+        """
+        Extracts each worker's winning subtree into a standalone skill module under `skills/<role>.py`
+        so `policy.py` stays a lean Behavior Tree coordinator importing `skills.<role>`.
+        """
+        from pathlib import Path
+
+        skill_modules: dict[str, str] = {}
+        out_dir = Path(skills_dir) if skills_dir else None
+        if out_dir is not None:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for existing in out_dir.glob("*.py"):
+                if existing.stem != "__init__":
+                    skill_modules[existing.stem] = existing.read_text(encoding="utf-8")
+
+        header = (
+            "import bisect\n"
+            "import collections\n"
+            "import copy\n"
+            "import heapq\n"
+            "import itertools\n"
+            "import math\n"
+            "import re\n"
+            "import numpy as np\n"
+            "from lox.env.actions import Action, DIR_DELTAS, seq, key, repeat\n"
+            "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, ConditionLeaf, Inverter, PrioritySelector, Sequence\n\n"
+        )
+        for role, rep in worker_reports.items():
+            raw_code = str(rep.get("best_code") or rep.get("content") or "").strip()
+            if not raw_code or "class Policy" in raw_code:
+                continue
+            safe_name = (
+                re.sub(r"[^a-zA-Z0-9_]", "_", str(role).lower()).strip("_")
+                or "skill_node"
+            )
+            mod_code = f"# Auto-generated modular skill for specialist `{role}`\n{header}{raw_code}\n"
+            try:
+                validate_python_code(mod_code)
+            except Exception:
+                continue
+            skill_modules[safe_name] = mod_code
+            if out_dir is not None:
+                (out_dir / f"{safe_name}.py").write_text(mod_code, encoding="utf-8")
+        return skill_modules
+
+    def _query_function_telemetry(self) -> str:
+        """Queries DuckDB for the previous generation's function turn shares."""
+        try:
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                prev_gen_row = con.execute(
+                    "SELECT max(generation) FROM function_stats"
+                ).fetchone()
+                prev_gen = (
+                    prev_gen_row[0]
+                    if prev_gen_row and prev_gen_row[0] is not None
+                    else None
+                )
+                if prev_gen is None:
+                    return ""
+                fn_rows = con.execute(
+                    """
+                    SELECT function_name, episodes_triggered, total_turns_active,
+                           coalesce(liblit_failure_score, 0.0)
+                    FROM function_stats
+                    WHERE generation = ? AND total_turns_active > 0
+                    ORDER BY total_turns_active DESC
+                    LIMIT 12
+                    """,
+                    [prev_gen],
+                ).fetchall()
+                tot_turns = sum(int(r[2]) for r in fn_rows) or 1
+                if not fn_rows:
+                    return ""
+                fn_lines = "\n".join(
+                    f"- `{r[0]}`: {r[2]} turns ({100.0 * int(r[2]) / tot_turns:.1f}% share), "
+                    f"episodes={r[1]}, liblit_fail={float(r[3]):.3f}"
+                    for r in fn_rows
+                )
+                return (
+                    f"\n### Function Turn-Share Telemetry (Gen {prev_gen} — prune/merge any hijacking or dead branches):\n"
+                    f"{fn_lines}\n"
+                )
+            finally:
+                con.close()
+        except Exception:
+            return ""
+
     def assemble_policy(
         self,
         generation: int,
         worker_reports: dict[str, dict[str, Any]] | None = None,
         current_policy: str = "",
         max_repair_turns: int = 3,
+        skills_dir: str | Any = None,
     ) -> str:
         """
         Gathers worker reports from LanceDB, checks DuckDB metrics, and synthesizes the master Policy code.
@@ -429,9 +528,12 @@ class Policy:
     def step(self, state):
         return self.tree.tick(state)
 """
+        skill_modules = self._build_skill_modules(worker_reports, skills_dir=skills_dir)
         if self.provider == "mock":
             master_policy_code = default_template
-            is_valid, diag = self.verify_policy(master_policy_code)
+            is_valid, diag = self.verify_policy(
+                master_policy_code, skills=skill_modules
+            )
             if not is_valid:
                 raise RuntimeError(
                     f"Default master template failed verification: {diag}"
@@ -458,52 +560,14 @@ class Policy:
                         f"**Empirical Verification**: {obs_text}\n"
                         f"```python\n{code_snip}\n```\n"
                     )
-            fn_telemetry_block = ""
-            try:
-                con = connect_db(self.db_path, read_only=True)
-                try:
-                    prev_gen_row = con.execute(
-                        "SELECT max(generation) FROM function_stats"
-                    ).fetchone()
-                    prev_gen = (
-                        prev_gen_row[0]
-                        if prev_gen_row and prev_gen_row[0] is not None
-                        else None
-                    )
-                    if prev_gen is not None:
-                        fn_rows = con.execute(
-                            """
-                            SELECT function_name, episodes_triggered, total_turns_active,
-                                   coalesce(liblit_failure_score, 0.0)
-                            FROM function_stats
-                            WHERE generation = ? AND total_turns_active > 0
-                            ORDER BY total_turns_active DESC
-                            LIMIT 12
-                            """,
-                            [prev_gen],
-                        ).fetchall()
-                        tot_turns = sum(int(r[2]) for r in fn_rows) or 1
-                        if fn_rows:
-                            fn_lines = "\n".join(
-                                f"- `{r[0]}`: {r[2]} turns ({100.0 * int(r[2]) / tot_turns:.1f}% share), "
-                                f"episodes={r[1]}, liblit_fail={float(r[3]):.3f}"
-                                for r in fn_rows
-                            )
-                            fn_telemetry_block = (
-                                f"\n### Function Turn-Share Telemetry (Gen {prev_gen} — prune/refactor nodes >30% if hijacking or looping):\n"
-                                f"{fn_lines}\n"
-                            )
-                finally:
-                    con.close()
-            except Exception:
-                pass
 
+            fn_telemetry_block = self._query_function_telemetry()
             context = "\n".join(reports_summary)
             meta_prompt = (
-                f"You are the Meta-Agent Architect. Synthesize a unified `class Policy` utilizing Behavior Trees "
+                f"You are the Meta-Agent Architect. Synthesize a modular, lean `class Policy` utilizing Behavior Trees "
                 f"(`BehaviorTree`, `PrioritySelector`, `ActionLeaf`, `ConditionLeaf`, `Blackboard`) for Generation {generation}.\n"
                 f"{fn_telemetry_block}\n"
-                f"Integrate the specialized subtrees and findings from these category workers, while pruning any dead or hijacking branches:\n\n{context}\n\n"
+                f"Specialist subtrees are saved in `skills/` (see Hierarchical Skill Registry). Import and compose them cleanly while pruning any hijacking or dead branches:\n\n{context}\n\n"
                 f"Ensure the master policy defines `class Policy` with `def __init__(self)` and `def step(self, state): return self.tree.tick(state)`."
             )
 
@@ -512,12 +576,13 @@ class Policy:
                 generation=generation,
                 current_policy=current_policy or default_template,
                 batch_digest=meta_prompt,
+                skills=skill_modules,
                 max_tool_turns=6,
             )
             candidate_code = proposal.full_policy_code or proposal.raw_code_patch
 
             # Live verification gate with self-repair turns
-            is_valid, diag = self.verify_policy(candidate_code)
+            is_valid, diag = self.verify_policy(candidate_code, skills=skill_modules)
             repair_turns = 0
             while not is_valid and repair_turns < max_repair_turns:
                 repair_turns += 1
@@ -529,12 +594,15 @@ class Policy:
                     generation=generation,
                     current_policy=candidate_code,
                     batch_digest=f"Self-Repair Required: Master policy failed verification:\n{diag}",
+                    skills=skill_modules,
                     max_tool_turns=2,
                 )
                 candidate_code = (
                     repair_proposal.full_policy_code or repair_proposal.raw_code_patch
                 )
-                is_valid, diag = self.verify_policy(candidate_code)
+                is_valid, diag = self.verify_policy(
+                    candidate_code, skills=skill_modules
+                )
 
             if is_valid:
                 master_policy_code = candidate_code
