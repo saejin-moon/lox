@@ -776,6 +776,29 @@ class CampaignOrchestrator:
                         )
 
                     stag_fn = ""
+                    if recent_failures and len(recent_failures) >= 3:
+                        from collections import Counter
+
+                        fn_counts: Counter[str] = Counter()
+                        for f in recent_failures[:4]:
+                            t_fns = f.get("target_functions")
+                            if isinstance(t_fns, str):
+                                try:
+                                    t_fns = json.loads(t_fns)
+                                except Exception:
+                                    t_fns = [t_fns]
+                            if isinstance(t_fns, list):
+                                for fn in t_fns:
+                                    if fn and fn not in ("run", "root"):
+                                        fn_counts[fn] += 1
+                        for fn, cnt in fn_counts.most_common(1):
+                            if cnt >= 3:
+                                stag_fn = fn
+                                ui.warn(
+                                    f"Stagnation detected: '{fn}' targeted in {cnt} of last 4 rejected generations. "
+                                    f"Enforcing active cooldown ban on '{fn}'."
+                                )
+                                break
 
                     try:
                         proposal = self.author.synthesize(

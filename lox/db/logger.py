@@ -185,6 +185,8 @@ class BatchDatabaseLogger:
                     "died_unarmored": [
                         bool(r.get("died_unarmored", False)) for r in runs
                     ],
+                    "is_shard": [bool(r.get("is_shard", False)) for r in runs],
+                    "shard_id": [str(r.get("shard_id", "")) for r in runs],
                 }
                 run_tbl = pa.Table.from_pydict(run_cols)
                 run_cols_str = ", ".join(run_cols.keys())
@@ -234,6 +236,7 @@ class BatchDatabaseLogger:
                     "action_name": [],
                     "raw_key": [],
                     "active_function": [],
+                    "byte_offset": [],
                     "message": [],
                     "visible_monsters": [],
                     "inventory_summary": [],
@@ -262,6 +265,7 @@ class BatchDatabaseLogger:
                         tick_cols["active_function"].append(
                             str(t.get("active_function", "root"))
                         )
+                        tick_cols["byte_offset"].append(int(t.get("byte_offset", 0)))
                         tick_cols["message"].append(str(t.get("message", "")))
                         tick_cols["visible_monsters"].append(
                             str(t.get("visible_monsters", ""))
@@ -434,7 +438,7 @@ class BatchDatabaseLogger:
                        starved_with_food, died_unarmored, auto_esc_count,
                        subgen_preemptions, policy_exceptions
                 FROM runs
-                WHERE batch_id = ? AND run_id NOT LIKE 'shard_%'
+                WHERE batch_id = ? AND run_id NOT LIKE 'shard_%' AND (is_shard IS NULL OR is_shard = FALSE)
                 """,
                 (target_batch_id,),
             )
@@ -455,7 +459,7 @@ class BatchDatabaseLogger:
                         SELECT t.run_id, t.step_idx, t.turn, t.depth, t.byte_offset, t.active_function
                         FROM ticks t
                         JOIN runs r ON t.run_id = r.run_id
-                        WHERE r.batch_id = ? AND r.run_id NOT LIKE 'shard_%'
+                        WHERE r.batch_id = ? AND r.run_id NOT LIKE 'shard_%' AND (r.is_shard IS NULL OR r.is_shard = FALSE)
                         ORDER BY t.run_id, t.step_idx
                         """,
                         (target_batch_id,),

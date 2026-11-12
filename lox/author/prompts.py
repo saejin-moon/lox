@@ -474,6 +474,14 @@ def build_user_prompt(
                 + "\n"
             )
 
+    stagnation_block = ""
+    if stagnation_function:
+        stagnation_block = (
+            f"\n### 🛑 ACTIVE FUNCTION COOLDOWN BAN:\n"
+            f"The function `{stagnation_function}` has been targeted repeatedly in recent rejected generations without progress.\n"
+            f"**DO NOT target `{stagnation_function}` this generation.** You MUST investigate and target a completely different subsystem or capability!\n"
+        )
+
     exp_block = (
         f"\n### Recent Experiment Lab Notebook (`experiments` table):\n{recent_experiments}\n"
         if recent_experiments
@@ -484,7 +492,7 @@ def build_user_prompt(
 
     if canon_mode == "CREATE":
         return f"""### Generation {generation} — Mode: `CREATE` (Initial Baseline Synthesis)
-{discoveries_block}{failures_block}You are bootstrapping the policy from a **completely clean slate** (no pre-written policy is provided).
+{stagnation_block}{discoveries_block}{failures_block}You are bootstrapping the policy from a **completely clean slate** (no pre-written policy is provided).
 Your task:
 1. Use multiple tool calls (`query_db` on `expert_runs` / `expert_ticks`, `query_wiki`, `query_policy_docs`) to study successful NetHack runs, early-game survival mechanics, dungeon navigation, door opening/kicking, stair descent, combat, and food/corpse consumption.
 2. Design a well-structured, modular `class Policy:` with clear methods (e.g. `run(self, state)`, `update_memory(self, state)`, `handle_combat(self, state)`, `handle_nutrition(self, state)`, `explore_level(self, state)`, etc.).
@@ -494,22 +502,22 @@ Your task:
    - Passability Mask: `get_passable_mask` must never mark `ord('-')` or `ord('|')` as passable.
    - Trigger Reachability: Any specialist method must be called from `run()`.
 4. Test your full `class Policy:` using `dry_run_policy(code=...)` to verify there are zero syntax/attribute errors or 0-yield infinite loops.
-5. Output:
-   - A `yaml` hypothesis block describing your architecture:
-     ```yaml
+5. Output Format:
+   - Output your YAML hypothesis inside `<hypothesis> ... </hypothesis>` tags:
+     <hypothesis>
      mode: CREATE
      target_functions: [run]
      binding_constraint: "Initial baseline bootstrap"
      verified_c_rule: "Core survival & navigation rules identified via expert_runs and wiki"
      mechanism: "Summary of initial Policy architecture and state tracking"
      state_persistence: "Self.* attributes used for memory and navigation"
-     ```
-   - Your complete `class Policy:` implementation in a single ```python ... ``` block.
+     </hypothesis>
+   - Output your complete `class Policy:` implementation inside `<policy_code> ... </policy_code>` tags (or standard ```python ... ``` block).
 """
 
     if canon_mode == "REFACTOR":
         return f"""### Generation {generation} — Mode: `REFACTOR` (Subsystem Modularization into Skills)
-{digest_block}{exp_block}{discoveries_block}{failures_block}
+{stagnation_block}{digest_block}{exp_block}{discoveries_block}{failures_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 
@@ -533,8 +541,8 @@ The policy has grown into a large monolith (or reached a structural threshold). 
    - Verify that imports resolve cleanly, there are zero syntax or attribute errors, and the policy passes the Behavioral Parity Gate.
 
 4. **Stage 4: Commit Output**:
-   - Output a `yaml` block detailing the modular extraction:
-     ```yaml
+   - Output your YAML hypothesis inside `<hypothesis> ... </hypothesis>` tags:
+     <hypothesis>
      mode: REFACTOR
      target_functions: [run]
      skill_module: "extracted_skill_name"
@@ -542,27 +550,28 @@ The policy has grown into a large monolith (or reached a structural threshold). 
      verified_c_rule: "Behavioral parity: exact preservation of existing logic"
      mechanism: "Extracted cohesive subsystem from policy.py into skills/<name>.py and imported it"
      state_persistence: "Attributes on self used by the extracted skill"
-     ```
-   - Block 1: Output your refactored `class Policy:` (importing the skill) in a ```python ... ``` block.
-   - Block 2: Output your new/updated skill module in a second ```python ... ``` block labeled with `# skill_module: <name>`.
+     </hypothesis>
+   - Block 1: Output your refactored `class Policy:` (importing the skill) inside `<policy_code> ... </policy_code>` tags (or ```python ... ``` block).
+   - Block 2: Output your new/updated skill module inside `<skill_code module="<name>"> ... </skill_code>` tags (or labeled ```python ... ``` block).
 """
 
     # Default: WRITE
     return f"""### Generation {generation} — Mode: `WRITE` (Targeted Single-Skill Addition / Modification)
-{digest_block}{exp_block}{discoveries_block}{failures_block}
+{stagnation_block}{digest_block}{exp_block}{discoveries_block}{failures_block}
 {skills_block}
 {_format_context_scoped_policy(current_policy, batch_digest)}
 
 ### Scientific Investigation & 4-Step Deductive Protocol for `WRITE`:
 
-1. **Step 1: MANDATORY Empirical Research (Turn 1) — Macro-Constraint & Specialist Attribution**:
+1. **Step 1: MANDATORY Empirical Research (Turn 1) — Autonomous Database Exploration**:
    - **DO NOT OUTPUT CODE ON TURN 1.**
-   - Inspect the **Macro-Category Binding Constraints Rollup**, **Depth-Tier Mortality Matrix**, **Per-Function Attribution Table**, and **Action Primitive & Terminal Inventory Capability Audit** in the Batch Digest above.
-   - Identify the #1 macro-category killing or stalling runs (e.g. `Combat / Monster Deaths`, `Step Truncation (max_steps)`, `Starvation / Fainting`, `Illness / Tainted Corpse / Poison`) and which specialist function (`last_active_function` / `active_function`) was in control.
-   - Check the **Action Primitive & Terminal Inventory Capability Audit**: if runs are dying with unused potions, scrolls, wands, or ranged weapons while `QUAFF`, `READ`, `ZAP`, or `THROW` have `0` turns across the batch, consider unlocking that survival/tactical capability!
+   - Do not rely uncritically on heuristic summaries ("Hard Code Nothing"). Run `query_db(sql=...)` on `champion_runs`, `champion_ticks`, and `champion_function_stats` to inspect what actually happened in the baseline episodes.
+   - Query what caused deaths and stalls (e.g. `SELECT end_reason, COUNT(*), AVG(depth), AVG(turns), AVG(pct_wait), AVG(pct_search) FROM champion_runs GROUP BY end_reason ORDER BY COUNT(*) DESC`).
+   - Query `champion_function_stats` to see Ochiai Good-Run Similarity vs. Liblit Failure Importance for each method.
+   - Check where the hero spent turns (e.g. `SELECT depth, AVG(turns) FROM champion_runs GROUP BY depth`), whether food was present in inventory (`starved_with_food`), and which functions consumed turns.
 
 2. **Step 2: Pre-Mortem & Full-Tick Trace to Exact Code Line**:
-   - Inspect the **Concrete Lethal Pre-Mortem Trace Exemplars** and **Concrete Step-Limit Timeout Pre-Mortem Exemplars** in the digest and run `query_db` on `champion_ticks` (which stores **100% full, lossless step-by-step ticks** with `inventory_summary` and `visible_monsters`) to trace the exact 10–20 turns before death or stall.
+   - Run `query_db` on `champion_ticks` (which stores **100% full, lossless step-by-step ticks** with `inventory_summary` and `visible_monsters`) to trace the exact 10–20 turns before death or stall.
    - Cross-reference those ticks with the exact lines of `Current policy.py` (or `read_skill(...)`) to pinpoint the exact conditional branch, missing guard, or threshold that caused the specialist function to make the wrong decision.
 
 3. **Step 3: C-Mechanic & Expert Verification (`query_wiki` / `expert_runs`)**:
@@ -580,15 +589,16 @@ The policy has grown into a large monolith (or reached a structural threshold). 
    - *Trigger Reachability*: Any modified or newly added specialist method must be called from `run()` / `dispatch()`.
 
 6. **Output Format (Once Ready to Test or Submit)**:
-   - Output a `yaml` hypothesis block detailing your qualitative causal hypothesis and skill spec:
-     ```yaml
+   - Output your YAML hypothesis inside `<hypothesis> ... </hypothesis>` tags:
+     <hypothesis>
      mode: WRITE
      target_functions: [method_you_modified_or_added]
-     binding_constraint: "Largest single macro-category failure cause from batch digest"
+     binding_constraint: "Empirical bottleneck identified via query_db on champion_runs"
      verified_c_rule: "Exact C engine rule discovered via query_wiki/query_db"
      mechanism: "Exact behavioral change introduced by your skill modification"
      state_persistence: "What self.* attributes prevent oscillation and track targets"
      skill_module: "optional_skill_name"
-     ```
-   - Output your modified and/or newly added method(s) (or `class Policy:`) in a ```python ... ``` block. If providing an external skill module, provide its code in a second ```python ... ``` block labeled with `# skill_module: <name>`.
+     </hypothesis>
+   - Output your modified and/or newly added method(s) (or `class Policy:`) inside `<policy_code> ... </policy_code>` tags (or standard ```python ... ``` block).
+   - If providing an external skill module, provide its code inside `<skill_code module="<name>"> ... </skill_code>`.
 """

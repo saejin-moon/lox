@@ -228,6 +228,39 @@ def is_ast_equivalent(code1: str, code2: str) -> bool:
         return False
 
 
+def smart_dedent(code: str) -> str:
+    """Smart dedents code even when comments or docstrings appear at column 0."""
+    lines = code.splitlines()
+    code_lines = [
+        line_str
+        for line_str in lines
+        if line_str.strip() and not line_str.strip().startswith("#")
+    ]
+    if not code_lines:
+        return code
+    common_indent = min(
+        len(line_str) - len(line_str.lstrip()) for line_str in code_lines
+    )
+    if common_indent > 0:
+        new_lines = []
+        for line_str in lines:
+            if not line_str.strip():
+                new_lines.append("")
+            elif (
+                line_str.strip().startswith("#")
+                and (len(line_str) - len(line_str.lstrip())) < common_indent
+            ):
+                new_lines.append(line_str.strip())
+            else:
+                new_lines.append(
+                    line_str[common_indent:]
+                    if len(line_str) >= common_indent
+                    else line_str.lstrip()
+                )
+        return "\n".join(new_lines)
+    return code
+
+
 def splice_functions_into_policy(
     base_policy_code: str,
     patch_code: str,
@@ -240,6 +273,7 @@ def splice_functions_into_policy(
     - Full `class Policy:` definitions containing one or more methods
     Returns `(new_policy_code, modified_or_added_function_names)`.
     """
+    patch_code = smart_dedent(patch_code)
     patch_tree = validate_python_code(patch_code, filename="<patch>")
     if not base_policy_code or not base_policy_code.strip():
         fn_names = [

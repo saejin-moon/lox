@@ -1471,7 +1471,8 @@ class Policy:
     migrated_cols = [
         r[1] for r in con_migrated.execute("PRAGMA table_info('ticks')").fetchall()
     ]
-    assert len(migrated_cols) == 20
+    assert len(migrated_cols) == 21
+    assert "byte_offset" in migrated_cols
     con_migrated.close()
 
     # 6. write_status_report and scripts/status_lox.py

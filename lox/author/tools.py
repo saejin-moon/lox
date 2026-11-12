@@ -807,9 +807,24 @@ class AuthorToolRegistry:
                         if target_set and (target_set & fn_keys):
                             base_trig_seeds.append(int(r["seed"]))
 
-                    fail_runs = [
+                    clean_baselines = [
                         r
                         for r in self.baseline_runs
+                        if float(r.get("outlier_z_score", 0.0) or 0.0) <= 2.5
+                    ] or self.baseline_runs
+
+                    if self.mode == "REFACTOR":
+                        clean_baselines = [
+                            r
+                            for r in clean_baselines
+                            if not r.get("is_shard")
+                            and not str(r.get("shard_id", "")).strip()
+                            and not str(r.get("run_id", "")).startswith("shard_")
+                        ] or clean_baselines
+
+                    fail_runs = [
+                        r
+                        for r in clean_baselines
                         if r.get("end_reason") not in ("ascended", "max_steps", "ended")
                         or (
                             "stalls:" in str(r.get("summary_digest", "")).lower()
@@ -817,15 +832,15 @@ class AuthorToolRegistry:
                             not in str(r.get("summary_digest", "")).lower()
                         )
                     ]
-                    if self.baseline_runs and self.mode != "REFACTOR":
+                    if clean_baselines and self.mode != "REFACTOR":
                         max_sh = min(40, max(1, target_eps // 3))
                         pilot_shards = extract_shards_from_runs(
-                            self.baseline_runs,
+                            clean_baselines,
                             max_shards=max_sh,
                             target_functions=changed_fns,
                         )
                     shard_seeds = {int(sh.seed) for sh in pilot_shards}
-                    normal_runs = [r for r in self.baseline_runs if r not in fail_runs]
+                    normal_runs = [r for r in clean_baselines if r not in fail_runs]
                     avail_fail = [
                         r for r in fail_runs if int(r["seed"]) not in shard_seeds
                     ]
@@ -839,12 +854,12 @@ class AuthorToolRegistry:
                     if len(strat_runs) < needed_full:
                         rem = [
                             r
-                            for r in self.baseline_runs
+                            for r in clean_baselines
                             if r not in strat_runs and int(r["seed"]) not in shard_seeds
                         ]
                         strat_runs.extend(rem[: needed_full - len(strat_runs)])
                     pilot_seeds = [int(r["seed"]) for r in strat_runs]
-                    for r in self.baseline_runs:
+                    for r in clean_baselines:
                         s_val = int(r["seed"])
                         if s_val not in shard_seeds and s_val not in pilot_seeds:
                             pilot_seeds.append(s_val)
@@ -853,7 +868,9 @@ class AuthorToolRegistry:
 
                 base_by_seed = {
                     int(r["seed"]): r
-                    for r in self.baseline_runs
+                    for r in (
+                        clean_baselines if self.baseline_runs else self.baseline_runs
+                    )
                     if "seed" in r and not r.get("is_shard")
                 }
 
@@ -982,6 +999,8 @@ class AuthorToolRegistry:
                     else:
                         if s in base_by_seed:
                             br = base_by_seed[s]
+                            if float(br.get("outlier_z_score", 0.0) or 0.0) > 2.5:
+                                continue
                             b_d = float(br.get("max_depth", 1))
                             d_val = float(metric_fn(r) - metric_fn(br))
                             deltas.append(d_val)

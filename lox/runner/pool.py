@@ -844,6 +844,10 @@ class PersistentEvalPool:
                         or unreachable_abort
                         or early_stopped
                     ):
+                        if (
+                            unreachable_abort or early_stopped or raw_done < len(tasks)
+                        ) and self.workers > 1:
+                            self.close()
                         break
                 break
             except Exception as pool_exc:

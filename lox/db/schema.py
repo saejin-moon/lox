@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS runs (
     pct_wait DOUBLE DEFAULT 0.0,
     pct_search DOUBLE DEFAULT 0.0,
     starved_with_food BOOLEAN DEFAULT FALSE,
-    died_unarmored BOOLEAN DEFAULT FALSE
+    died_unarmored BOOLEAN DEFAULT FALSE,
+    is_shard BOOLEAN DEFAULT FALSE,
+    shard_id VARCHAR DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS ticks (
@@ -124,6 +126,7 @@ CREATE TABLE IF NOT EXISTS ticks (
     action_name VARCHAR,
     raw_key INTEGER,
     active_function VARCHAR,
+    byte_offset INTEGER DEFAULT 0,
     message VARCHAR,
     visible_monsters VARCHAR,
     inventory_summary VARCHAR
@@ -314,8 +317,15 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
         tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
         if "ticks" in tables:
             cols = [r[1] for r in con.execute("PRAGMA table_info('ticks')").fetchall()]
-            if len(cols) != 20:
+            if "run_id" not in cols or len(cols) < 20:
                 con.execute("DROP TABLE ticks")
+            elif "byte_offset" not in cols:
+                try:
+                    con.execute(
+                        "ALTER TABLE ticks ADD COLUMN byte_offset INTEGER DEFAULT 0"
+                    )
+                except Exception:
+                    pass
         if "runs" in tables:
             cols_runs = [
                 r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()

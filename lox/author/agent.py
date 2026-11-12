@@ -26,7 +26,9 @@ from lox.lang.validator import (
     is_ast_equivalent,
     normalize_mode,
     prune_extracted_skill_functions,
+    smart_dedent,
     splice_functions_into_policy,
+    validate_python_code,
 )
 from lox.ui.console import ui
 
@@ -170,22 +172,54 @@ class AuthorAgent:
         )
 
     @staticmethod
+    def _sanitize_skill_code(code: str) -> str:
+        """Strips leading non-python markdown headers (e.g. `**Block 2 — skills/...**:`) and artifacts."""
+        lines = code.splitlines()
+        start_idx = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if (
+                stripped.startswith("**")
+                or stripped.startswith("##")
+                or stripped.startswith("Block ")
+            ):
+                continue
+            start_idx = i
+            break
+        return "\n".join(lines[start_idx:])
+
+    @staticmethod
     def extract_yaml_and_python(content: str) -> tuple[dict[str, Any], str]:
         """Extracts the YAML hypothesis dict and Python code block from an LLM response."""
         text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL).strip()
 
         yaml_dict: dict[str, Any] = {}
-        yaml_blocks = re.findall(
-            r"```(?:yaml|yml)\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+        # 1. Prefer explicit <hypothesis> ... </hypothesis> XML tags
+        hyp_match = re.search(
+            r"<hypothesis>(.*?)</hypothesis>", text, flags=re.DOTALL | re.IGNORECASE
         )
-        for yb in yaml_blocks:
+        if hyp_match:
             try:
-                parsed = yaml.safe_load(yb)
+                parsed = yaml.safe_load(hyp_match.group(1).strip())
                 if isinstance(parsed, dict):
                     yaml_dict = parsed
-                    break
             except Exception:
-                continue
+                pass
+
+        if not yaml_dict:
+            yaml_blocks = re.findall(
+                r"```(?:yaml|yml)\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+            )
+            for yb in yaml_blocks:
+                try:
+                    parsed = yaml.safe_load(yb)
+                    if isinstance(parsed, dict):
+                        yaml_dict = parsed
+                        break
+                except Exception:
+                    continue
 
         if yaml_dict:
             if "target_functions" not in yaml_dict:
@@ -220,22 +254,43 @@ class AuthorAgent:
                     yaml_dict.get("persistence") or yaml_dict.get("memory") or ""
                 )
 
-        py_blocks = re.findall(
-            r"```python\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
-        )
-        if not py_blocks:
-            py_blocks = re.findall(r"```\s*\n(.*?)```", text, flags=re.DOTALL)
-            py_blocks = [b for b in py_blocks if "def " in b or "class " in b]
-
         code_str = ""
-        if py_blocks:
-            policy_candidates = [
-                b for b in py_blocks if "class Policy" in b or "class Agent" in b
-            ]
-            if policy_candidates:
-                code_str = policy_candidates[-1].strip()
-            else:
-                code_str = py_blocks[-1].strip()
+        # 2. Prefer explicit <policy_code> ... </policy_code> or <policy> ... </policy> XML tags
+        pol_match = re.search(
+            r"<(?:policy_code|policy)>(.*?)</(?:policy_code|policy)>",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if pol_match:
+            code_str = pol_match.group(1).strip()
+            fence_m = re.search(
+                r"```(?:python)?\s*\n(.*?)```",
+                code_str,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if fence_m:
+                code_str = fence_m.group(1).strip()
+
+        if not code_str:
+            py_blocks = re.findall(
+                r"```python\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+            )
+            if not py_blocks:
+                py_blocks = re.findall(r"```\s*\n(.*?)```", text, flags=re.DOTALL)
+                py_blocks = [b for b in py_blocks if "def " in b or "class " in b]
+
+            if py_blocks:
+                policy_candidates = [
+                    b for b in py_blocks if "class Policy" in b or "class Agent" in b
+                ]
+                if policy_candidates:
+                    code_str = policy_candidates[-1].strip()
+                else:
+                    code_str = py_blocks[-1].strip()
+
+        if code_str:
+            code_str = smart_dedent(code_str)
+
         return yaml_dict, code_str
 
     @staticmethod
@@ -245,7 +300,29 @@ class AuthorAgent:
         fallback_skill_code: str = "",
         fallback_skill_name: str | None = None,
     ) -> str:
-        """Extracts external skill module code if specified in hypothesis or markdown."""
+        """Extracts external skill module code if specified in hypothesis, XML tags, or markdown."""
+        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL)
+
+        # 1. Prefer explicit <skill_code ...> ... </skill_code> or <skill ...> ... </skill> XML tags
+        skill_tag_m = re.search(
+            r"<(?:skill_code|skill)(?:\s+(?:module|name)=[\"'](?P<mod>[^\"']+)[\"'])?[^>]*>(?P<code>.*?)</(?:skill_code|skill)>",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if skill_tag_m:
+            mod_attr = skill_tag_m.group("mod")
+            if mod_attr and not hyp.get("skill_module"):
+                hyp["skill_module"] = mod_attr.strip()
+            s_raw = skill_tag_m.group("code").strip()
+            fence_m = re.search(
+                r"```(?:python)?\s*\n(.*?)```", s_raw, flags=re.DOTALL | re.IGNORECASE
+            )
+            if fence_m:
+                s_raw = fence_m.group(1).strip()
+            s_clean = AuthorAgent._sanitize_skill_code(s_raw)
+            if s_clean:
+                return smart_dedent(s_clean)
+
         skill_mod = hyp.get("skill_module") or fallback_skill_name
         if skill_mod and "skill_module" not in hyp:
             hyp["skill_module"] = skill_mod
@@ -253,19 +330,20 @@ class AuthorAgent:
             return fallback_skill_code
 
         if hyp.get("skill_code"):
-            return str(hyp["skill_code"]).strip()
+            s_clean = AuthorAgent._sanitize_skill_code(str(hyp["skill_code"]).strip())
+            return smart_dedent(s_clean)
 
-        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL)
         m = re.search(
             rf"```(?:python:)?(?:skill|{re.escape(str(skill_mod))})\s*\n(.*?)```",
             text,
             flags=re.DOTALL | re.IGNORECASE,
         )
         if m:
-            return m.group(1).strip()
+            s_clean = AuthorAgent._sanitize_skill_code(m.group(1).strip())
+            return smart_dedent(s_clean)
 
         py_blocks = re.findall(
-            r"```(?:python)?\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+            r"```python\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
         )
         if len(py_blocks) >= 2:
             for b in py_blocks:
@@ -273,10 +351,12 @@ class AuthorAgent:
                     f"module: {skill_mod}" in b.lower()
                     or f"skills/{skill_mod}" in b.lower()
                 ):
-                    return b.strip()
+                    s_clean = AuthorAgent._sanitize_skill_code(b.strip())
+                    return smart_dedent(s_clean)
             for b in py_blocks:
                 if "class Policy" not in b and ("def " in b or "class " in b):
-                    return b.strip()
+                    s_clean = AuthorAgent._sanitize_skill_code(b.strip())
+                    return smart_dedent(s_clean)
 
         return fallback_skill_code
 
@@ -1106,7 +1186,7 @@ class AuthorAgent:
                 code_patch = self.tools.best_pilot_code
 
             if not code_patch:
-                diag = "No ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
+                diag = "No <policy_code> or ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
                 status = "MISSING_CODE"
             else:
                 s_name = (
@@ -1114,8 +1194,15 @@ class AuthorAgent:
                     or getattr(self.tools, "last_passed_skill_name", None)
                     or getattr(self.tools, "best_pilot_skill_name", None)
                 )
-                s_code = getattr(self.tools, "last_passed_skill_code", None) or getattr(
-                    self.tools, "best_pilot_skill_code", None
+                s_code = self.extract_skill_code(
+                    final_content,
+                    hyp or latest_hyp,
+                    fallback_skill_code=(
+                        getattr(self.tools, "last_passed_skill_code", None)
+                        or getattr(self.tools, "best_pilot_skill_code", None)
+                        or ""
+                    ),
+                    fallback_skill_name=s_name,
                 )
                 diag, status = self.tools.dry_run_policy(
                     code=code_patch,
@@ -1173,6 +1260,32 @@ class AuthorAgent:
                         or getattr(self.tools, "best_pilot_skill_name", None)
                     ),
                 )
+                if skill_code and skill_code.strip():
+                    try:
+                        validate_python_code(
+                            skill_code,
+                            filename=f"skills/{hyp.get('skill_module', 'skill')}.py",
+                        )
+                    except Exception as val_err:
+                        diag = f"SyntaxError in skill code: {val_err}"
+                        status = "SYNTAX_ERROR"
+                        if repair_idx < self.max_repair_turns:
+                            continue
+                        return SynthesisProposal(
+                            mode=mode,
+                            hypothesis=hyp,
+                            raw_code_patch=code_patch,
+                            full_policy_code=current_policy,
+                            full_macros_code="",
+                            target_functions=hyp.get("target_functions") or ["run"],
+                            tool_calls_made=total_tool_calls,
+                            skill_code="",
+                            aborted=True,
+                            abort_reason=f"SKILL_SYNTAX_ERROR: {val_err}",
+                            pilot_best_delta=getattr(
+                                self.tools, "best_pilot_delta", 0.0
+                            ),
+                        )
                 if canon_mode == "CREATE" or not current_policy.strip():
                     spliced_policy = code_patch
                     changed_fns = hyp.get("target_functions") or ["run"]

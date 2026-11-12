@@ -113,6 +113,12 @@ class ExecutionTracer:
                     self.active_fn = fn_name
         return val
 
+    def on_yield(self, fn_name: str, val: Any) -> Any:
+        self.active_fn = fn_name
+        if fn_name not in self._ROOT_FNS:
+            self._turn_fn_locked = True
+        return val
+
     def exit_fn(self, fn_name: str) -> None:
         returned_non_noop = False
         if self.call_stack:
@@ -285,6 +291,36 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                     ctx=ast.Load(),
                 ),
                 args=[ast.Constant(value=fn_name), ret_val],
+                keywords=[],
+            )
+        return node
+
+    def visit_Yield(self, node: ast.Yield) -> ast.AST:
+        self.generic_visit(node)
+        if self._current_fn_stack and self._current_fn_stack[-1] != "__init__":
+            fn_name = self._current_fn_stack[-1]
+            return ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
+                    attr="on_yield",
+                    ctx=ast.Load(),
+                ),
+                args=[ast.Constant(value=fn_name), node],
+                keywords=[],
+            )
+        return node
+
+    def visit_YieldFrom(self, node: ast.YieldFrom) -> ast.AST:
+        self.generic_visit(node)
+        if self._current_fn_stack and self._current_fn_stack[-1] != "__init__":
+            fn_name = self._current_fn_stack[-1]
+            return ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
+                    attr="on_yield",
+                    ctx=ast.Load(),
+                ),
+                args=[ast.Constant(value=fn_name), node],
                 keywords=[],
             )
         return node

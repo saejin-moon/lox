@@ -194,6 +194,7 @@ class NetHackHarness:
                 obs_tuple, done = self.nh.step(b)
             except RuntimeError as err:
                 if "Called step on finished NetHack" in str(err):
+                    self.done = True
                     return obs_tuple, True
                 raise
             if messages is not None:
@@ -296,6 +297,10 @@ class NetHackHarness:
                     raw_m = self._extract_raw_message(obs_tuple)
                     if raw_m and (not messages or messages[-1] != raw_m):
                         messages.append(raw_m)
+                    if done:
+                        break
+                if done:
+                    break
 
         if not done and (
             self._waiting_for_space(obs_tuple) or not self._in_moveloop(obs_tuple)

@@ -349,7 +349,7 @@ def evaluate_paired_hypothesis(
         }
 
     reasons: list[str] = []
-    if mean_d <= -0.005:
+    if mean_d <= 0.0:
         reasons.append(f"Non-positive overall mean delta ({mean_d:+.3f})")
     if wins <= losses:
         reasons.append(f"Wins ({wins}) <= Losses ({losses})")
