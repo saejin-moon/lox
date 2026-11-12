@@ -434,6 +434,7 @@ def build_user_prompt(
     recent_discoveries: list[dict[str, Any]] | None = None,
     recent_failures: list[dict[str, Any]] | None = None,
     stagnation_function: str = "",
+    num_hypotheses: int = 3,
 ) -> str:
     """Constructs the stateless Turn-0 prompt tailored to the active Modification Mode."""
     from lox.lang.validator import extract_module_outline
@@ -506,26 +507,60 @@ def build_user_prompt(
     canon_mode = normalize_mode(mode)
 
     if canon_mode == "SWARM_WORKER":
+        k_hyp = max(1, int(num_hypotheses))
         prev_subtree_block = (
-            f"\n### Previous Turn Subtree Draft (Iterate or Fix):\n```python\n{current_policy}\n```\n"
+            f"\n### Previous Generation Subtree Reference:\n```python\n{current_policy}\n```\n"
             if current_policy.strip()
             else ""
         )
-        return f"""### Generation {generation} — Mode: `SWARM_WORKER` (Behavior Tree Subtree Synthesis)
+        return f"""### Generation {generation} — Mode: `SWARM_WORKER` (Warm Multi-Hypothesis Behavior Tree Synthesis)
 {digest_block}{prev_subtree_block}
 {BEHAVIOR_TREE_DOCS}
 
-### Swarm Worker Protocol (Hard Code Nothing):
-1. **Standalone Behavior Tree Subtree ONLY**:
-   - Write a clean, modular Behavior Tree subtree (multiple helper functions are welcome—there is **no 2-function limit**).
-   - Assign your top-level node to `subtree` (e.g., `subtree = PrioritySelector([...], name="...")` or `subtree = ActionLeaf(...)` / `Sequence([...])`).
-   - Do **NOT** wrap your subtree in a monolithic `class Policy:` generator with `def run(self, state): yield ...`, and do **NOT** return `None` from `subtree` imports. When your branch does not apply in the current `state`, return `None` from your `ActionLeaf` function so `PrioritySelector` falls through cleanly to lower-priority categories!
-2. **Empirical Research Before Guessing**:
-   - Use `query_monster(name)`, `query_item(name)`, `query_wiki(query)`, and `query_db(sql)` on `expert_runs` / `expert_ticks` whenever you need exact NetHack 3.6.6 mechanics instead of hardcoding monster or item lists from memory.
-3. **Verify Before Finishing**:
-   - Call `dry_run_policy(code=...)` on your complete subtree snippet to verify zero syntax/import errors and clean execution on `GameState`.
-4. **Output Format**:
-   - Optional brief empirical note or YAML summary (`observation_from_db`, `mechanism`), followed by your complete Python subtree inside `<policy_code> ... </policy_code>` or a standard ```python ... ``` code block.
+### Warm Scientific Method Protocol ({k_hyp} Competing Hypotheses, Hard Code Nothing):
+Follow these 4 stages sequentially inside THIS conversation (your context, DB queries, and experiment results stay warm across all turns):
+
+1. **Empirical Audit (1× upfront — do NOT guess mechanics from memory)**:
+   - Use `query_db(sql)` (against `runs`, `ticks`, `expert_runs`, `expert_ticks`, `function_stats`), `query_wiki(query)`, `query_monster(name)`, and `query_item(name)` once upfront to gather exact NetHack 3.6.6 facts and failure modes for your category.
+   - Check the **Prior Theories** and **Condition-Matched Failure Fixtures** in your brief above so you never repeat previously refuted mechanisms.
+
+2. **Brainstorm {k_hyp} Distinct Competing Hypotheses BEFORE Coding**:
+   - Emit a `<hypotheses>` YAML block listing {k_hyp} genuinely different mechanisms (`H1` .. `H{k_hyp}`) addressing your category:
+     ```xml
+     <hypotheses>
+     - id: H1
+       mechanism: "..."
+       trigger_condition: "..."
+       expected_effect: "..."
+     - id: H2
+       mechanism: "..."
+       trigger_condition: "..."
+       expected_effect: "..."
+     </hypotheses>
+     ```
+   - Each hypothesis must test a meaningfully distinct mechanism, condition threshold, or action sequence (not trivial constant tweaks).
+
+3. **Sequential Translate, Test & Repair (`H1` .. `H{k_hyp}` — never stop at 1 candidate)**:
+   - For each hypothesis `Hi`:
+     - Translate `Hi` into a standalone Behavior Tree subtree (multiple helper functions are welcome—there is **no 2-function limit**) assigning `subtree = PrioritySelector([...], name="...")` or `subtree = ActionLeaf(...)` / `Sequence(...)`.
+     - Do **NOT** wrap your subtree in `class Policy:` with `def run(self, state): yield ...`. Return `None` from `ActionLeaf` when the branch does not apply so `PrioritySelector` falls through to lower-priority branches.
+     - Test it using `dry_run_policy(code=..., hypothesis="H1: <short mechanism label>")`!
+     - `dry_run_policy` evaluates your subtree **directly inside the baseline master scaffold** across both the Frontier checkpoint and condition-matched failure replays, and returns exact step telemetry including `Triggered: k/N` steps.
+     - If `dry_run_policy` reports a compile/runtime error OR `Triggered: 0/N` (never fired!), diagnose why and repair `Hi` immediately before moving to the next hypothesis.
+   - You MUST empirically test all {k_hyp} distinct hypotheses with `dry_run_policy(..., hypothesis=...)` before finishing.
+
+4. **Comparative Reflection & Final Winning Subtree**:
+   - After testing all {k_hyp} hypotheses, emit a `<reflection>` block summarizing what worked, what failed or was ruled out (e.g., never triggered, caused loop, died), and why the winner beat the alternatives:
+     ```xml
+     <reflection>
+     winner: H...
+     comparison:
+       - H1: <observed triggered count, survival/depth outcome, verdict>
+       - H2: ...
+     ruled_out: <key pitfall / edge case future generations must avoid>
+     </reflection>
+     ```
+   - Finally, emit ONLY the winning, verified Python subtree inside `<policy_code> ... </policy_code>`.
 """
 
     if canon_mode == "SWARM_META":

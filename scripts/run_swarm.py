@@ -40,9 +40,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--turns-per-worker",
+        "--hypotheses-per-worker",
+        dest="turns_per_worker",
         type=int,
         default=3,
-        help="Number of exploration & theory turns per category worker (default: 3).",
+        help="Number of competing hypotheses per category worker per generation (default: 3).",
     )
     parser.add_argument(
         "--seeds",

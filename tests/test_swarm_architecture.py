@@ -329,7 +329,7 @@ subtree = PrioritySelector([
     msg, status = tools.dry_run_policy(subtree_code, seed=42, max_turns=15)
     assert status.startswith("PASSED"), msg
     assert tools.last_pilot_improved is True
-    assert "Non-None Subtree Actions: 15/15" in msg
+    assert "Triggered 15/15" in msg
 
     # Now test SWARM_META with non-empty current_policy_code (must NOT call splice or hit MUTATION_SCOPE_ERROR)
     tools.configure_generation(
@@ -508,12 +508,236 @@ def test_swarm_gen2_with_frontier_checkpoint_brief_and_replay(tmp_path):
     brief = worker._build_worker_brief(
         generation=2,
         checkpoint=cp,
-        turn=1,
-        turn_results=[],
     )
     assert "fc_dlvl_2_seed42_g1" in brief
     assert "Dlvl 2" in brief
 
     res = worker.run_cycle(generation=2, checkpoint=cp)
     assert res["role"] == "threat"
+
+
+def test_swarm_scaffold_trigger_attribution(tmp_path):
+    from lox.author.bt_eval import evaluate_bt_subtree
+
+    scaffold_code = """
+from lox.env.actions import Action
+
+class Policy:
+    def step(self, state):
+        return Action.WAIT
+"""
+    noop_subtree = """
+def _leaf_noop(state, bb):
+    return None
+
+subtree = ActionLeaf(_leaf_noop, name="noop")
+"""
+    obs_noop, err_noop = evaluate_bt_subtree(
+        noop_subtree,
+        seed=42,
+        steps=10,
+        baseline_policy_code=scaffold_code,
+    )
+    assert not err_noop
+    assert obs_noop.triggered_steps == 0
+    assert obs_noop.total_eval_steps == 10
+    assert obs_noop.actions_taken.get("WAIT", 0) == 10
+
+    conditional_subtree = """
+def _leaf_even_search(state, bb):
+    if state.step_count % 2 == 0:
+        return Action.SEARCH
+    return None
+
+subtree = ActionLeaf(_leaf_even_search, name="even_search")
+"""
+    obs_cond, err_cond = evaluate_bt_subtree(
+        conditional_subtree,
+        seed=42,
+        steps=10,
+        baseline_policy_code=scaffold_code,
+    )
+    assert not err_cond
+    assert 0 < obs_cond.triggered_steps < obs_cond.total_eval_steps
+    assert obs_cond.actions_taken.get("SEARCH", 0) == obs_cond.triggered_steps
+    assert obs_cond.actions_taken.get("WAIT", 0) == (
+        obs_cond.total_eval_steps - obs_cond.triggered_steps
+    )
+
+
+def test_swarm_worker_multi_hypothesis_session(tmp_path):
+    import json
+
+    theories_path = str(tmp_path / "theories.lance")
+    frontier_dir = str(tmp_path / "frontier")
+    db_path = str(tmp_path / "test_warm_worker.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    worker = SwarmWorker(
+        role="navigation",
+        provider="openrouter",
+        db_path=db_path,
+        theories_path=theories_path,
+        frontier_dir=frontier_dir,
+        max_turns=3,
+    )
+
+    h1_code = (
+        "def h1_noop(state, bb):\n"
+        "    return None\n"
+        "subtree = ActionLeaf(h1_noop, name='h1_noop')\n"
+    )
+    h2_broken = (
+        "def h2_broken(state, bb):\n"
+        "    return undefined_var\n"
+        "subtree = ActionLeaf(h2_broken, name='h2_broken')\n"
+    )
+    h2_repaired = (
+        "def h2_east(state, bb):\n"
+        "    return Action.WAIT\n"
+        "subtree = ActionLeaf(h2_east, name='h2_wait')\n"
+    )
+    h3_winner = (
+        "def h3_explore(state, bb):\n"
+        "    seen = bb.get_var('seen') or set()\n"
+        "    seen.add((state.y, state.x))\n"
+        "    bb.set_var('seen', seen)\n"
+        "    passable = state.passable_mask\n"
+        "    for act, (dy, dx) in [(Action.E, (0, 1)), (Action.S, (1, 0)), (Action.W, (0, -1)), (Action.N, (-1, 0)), (Action.NE, (-1, 1)), (Action.SE, (1, 1)), (Action.NW, (-1, -1)), (Action.SW, (1, -1))]:\n"
+        "        ny, nx = state.y + dy, state.x + dx\n"
+        "        if 0 <= ny < 21 and 0 <= nx < 79 and passable[ny, nx] and (ny, nx) not in seen:\n"
+        "            return act\n"
+        "    return Action.SEARCH\n"
+        "subtree = ActionLeaf(h3_explore, name='h3_explore')\n"
+    )
+
+    msg_history_lengths: list[int] = []
+    call_idx = 0
+
+    def fake_llm_call(messages, allow_tools=True):
+        nonlocal call_idx
+        call_idx += 1
+        msg_history_lengths.append(len(messages))
+        if call_idx == 1:
+            return {
+                "content": (
+                    "<hypotheses>\n"
+                    "- id: H1\n  mechanism: No-op guard check\n"
+                    "- id: H2\n  mechanism: Stationary wait test\n"
+                    "- id: H3\n  mechanism: Unvisited neighbor walk\n"
+                    "</hypotheses>"
+                ),
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "query_db",
+                            "arguments": json.dumps(
+                                {"sql": "SELECT COUNT(*) AS n FROM runs"}
+                            ),
+                        },
+                    }
+                ],
+            }
+        if call_idx == 2:
+            return {
+                "content": "Testing H1.",
+                "tool_calls": [
+                    {
+                        "id": "call_2",
+                        "function": {
+                            "name": "dry_run_policy",
+                            "arguments": json.dumps(
+                                {"code": h1_code, "hypothesis": "H1: noop probe"}
+                            ),
+                        },
+                    }
+                ],
+            }
+        if call_idx == 3:
+            return {
+                "content": "Testing H2 (initial broken draft).",
+                "tool_calls": [
+                    {
+                        "id": "call_3",
+                        "function": {
+                            "name": "dry_run_policy",
+                            "arguments": json.dumps(
+                                {"code": h2_broken, "hypothesis": "H2: wait test"}
+                            ),
+                        },
+                    }
+                ],
+            }
+        if call_idx == 4:
+            # Verify runtime error from H2 was fed back in the SAME warm conversation
+            last_tool_msg = str(messages[-1].get("content", ""))
+            assert "RUNTIME_ERROR" in last_tool_msg or "NameError" in last_tool_msg
+            return {
+                "content": "Repairing H2 after runtime error.",
+                "tool_calls": [
+                    {
+                        "id": "call_4",
+                        "function": {
+                            "name": "dry_run_policy",
+                            "arguments": json.dumps(
+                                {"code": h2_repaired, "hypothesis": "H2: wait test"}
+                            ),
+                        },
+                    }
+                ],
+            }
+        if call_idx == 5:
+            return {
+                "content": "Testing H3 unvisited exploration.",
+                "tool_calls": [
+                    {
+                        "id": "call_5",
+                        "function": {
+                            "name": "dry_run_policy",
+                            "arguments": json.dumps(
+                                {
+                                    "code": h3_winner,
+                                    "hypothesis": "H3: neighbor walk",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": (
+                "<reflection>\n"
+                "winner: H3\n"
+                "comparison:\n"
+                "  - H1: never triggered\n"
+                "  - H2: repaired NameError but gained 1 tile only\n"
+                "  - H3: explored multiple new tiles cleanly\n"
+                "ruled_out: undefined globals and noop fallbacks\n"
+                "</reflection>\n"
+                f"<policy_code>\n{h3_winner}\n</policy_code>"
+            ),
+            "tool_calls": [],
+        }
+
+    worker.author._call_llm_api = fake_llm_call  # type: ignore[method-assign]
+    res = worker.run_cycle(generation=1)
+
+    # Single warm session: conversation strictly accumulates instead of resetting
+    assert msg_history_lengths == sorted(msg_history_lengths)
+    assert len(msg_history_lengths) == 6
+    assert len(res["experiments"]) == 3
+    assert "h3_explore" in res["best_code"]
+
+    assert worker.theories._table is not None
+    docs = worker.theories._table.to_arrow().to_pylist()
+    theory_docs = [d for d in docs if d["doc_type"] == "THEORY"]
+    ref_docs = [d for d in docs if d["doc_type"] == "REFLECTION_REPORT"]
+    assert len(theory_docs) == 3
+    assert len(ref_docs) == 1
+    assert "winner: H3" in ref_docs[0]["content"]
+    assert "H1: noop probe" in ref_docs[0]["content"]
+    latest_reports = worker.theories.get_latest_reports(generation=1)
+    assert "navigation" in latest_reports
     assert res["observation"].steps_taken > 0

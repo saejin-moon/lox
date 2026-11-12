@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from lox.author.bt_eval import evaluate_bt_subtree
 from lox.author.prompts import FULL_ACTION_DOCS, POLICY_LANG_DOCS
 from lox.core.contracts import CandidatePackage
 from lox.datasets.symbols import SYMBOL_REGISTRY
@@ -29,8 +30,7 @@ from lox.db.schema import DEFAULT_DB_PATH, connect_db
 from lox.db.shards import extract_shards_from_runs
 from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
-from lox.lang.bt import BehaviorTree, Blackboard
-from lox.lang.compiler import compile_bt_subtree, compile_policy_package
+from lox.lang.compiler import compile_policy_package
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.lang.validator import (
     audit_policy_ast_hygiene,
@@ -100,6 +100,11 @@ class AuthorToolRegistry:
         self.skills: dict[str, str] = {}
         self.generation: int = 0
         self.mode: str = "WRITE"
+        self.swarm_checkpoint: Any = None
+        self.swarm_frontier: Any = None
+        self.swarm_replay_fixtures: list[dict[str, Any]] = []
+        self.swarm_scaffold_code: str = ""
+        self.swarm_experiments: list[dict[str, Any]] = []
 
     @property
     def last_passed_code(self) -> str:
@@ -167,6 +172,10 @@ class AuthorToolRegistry:
         generation: int = 0,
         benchmark: str | None = None,
         mode: str = "WRITE",
+        swarm_checkpoint: Any = None,
+        swarm_frontier: Any = None,
+        swarm_replay_fixtures: list[dict[str, Any]] | None = None,
+        swarm_scaffold_code: str = "",
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
         self.pool = pool
@@ -182,6 +191,11 @@ class AuthorToolRegistry:
         self.last_base_depths = []
         self.generation = int(generation)
         self.mode = normalize_mode(mode)
+        self.swarm_checkpoint = swarm_checkpoint
+        self.swarm_frontier = swarm_frontier
+        self.swarm_replay_fixtures = list(swarm_replay_fixtures or [])
+        self.swarm_scaffold_code = str(swarm_scaffold_code or "")
+        self.swarm_experiments = []
         if skills is not None:
             self.skills = dict(skills)
         if benchmark is not None:
@@ -333,7 +347,7 @@ class AuthorToolRegistry:
         """
         import traceback
 
-        from lox.env.actions import Action, ActionSequence, RawAction
+        from lox.env.actions import ActionSequence, RawAction
         from lox.env.state import GameState, VisibleMonster, VisibleObject
         from lox.lang.compiler import _build_base_namespace
         from lox.lang.instrument import ExecutionTracer, PolicyInstrumentTransformer
@@ -533,72 +547,148 @@ class AuthorToolRegistry:
         code: str,
         seed: int = 42,
         max_turns: int = 25,
+        replay_run_id: str = "",
+        replay_steps: int = 0,
+        hypothesis: str = "",
     ) -> tuple[str, str]:
-        """Validates and smoke-tests a standalone SWARM_WORKER Behavior Tree subtree."""
-        try:
-            node = compile_bt_subtree(code)
-        except Exception as exc:
-            return (
-                f"Subtree Compilation / Validation Error:\n{type(exc).__name__}: {exc}",
-                "COMPILE_ERROR",
-            )
-
+        """Validates and empirically tests a standalone SWARM_WORKER BT subtree across frontier + failure fixtures."""
         steps = max(10, min(40, int(max_turns)))
-        harness = NetHackHarness(max_steps=steps + 10)
-        bb = Blackboard(strict_errors=True)
-        raw_act_names: list[str] = []
-        unique_positions: set[tuple[int, int]] = set()
-        non_none_actions = 0
-
-        try:
-            state = harness.reset(seed=int(seed))
-            for _ in range(steps):
-                unique_positions.add((state.y, state.x))
-                if isinstance(node, BehaviorTree):
-                    act = node.tick(state)
-                elif hasattr(node, "tick"):
-                    try:
-                        res = node.tick(state, bb)
-                    except TypeError:
-                        res = node.tick(state)
-                    act = res[1] if isinstance(res, tuple) else res
-                elif hasattr(node, "step"):
-                    act = node.step(state)
-                else:
-                    act = node(state)
-
-                if act is not None:
-                    non_none_actions += 1
-                else:
-                    act = Action.SEARCH
-
-                state, done, info = harness.step(act)
-                raw_act_names.append(str(info.get("action_name", act)))
-                if done:
-                    break
-            unique_positions.add((state.y, state.x))
-        except Exception as exc:
-            return (
-                f"Subtree Runtime Error during smoke test:\n{type(exc).__name__}: {exc}",
-                "RUNTIME_ERROR",
-            )
-        finally:
-            harness.close()
-
-        act_counts = ", ".join(
-            f"{k}:{v}" for k, v in Counter(raw_act_names).most_common(6)
+        hyp_label = (
+            str(hypothesis or "").strip() or f"H{len(self.swarm_experiments) + 1}"
         )
+        scaffold = self.swarm_scaffold_code or self.current_policy_code
+
+        contexts: list[dict[str, Any]] = []
+        explicit_rid = str(replay_run_id or "").strip()
+        if explicit_rid and os.path.exists(self.db_path):
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                row = con.execute(
+                    "SELECT seed, action_bytes FROM runs WHERE run_id = ?",
+                    [explicit_rid],
+                ).fetchone()
+            finally:
+                con.close()
+            if row:
+                r_bytes = bytes(row[1] or b"")
+                stop_idx = (
+                    min(len(r_bytes), int(replay_steps))
+                    if int(replay_steps) > 0
+                    else max(1, len(r_bytes) - 25)
+                )
+                contexts.append(
+                    {
+                        "replay_fixture": {
+                            "run_id": explicit_rid,
+                            "seed": int(row[0]),
+                            "action_bytes": r_bytes,
+                            "stop_at_byte_idx": stop_idx,
+                        }
+                    }
+                )
+
+        if not contexts:
+            if self.swarm_checkpoint is not None and self.swarm_frontier is not None:
+                contexts.append(
+                    {
+                        "checkpoint": self.swarm_checkpoint,
+                        "frontier": self.swarm_frontier,
+                    }
+                )
+            else:
+                contexts.append({"seed": int(seed)})
+            for fix in self.swarm_replay_fixtures[:2]:
+                contexts.append({"replay_fixture": fix})
+
+        observations = []
+        errors: list[str] = []
+        for ctx in contexts:
+            obs, err = evaluate_bt_subtree(
+                code,
+                checkpoint=ctx.get("checkpoint"),
+                frontier=ctx.get("frontier"),
+                replay_fixture=ctx.get("replay_fixture"),
+                seed=ctx.get("seed"),
+                steps=steps,
+                baseline_policy_code=scaffold,
+            )
+            if err:
+                errors.append(err)
+                break
+            observations.append(obs)
+
+        if errors:
+            err_msg = errors[0]
+            first_line = err_msg.strip().splitlines()[0] if err_msg.strip() else "error"
+            is_compile = any(
+                tag in first_line
+                for tag in (
+                    "SyntaxError",
+                    "ValueError",
+                    "PolicyValidationError",
+                    "CompileError",
+                )
+            )
+            status_tag = "COMPILE_ERROR" if is_compile else "RUNTIME_ERROR"
+            self.swarm_experiments.append(
+                {
+                    "hypothesis": hyp_label,
+                    "code": code,
+                    "observations": [],
+                    "triggered_steps": 0,
+                    "total_steps": 0,
+                    "survived_all": False,
+                    "max_depth": 1,
+                    "max_unique_tiles": 0,
+                    "error": first_line,
+                    "passed": False,
+                }
+            )
+            return (
+                f"Subtree {status_tag} for [{hyp_label}]:\n{err_msg}",
+                status_tag,
+            )
+
+        total_triggered = sum(o.triggered_steps for o in observations)
+        total_eval = sum(o.total_eval_steps or o.steps_taken for o in observations)
+        survived_all = all(o.survived for o in observations)
+        max_depth = max((o.depth_end for o in observations), default=1)
+        max_tiles = max((o.unique_tiles for o in observations), default=0)
+
+        self.swarm_experiments.append(
+            {
+                "hypothesis": hyp_label,
+                "code": code,
+                "observations": observations,
+                "triggered_steps": total_triggered,
+                "total_steps": total_eval,
+                "survived_all": survived_all,
+                "max_depth": max_depth,
+                "max_unique_tiles": max_tiles,
+                "error": "",
+                "passed": True,
+            }
+        )
+        # Store last valid subtree and summary for compatibility with legacy callers.
+        # Multi-hypothesis sessions in run_swarm_worker_session do not check last_pilot_improved
+        # so all H1..HK continue sequentially across the warm conversation.
         self.last_passed_code = code
         self.last_pilot_improved = True
-        self.last_pilot_summary = (
-            f"Swarm subtree smoke check ({harness.step_count} steps)"
-        )
-        return (
-            f"Subtree Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
-            f"- Non-None Subtree Actions: {non_none_actions}/{harness.step_count}\n"
-            f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), UniqueTiles={len(unique_positions)}, HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"
-            f"- Action Breakdown: {{{act_counts}}}",
-            "PASSED (subtree smoke check)",
+        self.last_pilot_summary = f"[{hyp_label}] Triggered {total_triggered}/{total_eval} across {len(observations)} context(s)"
+
+        lines = [
+            f"Subtree Evaluation for [{hyp_label}] across {len(observations)} context(s):",
+            f"- Aggregate Activation: Triggered {total_triggered}/{total_eval} steps (scaffold active={bool(scaffold.strip())})",
+        ]
+        for obs in observations:
+            lines.append(f"  * {obs.summary()}")
+        if total_triggered == 0:
+            lines.append(
+                "- WARNING: Your subtree returned None on 0/"
+                f"{total_eval} steps (it NEVER triggered!). Broaden or fix your condition check, or repair and re-test before moving to the next hypothesis."
+            )
+        return "\n".join(lines), (
+            f"PASSED ({hyp_label}: trig {total_triggered}/{total_eval})"
         )
 
     def dry_run_policy(
@@ -612,6 +702,7 @@ class AuthorToolRegistry:
         smoke_only: bool = False,
         skill_name: str | None = None,
         skill_code: str | None = None,
+        hypothesis: str = "",
     ) -> tuple[str, str]:
         """
         Compiles and tests candidate `code` in a live NetHack sandbox:
@@ -635,6 +726,7 @@ class AuthorToolRegistry:
 
         if (
             not is_macro
+            and self.mode != "SWARM_WORKER"
             and not has_replay
             and self.last_passed_code
             and self.last_pilot_improved
@@ -658,6 +750,9 @@ class AuthorToolRegistry:
                 code=code,
                 seed=seed,
                 max_turns=min(40, max(10, int(max_turns))),
+                replay_run_id=replay_run_id,
+                replay_steps=replay_steps,
+                hypothesis=hypothesis,
             )
 
         try:
@@ -1700,6 +1795,11 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     "skill_code": {
                         "type": "string",
                         "description": "Optional Python source code for the skill module identified by skill_name.",
+                    },
+                    "hypothesis": {
+                        "type": "string",
+                        "description": "Optional short hypothesis identifier/mechanism label (e.g. 'H1: eat corpse when hungry') in SWARM_WORKER multi-hypothesis sessions.",
+                        "default": "",
                     },
                 },
                 "required": ["code"],

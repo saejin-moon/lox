@@ -392,7 +392,7 @@ class Policy:
                     f"Default master template failed verification: {diag}"
                 )
         else:
-            # Build synthesis prompt summarizing worker discoveries
+            # Build synthesis prompt summarizing worker discoveries & comparative hypotheses
             reports_summary = []
             for role, rep in worker_reports.items():
                 code_snip = rep.get("best_code", "")
@@ -400,11 +400,19 @@ class Policy:
                 obs_text = (
                     obs.summary() if hasattr(obs, "summary") else str(obs or "verified")
                 )
-                reports_summary.append(
-                    f"### Specialist Worker: {role}\n"
-                    f"**Empirical Verification**: {obs_text}\n"
-                    f"```python\n{code_snip}\n```\n"
-                )
+                rep_doc = str(rep.get("report_content") or "").strip()
+                if rep_doc:
+                    if len(rep_doc) > 3500:
+                        rep_doc = rep_doc[:3500] + "\n... [truncated]"
+                    reports_summary.append(
+                        f"### Specialist Worker: {role}\n{rep_doc}\n"
+                    )
+                else:
+                    reports_summary.append(
+                        f"### Specialist Worker: {role}\n"
+                        f"**Empirical Verification**: {obs_text}\n"
+                        f"```python\n{code_snip}\n```\n"
+                    )
             context = "\n".join(reports_summary)
             meta_prompt = (
                 f"You are the Meta-Agent Architect. Synthesize a unified `class Policy` utilizing Behavior Trees "

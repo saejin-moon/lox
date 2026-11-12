@@ -9,67 +9,18 @@ Specializes in one of 4 functional domains:
 
 from __future__ import annotations
 
-import collections
-import random
-import traceback
-from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from lox.author.agent import AuthorAgent
+from lox.author.bt_eval import (
+    ObservationDigest,
+    evaluate_bt_subtree,
+    sample_condition_fixtures,
+)
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive, FrontierCheckpoint
-from lox.env.actions import Action
-from lox.env.harness import NetHackHarness
-from lox.lang.bt import (
-    BehaviorTree,
-    Blackboard,
-)
-from lox.lang.compiler import compile_bt_subtree
 from lox.ui.console import ui
-
-
-@dataclass(slots=True)
-class ObservationDigest:
-    """Rich multi-dimensional empirical outcome from evaluating a candidate Behavior Tree node."""
-
-    survived: bool = False
-    steps_taken: int = 0
-    end_reason: str = ""
-    hp_start: int = 0
-    hp_end: int = 0
-    depth_start: int = 1
-    depth_end: int = 1
-    score_start: int = 0
-    score_end: int = 0
-    unique_tiles: int = 0
-    actions_taken: dict[str, int] = field(default_factory=dict)
-    dialog_resolved: bool = False
-
-    @property
-    def hp_delta(self) -> int:
-        return self.hp_end - self.hp_start
-
-    @property
-    def depth_delta(self) -> int:
-        return self.depth_end - self.depth_start
-
-    def summary(self) -> str:
-        status = (
-            "SURVIVED"
-            if self.survived
-            else f"TERMINATED ({self.end_reason or 'death'})"
-        )
-        hp_str = f"{self.hp_end}/{self.hp_start} (Δ{self.hp_delta:+d})"
-        depth_str = f"Dlvl {self.depth_end} (Δ{self.depth_delta:+d})"
-        actions_str = (
-            ", ".join(f"{k}:{v}" for k, v in sorted(self.actions_taken.items()))
-            or "none"
-        )
-        return (
-            f"Status: {status} | Steps: {self.steps_taken} | HP: {hp_str} | "
-            f"Depth: {depth_str} | Unique Tiles: {self.unique_tiles} | Actions: [{actions_str}]"
-        )
-
 
 WORKER_ROLE_DESCRIPTIONS: dict[str, str] = {
     "dialog": (
@@ -152,11 +103,9 @@ class SwarmWorker:
         self,
         generation: int,
         checkpoint: FrontierCheckpoint | None,
-        turn: int,
-        turn_results: list[dict[str, Any]],
-        err_diag: str = "",
+        replay_fixtures: list[dict[str, Any]] | None = None,
     ) -> str:
-        """Builds dynamic category brief, checkpoint context, turn digest, and repair error details."""
+        """Builds dynamic category brief with checkpoint, failure fixtures, and prior LanceDB memory."""
         parts = [self.get_role_prompt()]
         if checkpoint is not None:
             raw_log = getattr(checkpoint, "game_log", "") or ""
@@ -166,32 +115,39 @@ class SwarmWorker:
                 else "none"
             )
             parts.append(
-                f"### Frontier Checkpoint Context (Gen {generation}, Turn {turn}/{self.max_turns}):\n"
+                f"### Frontier Checkpoint Context (Gen {generation}, {self.max_turns} Competing Hypotheses):\n"
                 f"- Checkpoint: `{checkpoint.checkpoint_id}` | Seed: {checkpoint.seed} | Depth: Dlvl {checkpoint.depth} ({checkpoint.milestone})\n"
                 f"- Turns Reached: {checkpoint.turns} | Prefix Bytes: {len(checkpoint.action_bytes)}\n"
                 f"- Recent Log: {log_tail[:300]}"
             )
         else:
             parts.append(
-                f"### Fresh Seed Exploration (Gen {generation}, Turn {turn}/{self.max_turns})"
+                f"### Fresh Seed Exploration (Gen {generation}, {self.max_turns} Competing Hypotheses)"
             )
 
-        if turn_results:
-            hist = "\n".join(
-                f"- Turn {r['turn']}: {r['obs'].summary()}"
-                + (
-                    f" | Error: {str(r['error']).splitlines()[0]}"
-                    if r.get("error")
-                    else ""
-                )
-                for r in turn_results[-3:]
+        if replay_fixtures:
+            fix_lines = "\n".join(
+                f"- run_id=`{f['run_id']}` (seed={f['seed']}, dlvl={f['depth']}, end=`{f['end_reason']}`, rewind_step={f['stop_at_byte_idx']})"
+                for f in replay_fixtures
             )
-            parts.append(f"### Previous Turns in This Cycle:\n{hist}")
-
-        if err_diag:
             parts.append(
-                f"### ⚠️ Checkpoint Evaluation Failed — Repair Required:\n```\n{err_diag[:1500]}\n```"
+                f"### Condition-Matched DuckDB Failure Fixtures (auto-tested in `dry_run_policy`):\n{fix_lines}"
             )
+
+        try:
+            q_str = f"{self.role} {' '.join(self.target_metrics)}".strip()
+            prior_docs = self.theories.search_theories(q_str, limit=3)
+            if prior_docs:
+                prior_lines = "\n".join(
+                    f"- [{d.get('doc_type', 'DOC')}] {d.get('title', '')}: {str(d.get('content', '')).strip()[:280]}"
+                    for d in prior_docs
+                )
+                parts.append(
+                    f"### Prior Theories & Ruled-Out Findings from LanceDB:\n{prior_lines}"
+                )
+        except Exception:
+            pass
+
         return "\n\n".join(parts)
 
     def evaluate_candidate(
@@ -199,233 +155,212 @@ class SwarmWorker:
         code_snippet: str,
         checkpoint: FrontierCheckpoint | None = None,
         steps: int = 25,
+        replay_fixture: dict[str, Any] | None = None,
+        baseline_policy_code: str = "",
     ) -> tuple[ObservationDigest, str]:
         """
-        Empirically evaluates candidate code directly on a frontier checkpoint or fresh seed.
-        Returns (ObservationDigest, error_diagnostic). Zero arbitrary scalar score formulas.
+        Empirically evaluates candidate code directly on a frontier checkpoint, failure replay, or fresh seed.
+        Delegates to shared `evaluate_bt_subtree`. Zero arbitrary scalar score formulas.
         """
-        harness = NetHackHarness(max_steps=steps + 50)
+        return evaluate_bt_subtree(
+            code_snippet,
+            checkpoint=checkpoint,
+            frontier=self.frontier,
+            replay_fixture=replay_fixture,
+            steps=steps,
+            baseline_policy_code=baseline_policy_code,
+        )
+
+    def _load_baseline_scaffold(self, explicit_scaffold: str = "") -> str:
+        if explicit_scaffold and explicit_scaffold.strip():
+            return explicit_scaffold
         try:
-            if checkpoint is not None:
-                st = self.frontier.replay_into(harness, checkpoint)
-            else:
-                st = harness.reset(seed=random.randint(1000, 9999))
-
-            start_score = int(st.score)
-            start_hp = int(st.hp)
-            start_depth = int(st.depth)
-
-            node = compile_bt_subtree(code_snippet)
-
-            bb = Blackboard(strict_errors=True)
-            action_counts: dict[str, int] = collections.defaultdict(int)
-            visited_tiles: set[tuple[int, int]] = set()
-
-            for _ in range(steps):
-                visited_tiles.add((st.y, st.x))
-                if isinstance(node, BehaviorTree):
-                    act = node.tick(st)
-                elif hasattr(node, "tick"):
-                    try:
-                        res = node.tick(st, bb)
-                    except TypeError:
-                        res = node.tick(st)
-                    act = res[1] if isinstance(res, tuple) else res
-                elif hasattr(node, "step"):
-                    act = node.step(st)
-                else:
-                    act = node(st)
-                if act is None:
-                    act = Action.SEARCH
-
-                act_name = act.name if hasattr(act, "name") else str(act)
-                action_counts[act_name] += 1
-                st, done, _ = harness.step(act)
-                if done:
-                    break
-
-            visited_tiles.add((st.y, st.x))
-            obs = ObservationDigest(
-                survived=not harness.done,
-                steps_taken=harness.step_count,
-                end_reason=str(getattr(st, "end_reason", ""))
-                if harness.done
-                else "active",
-                hp_start=start_hp,
-                hp_end=int(st.hp),
-                depth_start=start_depth,
-                depth_end=int(st.depth),
-                score_start=start_score,
-                score_end=int(st.score),
-                unique_tiles=len(visited_tiles),
-                actions_taken=dict(action_counts),
-                dialog_resolved=not getattr(st, "waiting_for_space", False)
-                and not getattr(st, "in_text_prompt", False),
-            )
-            return obs, ""
-        except Exception as e:
-            tb = traceback.format_exc()
-            return ObservationDigest(), f"{type(e).__name__}: {e}\n{tb}"
-        finally:
-            harness.close()
+            cand = Path(self.db_path).parent / "workspace" / "policy.py"
+            if cand.exists():
+                return cand.read_text(encoding="utf-8")
+        except Exception:
+            pass
+        return ""
 
     def run_cycle(
         self,
         generation: int,
         checkpoint: FrontierCheckpoint | None = None,
+        scaffold_code: str = "",
     ) -> dict[str, Any]:
         """
-        Runs an N-turn exploration cycle for this category.
-        If checkpoint is provided, evaluates candidate code directly on that mid-game state in ~15ms.
-        At the end of the cycle, persists a structured reflection report into LanceDB.
+        Runs a single warm multi-hypothesis exploration cycle for this category:
+        1. Audits DuckDB / Wiki / LanceDB upfront
+        2. Brainstorms `self.max_turns` competing hypotheses (`H1..HK`)
+        3. Translates, dry-runs (with baseline scaffold + failure fixtures), and repairs each sequentially
+        4. Persists per-hypothesis THEORY docs and a comparative REFLECTION_REPORT to LanceDB.
         """
         ui.info(
-            f"Swarm Worker [{self.role}]: Starting Generation {generation} cycle ({self.max_turns} turns)..."
+            f"Swarm Worker [{self.role}]: Starting Gen {generation} warm multi-hypothesis session ({self.max_turns} hypotheses)..."
         )
         if checkpoint is None:
             checkpoint = self.frontier.sample_checkpoint()
 
-        turn_results: list[dict[str, Any]] = []
+        active_scaffold = self._load_baseline_scaffold(scaffold_code)
+        replay_fixtures = sample_condition_fixtures(
+            self.db_path,
+            self.role,
+            self.target_metrics,
+            generation=generation,
+            limit=2,
+        )
+        brief = self._build_worker_brief(
+            generation=generation,
+            checkpoint=checkpoint,
+            replay_fixtures=replay_fixtures,
+        )
 
-        for turn in range(1, self.max_turns + 1):
-            theory_desc = ""
-            if self.provider == "mock":
-                code_snippet = (
-                    f"# Subtree for {self.role} Gen {generation} Turn {turn}\n"
-                )
-                if "dialog" in self.role:
-                    code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\ndialog_node = ActionLeaf(lambda st: Action.SPACE if getattr(st, 'waiting_for_space', False) else None)\n"
-                elif "threat" in self.role or "combat" in self.role:
-                    code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nthreat_node = ActionLeaf(lambda st, bb: Action.WAIT if bb and bb.get_var('in_danger') else None)\n"
-                elif (
-                    "survival" in self.role
-                    or "health" in self.role
-                    or "resource" in self.role
-                ):
-                    code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nsurvival_node = ActionLeaf(lambda st, bb: None)\n"
-                else:
-                    code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nnavigation_node = ActionLeaf(lambda st: Action.SEARCH)\n"
-                theory_desc = f"Implements reactive {self.role} Behavior Tree logic for checkpoint depth {checkpoint.depth if checkpoint else 1}."
-            else:
-                last_code = turn_results[-1]["code"] if turn_results else ""
-                brief = self._build_worker_brief(
-                    generation=generation,
-                    checkpoint=checkpoint,
-                    turn=turn,
-                    turn_results=turn_results,
-                )
-                proposal = self.author.synthesize(
-                    mode="SWARM_WORKER",
-                    generation=generation,
-                    current_policy=last_code,
-                    batch_digest=brief,
-                    max_tool_turns=4,
-                )
-                code_snippet = proposal.raw_code_patch or proposal.full_policy_code
-                theory_desc = str(
-                    proposal.hypothesis.get("mechanism")
-                    or proposal.hypothesis.get("observation_from_db")
-                    or f"Evolving {self.role} subtree"
-                )
+        session = self.author.run_swarm_worker_session(
+            generation=generation,
+            brief=brief,
+            num_hypotheses=self.max_turns,
+            checkpoint=checkpoint,
+            frontier=self.frontier,
+            replay_fixtures=replay_fixtures,
+            scaffold_code=active_scaffold,
+        )
 
-            # Empirically evaluate candidate code on the frontier checkpoint!
+        raw_exps = list(session.get("experiments") or [])
+        hyp_list = list(session.get("hypotheses") or [])
+        reflection_text = str(session.get("reflection") or "").strip()
+
+        # Deduplicate repaired runs by hypothesis label, keeping the latest attempt per label
+        by_hyp: dict[str, dict[str, Any]] = {}
+        for idx, exp in enumerate(raw_exps):
+            h_key = str(exp.get("hypothesis") or f"H{idx + 1}").strip()
+            by_hyp[h_key] = exp
+        experiments = list(by_hyp.values())
+
+        # If LLM emitted code in text without any dry_run_policy call recorded, evaluate it now
+        if not experiments:
+            fallback_code = str(session.get("final_code") or "").strip()
             obs, err_diag = self.evaluate_candidate(
-                code_snippet, checkpoint=checkpoint, steps=25
+                fallback_code,
+                checkpoint=checkpoint,
+                steps=25,
+                baseline_policy_code=active_scaffold,
             )
-
-            # In-turn self-repair loop: if checkpoint evaluation raised a syntax or runtime error
-            repair_turns = 0
-            while (
-                err_diag
-                and repair_turns < self.max_repair_turns
-                and self.provider != "mock"
-            ):
-                repair_turns += 1
-                ui.warn(
-                    f"Swarm Worker [{self.role}]: Checkpoint error caught; executing self-repair turn ({repair_turns}/{self.max_repair_turns})..."
-                )
-                repair_brief = self._build_worker_brief(
-                    generation=generation,
-                    checkpoint=checkpoint,
-                    turn=turn,
-                    turn_results=turn_results,
-                    err_diag=err_diag,
-                )
-                repair_proposal = self.author.synthesize(
-                    mode="SWARM_WORKER",
-                    generation=generation,
-                    current_policy=code_snippet,
-                    batch_digest=repair_brief,
-                    max_tool_turns=2,
-                )
-                code_snippet = (
-                    repair_proposal.raw_code_patch or repair_proposal.full_policy_code
-                )
-                obs, err_diag = self.evaluate_candidate(
-                    code_snippet, checkpoint=checkpoint, steps=25
-                )
-
-            turn_results.append(
+            experiments.append(
                 {
-                    "turn": turn,
-                    "code": code_snippet,
-                    "obs": obs,
-                    "theory": theory_desc,
+                    "hypothesis": "H1: emitted subtree",
+                    "code": fallback_code,
+                    "observations": [obs] if not err_diag else [],
+                    "triggered_steps": obs.triggered_steps if not err_diag else 0,
+                    "total_steps": obs.total_eval_steps if not err_diag else 0,
                     "error": err_diag,
+                    "passed": not bool(err_diag),
                 }
             )
 
-            # Persist intermediate theory to LanceDB with real empirical observation facts
-            status_label = "OK" if not err_diag else "ERROR"
+        # Persist per-hypothesis THEORY docs and score for best selection
+        evaluated_records: list[dict[str, Any]] = []
+        for idx, exp in enumerate(experiments, start=1):
+            h_label = str(exp.get("hypothesis") or f"H{idx}")
+            h_code = str(exp.get("code") or "")
+            h_err = str(exp.get("error") or "")
+            obs_list: list[ObservationDigest] = list(exp.get("observations") or [])
+            primary_obs = obs_list[0] if obs_list else ObservationDigest()
+            trig_sum = int(exp.get("triggered_steps", primary_obs.triggered_steps))
+            tot_sum = int(
+                exp.get(
+                    "total_steps",
+                    primary_obs.total_eval_steps or primary_obs.steps_taken,
+                )
+            )
+            status_label = "OK" if not h_err else "ERROR"
+            obs_block = (
+                "\n".join(f"- {o.summary()}" for o in obs_list)
+                if obs_list
+                else f"- Execution Error: {h_err}"
+            )
             self.theories.save_document(
                 generation=generation,
                 agent_role=self.role,
                 doc_type="THEORY",
-                title=f"{self.role.capitalize()} Theory G{generation}T{turn} ({status_label})",
+                title=f"{self.role.capitalize()} Hypothesis G{generation}#{idx} ({h_label[:48]}) [{status_label}]",
                 content=(
-                    f"### Theory: {self.role.capitalize()} Exploration (Turn {turn})\n"
-                    f"{theory_desc}\n\n"
-                    f"```python\n{code_snippet}\n```\n\n"
-                    f"### Empirical Outcome:\n"
-                    f"- {obs.summary()}\n"
-                    f"- Execution: {'Clean' if not err_diag else err_diag}"
+                    f"### Hypothesis: {h_label}\n\n"
+                    f"```python\n{h_code}\n```\n\n"
+                    f"### Empirical Outcomes (Triggered: {trig_sum}/{tot_sum}):\n"
+                    f"{obs_block}\n"
+                    f"- Status: {'Clean' if not h_err else h_err}"
                 ),
-                tags=[self.role, f"gen_{generation}", "theory"],
+                tags=[self.role, f"gen_{generation}", "theory", "hypothesis"],
+            )
+            evaluated_records.append(
+                {
+                    "idx": idx,
+                    "hypothesis": h_label,
+                    "code": h_code,
+                    "obs": primary_obs,
+                    "obs_list": obs_list,
+                    "triggered_steps": trig_sum,
+                    "total_steps": tot_sum,
+                    "error": h_err,
+                }
             )
 
-        # Select chosen subtree: prefer clean runs, prioritized by survival and progression
-        clean_runs = [r for r in turn_results if not r["error"]]
-        if clean_runs:
+        # Pick winning verified subtree: clean > triggered > survived > depth > unique_tiles
+        clean_recs = [
+            r for r in evaluated_records if not r["error"] and r["code"].strip()
+        ]
+        if clean_recs:
             selected = max(
-                clean_runs,
+                clean_recs,
                 key=lambda r: (
+                    1 if r["triggered_steps"] > 0 else 0,
                     1 if r["obs"].survived else 0,
-                    r["obs"].depth_end,
-                    r["obs"].unique_tiles,
+                    max(
+                        (o.depth_end for o in r["obs_list"]), default=r["obs"].depth_end
+                    ),
+                    max(
+                        (o.unique_tiles for o in r["obs_list"]),
+                        default=r["obs"].unique_tiles,
+                    ),
+                    r["triggered_steps"],
                 ),
             )
         else:
-            selected = turn_results[-1]
+            selected = evaluated_records[-1]
 
         best_code = selected["code"]
         best_obs = selected["obs"]
 
-        # Compile final reflection report summarizing all exploration theories
-        findings_bullets = "\n".join(
-            f"- Turn {r['turn']}: {r['theory']} -> {r['obs'].summary()}"
-            for r in turn_results
+        hyps_bullet = "\n".join(
+            f"- {h.get('id', '?')}: {h.get('mechanism', str(h))}" for h in hyp_list
         )
-        report_content = f"""# {self.role.capitalize()} Reflection Report (Generation {generation})
-## Chosen Verified Subtree:
+        findings_bullets = "\n".join(
+            f"- {r['hypothesis']} (Trig {r['triggered_steps']}/{r['total_steps']}): "
+            + (r["obs"].summary() if not r["error"] else f"ERROR: {r['error']}")
+            for r in evaluated_records
+        )
+        reflection_sec = (
+            f"\n## Worker Comparative Reflection:\n{reflection_text}\n"
+            if reflection_text
+            else ""
+        )
+        planned_sec = (
+            f"\n## Planned Competing Hypotheses:\n{hyps_bullet}\n"
+            if hyps_bullet
+            else ""
+        )
+        report_content = f"""# {self.role.capitalize()} Comparative Reflection Report (Generation {generation})
+## Chosen Winning Subtree ({selected["hypothesis"]}):
 ```python
 {best_code}
 ```
 ## Empirical Outcome of Chosen Subtree:
+- Triggered {selected["triggered_steps"]}/{selected["total_steps"]} steps across {max(1, len(selected["obs_list"]))} context(s)
 - {best_obs.summary()}
-
-## Exploration Turn Digest:
+{planned_sec}
+## Tested Hypotheses Comparison:
 {findings_bullets}
-"""
+{reflection_sec}"""
         report_id = self.theories.save_document(
             generation=generation,
             agent_role=self.role,
@@ -435,7 +370,8 @@ class SwarmWorker:
             tags=[self.role, f"gen_{generation}", "reflection"],
         )
         ui.info(
-            f"Swarm Worker [{self.role}]: Completed cycle ({best_obs.summary()}). Saved report: {report_id}"
+            f"Swarm Worker [{self.role}]: Tested {len(evaluated_records)} hypothesis/hypotheses -> Winner [{selected['hypothesis']}] "
+            f"(Trig {selected['triggered_steps']}/{selected['total_steps']} | {best_obs.summary()}). Saved report: {report_id}"
         )
 
         return {
@@ -444,4 +380,6 @@ class SwarmWorker:
             "observation": best_obs,
             "report_id": report_id,
             "report_content": report_content,
+            "experiments": evaluated_records,
+            "reflection": reflection_text,
         }

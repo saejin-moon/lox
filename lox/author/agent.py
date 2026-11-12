@@ -404,6 +404,43 @@ class AuthorAgent:
 
         return fallback_skill_code
 
+    @staticmethod
+    def extract_hypotheses_and_reflection(
+        text: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Extracts structured <hypotheses> list and <reflection> summary from swarm worker output."""
+        hypotheses: list[dict[str, Any]] = []
+        reflection = ""
+
+        hyp_m = re.search(
+            r"<hypotheses>(.*?)</hypotheses>", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        if hyp_m:
+            raw_h = hyp_m.group(1).strip()
+            try:
+                parsed = yaml.safe_load(raw_h)
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            hypotheses.append(dict(item))
+                        else:
+                            hypotheses.append({"mechanism": str(item)})
+                elif isinstance(parsed, dict):
+                    hypotheses.append(dict(parsed))
+            except Exception:
+                for line in raw_h.splitlines():
+                    clean_line = line.strip().lstrip("-* ").strip()
+                    if clean_line:
+                        hypotheses.append({"mechanism": clean_line})
+
+        ref_m = re.search(
+            r"<reflection>(.*?)</reflection>", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        if ref_m:
+            reflection = ref_m.group(1).strip()
+
+        return hypotheses, reflection
+
     def _execute_tool_call(self, turn_idx: int, name: str, args: dict[str, Any]) -> str:
         t0 = time.perf_counter()
         if name == "query_db":
@@ -447,6 +484,7 @@ class AuthorAgent:
                 mt = int(args.get("max_turns", 150))
                 replay_id = str(args.get("replay_run_id", ""))
                 replay_steps = int(args.get("replay_steps", 0))
+                hyp_label = str(args.get("hypothesis", ""))
                 out, summary = self.tools.dry_run_policy(
                     code=code,
                     is_macro=is_macro,
@@ -456,8 +494,11 @@ class AuthorAgent:
                     replay_steps=replay_steps,
                     skill_name=str(s_name) if s_name else None,
                     skill_code=str(s_code) if s_code else None,
+                    hypothesis=hyp_label,
                 )
                 arg_disp = f"{len(code.splitlines())} lines, seed={seed}"
+                if hyp_label:
+                    arg_disp += f", {hyp_label[:28]}"
                 if s_name:
                     arg_disp += f", skill={s_name}"
                 if replay_id:
@@ -1586,3 +1627,244 @@ class AuthorAgent:
         raise RuntimeError(
             f"Author Agent failed to produce valid compiling code after {self.max_repair_turns} repair attempts. Last error: {diag}"
         )
+
+    def run_swarm_worker_session(
+        self,
+        generation: int,
+        brief: str,
+        current_policy: str = "",
+        num_hypotheses: int = 3,
+        checkpoint: Any = None,
+        frontier: Any = None,
+        replay_fixtures: list[dict[str, Any]] | None = None,
+        scaffold_code: str = "",
+        max_tool_turns: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Runs a single warm conversation for a SwarmWorker:
+        1. Empirical audit upfront (tools stay active across turns)
+        2. Brainstorm `num_hypotheses` distinct mechanisms in <hypotheses>
+        3. Sequentially translate & test each hypothesis via `dry_run_policy(..., hypothesis=...)`
+        4. Emit <reflection> comparing tested candidates + winning `<policy_code>` subtree
+        """
+        k_hyp = max(1, int(num_hypotheses))
+        self.tools.configure_generation(
+            pool=None,
+            baseline_runs=[],
+            max_pilot_runs=max(12, k_hyp * 4),
+            pilot_episodes=1,
+            generation=generation,
+            benchmark=self.benchmark,
+            mode="SWARM_WORKER",
+            swarm_checkpoint=checkpoint,
+            swarm_frontier=frontier,
+            swarm_replay_fixtures=replay_fixtures,
+            swarm_scaffold_code=scaffold_code,
+        )
+        self.tools.current_policy_code = scaffold_code or current_policy
+
+        if self.provider == "mock":
+            self.tools.query_db("SELECT COUNT(*) FROM runs")
+            mock_hyps = [
+                {
+                    "id": "H1",
+                    "mechanism": "ActionLeaf wait fallback probe (non-triggering baseline check)",
+                    "trigger_condition": "Never fires",
+                },
+                {
+                    "id": "H2",
+                    "mechanism": "Move step right along passable terrain",
+                    "trigger_condition": "Adjacent east tile passable",
+                },
+                {
+                    "id": "H3",
+                    "mechanism": "Frontier BFS exploration step toward unexplored tiles",
+                    "trigger_condition": "Unvisited walkable tile reachable",
+                },
+            ][:k_hyp]
+            mock_codes = [
+                "def leaf_noop(state, bb):\n    return None\nsubtree = ActionLeaf(leaf_noop, name='noop')",
+                "def leaf_east(state, bb):\n    return Action.E if state.passable_mask[state.y, min(78, state.x + 1)] else None\nsubtree = ActionLeaf(leaf_east, name='east')",
+                "def leaf_explore(state, bb):\n    if not hasattr(bb, 'seen'):\n        bb.seen = set()\n    bb.seen.add((state.y, state.x))\n    for d, (dy, dx) in [(Action.E, (0, 1)), (Action.S, (1, 0)), (Action.W, (0, -1)), (Action.N, (-1, 0))]:\n        ny, nx = state.y + dy, state.x + dx\n        if 0 <= ny < 21 and 0 <= nx < 79 and state.passable_mask[ny, nx] and (ny, nx) not in bb.seen:\n            return d\n    return None\nsubtree = ActionLeaf(leaf_explore, name='explore')",
+            ][:k_hyp]
+            for h_dict, h_code in zip(mock_hyps, mock_codes):
+                self.tools.dry_run_policy(
+                    code=h_code,
+                    hypothesis=f"{h_dict['id']}: {h_dict['mechanism']}",
+                )
+            winning_code = mock_codes[-1]
+            reflection = (
+                f"winner: {mock_hyps[-1]['id']}\n"
+                f"tested: {len(mock_hyps)} hypotheses cleanly in warm mock session."
+            )
+            return {
+                "hypotheses": mock_hyps,
+                "reflection": reflection,
+                "experiments": list(self.tools.swarm_experiments),
+                "final_code": winning_code,
+                "raw_response": f"<reflection>\n{reflection}\n</reflection>\n<policy_code>\n{winning_code}\n</policy_code>",
+                "tool_calls_made": len(mock_hyps) + 1,
+            }
+
+        sys_prompt = build_system_prompt(self.db_path)
+        user_prompt = build_user_prompt(
+            mode="SWARM_WORKER",
+            generation=generation,
+            current_policy=current_policy,
+            batch_digest=brief,
+            num_hypotheses=k_hyp,
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        turn_limit = max_tool_turns or max(8, k_hyp * 4 + 4)
+        total_tool_calls = 0
+        parsed_hypotheses: list[dict[str, Any]] = []
+        reflection_text = ""
+        final_content = ""
+        last_valid_code = ""
+        nudges_used = 0
+        batch_id = f"swarm_g{generation}_{self.agent_role}"
+
+        for turn_idx in range(1, turn_limit + 2):
+            allow_tools = turn_idx <= turn_limit
+            t0_turn = time.perf_counter()
+            msg = self._call_llm_api(messages, allow_tools=allow_tools)
+            turn_ms = (time.perf_counter() - t0_turn) * 1000.0
+            msg_text = msg.get("content") or ""
+            reasoning_text = msg.get("_reasoning") or ""
+            usage = msg.get("_usage") or {}
+
+            clean_text = re.sub(
+                r"<think>.*?</think>", "", msg_text, flags=re.DOTALL
+            ).strip()
+            clean_msg: dict[str, Any] = {"role": "assistant", "content": clean_text}
+            if msg.get("tool_calls"):
+                clean_msg["tool_calls"] = msg["tool_calls"]
+            messages.append(clean_msg)
+
+            if clean_text:
+                final_content = clean_text
+                turn_hyps, turn_ref = self.extract_hypotheses_and_reflection(clean_text)
+                if turn_hyps:
+                    parsed_hypotheses = turn_hyps
+                if turn_ref:
+                    reflection_text = turn_ref
+                _, extracted_code = self.extract_yaml_and_python(clean_text)
+                if extracted_code:
+                    last_valid_code = extracted_code
+
+            tool_calls = msg.get("tool_calls") or []
+            if not tool_calls:
+                _, extracted_code = self.extract_yaml_and_python(clean_text)
+                distinct_hyp_count = len(
+                    {
+                        str(e.get("hypothesis", f"exp_{i}"))
+                        for i, e in enumerate(self.tools.swarm_experiments)
+                    }
+                )
+                if (
+                    extracted_code
+                    and not self.tools.swarm_experiments
+                    and turn_idx <= turn_limit
+                ):
+                    total_tool_calls += 1
+                    t0 = time.perf_counter()
+                    pilot_res, pilot_summary = self.tools.dry_run_policy(
+                        code=extracted_code,
+                        hypothesis="H1: emitted subtree",
+                    )
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                    ui.tool_call(
+                        turn_idx,
+                        "dry_run_policy",
+                        f"auto-eval ({len(extracted_code.splitlines())} lines)",
+                        pilot_summary,
+                        elapsed_ms,
+                        agent_role=self.agent_role,
+                    )
+                    distinct_hyp_count = len(self.tools.swarm_experiments)
+
+                min_required = min(k_hyp, 2) if k_hyp >= 2 else 1
+                if (
+                    distinct_hyp_count < min_required
+                    and nudges_used < 2
+                    and turn_idx < turn_limit
+                ):
+                    nudges_used += 1
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"You have empirically tested {distinct_hyp_count} hypothesis/hypotheses via `dry_run_policy` so far, "
+                                f"but this session expects {k_hyp} competing hypotheses (`H1`..`H{k_hyp}`). "
+                                "Please formulate and test the remaining distinct hypothesis/hypotheses via "
+                                "`dry_run_policy(code=..., hypothesis='H...: ...')` before emitting `<reflection>` and the winning `<policy_code>`."
+                            ),
+                        }
+                    )
+                    continue
+                break
+
+            tool_results_list: list[dict[str, str]] = []
+            for tc in tool_calls:
+                total_tool_calls += 1
+                fn_obj = tc.get("function", {})
+                t_name = fn_obj.get("name", "")
+                raw_args = fn_obj.get("arguments", "{}")
+                try:
+                    t_args = (
+                        json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    )
+                except Exception:
+                    t_args = {}
+                t_out = self._execute_tool_call(turn_idx, t_name, t_args or {})
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", f"call_{total_tool_calls}"),
+                        "content": t_out,
+                    }
+                )
+                tool_results_list.append({"name": t_name, "result": t_out[:2000]})
+
+            try:
+                self.db_logger.save_synthesis_log(
+                    log_id=f"syn_sw_{generation}_{self.agent_role}_{turn_idx}_{int(time.time() * 1000)}",
+                    generation=generation,
+                    batch_id=batch_id,
+                    mode="SWARM_WORKER",
+                    turn_index=turn_idx,
+                    turn_type="WARM_HYPOTHESIS_TURN",
+                    repair_idx=0,
+                    model=self.model,
+                    thinking_content=reasoning_text,
+                    message_content=clean_text,
+                    tool_calls_json=json.dumps(tool_calls),
+                    tool_results_json=json.dumps(tool_results_list),
+                    candidate_code=last_valid_code,
+                    status="TOOL_CALLS",
+                    prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(usage.get("completion_tokens", 0)),
+                    reasoning_tokens=int(
+                        usage.get("completion_tokens_details", {}).get(
+                            "reasoning_tokens", 0
+                        )
+                    ),
+                    agent_role=self.agent_role,
+                    wall_ms=turn_ms,
+                )
+            except Exception:
+                pass
+
+        chosen_code = last_valid_code or self.tools.last_passed_code or ""
+        return {
+            "hypotheses": parsed_hypotheses,
+            "reflection": reflection_text,
+            "experiments": list(self.tools.swarm_experiments),
+            "final_code": chosen_code,
+            "raw_response": final_content,
+            "tool_calls_made": total_tool_calls,
+        }
