@@ -8,8 +8,9 @@ Standard reinforcement learning requires billions of environment frames to train
 
 `LOX` decouples reasoning speed from execution speed through a **Hierarchical Multi-Agent Swarm and Dual-Store Architecture**:
 
-- **Execution Engine (C++ / Numba)**: Compiled Python 3.11+ Behavior Tree policies execute directly against native C environment harnesses at **120,000 to 285,000+ steps/second** across multi-core worker pools (`0` LLM tokens per action). The harness exposes lean zero-copy observation channels, auto-dismisses pagination (`--More--`), passes interactive decision prompts (`[yn]`, `[ynq]`, getlin) directly to policies with watchdog protection, and tracks zero-turn action stall telemetry (`state.turn_advanced`, `state.consecutive_stalls`).
-- **Dynamic Swarm Synthesis Loop (Meta-Agent & Concurrent Category Workers)**: Rather than relying on static human roles, an empirical **Meta-Agent** dynamically analyzes DuckDB mortality and depth bottlenecks to discover emergent macro-categories per run. Specialized concurrent **Category Workers** run iterative exploration turns on **Go-Explore Frontier Checkpoints**, testing candidate code directly on replayed mid-game states in ~15ms, and logging theories into an embedded **LanceDB Document Store** (Tantivy BM25 FTS).
+- **Execution Engine (C++ / Rust / Numba)**: Compiled Python 3.11+ Behavior Tree policies execute directly against native C environment harnesses at **120,000 to 285,000+ steps/second** across multi-core worker pools (`0` LLM tokens per action). Spatial 21×79 grid pathfinding (BFS distance grids, A* next steps) and Behavior Tree operations are accelerated via **`lox-core` (PyO3 Rust extension)** using stack-allocated ring buffers with zero heap allocations (40,000+ BFS grids/sec; 700,000+ A* steps/sec). The harness exposes lean zero-copy observation channels, auto-dismisses pagination (`--More--`), passes interactive decision prompts directly to policies with watchdog protection, and tracks zero-turn action stall telemetry (`state.turn_advanced`, `state.consecutive_stalls`).
+- **Dynamic Swarm Synthesis Loop (Meta-Agent & Concurrent Category Workers)**: Rather than relying on static human roles, an empirical **Meta-Agent** dynamically analyzes DuckDB mortality and depth bottlenecks to discover emergent macro-categories per run. Specialized concurrent **Category Workers** run iterative exploration turns on **Go-Explore Frontier Checkpoints**, testing candidate code directly on replayed mid-game states in ~15ms, capturing rich multi-dimensional telemetry (`ObservationDigest`: survived, steps, hp_delta, depth_delta, unique_tiles, actions, dialog_resolved), and logging qualitative theories into an embedded **LanceDB Document Store** (Tantivy BM25 FTS).
+- **Zero Synthetic Score Delta**: Entirely eliminates artificial scalar score formulas (`score_gain + 5*hp + 200*depth`) in favor of true empirical survival and progression milestones. Sub-agents synthesize holistic reflection reports across all theories explored, and the Meta-Agent integrates subtrees based on specialized behavioral competency.
 - **Hierarchical Behavior Tree Assembly**: The Meta-Agent integrates worker reflection reports into unified, modular Behavior Trees (`PrioritySelector`, `Sequence`, `ActionLeaf`, `ConditionLeaf`) communicating exclusively through a shared `Blackboard`.
 - **Dual-Store Analytical Warehouse**: Unstructured agent theories, category decompositions, and reflection reports persist in **LanceDB**; structured episode telemetry, tail-sampled turn ticks, spectrum-based Ochiai/Liblit fault attributions, and exact USD LLM costs persist in **DuckDB**.
 
@@ -94,11 +95,13 @@ graph TD
    - The decomposition plan is persisted into LanceDB as a `CATEGORY_DECOMPOSITION` document.
 2. **Concurrent Category Worker Exploration**:
    - $M$ specialized workers execute in parallel.
-   - For $N$ exploration turns, each worker queries C symbol tables (`query_monster`, `query_item`) and DuckDB, formulates hypotheses, synthesizes candidate subtrees, and evaluates them directly on replayed frontier checkpoints in ~15ms.
-   - Intermediate theories and empirical score deltas are saved into LanceDB. At the end of $N$ turns, each worker writes a structured `REFLECTION_REPORT`.
-3. **Behavior Tree Master Policy Assembly**:
+   - For $N$ exploration turns, each worker queries C symbol tables (`query_monster`, `query_item`) and DuckDB, formulates qualitative theories, synthesizes candidate subtrees, and evaluates them directly on replayed frontier checkpoints in ~15ms.
+   - Captures rich multi-dimensional telemetry via `ObservationDigest` (`survived`, `steps_taken`, `hp_delta`, `depth_delta`, `unique_tiles`, `actions_taken`, `dialog_resolved`).
+   - Intermediate theories and empirical facts are saved into LanceDB (`doc_type="THEORY"`). At the end of $N$ turns, each worker writes a structured `REFLECTION_REPORT` reviewing all explored subtrees without relying on an artificial scalar score formula.
+3. **Behavior Tree Master Policy Assembly & Self-Repair**:
    - The Meta-Agent retrieves worker reflection reports from LanceDB and assembles verified subtrees into a master Behavior Tree `PrioritySelector` with strict Blackboard communication.
-   - Validates Python AST and writes the policy to `data/workspace/policy.py`.
+   - Runs compiler-in-the-loop validation and live 10-step `NetHackHarness` verification, with up to 3 automated self-repair turns if runtime errors are detected.
+   - Saves master synthesis reflection into LanceDB and writes the policy to `data/workspace/policy.py`.
 4. **Full Multi-Core Rollout & Dual-Store Logging**:
    - The master policy is evaluated across seeds on the persistent worker pool.
    - Runs, tail-sampled ticks, and Ochiai/Liblit fault attributions are logged to DuckDB.
@@ -185,6 +188,13 @@ class Policy:
 ### Invariants:
 - **Zero Hidden Mutations**: Nodes must NOT mutate arbitrary `self.*` attributes on `Policy`. Inter-node state is communicated strictly through `blackboard.get_var(key)` / `blackboard.set_var(key, val)`.
 - **Status Enum Flow**: Leaves return `NodeStatus.SUCCESS`, `NodeStatus.FAILURE`, or `NodeStatus.RUNNING` alongside optional actions, allowing sequences to manage multi-step actions cleanly.
+
+### High-Throughput `lox-core` Rust Extension (`crates/lox-core/`)
+To maximize evaluation throughput across multi-core worker pools, LOX includes a native PyO3 Rust extension (`lox_core`):
+- **Native Behavior Tree Engine**: Zero-allocation Behavior Tree traversals (`PyBehaviorTree`, `PyPrioritySelector`, `PySequence`, `PyActionLeaf`, `PyConditionLeaf`) and high-speed typed `PyBlackboard` key-value lookups.
+- **Zero-Heap 21×79 Grid Pathfinding**: Stack-allocated ring-buffer queues (`MAX_STACK_TILES = 2048`) evaluate 2D BFS distance transforms in `<25 µs` (40,000+ ops/sec) and A* first-step pathfinding with 1.38× speedup over Numba JIT (700,000+ queries/sec).
+- **Fast Action Byte Replay**: Fast-forwards checkpoint byte streams into NetHack in native speed.
+- **Transparent Fallback**: When `lox_core` is installed, LOX automatically uses the native Rust engine; when absent, it gracefully falls back to Numba and pure Python with zero breakage.
 
 ---
 
@@ -283,6 +293,15 @@ Candidate policies are evaluated on paired seeds against the active baseline usi
 ## 10. Repository Structure
 
 ```text
+crates/
+└── lox-core/               # PyO3 Rust high-throughput acceleration engine
+    ├── Cargo.toml          # PyO3, numpy, smallvec, parking_lot dependencies
+    └── src/
+        ├── blackboard.rs   # High-speed typed Blackboard key-value store
+        ├── bt.rs           # Native Behavior Tree nodes & PrioritySelector traversal
+        ├── lib.rs          # PyO3 module entrypoint (lox_core)
+        ├── path.rs         # Stack-allocated SIMD 21x79 BFS & A* pathfinder (40k+ ops/sec)
+        └── replay.rs       # Checkpoint action byte stream replayer
 lox/
 ├── core/
 │   └── contracts.py        # Typed EpisodeRun, BatchEvaluation, CandidatePackage contracts
@@ -290,7 +309,7 @@ lox/
 │   ├── actions.py          # 1-to-1 Action IntEnum, key(), seq(), DIR_DELTAS
 │   ├── base.py             # BenchmarkAdapter protocol & registry
 │   ├── craftax/            # CraftaxAdapter, 17 actions, 22-achievement ruleset
-│   ├── grid_utils.py       # Numba-JIT BFS, A*, room flood-fill, chokepoints, LOS raycasting
+│   ├── grid_utils.py       # Numba-JIT & Rust BFS, A*, room flood-fill, chokepoints, LOS raycasting
 │   ├── harness.py          # Direct C++ NLE harness, lean observations, byte replay & watchdog
 │   ├── nethack/            # NetHackAdapter & composite progression index
 │   └── state.py            # Lazy zero-copy GameState, WorldMemory, C struct LUTs, stall tracking
@@ -330,6 +349,7 @@ lox/
 └── ui/
     └── console.py          # Compact ANSI console UI with single-line progress & summary tables
 scripts/
+├── build_core.sh           # Compiles and installs lox-core Rust extension into .venv
 ├── build_strategy_wiki.py  # Indexes high-level NetHack strategy & mechanics articles into wiki_index.db
 ├── build_wiki_db.py        # Builds data/wiki_index.db from data/nethackwikidata.json
 ├── calibrate_pilot.py      # Calibrates pilot revision budget and evaluates transfer rates from DuckDB
@@ -344,17 +364,20 @@ scripts/
 
 ## 11. Quickstart & CLI Usage
 
-### 1. Installation, Linting & Automated Tests
+### 1. Installation, Build & Automated Tests
 LOX uses [`uv`](https://docs.astral.sh/uv/) for high-speed package and dependency management:
 ```bash
 # Clone the repository
 git clone git@github.com:saejin-moon/lox.git
 cd lox
 
-# Install dependencies into .venv
+# Install Python 3.11 virtual environment & dependencies
 uv sync
 
-# Run linter, formatter checks, and full test suite (107 automated tests)
+# Compile and install high-throughput lox-core Rust extension
+./scripts/build_core.sh
+
+# Run linter, formatter checks, and full test suite (112 automated tests)
 uv run ruff check --fix .
 uv run ruff format .
 uv run pytest -v
