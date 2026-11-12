@@ -257,6 +257,8 @@ class PolicyRunner:
             self._mode = "step"
         elif hasattr(self.instance, "act") and callable(self.instance.act):
             self._mode = "act"
+        elif hasattr(self.instance, "tree") and hasattr(self.instance.tree, "tick"):
+            self._mode = "bt"
         elif callable(self.instance):
             self._mode = "callable"
         else:
@@ -275,10 +277,6 @@ class PolicyRunner:
         except Exception:
             pass
 
-        crit_hp = getattr(self.instance, "flee_hp_ratio", None)
-        hp_ratio = (state.hp / max(1, state.max_hp)) if state.max_hp > 0 else 1.0
-        hp_preempt = bool(crit_hp is not None and hp_ratio < float(crit_hp))
-
         policy_preempt = False
         if hasattr(self.instance, "should_preempt_subgenerator"):
             try:
@@ -286,13 +284,7 @@ class PolicyRunner:
             except Exception:
                 policy_preempt = False
 
-        should_preempt = (
-            getattr(state, "in_yn_prompt", False)
-            or getattr(state, "in_text_prompt", False)
-            or hp_preempt
-            or policy_preempt
-        )
-        if self._active_subgen is not None and should_preempt:
+        if self._active_subgen is not None and policy_preempt:
             self._active_subgen = None
             self.subgen_preemptions += 1
 
@@ -340,6 +332,8 @@ class PolicyRunner:
                     act = res
             elif self._mode == "act":
                 act = self.instance.act(state)
+            elif self._mode == "bt":
+                act = self.instance.tree.tick(state)
             else:
                 act = self.instance(state)
         except StopIteration:
@@ -366,21 +360,6 @@ class PolicyRunner:
             except StopIteration:
                 self._active_subgen = None
                 act = Action.WAIT
-
-        # Fallback auto-ESC: unhandled text/naming prompt dismissal
-        if getattr(state, "in_text_prompt", False):
-            self._text_prompt_ticks += 1
-            is_esc = (
-                act == Action.ESC
-                or act == "\x1b"
-                or (isinstance(act, RawAction) and b"\x1b" in act.bytes_payload)
-            )
-            if not is_esc and self._text_prompt_ticks >= 2:
-                self._text_prompt_ticks = 0
-                act = Action.ESC
-                self.auto_esc_count += 1
-        else:
-            self._text_prompt_ticks = 0
 
         active_fn = self.tracer.record_turn_yield()
         return act, active_fn

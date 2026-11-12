@@ -304,9 +304,11 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    - Query `champion_runs` to inspect what happened in the active champion policy's episodes (`summary_digest`, `game_log`, `triggered_functions`, `auto_esc_count`, `unique_tiles`, `pct_wait`, `pct_search`, `starved_with_food`, `died_unarmored`).
    - Query `expert_runs` and `expert_ticks` to study how successful human ascensions and reference runs progress, what intrinsics/kit they acquire, and how they act across depths.
 2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact monster mechanics, corpse effects, item properties, intrinsics, and dungeon branches.
-3. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py` (or call `query_policy_docs("actions")` for the complete command index).
-4. `read_skill(skill_name)`: Retrieve the complete Python source code of any modular skill package currently residing in `skills/` (e.g. `skills/survival.py`, `skills/navigation.py`).
-5. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
+3. `query_monster(name)`: Query the exact C-level engine `permonst` struct for any monster (e.g. `jackal`, `floating eye`, `lichen`, `orc`). Returns exact level, AC, movement speed, magic resistance, corpse weight, corpse nutrition, conveyed intrinsics (e.g. poison resistance), and monster innate resistances.
+4. `query_item(name)`: Query the exact C-level engine `objclass` struct for any item (e.g. `food ration`, `potion of extra healing`, `long sword`). Returns exact object class, cost, weight, and nutrition value.
+5. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py` (or call `query_policy_docs("actions")` for the complete command index).
+6. `read_skill(skill_name)`: Retrieve the complete Python source code of any modular skill package currently residing in `skills/` (e.g. `skills/survival.py`, `skills/navigation.py`).
+7. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
    - Tests candidate Python code in a live NetHack sandbox.
    - **Step 1 (Smoke Check & Behavioral Critic)**: Verifies AST, checks reachability, detects oscillations and search spam. Optional `replay_run_id` fast-forwards into any recorded mid-game run in ~10ms.
    - **Step 2 (30-Episode Parallel Pilot Batch)**: Dispatches 30 episodes across persistent workers (up to 8 pilot revisions per generation, with fallback to best candidate) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.

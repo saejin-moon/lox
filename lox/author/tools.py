@@ -22,6 +22,7 @@ import numpy as np
 
 from lox.author.prompts import FULL_ACTION_DOCS, POLICY_LANG_DOCS
 from lox.core.contracts import CandidatePackage
+from lox.datasets.symbols import SYMBOL_REGISTRY
 from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db
@@ -215,37 +216,6 @@ class AuthorToolRegistry:
                 "error",
             )
 
-        # Dynamically rewrite SELECT MAX(batch_id) poison pill to target the active champion batch
-        max_batch_pattern = re.compile(
-            r"\(\s*SELECT\s+MAX\s*\(\s*batch_id\s*\)\s+FROM\s+(?:runs|function_stats|batches)\s*\)",
-            re.IGNORECASE,
-        )
-        if max_batch_pattern.search(clean):
-            con_temp = connect_db(self.db_path, read_only=True)
-            try:
-                row = con_temp.execute(
-                    "SELECT batch_id FROM batches WHERE hypothesis_passed = TRUE "
-                    "AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE') "
-                    "ORDER BY generation DESC, created_at DESC LIMIT 1"
-                ).fetchone()
-                if row and row[0]:
-                    target_batch_sql = (
-                        "(SELECT batch_id FROM batches WHERE hypothesis_passed = TRUE "
-                        "AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE') "
-                        "ORDER BY generation DESC, created_at DESC LIMIT 1)"
-                    )
-                else:
-                    target_batch_sql = "(SELECT batch_id FROM batches ORDER BY created_at DESC LIMIT 1)"
-            except Exception:
-                target_batch_sql = (
-                    "(SELECT batch_id FROM batches WHERE hypothesis_passed = TRUE "
-                    "AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE') "
-                    "ORDER BY generation DESC, created_at DESC LIMIT 1)"
-                )
-            finally:
-                con_temp.close()
-            clean = max_batch_pattern.sub(target_batch_sql, clean)
-
         if "limit" not in low_no_literals:
             clean += " LIMIT 30"
 
@@ -264,6 +234,50 @@ class AuthorToolRegistry:
         k = max(1, min(6, int(top_k or 3)))
         hits = self.wiki.search_wiki(query, top_k=k)
         return self.wiki.query(query, top_k=k), f"{len(hits)} articles"
+
+    def query_monster(self, name: str) -> tuple[str, str]:
+        """Queries C-level permonst ground truth struct for a monster."""
+        import yaml
+
+        data = SYMBOL_REGISTRY.query_monster(name)
+        if data:
+            return "```yaml\n" + yaml.dump(
+                data, default_flow_style=False
+            ) + "\n```", "found"
+        matches = SYMBOL_REGISTRY.search_monsters(name, limit=5)
+        if matches:
+            return (
+                "Monster not found exact. Closest matches:\n```yaml\n"
+                + yaml.dump(matches, default_flow_style=False)
+                + "\n```",
+                f"{len(matches)} matches",
+            )
+        return (
+            f"Monster '{name}' not found in NetHack 3.6.6 permonst symbol table.",
+            "not_found",
+        )
+
+    def query_item(self, name: str) -> tuple[str, str]:
+        """Queries C-level objclass ground truth struct for an item."""
+        import yaml
+
+        data = SYMBOL_REGISTRY.query_item(name)
+        if data:
+            return "```yaml\n" + yaml.dump(
+                data, default_flow_style=False
+            ) + "\n```", "found"
+        matches = SYMBOL_REGISTRY.search_items(name, limit=5)
+        if matches:
+            return (
+                "Item not found exact. Closest matches:\n```yaml\n"
+                + yaml.dump(matches, default_flow_style=False)
+                + "\n```",
+                f"{len(matches)} matches",
+            )
+        return (
+            f"Item '{name}' not found in NetHack 3.6.6 objclass symbol table.",
+            "not_found",
+        )
 
     def query_policy_docs(self, topic: str = "all") -> tuple[str, str]:
         """Returns policy language specs and registered macro definitions/docstrings."""
@@ -1470,6 +1484,46 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_monster",
+            "description": (
+                "Query exact C-level engine permonst struct for a monster name "
+                "(level, speed, AC, magic resistance, nutrition, corpse weight, conveyed intrinsics, resistances)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Monster name to inspect (e.g., 'jackal', 'floating eye', 'orc', 'lichen').",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_item",
+            "description": (
+                "Query exact C-level engine objclass struct for an item name "
+                "(class, cost, weight, nutrition)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Item name to inspect (e.g., 'food ration', 'potion of extra healing', 'long sword').",
+                    }
+                },
+                "required": ["name"],
             },
         },
     },

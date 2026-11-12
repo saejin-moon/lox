@@ -29,10 +29,12 @@ from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
 from lox.db.shards import extract_shards_from_runs
 from lox.db.summarizer import build_batch_contrast_digest
+from lox.engine.frontier import FrontierArchive
 from lox.engine.hypothesis import (
     evaluate_paired_hypothesis,
     should_stop_early_for_futility,
 )
+from lox.engine.map_elites import MAPElitesArchive
 from lox.engine.scheduler import ModeScheduler, normalize_mode
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.runner.pool import PersistentEvalPool
@@ -346,6 +348,16 @@ class CampaignOrchestrator:
             pilot_fallback=pilot_fallback,
         )
         self.scheduler = ModeScheduler()
+        self.map_elites = MAPElitesArchive()
+        try:
+            con_me = connect_db(self.db_path, read_only=True)
+            self.map_elites.load_from_db(con_me)
+            con_me.close()
+        except Exception:
+            pass
+        self.frontier = FrontierArchive(
+            frontier_dir=str(Path(self.workspace_dir) / "frontier")
+        )
         self.pool = PersistentEvalPool(
             workers=workers,
             role=role,
@@ -1185,6 +1197,34 @@ class CampaignOrchestrator:
                         max_depth=eval_res["max_depth"],
                         is_promoted=verdict["passed"],
                     )
+
+                    con_map = connect_db(self.db_path, read_only=False)
+                    try:
+                        added, cell_id, elite = self.map_elites.add_candidate(
+                            policy_code=proposal.full_policy_code,
+                            metrics=eval_res,
+                            batch_id=batch_id,
+                            generation=gen,
+                            con=con_map,
+                        )
+                        if added:
+                            ui.info(
+                                f"MAP-Elites: Added/improved elite in niche {cell_id} "
+                                f"(fitness={elite.fitness:.1f}, coverage={self.map_elites.coverage() * 100:.1f}%)"
+                            )
+                    finally:
+                        con_map.close()
+
+                    for r in eval_res.get("runs", []):
+                        if int(r.get("max_depth", 1)) >= 3 and r.get("action_bytes"):
+                            self.frontier.add_checkpoint(
+                                seed=int(r["seed"]),
+                                depth=int(r["max_depth"]),
+                                milestone=f"DLVL_{r['max_depth']}",
+                                turns=int(r.get("turns", 0)),
+                                action_bytes=r["action_bytes"],
+                                game_log=str(r.get("game_log", "")),
+                            )
 
                     if verdict["passed"]:
                         consecutive_failures = 0

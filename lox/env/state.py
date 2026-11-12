@@ -823,71 +823,17 @@ class WorldMemory:
             uninit_occupied = non_cmap_floor & (floor.remembered_chars == 0)
             floor.remembered_chars[uninit_occupied] = ord(".")
 
-            msg_low = str(state.message).lower() if hasattr(state, "message") else ""
             if (
                 0 <= sy < floor.remembered_chars.shape[0]
                 and 0 <= sx < floor.remembered_chars.shape[1]
             ):
-                if (
-                    getattr(state, "is_on_stairs_down", False)
-                    or "staircase down" in msg_low
-                ):
+                if getattr(state, "is_on_stairs_down", False):
                     floor.remembered_chars[sy, sx] = ord(">")
-                elif "staircase up" in msg_low:
-                    floor.remembered_chars[sy, sx] = ord("<")
-                elif "there is an altar" in msg_low or "altar of" in msg_low:
-                    floor.remembered_chars[sy, sx] = ord("_")
-                elif "there is a fountain" in msg_low:
-                    floor.remembered_chars[sy, sx] = ord("{")
 
             # 4. Update remembered_obj_glyphs
             floor.remembered_obj_glyphs[is_cmap] = 0
             obj_mask = _IS_OBJECT_LUT[glyphs]
             floor.remembered_obj_glyphs[obj_mask] = glyphs[obj_mask]
-
-            if (
-                0 <= sy < floor.remembered_obj_glyphs.shape[0]
-                and 0 <= sx < floor.remembered_obj_glyphs.shape[1]
-            ):
-                act_upper = action_name.upper() if action_name else ""
-                msg_low = (
-                    str(state.message).lower() if hasattr(state, "message") else ""
-                )
-                if (
-                    "you see no objects here" in msg_low
-                    or "feel no objects here" in msg_low
-                ):
-                    floor.remembered_obj_glyphs[sy, sx] = 0
-                elif any(tok in act_upper for tok in ("PICKUP", "EAT", "COMMA")):
-                    if not any(
-                        abort_tok in msg_low
-                        for abort_tok in (
-                            "never mind",
-                            "don't have",
-                            "nothing here",
-                            "there are ",
-                            "you see here",
-                            "objects here",
-                        )
-                    ):
-                        floor.remembered_obj_glyphs[sy, sx] = 0
-                elif (
-                    len(self.pos_history) >= 2
-                    and self.pos_history[-1] != self.pos_history[-2]
-                ):
-                    if not any(
-                        tok in msg_low
-                        for tok in (
-                            "you see here",
-                            "objects here",
-                            "things that are here",
-                            "you feel here",
-                            "there is a ",
-                            "there is an ",
-                            "there are ",
-                        )
-                    ):
-                        floor.remembered_obj_glyphs[sy, sx] = 0
         except Exception:
             pass
 

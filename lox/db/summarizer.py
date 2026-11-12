@@ -300,15 +300,15 @@ def summarize_episode_ticks(
             ]
             msgs_lower = " ".join(seg.get("messages", set())).lower()
             if "swap places with" in msgs_lower or "in the way" in msgs_lower:
-                cause = "pet displacement loop (yield WAIT to let pet move)"
+                cause = "pet displacement loop"
             elif "locked" in msgs_lower:
-                cause = "locked door stall (needs seq(Action.KICK, dir))"
+                cause = "locked door stall"
             elif "try to move the boulder" in msgs_lower:
-                cause = "boulder blockage (path blocked by boulder)"
+                cause = "boulder blockage"
             elif "solid stone" in msgs_lower or "doorway" in msgs_lower:
-                cause = "wall/doorway diagonal collision"
+                cause = "wall/doorway collision"
             elif "descend the stairs" in msgs_lower:
-                cause = "staircase / --More-- pagination pause"
+                cause = "staircase / --More-- pagination"
             else:
                 cause = f"{len(seg['positions'])} tiles oscillation"
 

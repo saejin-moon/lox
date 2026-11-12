@@ -748,11 +748,15 @@ def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
     con.close()
 
     tools = AuthorToolRegistry(db_path=db_path)
-    yaml_out, count_str = tools.query_db(
-        "SELECT run_id FROM runs WHERE batch_id = (SELECT MAX(batch_id) FROM runs)"
-    )
+    yaml_out, count_str = tools.query_db("SELECT run_id FROM champion_runs")
     assert "run_champ" in yaml_out
     assert "run_pilot" not in yaml_out
+
+    # Verify query_monster and query_item tools
+    m_out, _ = tools.query_monster("jackal")
+    assert "jackal" in m_out
+    i_out, _ = tools.query_item("food ration")
+    assert "food" in i_out.lower()
 
     # 2. Expert Ticks Deep Depths Population
     res = ingest_expert_runs_into_duckdb(db_path=db_path, max_ascensions=3, force=True)
@@ -1390,6 +1394,8 @@ def test_pass8_long_horizon_and_unattended_ops(tmp_path: Path) -> None:
 class Policy:
     def __init__(self):
         self.flee_hp_ratio = 0.5
+    def should_preempt_subgenerator(self, state):
+        return (state.hp / max(1, state.max_hp)) < self.flee_hp_ratio
     def subgen(self):
         while True:
             yield Action.WAIT

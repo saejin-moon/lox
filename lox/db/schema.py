@@ -270,6 +270,19 @@ CREATE TABLE IF NOT EXISTS synthesis_logs (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS archive_policies (
+    cell_id VARCHAR PRIMARY KEY,
+    depth_bin INTEGER,
+    caution_bin INTEGER,
+    resource_bin INTEGER,
+    fitness DOUBLE,
+    policy_code TEXT,
+    batch_id VARCHAR,
+    generation INTEGER,
+    metrics_json VARCHAR,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE OR REPLACE VIEW champion_runs AS
 SELECT * FROM runs
 WHERE batch_id = (
@@ -414,6 +427,8 @@ def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:
   `run_id` (VARCHAR), `turn` (INT), `step_idx` (INT), `depth` (INT), `dungeon_num` (INT), `hp` (INT), `max_hp` (INT), `energy` (INT), `ac` (INT), `xp_level` (INT), `hunger_state` (INT), `condition_mask` (INT), `y` (INT), `x` (INT), `action_name` (VARCHAR), `raw_key` (INT), `active_function` (VARCHAR), `message` (VARCHAR), `visible_monsters` (VARCHAR), `inventory_summary` (VARCHAR).
 - **`batches`** (Per-generation batch overview):
   `batch_id`, `generation`, `mode`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `seeds_evaluated` (INT), `is_early_stopped` (BOOLEAN), `pilot_best_delta` (DOUBLE).
+- **`archive_policies`** (Quality-Diversity MAP-Elites Behavioral Archive - 80 niches):
+  `cell_id` (VARCHAR: e.g. 'cell_d1_c2_r0'), `depth_bin` (INT: 0-4), `caution_bin` (INT: 0-3), `resource_bin` (INT: 0-3), `fitness` (DOUBLE), `policy_code` (TEXT), `batch_id` (VARCHAR), `generation` (INT), `metrics_json` (VARCHAR), `updated_at` (TIMESTAMP).
 - **`function_stats`** (Per-function execution & statistical debugging metrics per batch):
   `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, **`ochiai_good_run_score` (DOUBLE: correlation with `is_outlier_good=TRUE`)**, **`liblit_failure_score` (DOUBLE: correlation with failure)**, **`stagnation_turns` (BIGINT: turns spent stalled after last progress)**, **`stagnation_share` (DOUBLE: fraction of all stagnant turns in batch consumed by this function)**, **`livelock_score` (DOUBLE: livelock sink severity)**.
 - **`experiments`** (Historical hypothesis outcomes):

@@ -278,30 +278,6 @@ class NetHackHarness:
             if done:
                 break
 
-            # Dismiss intermediate --More-- pagination prompts between bytes of a sequence
-            if idx + 1 < len(bytes_seq) and b != ASCII_SPACE:
-                more_safety = 0
-                while (
-                    not done and self._waiting_for_space(obs_tuple) and more_safety < 16
-                ):
-                    more_safety += 1
-                    self.action_bytes.append(ASCII_SPACE)
-                    try:
-                        obs_tuple, done = self.nh.step(ASCII_SPACE)
-                    except RuntimeError as err:
-                        if "Called step on finished NetHack" in str(err):
-                            self.done = True
-                            done = True
-                            break
-                        raise
-                    raw_m = self._extract_raw_message(obs_tuple)
-                    if raw_m and (not messages or messages[-1] != raw_m):
-                        messages.append(raw_m)
-                    if done:
-                        break
-                if done:
-                    break
-
         if not done and (
             self._waiting_for_space(obs_tuple) or not self._in_moveloop(obs_tuple)
         ):

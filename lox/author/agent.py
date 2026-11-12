@@ -371,6 +371,14 @@ class AuthorAgent:
             tk = int(args.get("top_k", 3))
             out, summary = self.tools.query_wiki(q, top_k=tk)
             arg_disp = q
+        elif name == "query_monster":
+            m_name = str(args.get("name", ""))
+            out, summary = self.tools.query_monster(m_name)
+            arg_disp = m_name
+        elif name == "query_item":
+            i_name = str(args.get("name", ""))
+            out, summary = self.tools.query_item(i_name)
+            arg_disp = i_name
         elif name == "query_policy_docs":
             topic = str(args.get("topic", "all"))
             out, summary = self.tools.query_policy_docs(topic)
@@ -1010,7 +1018,7 @@ class AuthorAgent:
                 total_tool_calls += 1
                 fn_Spec = tc.get("function") or {}
                 t_name = fn_Spec.get("name", "")
-                if t_name in ("query_db", "query_wiki"):
+                if t_name in ("query_db", "query_wiki", "query_monster", "query_item"):
                     research_tools_called.add(t_name)
                 raw_args = fn_Spec.get("arguments", "{}")
                 try:
