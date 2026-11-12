@@ -1,0 +1,150 @@
+"""
+Automated Test Suite for the Hierarchical Multi-Agent Swarm:
+1. TheoryDocumentStore (LanceDB BM25 Tantivy FTS).
+2. Exact LLM cost and token accounting in DuckDB.
+3. Frontier checkpoint bootstrapping from recorded runs.
+4. Category SwarmWorker execution cycle and report generation.
+5. Meta-Agent master Behavior Tree policy assembly and live execution.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import duckdb
+
+from lox.author.swarm_meta import SwarmMetaAgent
+from lox.author.swarm_worker import SwarmWorker
+from lox.datasets.bootstrap_frontier import bootstrap_frontier_from_duckdb
+from lox.db.logger import BatchDatabaseLogger
+from lox.db.schema import compute_llm_cost, init_db
+from lox.db.theories import TheoryDocumentStore
+from lox.env.actions import Action
+from lox.env.harness import NetHackHarness
+from lox.lang.compiler import compile_policy_package
+
+
+def test_theory_document_store_lancedb(tmp_path):
+    p = tmp_path / "test_theories"
+    store = TheoryDocumentStore(db_path=str(p))
+    assert store.count() == 1  # Seed row
+
+    # 1. Save document
+    doc_id = store.save_document(
+        generation=1,
+        agent_role="threat",
+        doc_type="REFLECTION_REPORT",
+        title="Tactical Ant Kiting",
+        content="Soldier ants have poisonous bites. In narrow corridors, only one ant can attack at a time.",
+        tags=["combat", "ants", "poison"],
+        verified_c_rule="corridor choke prevents surrounding",
+    )
+    assert doc_id.startswith("doc_threat_")
+    assert store.count() == 2
+
+    # 2. Search document
+    hits = store.search_theories("ants poison", limit=3)
+    assert len(hits) >= 1
+    assert "Tactical Ant Kiting" in hits[0]["title"]
+
+    # 3. Retrieve latest reports
+    reports = store.get_latest_reports(generation=1)
+    assert "threat" in reports
+    assert reports["threat"]["title"] == "Tactical Ant Kiting"
+
+
+def test_duckdb_llm_cost_and_token_tracking(tmp_path):
+    db_path = str(tmp_path / "test_cost.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    # 1. Verify cost formula
+    cost = compute_llm_cost(
+        "z-ai/glm-5.3-flash:nitro", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert abs(cost - 0.46) < 1e-4
+
+    # 2. Save log with cost
+    logger = BatchDatabaseLogger(db_path=db_path)
+    logger.save_synthesis_log(
+        log_id="log_swarm_01",
+        generation=1,
+        batch_id="b_swarm_01",
+        mode="WRITE",
+        turn_index=1,
+        turn_type="PILOT",
+        model="z-ai/glm-5.3-flash:nitro",
+        prompt_tokens=50000,
+        completion_tokens=2000,
+        reasoning_tokens=500,
+        agent_role="threat",
+    )
+
+    con = duckdb.connect(db_path, read_only=True)
+    row = con.execute(
+        "SELECT agent_role, cost_usd, prompt_tokens, completion_tokens FROM synthesis_logs"
+    ).fetchone()
+    assert row[0] == "threat"
+    assert row[1] > 0.0
+
+    rates_count = con.execute("SELECT COUNT(*) FROM llm_cost_rates").fetchone()[0]
+    assert rates_count >= 8
+    con.close()
+
+
+def test_frontier_bootstrapping_and_checkpoints(tmp_path):
+    frontier_dir = str(tmp_path / "frontier")
+    # Bootstrap from current data/lox.duckdb if available
+    db_file = Path("data/lox.duckdb")
+    if db_file.exists():
+        count = bootstrap_frontier_from_duckdb(
+            db_path=str(db_file),
+            frontier_dir=frontier_dir,
+            max_checkpoints_per_depth=2,
+        )
+        assert count > 0
+
+
+def test_swarm_worker_and_meta_agent_end_to_end(tmp_path):
+    theories_path = str(tmp_path / "theories.lance")
+    frontier_dir = str(tmp_path / "frontier")
+    db_path = str(tmp_path / "test_swarm.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    # 1. Worker runs cycle
+    worker = SwarmWorker(
+        role="threat",
+        provider="mock",
+        db_path=db_path,
+        theories_path=theories_path,
+        frontier_dir=frontier_dir,
+        max_turns=2,
+    )
+    res = worker.run_cycle(generation=1)
+    assert res["role"] == "threat"
+    assert "report_id" in res
+
+    # 2. Meta-Agent assembles policy
+    meta = SwarmMetaAgent(
+        provider="mock",
+        db_path=db_path,
+        theories_path=theories_path,
+        frontier_dir=frontier_dir,
+    )
+    master_code = meta.assemble_policy(generation=1)
+    assert "class Policy" in master_code
+    assert "BehaviorTree" in master_code
+
+    # 3. Compile and execute policy in live harness
+    compiled = compile_policy_package(master_code)
+    runner = compiled.create_runner()
+    assert runner._mode in ("bt", "step")
+
+    h = NetHackHarness(max_steps=10)
+    try:
+        st = h.reset(seed=42)
+        act, fn = runner.next_action(st)
+        assert act in Action
+    finally:
+        h.close()

@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS batches (
     seeds_evaluated INTEGER DEFAULT 0,
     is_early_stopped BOOLEAN DEFAULT FALSE,
     pilot_best_delta DOUBLE DEFAULT 0.0,
+    total_cost_usd DOUBLE DEFAULT 0.0,
+    total_llm_tokens BIGINT DEFAULT 0,
     created_at TIMESTAMP
 );
 
@@ -182,6 +184,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     seeds_evaluated INTEGER DEFAULT 0,
     is_early_stopped BOOLEAN DEFAULT FALSE,
     pilot_best_delta DOUBLE DEFAULT 0.0,
+    total_cost_usd DOUBLE DEFAULT 0.0,
     verdict_reason VARCHAR,
     created_at TIMESTAMP
 );
@@ -266,8 +269,17 @@ CREATE TABLE IF NOT EXISTS synthesis_logs (
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     reasoning_tokens INTEGER,
+    agent_role VARCHAR DEFAULT 'author',
+    cost_usd DOUBLE DEFAULT 0.0,
     wall_ms DOUBLE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS llm_cost_rates (
+    model VARCHAR PRIMARY KEY,
+    prompt_usd_per_m DOUBLE,
+    completion_usd_per_m DOUBLE,
+    reasoning_usd_per_m DOUBLE
 );
 
 CREATE TABLE IF NOT EXISTS archive_policies (
@@ -323,6 +335,48 @@ WHERE run_id IN (SELECT run_id FROM latest_pilot_runs);
 """
 
 
+DEFAULT_LLM_COST_RATES: dict[str, dict[str, float]] = {
+    "z-ai/glm-5.3-flash:nitro": {"prompt": 0.06, "completion": 0.40, "reasoning": 0.40},
+    "z-ai/glm-5.3-flash": {"prompt": 0.06, "completion": 0.40, "reasoning": 0.40},
+    "openai/gpt-4o-mini": {"prompt": 0.15, "completion": 0.60, "reasoning": 0.60},
+    "openai/gpt-4o": {"prompt": 2.50, "completion": 10.00, "reasoning": 10.00},
+    "google/gemini-2.0-flash": {"prompt": 0.10, "completion": 0.40, "reasoning": 0.40},
+    "anthropic/claude-3.5-haiku": {
+        "prompt": 0.80,
+        "completion": 4.00,
+        "reasoning": 4.00,
+    },
+    "anthropic/claude-3.5-sonnet": {
+        "prompt": 3.00,
+        "completion": 15.00,
+        "reasoning": 15.00,
+    },
+    "deepseek/deepseek-chat": {"prompt": 0.14, "completion": 0.28, "reasoning": 0.28},
+}
+
+
+def compute_llm_cost(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    reasoning_tokens: int = 0,
+) -> float:
+    """Computes exact USD cost of an LLM call from per-million token pricing rates."""
+    m_low = (model or "").lower().strip()
+    rates = DEFAULT_LLM_COST_RATES.get(m_low)
+    if not rates:
+        for k, v in DEFAULT_LLM_COST_RATES.items():
+            if k in m_low or m_low in k:
+                rates = v
+                break
+    if not rates:
+        rates = {"prompt": 0.15, "completion": 0.60, "reasoning": 0.60}
+    p_cost = (prompt_tokens / 1_000_000.0) * rates["prompt"]
+    c_cost = (completion_tokens / 1_000_000.0) * rates["completion"]
+    r_cost = (reasoning_tokens / 1_000_000.0) * rates["reasoning"]
+    return float(p_cost + c_cost + r_cost)
+
+
 def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
     """Initializes all DuckDB tables for LOX and automatically migrates outdated schemas."""
     con = connect_db(db_path, read_only=False)
@@ -368,6 +422,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                 ("seeds_evaluated", "INTEGER DEFAULT 0"),
                 ("is_early_stopped", "BOOLEAN DEFAULT FALSE"),
                 ("pilot_best_delta", "DOUBLE DEFAULT 0.0"),
+                ("total_cost_usd", "DOUBLE DEFAULT 0.0"),
+                ("total_llm_tokens", "BIGINT DEFAULT 0"),
             ]:
                 if c_name not in cols_b:
                     try:
@@ -382,11 +438,28 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                 ("seeds_evaluated", "INTEGER DEFAULT 0"),
                 ("is_early_stopped", "BOOLEAN DEFAULT FALSE"),
                 ("pilot_best_delta", "DOUBLE DEFAULT 0.0"),
+                ("total_cost_usd", "DOUBLE DEFAULT 0.0"),
             ]:
                 if c_name not in cols_exp:
                     try:
                         con.execute(
                             f"ALTER TABLE experiments ADD COLUMN {c_name} {c_typ}"
+                        )
+                    except Exception:
+                        pass
+        if "synthesis_logs" in tables:
+            cols_syn = [
+                r[1]
+                for r in con.execute("PRAGMA table_info('synthesis_logs')").fetchall()
+            ]
+            for c_name, c_typ in [
+                ("agent_role", "VARCHAR DEFAULT 'author'"),
+                ("cost_usd", "DOUBLE DEFAULT 0.0"),
+            ]:
+                if c_name not in cols_syn:
+                    try:
+                        con.execute(
+                            f"ALTER TABLE synthesis_logs ADD COLUMN {c_name} {c_typ}"
                         )
                     except Exception:
                         pass
@@ -410,6 +483,17 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
     except Exception:
         pass
     con.execute(SCHEMA_SQL)
+    try:
+        for m_name, rates in DEFAULT_LLM_COST_RATES.items():
+            con.execute(
+                """
+                INSERT OR IGNORE INTO llm_cost_rates (model, prompt_usd_per_m, completion_usd_per_m, reasoning_usd_per_m)
+                VALUES (?, ?, ?, ?)
+                """,
+                [m_name, rates["prompt"], rates["completion"], rates["reasoning"]],
+            )
+    except Exception:
+        pass
     return con
 
 

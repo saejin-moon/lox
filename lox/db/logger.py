@@ -18,7 +18,7 @@ from lox.core.contracts import (
     normalize_episode_run,
     split_full_and_shard_runs,
 )
-from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
+from lox.db.schema import DEFAULT_DB_PATH, compute_llm_cost, connect_db, init_db
 from lox.db.summarizer import compute_function_stats, mark_outlier_good_runs
 from lox.ui.console import ui
 
@@ -71,6 +71,19 @@ class BatchDatabaseLogger:
         con = connect_db(self.db_path, read_only=False)
         now = datetime.datetime.now()
 
+        total_cost_usd = 0.0
+        total_tokens = 0
+        try:
+            row_c = con.execute(
+                "SELECT SUM(cost_usd), SUM(prompt_tokens + completion_tokens) FROM synthesis_logs WHERE batch_id = ?",
+                [batch_id],
+            ).fetchone()
+            if row_c:
+                total_cost_usd = float(row_c[0] or 0.0)
+                total_tokens = int(row_c[1] or 0)
+        except Exception:
+            pass
+
         try:
             con.execute("BEGIN TRANSACTION")
             con.execute(
@@ -80,9 +93,10 @@ class BatchDatabaseLogger:
                     target_functions, episodes_recorded, episodes_discarded,
                     avg_depth, p90_depth, max_depth, avg_score, max_score, avg_turns,
                     outlier_count, hypothesis_passed, wilcoxon_p, ci_lower, ci_upper,
-                    seeds_evaluated, is_early_stopped, pilot_best_delta, created_at
+                    seeds_evaluated, is_early_stopped, pilot_best_delta,
+                    total_cost_usd, total_llm_tokens, created_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [
@@ -108,6 +122,8 @@ class BatchDatabaseLogger:
                     int(batch_metrics.get("seeds_evaluated", len(runs))),
                     bool(batch_metrics.get("is_early_stopped", False)),
                     float(batch_metrics.get("pilot_best_delta", 0.0)),
+                    float(total_cost_usd),
+                    int(total_tokens),
                     now,
                 ],
             )
@@ -590,6 +606,17 @@ class BatchDatabaseLogger:
         import yaml
 
         con = connect_db(self.db_path, read_only=False)
+        total_cost_usd = 0.0
+        try:
+            row_c = con.execute(
+                "SELECT SUM(cost_usd) FROM synthesis_logs WHERE batch_id = ?",
+                [batch_id],
+            ).fetchone()
+            if row_c and row_c[0] is not None:
+                total_cost_usd = float(row_c[0])
+        except Exception:
+            pass
+
         try:
             con.execute(
                 """
@@ -597,9 +624,10 @@ class BatchDatabaseLogger:
                     experiment_id, generation, batch_id, mode, target_functions,
                     hypothesis_yaml, observation_from_db, mechanism, passed, mean_delta,
                     ci_lower, ci_upper, wilcoxon_p, wins, losses, ties,
-                    seeds_evaluated, is_early_stopped, pilot_best_delta, verdict_reason, created_at
+                    seeds_evaluated, is_early_stopped, pilot_best_delta, total_cost_usd,
+                    verdict_reason, created_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [
@@ -628,6 +656,7 @@ class BatchDatabaseLogger:
                     int(verdict.get("seeds_evaluated", 0)),
                     bool(verdict.get("is_early_stopped", False)),
                     float(verdict.get("pilot_best_delta", 0.0)),
+                    float(total_cost_usd),
                     str(verdict.get("reason", "")),
                     datetime.datetime.now(),
                 ],
@@ -769,9 +798,18 @@ class BatchDatabaseLogger:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         reasoning_tokens: int = 0,
+        agent_role: str = "author",
+        cost_usd: float | None = None,
         wall_ms: float = 0.0,
     ) -> None:
-        """Saves a rich turn-level synthesis record (reasoning tokens, candidate code, errors, tools) to DuckDB."""
+        """Saves a rich turn-level synthesis record (reasoning tokens, candidate code, errors, tools, cost) to DuckDB."""
+        if cost_usd is None:
+            cost_usd = compute_llm_cost(
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                reasoning_tokens=reasoning_tokens,
+            )
         con = connect_db(self.db_path, read_only=False)
         try:
             con.execute(
@@ -781,8 +819,8 @@ class BatchDatabaseLogger:
                     model, thinking_content, message_content, tool_calls_json, tool_results_json,
                     candidate_code, skill_name, skill_code, hypothesis_yaml, status,
                     error_diagnostic, prompt_sent, prompt_tokens, completion_tokens,
-                    reasoning_tokens, wall_ms, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reasoning_tokens, agent_role, cost_usd, wall_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(log_id),
@@ -807,6 +845,8 @@ class BatchDatabaseLogger:
                     int(prompt_tokens),
                     int(completion_tokens),
                     int(reasoning_tokens),
+                    str(agent_role or "author"),
+                    float(cost_usd or 0.0),
                     float(wall_ms),
                     datetime.datetime.now(),
                 ],

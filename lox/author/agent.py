@@ -74,9 +74,11 @@ class AuthorAgent:
         max_repair_turns: int = 5,
         benchmark: str = "nethack",
         pilot_fallback: str = "best",
+        agent_role: str = "author",
     ):
         self.provider = provider.lower()
         self.model = model
+        self.agent_role = str(agent_role)
         self.api_key = (
             api_key
             or os.environ.get("OPENROUTER_API_KEY")
@@ -645,6 +647,7 @@ class AuthorAgent:
                     prompt_tokens=100,
                     completion_tokens=200,
                     reasoning_tokens=50,
+                    agent_role=self.agent_role,
                     wall_ms=1.5,
                 )
             except Exception:
@@ -913,6 +916,7 @@ class AuthorAgent:
                             prompt_tokens=prompt_toks,
                             completion_tokens=comp_toks,
                             reasoning_tokens=reasoning_toks,
+                            agent_role=self.agent_role,
                             wall_ms=turn_ms,
                         )
                     except Exception:
@@ -1098,6 +1102,7 @@ class AuthorAgent:
                     prompt_tokens=prompt_toks,
                     completion_tokens=comp_toks,
                     reasoning_tokens=reasoning_toks,
+                    agent_role=self.agent_role,
                     wall_ms=turn_ms,
                 )
             except Exception:
@@ -1151,6 +1156,7 @@ class AuthorAgent:
                         prompt_tokens=0,
                         completion_tokens=0,
                         reasoning_tokens=0,
+                        agent_role=self.agent_role,
                         wall_ms=0.0,
                     )
                 except Exception:
@@ -1249,6 +1255,7 @@ class AuthorAgent:
                     prompt_tokens=0,
                     completion_tokens=0,
                     reasoning_tokens=0,
+                    agent_role=self.agent_role,
                     wall_ms=0.0,
                 )
             except Exception:
@@ -1421,6 +1428,7 @@ class AuthorAgent:
                                 "reasoning_tokens", 0
                             )
                         ),
+                        agent_role=self.agent_role,
                         wall_ms=rep_ms,
                     )
                 except Exception:
