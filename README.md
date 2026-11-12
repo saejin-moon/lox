@@ -114,7 +114,15 @@ graph TD
 # Master Behavior Tree Policy - Synthesized by Meta-Agent (Gen k)
 import numpy as np
 from lox.env.actions import Action, DIR_DELTAS, seq
-from lox.lang.bt import BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, Blackboard
+from lox.lang.bt import (
+    BehaviorTree,
+    PrioritySelector,
+    Sequence,
+    ActionLeaf,
+    ConditionLeaf,
+    Blackboard,
+)
+
 
 class Policy:
     def __init__(self):
@@ -124,9 +132,12 @@ class Policy:
         def dialog_action(state):
             if getattr(state, "waiting_for_space", False):
                 return Action.SPACE
-            if getattr(state, "in_text_prompt", False) or getattr(state, "in_yn_prompt", False):
+            if getattr(state, "in_text_prompt", False) or getattr(
+                state, "in_yn_prompt", False
+            ):
                 return Action.ESC
             return None
+
         self.node_dialog = ActionLeaf(dialog_action, name="DialogLeaf")
 
         # Priority 2: Tactical Threat & Melee Combat
@@ -138,6 +149,7 @@ class Policy:
                     bb.set_var("last_target", (m.y, m.x))
                     return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
             return None
+
         self.node_threat = ActionLeaf(threat_action, name="ThreatLeaf")
 
         # Priority 3: Spatial Exploration & Stair Descent
@@ -151,14 +163,18 @@ class Policy:
                 dx = int(np.sign(tx - state.x))
                 return DIR_DELTAS.get((dy, dx), Action.SEARCH)
             return Action.SEARCH
+
         self.node_navigation = ActionLeaf(navigation_action, name="NavigationLeaf")
 
         # Assemble Master Priority Selector
-        root = PrioritySelector([
-            self.node_dialog,
-            self.node_threat,
-            self.node_navigation,
-        ], name="MasterSelector")
+        root = PrioritySelector(
+            [
+                self.node_dialog,
+                self.node_threat,
+                self.node_navigation,
+            ],
+            name="MasterSelector",
+        )
 
         self.tree = BehaviorTree(root=root, blackboard=self.blackboard)
 

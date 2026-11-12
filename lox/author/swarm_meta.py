@@ -7,12 +7,15 @@ queries DuckDB for causal metrics, and assembles the unified Behavior Tree polic
 from __future__ import annotations
 
 import json
+import traceback
 from typing import Any
 
 from lox.author.agent import AuthorAgent
 from lox.db.schema import connect_db
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
+from lox.env.harness import NetHackHarness
+from lox.lang.compiler import compile_policy_package
 from lox.lang.validator import validate_python_code
 from lox.ui.console import ui
 
@@ -272,13 +275,44 @@ class SwarmMetaAgent:
         )
         return categories
 
+    def verify_policy(self, code: str, steps: int = 10) -> tuple[bool, str]:
+        """
+        Validates Python syntax/AST, compiles the policy, and executes a smoke test
+        in NetHackHarness for `steps` ticks to verify runtime stability.
+        Returns (is_valid, diagnostic_error_string).
+        """
+        try:
+            validate_python_code(code)
+            compiled = compile_policy_package(code)
+            runner = compiled.create_runner()
+            harness = NetHackHarness(max_steps=steps + 5)
+            try:
+                st = harness.reset(seed=42)
+                for _ in range(steps):
+                    act, _ = runner.next_action(st)
+                    if act is None:
+                        continue
+                    st = harness.step(act)
+                    if harness.done:
+                        break
+                return True, ""
+            finally:
+                harness.close()
+        except Exception as e:
+            tb = traceback.format_exc()
+            return False, f"{type(e).__name__}: {e}\n{tb}"
+
     def assemble_policy(
         self,
         generation: int,
         worker_reports: dict[str, dict[str, Any]] | None = None,
+        current_policy: str = "",
+        max_repair_turns: int = 3,
     ) -> str:
         """
         Gathers worker reports from LanceDB, checks DuckDB metrics, and synthesizes the master Policy code.
+        Runs compiler-in-the-loop and live NetHackHarness verification with up to `max_repair_turns`
+        self-repair turns if candidate code fails.
         """
         if worker_reports is None:
             worker_reports = self.theories.get_latest_reports(generation=generation)
@@ -289,7 +323,7 @@ class SwarmMetaAgent:
         )
 
         # Standard clean Behavior Tree master template
-        master_policy_code = f"""# Master Behavior Tree Policy - Synthesized by Meta-Agent (Gen {generation})
+        default_template = f"""# Master Behavior Tree Policy - Synthesized by Meta-Agent (Gen {generation})
 import numpy as np
 from lox.env.actions import Action, DIR_DELTAS, seq
 from lox.lang.bt import BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, Blackboard
@@ -320,7 +354,6 @@ class Policy:
 
         # Priority 3: Survival & Nutrition
         def survival_action(state, bb):
-            # Check for emergency prayer or item consumption if needed
             return None
         self.node_survival = ActionLeaf(survival_action, name="SurvivalLeaf")
 
@@ -350,20 +383,70 @@ class Policy:
     def step(self, state):
         return self.tree.tick(state)
 """
-        # Validate AST
-        validate_python_code(master_policy_code)
+        if self.provider == "mock":
+            master_policy_code = default_template
+            is_valid, diag = self.verify_policy(master_policy_code)
+            if not is_valid:
+                raise RuntimeError(
+                    f"Default master template failed verification: {diag}"
+                )
+        else:
+            # Build synthesis prompt summarizing worker discoveries
+            reports_summary = []
+            for role, rep in worker_reports.items():
+                best_d = rep.get("best_delta", 0.0)
+                code_snip = rep.get("best_code", "")
+                reports_summary.append(
+                    f"### Specialist Worker: {role} (Best Delta: {best_d:+.2f})\n```python\n{code_snip}\n```\n"
+                )
+            context = "\n".join(reports_summary)
+            meta_prompt = (
+                f"You are the Meta-Agent Architect. Synthesize a unified `class Policy` utilizing Behavior Trees "
+                f"(`BehaviorTree`, `PrioritySelector`, `ActionLeaf`, `ConditionLeaf`, `Blackboard`) for Generation {generation}.\n"
+                f"Integrate the specialized subtrees and findings from these category workers:\n\n{context}\n\n"
+                f"Ensure the master policy defines `class Policy` with `def __init__(self)` and `def step(self, state): return self.tree.tick(state)`."
+            )
 
-        # Save synthesis reflection into LanceDB
-        self.theories.save_document(
-            generation=generation,
-            agent_role="meta_agent",
-            doc_type="META_SYNTHESIS",
-            title=f"Meta-Agent Policy Assembly G{generation}",
-            content=f"### Master Policy Code\n```python\n{master_policy_code}\n```",
-            tags=["meta_agent", f"gen_{generation}", "assembly"],
-        )
+            proposal = self.author.synthesize(
+                mode="CREATE" if not current_policy else "WRITE",
+                generation=generation,
+                current_policy=current_policy or default_template,
+                batch_digest=meta_prompt,
+                max_tool_turns=3,
+            )
+            candidate_code = proposal.full_policy_code or proposal.raw_code_patch
 
-        return master_policy_code
+            # Live verification gate with self-repair turns
+            is_valid, diag = self.verify_policy(candidate_code)
+            repair_turns = 0
+            while not is_valid and repair_turns < max_repair_turns:
+                repair_turns += 1
+                ui.warn(
+                    f"Meta-Agent: Policy verification failed; executing self-repair turn ({repair_turns}/{max_repair_turns})...\nDiagnostic: {diag[:300]}"
+                )
+                repair_proposal = self.author.synthesize(
+                    mode="WRITE",
+                    generation=generation,
+                    current_policy=candidate_code,
+                    batch_digest=f"Self-Repair Required: Master policy failed verification:\n{diag}",
+                    max_tool_turns=2,
+                )
+                candidate_code = (
+                    repair_proposal.full_policy_code or repair_proposal.raw_code_patch
+                )
+                is_valid, diag = self.verify_policy(candidate_code)
+
+            if is_valid:
+                master_policy_code = candidate_code
+                ui.info(
+                    f"Meta-Agent: Successfully assembled and verified master Behavior Tree policy (Repairs: {repair_turns})."
+                )
+            else:
+                ui.warn(
+                    f"Meta-Agent: Repairs exhausted; falling back to default Behavior Tree template. Error was: {diag[:200]}"
+                )
+                master_policy_code = default_template
+
         # Save synthesis reflection into LanceDB
         self.theories.save_document(
             generation=generation,

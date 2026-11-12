@@ -10,8 +10,8 @@ Specializes in one of 4 functional domains:
 from __future__ import annotations
 
 import inspect
-import json
 import random
+import traceback
 from typing import Any
 
 from lox.author.agent import AuthorAgent
@@ -19,6 +19,13 @@ from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive, FrontierCheckpoint
 from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
+from lox.lang.bt import (
+    ActionLeaf,
+    BehaviorNode,
+    BehaviorTree,
+    Blackboard,
+    ConditionLeaf,
+)
 from lox.ui.console import ui
 
 WORKER_ROLE_DESCRIPTIONS: dict[str, str] = {
@@ -55,6 +62,7 @@ class SwarmWorker:
         theories_path: str = "data/workspace/theories.lance",
         frontier_dir: str = "data/frontier",
         max_turns: int = 4,
+        max_repair_turns: int = 3,
     ) -> None:
         self.role = role.lower()
         self.description = description
@@ -65,6 +73,7 @@ class SwarmWorker:
         self.theories = TheoryDocumentStore(db_path=theories_path)
         self.frontier = FrontierArchive(frontier_dir=frontier_dir)
         self.max_turns = max_turns
+        self.max_repair_turns = max_repair_turns
         self.author = AuthorAgent(
             provider=provider,
             model=model,
@@ -101,10 +110,10 @@ class SwarmWorker:
         code_snippet: str,
         checkpoint: FrontierCheckpoint | None = None,
         steps: int = 25,
-    ) -> float:
+    ) -> tuple[float, str]:
         """
         Empirically evaluates candidate code directly on a frontier checkpoint or fresh seed.
-        Returns the true empirical progression score delta.
+        Returns (empirical_score_delta, error_diagnostic).
         """
         harness = NetHackHarness(max_steps=steps + 50)
         try:
@@ -121,20 +130,53 @@ class SwarmWorker:
             exec(code_snippet, globals(), local_scope)
 
             node: Any = None
+            # 1. Prefer instantiated BehaviorTree / BehaviorNode objects
             for candidate in local_scope.values():
-                if hasattr(candidate, "tick"):
+                if not inspect.isclass(candidate) and (
+                    hasattr(candidate, "tick")
+                    or hasattr(candidate, "step")
+                    or callable(candidate)
+                ):
                     node = candidate
                     break
-                elif inspect.isclass(candidate) and hasattr(candidate, "step"):
-                    node = candidate()
-                    break
+
+            # 2. If no instance found, check for Policy or Node classes to instantiate
+            if node is None:
+                builtin_bt_types = (
+                    BehaviorTree,
+                    ActionLeaf,
+                    ConditionLeaf,
+                    Blackboard,
+                    BehaviorNode,
+                )
+                for candidate in local_scope.values():
+                    if (
+                        inspect.isclass(candidate)
+                        and candidate not in builtin_bt_types
+                        and (hasattr(candidate, "step") or hasattr(candidate, "tick"))
+                    ):
+                        try:
+                            node = candidate()
+                            break
+                        except Exception:
+                            pass
 
             if node is None:
-                return 0.0
+                return (
+                    -10.0,
+                    "No BehaviorTree node (.tick(st)) or Policy class (.step(st)) found in code snippet.",
+                )
 
+            bb = Blackboard()
             for _ in range(steps):
-                if hasattr(node, "tick"):
+                if isinstance(node, BehaviorTree):
                     act = node.tick(st)
+                elif hasattr(node, "tick"):
+                    try:
+                        res = node.tick(st, bb)
+                    except TypeError:
+                        res = node.tick(st)
+                    act = res[1] if isinstance(res, tuple) else res
                 elif hasattr(node, "step"):
                     act = node.step(st)
                 else:
@@ -149,9 +191,10 @@ class SwarmWorker:
             hp_gain = float((st.hp - start_hp) * 5)
             depth_gain = float((st.depth - start_depth) * 200)
             survival_bonus = 20.0 if not harness.done else -50.0
-            return float(score_gain + hp_gain + depth_gain + survival_bonus)
-        except Exception:
-            return -10.0
+            return float(score_gain + hp_gain + depth_gain + survival_bonus), ""
+        except Exception as e:
+            tb = traceback.format_exc()
+            return -50.0, f"{type(e).__name__}: {e}\n{tb}"
         finally:
             harness.close()
 
@@ -175,6 +218,7 @@ class SwarmWorker:
             checkpoint = self.frontier.sample_checkpoint()
 
         for turn in range(1, self.max_turns + 1):
+            theory_desc = ""
             if self.provider == "mock":
                 code_snippet = (
                     f"# Subtree for {self.role} Gen {generation} Turn {turn}\n"
@@ -191,11 +235,7 @@ class SwarmWorker:
                     code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nsurvival_node = ActionLeaf(lambda st, bb: None)\n"
                 else:
                     code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nnavigation_node = ActionLeaf(lambda st: Action.SEARCH)\n"
-                hyp = {
-                    "role": self.role,
-                    "mechanism": f"Implements reactive {self.role} logic",
-                    "observation_from_db": "Empirical inspection from DuckDB",
-                }
+                theory_desc = f"Implements reactive {self.role} Behavior Tree logic for checkpoint depth {checkpoint.depth if checkpoint else 1}."
             else:
                 proposal = self.author.synthesize(
                     mode="WRITE",
@@ -204,12 +244,39 @@ class SwarmWorker:
                     max_tool_turns=4,
                 )
                 code_snippet = proposal.raw_code_patch
-                hyp = proposal.hypothesis
+                theory_desc = str(
+                    proposal.hypothesis.get("mechanism")
+                    or proposal.hypothesis.get("observation_from_db")
+                    or f"Evolving {self.role} subtree"
+                )
 
             # Empirically evaluate candidate code on the frontier checkpoint!
-            delta = self.evaluate_candidate(
+            delta, err_diag = self.evaluate_candidate(
                 code_snippet, checkpoint=checkpoint, steps=25
             )
+
+            # In-turn self-repair loop: if checkpoint evaluation raised a syntax or runtime error
+            repair_turns = 0
+            while (
+                err_diag
+                and repair_turns < self.max_repair_turns
+                and self.provider != "mock"
+            ):
+                repair_turns += 1
+                ui.warn(
+                    f"Swarm Worker [{self.role}]: Checkpoint error caught; executing self-repair turn ({repair_turns}/{self.max_repair_turns})..."
+                )
+                repair_proposal = self.author.synthesize(
+                    mode="WRITE",
+                    generation=generation,
+                    current_policy=code_snippet,
+                    max_tool_turns=2,
+                )
+                code_snippet = repair_proposal.raw_code_patch
+                delta, err_diag = self.evaluate_candidate(
+                    code_snippet, checkpoint=checkpoint, steps=25
+                )
+
             if delta > best_delta or not best_code:
                 best_delta = delta
                 best_code = code_snippet
@@ -218,11 +285,15 @@ class SwarmWorker:
             self.theories.save_document(
                 generation=generation,
                 agent_role=self.role,
-                doc_type="HYPOTHESIS",
-                title=f"{self.role.capitalize()} Hypothesis G{generation}T{turn} (Delta: {delta:+.1f})",
-                content=f"### Hypothesis\n{json.dumps(hyp, indent=2)}\n\n```python\n{code_snippet}\n```\n\n**Empirical Checkpoint Delta**: {delta:+.2f}",
-                tags=[self.role, f"gen_{generation}"],
-                verified_c_rule=str(hyp.get("verified_c_rule", "")),
+                doc_type="THEORY",
+                title=f"{self.role.capitalize()} Theory G{generation}T{turn} (Delta: {delta:+.1f})",
+                content=(
+                    f"### Theory: {self.role.capitalize()} Exploration (Turn {turn})\n"
+                    f"{theory_desc}\n\n"
+                    f"```python\n{code_snippet}\n```\n\n"
+                    f"**Checkpoint Evaluation Outcome**: Delta={delta:+.2f} | Status={'OK' if not err_diag else err_diag}"
+                ),
+                tags=[self.role, f"gen_{generation}", "theory"],
             )
 
         # Compile final reflection report with real empirical delta

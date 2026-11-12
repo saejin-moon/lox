@@ -207,3 +207,58 @@ def test_swarm_campaign_orchestrator_end_to_end(tmp_path):
         con.close()
     finally:
         orchestrator.close()
+
+
+def test_swarm_self_repair_mechanisms(tmp_path):
+    theories_path = str(tmp_path / "theories.lance")
+    frontier_dir = str(tmp_path / "frontier")
+    db_path = str(tmp_path / "test_repair.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    worker = SwarmWorker(
+        role="threat",
+        provider="mock",
+        db_path=db_path,
+        theories_path=theories_path,
+        frontier_dir=frontier_dir,
+    )
+
+    # 1. Test worker candidate evaluation: clean code succeeds
+    clean_code = """
+from lox.lang.bt import ActionLeaf
+from lox.env.actions import Action
+threat_node = ActionLeaf(lambda st: Action.SEARCH)
+"""
+    delta, err = worker.evaluate_candidate(clean_code, steps=5)
+    assert err == ""
+    assert isinstance(delta, float)
+
+    # 2. Test worker candidate evaluation: faulty runtime code returns diagnostic traceback
+    buggy_code = """
+from lox.lang.bt import ActionLeaf
+def faulty_action(st):
+    return 1 / 0  # ZeroDivisionError
+buggy_node = ActionLeaf(faulty_action)
+"""
+    delta, err = worker.evaluate_candidate(buggy_code, steps=5)
+    assert "ZeroDivisionError" in err
+    assert delta < 0.0
+
+    # 3. Test Meta-Agent policy verification: valid BehaviorTree code passes
+    meta = SwarmMetaAgent(
+        provider="mock",
+        db_path=db_path,
+        theories_path=theories_path,
+        frontier_dir=frontier_dir,
+    )
+    valid_code = meta.assemble_policy(generation=1)
+    is_valid, diag = meta.verify_policy(valid_code, steps=5)
+    assert is_valid is True
+    assert diag == ""
+
+    # 4. Test Meta-Agent policy verification: invalid code returns failure diagnostic
+    syntax_error_code = "class Policy:\n    def step(self): return Action.WAIT"
+    is_valid, diag = meta.verify_policy(syntax_error_code, steps=5)
+    assert is_valid is False
+    assert "PolicyValidationError" in diag or "TypeError" in diag

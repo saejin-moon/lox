@@ -153,10 +153,15 @@ class SwarmCampaignOrchestrator:
                     ui.warn(f"Worker [{c_id}] failed: {e}")
 
         # 3. Meta-Agent Policy Synthesis & Assembly
-        master_policy_code = self.meta_agent.assemble_policy(
-            generation=generation, worker_reports=worker_reports
-        )
         policy_path = self.workspace_dir / "policy.py"
+        current_policy = (
+            policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
+        )
+        master_policy_code = self.meta_agent.assemble_policy(
+            generation=generation,
+            worker_reports=worker_reports,
+            current_policy=current_policy,
+        )
         policy_path.write_text(master_policy_code, encoding="utf-8")
         ui.info(f"Gen {generation}: Master policy saved to `{policy_path}`.")
 
