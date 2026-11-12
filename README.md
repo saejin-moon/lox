@@ -6,24 +6,26 @@
 
 Standard reinforcement learning requires billions of environment frames to train opaque neural weights, frequently stalling on NetHack's combinatorial item interactions, multi-step tactical puzzles, and sparse delayed rewards. Turn-by-turn LLM game agents pay prohibitive latency (1–3 seconds per action) and API costs ($50–$200 per game) that make statistical evaluation impossible.
 
-`LOX` decouples reasoning speed from execution speed through a **dual-loop architecture**:
+`LOX` decouples reasoning speed from execution speed through a **Hierarchical Multi-Agent Swarm and Dual-Store Architecture**:
 
-- **Inner Execution Loop (CPU / Numba)**: Compiled Python 3.11+ generator policies execute directly against native C environment harnesses at **120,000 to 285,000+ steps/second** across multi-core worker pools (`0` LLM tokens per action). The harness utilizes lean observation channels (eliminating redundant C-level string descriptions), handles pagination (`--More--`) transparently, passes interactive decision prompts (`[yn]`, `[ynq]`, getlin) directly to policies with watchdog protection, and exposes zero-turn action stall telemetry (`state.turn_advanced`, `state.consecutive_stalls`).
-- **Outer Scientific Loop (Stateless LLM Author Agent)**: Between evaluation batches, a stateless Author Agent queries an 8-table **DuckDB** analytical warehouse (`runs`, `ticks`, `function_stats`, `discoveries`, `expert_runs`, `expert_ticks`) and an offline **NetHack 3.6.6 Wiki / Strategy Knowledge Base** (SQLite FTS5 BM25). It diagnoses empirical bottlenecks, checks game mechanics against C symbol tables (`permonst`, `objclass`), tests candidate revisions in a **4-attempt pilot loop** (`dry_run_policy`) against 30 paired baseline episodes with prefix-replay shards, and promotes candidates to full rollouts governed by parameter-free sequential hypothesis testing.
+- **Execution Engine (C++ / Numba)**: Compiled Python 3.11+ Behavior Tree policies execute directly against native C environment harnesses at **120,000 to 285,000+ steps/second** across multi-core worker pools (`0` LLM tokens per action). The harness exposes lean zero-copy observation channels, auto-dismisses pagination (`--More--`), passes interactive decision prompts (`[yn]`, `[ynq]`, getlin) directly to policies with watchdog protection, and tracks zero-turn action stall telemetry (`state.turn_advanced`, `state.consecutive_stalls`).
+- **Dynamic Swarm Synthesis Loop (Meta-Agent & Concurrent Category Workers)**: Rather than relying on static human roles, an empirical **Meta-Agent** dynamically analyzes DuckDB mortality and depth bottlenecks to discover emergent macro-categories per run. Specialized concurrent **Category Workers** run iterative exploration turns on **Go-Explore Frontier Checkpoints**, testing candidate code directly on replayed mid-game states in ~15ms, and logging theories into an embedded **LanceDB Document Store** (Tantivy BM25 FTS).
+- **Hierarchical Behavior Tree Assembly**: The Meta-Agent integrates worker reflection reports into unified, modular Behavior Trees (`PrioritySelector`, `Sequence`, `ActionLeaf`, `ConditionLeaf`) communicating exclusively through a shared `Blackboard`.
+- **Dual-Store Analytical Warehouse**: Unstructured agent theories, category decompositions, and reflection reports persist in **LanceDB**; structured episode telemetry, tail-sampled turn ticks, spectrum-based Ochiai/Liblit fault attributions, and exact USD LLM costs persist in **DuckDB**.
 
 ---
 
 ## Table of Contents
 
 1. [Core Architectural Philosophy ("Hard Code Nothing")](#1-core-architectural-philosophy-hard-code-nothing)
-2. [System Architecture & Lifecycle](#2-system-architecture--lifecycle)
-3. [The Canonical Modification Modes](#3-the-canonical-modification-modes)
-4. [Pilot Revision Gate & Negative-Delta Abort](#4-pilot-revision-gate--negative-delta-abort)
-5. [Harness Architecture & High-Throughput Telemetry](#5-harness-architecture--high-throughput-telemetry)
-6. [Prefix-Replay Checkpoint Shards & Spatial WorldMemory](#6-prefix-replay-checkpoint-shards--spatial-worldmemory)
-7. [Parameter-Free Sequential Hypothesis Testing](#7-parameter-free-sequential-hypothesis-testing)
-8. [DuckDB Analytical Schema & Fault Attribution](#8-duckdb-analytical-schema--fault-attribution)
-9. [Long-Horizon Scaling & Unattended Operations](#9-long-horizon-scaling--unattended-operations)
+2. [Hierarchical Multi-Agent Swarm Architecture](#2-hierarchical-multi-agent-swarm-architecture)
+3. [Behavior Tree Policy Framework & Blackboard](#3-behavior-tree-policy-framework--blackboard)
+4. [Dual-Store Architecture (LanceDB + DuckDB)](#4-dual-store-architecture-lancedb--duckdb)
+5. [Go-Explore Frontier Checkpoints & 3D MAP-Elites Archive](#5-go-explore-frontier-checkpoints--3d-map-elites-archive)
+6. [The Canonical Modification Modes](#6-the-canonical-modification-modes)
+7. [Pilot Revision Gate & Negative-Delta Abort](#7-pilot-revision-gate--negative-delta-abort)
+8. [Parameter-Free Sequential Hypothesis Testing](#8-parameter-free-sequential-hypothesis-testing)
+9. [Automated LLM Token & USD Cost Accounting](#9-automated-llm-token--usd-cost-accounting)
 10. [Repository Structure](#10-repository-structure)
 11. [Quickstart & CLI Usage](#11-quickstart--cli-usage)
 12. [References & Citations](#12-references--citations)
@@ -44,62 +46,167 @@ Most game-playing agents depend on human-engineered domain scaffolding: hardcode
    - **Interactive Prompt Passthrough**: Decouples pagination (`--More--`, auto-cleared with `SPACE`) from true decision prompts (`in_yn_function`, `in_getlin`), allowing policies to respond interactively across steps with a 3-step watchdog.
    - **Zero-Turn Action Stall Guard**: Automatically tracks `state.turn_advanced` and `state.consecutive_stalls`. Runaway action loops (e.g. repeatedly bumping into peaceful monsters or overweight containers) are truncated after 100 consecutive zero-turn steps with reason `stalled_zero_turn`.
 
-2. **Near-Full Python 3.11+ Policy Language & Modular Skills ([`lox/lang/`](lox/lang/))**:
-   - The Author Agent writes standard Python 3.11+ in `data/workspace/policy.py` and modular skill packages in `data/workspace/skills/`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
+2. **Near-Full Python 3.11+ Policy Language & Behavior Trees ([`lox/lang/`](lox/lang/))**:
+   - The Author Agent writes standard Python 3.11+ Behavior Trees in `data/workspace/policy.py` and modular skill packages in `data/workspace/skills/`: classes, stateful generator coroutines (`yield` / `yield from`), `match/case` pattern matching, comprehensions, `@dataclass`, closures, and safe standard library modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `numpy`, `random`, `bisect`, `copy`).
    - Compile-time AST instrumentation ([`PolicyInstrumentTransformer`](lox/lang/instrument.py) and [`ExecutionTracer`](lox/lang/instrument.py)) injects `<1 µs` per-function call tracking, per-function turn attribution, zero-yield loop protection ([`PolicyLoopError`](lox/lang/instrument.py)), and parameter hooks (`self.param(name, default, min_val, max_val)`).
    - Automatic naming prompt fallback: exposes `state.in_text_prompt` / `state.in_naming_prompt` directly to policy state and features a safety fallback auto-`ESC` in the execution runner to prevent unhandled text prompts (e.g. `Call a scroll: `) from stalling policies.
 
 ---
 
-## 2. System Architecture & Lifecycle
+## 2. Hierarchical Multi-Agent Swarm Architecture
 
-```text
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                     STATELESS AUTHOR AGENT (Per-Generation)                      │
-│  • 100% Static Cached System Prompt (Epistemic Discovery Loop + DuckDB Schema)   │
-│  • Dynamic User Prompt: Mode Instructions + Active Code + Contrastive Digest     │
-│  • Epistemic Memory: Verified Breakthroughs (discoveries) & Rejected Hypotheses  │
-│  • Tools: query_db(sql) | query_wiki(q) | query_policy_docs(t) | dry_run_policy  │
-│  • 4-Revision Pilot Loop: Up to 4 revisions × 30 paired episodes (~0.8s)         │
-│    with Negative-Delta Abort (never rolls out a known regression)                │
-└───────────────────────────────────────┬──────────────────────────────────────────┘
-                                        │ Emits Causal YAML Hypothesis + Python Code
-                                        ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                   MODE SCHEDULER & QUALITY-DIVERSITY BEHAVIOR ARCHIVE            │
-│       ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐          │
-│       │     CREATE      │    │      WRITE      │    │    REFACTOR     │          │
-│       │  250 episodes   │    │ 150 trig eps    │    │  200 episodes   │          │
-│       │  (Bootstrap)    │    │  (Max 2 fns)    │    │  (>=450 lines)  │          │
-│       └────────┬────────┘    └────────┬────────┘    └────────┬────────┘          │
-└────────────────┼──────────────────────┼──────────────────────┼───────────────────┘
-                 │                      │                      │
-                 ▼                      ▼                      ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│             PERSISTENT MULTI-CORE WORKER POOL (NLE & Craftax Adapters)           │
-│  • Direct C / Numba Step Execution (120k–285k+ steps/sec across worker cores)    │
-│  • Adaptive Horizon: Dynamically scales 5,000 -> 50,000 steps matching depth     │
-│  • 3-Tier Stratified Shards: Frontier (>=P90), Mid-Band, Foundation (up to 400s) │
-│  • Conditional Trigger Filter: discards episodes where target_fn call_count == 0 │
-│  • Preemptive Generator Interrupt: aborts macro on HP drop, hostiles, or prompts │
-│  • Unreachable Function Circuit Breaker + Sequential Futility Early Stopping     │
-└───────────────────────────────────────┬──────────────────────────────────────────┘
-                                        │ Recorded Triggered Episodes + Replay Bytes
-                                        ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│           MULTI-TABLE DUCKDB WAREHOUSE & OUTLIER SUMMARIZER (lox.duckdb)         │
-│  • RLE Phase Timeline Compressor + Critical Inflection & Stall Detector          │
-│  • Go-Explore Outlier Good-Run Marker (is_outlier_good = TRUE via Z-score / IQR) │
-│  • Spectrum-Based Function Attribution (Ochiai Good-Run & Liblit Failure Scores) │
-│  • Epistemic Breakthroughs (discoveries) & Milestone Checkpoint Archiver         │
-│  • Automated Telemetry Pruning (keeps DB nimble during 5,000+ generation runs)   │
-│  • Consolidated Human Ascensions & Expert Traces (expert_runs & expert_ticks)    │
-└──────────────────────────────────────────────────────────────────────────────────┘
+`LOX` replaces monolithic single-agent prompting with an asynchronous, hierarchical multi-agent swarm governed by empirical bottleneck discovery:
+
+```mermaid
+graph TD
+    subgraph "Meta-Agent Orchestration (Generation k)"
+        DB[(DuckDB Telemetry)] -->|Mortality, Stalls, Depth| MetaDisc[Meta-Agent: Dynamic Macro-Category Discovery]
+        MetaDisc -->|Category Decomposition| LanceDB[(LanceDB Document DB)]
+    end
+
+    subgraph "Concurrent Category Exploration (N Turns)"
+        MetaDisc -->|Brief 1: Combat| W1[Worker 1: Threat/Ant Defense]
+        MetaDisc -->|Brief 2: Health| W2[Worker 2: Intrinsic Farming]
+        MetaDisc -->|Brief 3: Navigation| W3[Worker 3: Sokoban/Stairs]
+        Frontier[(Frontier Archive)] -->|Replay ~15ms| W1
+        Frontier -->|Replay ~15ms| W2
+        Frontier -->|Replay ~15ms| W3
+        W1 -->|Theories & Reflection Reports| LanceDB
+        W2 -->|Theories & Reflection Reports| LanceDB
+        W3 -->|Theories & Reflection Reports| LanceDB
+    end
+
+    subgraph "Policy Assembly & Evaluation"
+        LanceDB -->|Gather Reports| MetaAssembly[Meta-Agent: Behavior Tree Assembly]
+        MetaAssembly -->|Master Policy| PolicyFile[data/workspace/policy.py]
+        PolicyFile --> EvalPool[Persistent Multi-Core Eval Pool]
+        EvalPool -->|Runs, Ticks, Stats| DB
+        EvalPool -->|Milestone Runs >= D2| Frontier
+        EvalPool -->|Niche Insertion| MAPElites[3D MAP-Elites Archive]
+    end
 ```
+
+### Swarm Lifecycle
+
+1. **Dynamic Macro-Category Discovery**:
+   - At the beginning of generation $k$, the Meta-Agent queries DuckDB's latest mortality telemetry (`end_reason`, `death_message`), depth distribution, prompt dismissals (`auto_esc_count`), and blunders (`starved_with_food`, `died_unarmored`).
+   - Rather than static human roles, categories emerge dynamically matching the active frontier (e.g. early vermin kiting on Dlvl 1–2 vs. soldier ant poison defense & Sokoban boulder navigation on Dlvl 4–6).
+   - The decomposition plan is persisted into LanceDB as a `CATEGORY_DECOMPOSITION` document.
+2. **Concurrent Category Worker Exploration**:
+   - $M$ specialized workers execute in parallel.
+   - For $N$ exploration turns, each worker queries C symbol tables (`query_monster`, `query_item`) and DuckDB, formulates hypotheses, synthesizes candidate subtrees, and evaluates them directly on replayed frontier checkpoints in ~15ms.
+   - Intermediate theories and empirical score deltas are saved into LanceDB. At the end of $N$ turns, each worker writes a structured `REFLECTION_REPORT`.
+3. **Behavior Tree Master Policy Assembly**:
+   - The Meta-Agent retrieves worker reflection reports from LanceDB and assembles verified subtrees into a master Behavior Tree `PrioritySelector` with strict Blackboard communication.
+   - Validates Python AST and writes the policy to `data/workspace/policy.py`.
+4. **Full Multi-Core Rollout & Dual-Store Logging**:
+   - The master policy is evaluated across seeds on the persistent worker pool.
+   - Runs, tail-sampled ticks, and Ochiai/Liblit fault attributions are logged to DuckDB.
+   - New milestone trajectories (depth $\ge 2$) are automatically added to the Go-Explore Frontier Archive.
 
 ---
 
-## 3. The Canonical Modification Modes
+## 3. Behavior Tree Policy Framework & Blackboard
+
+`LOX` policies are structured as modular **Behavior Trees** ([`lox/lang/bt.py`](lox/lang/bt.py)), eliminating fragile monolithic `if/elif/else` spaghetti:
+
+```python
+# Master Behavior Tree Policy - Synthesized by Meta-Agent (Gen k)
+import numpy as np
+from lox.env.actions import Action, DIR_DELTAS, seq
+from lox.lang.bt import BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, Blackboard
+
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+
+        # Priority 1: Interactive Prompts & --More-- Pagination
+        def dialog_action(state):
+            if getattr(state, "waiting_for_space", False):
+                return Action.SPACE
+            if getattr(state, "in_text_prompt", False) or getattr(state, "in_yn_prompt", False):
+                return Action.ESC
+            return None
+        self.node_dialog = ActionLeaf(dialog_action, name="DialogLeaf")
+
+        # Priority 2: Tactical Threat & Melee Combat
+        def threat_action(state, bb):
+            if hasattr(state, "adjacent_monsters"):
+                hostiles = state.adjacent_monsters(exclude_pets=True)
+                if hostiles:
+                    m = hostiles[0]
+                    bb.set_var("last_target", (m.y, m.x))
+                    return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
+            return None
+        self.node_threat = ActionLeaf(threat_action, name="ThreatLeaf")
+
+        # Priority 3: Spatial Exploration & Stair Descent
+        def navigation_action(state, bb):
+            if state.char_at(state.y, state.x) == ">":
+                return Action.DOWN
+            stairs = np.argwhere(state.chars == ord(">"))
+            if len(stairs) > 0:
+                ty, tx = stairs[0]
+                dy = int(np.sign(ty - state.y))
+                dx = int(np.sign(tx - state.x))
+                return DIR_DELTAS.get((dy, dx), Action.SEARCH)
+            return Action.SEARCH
+        self.node_navigation = ActionLeaf(navigation_action, name="NavigationLeaf")
+
+        # Assemble Master Priority Selector
+        root = PrioritySelector([
+            self.node_dialog,
+            self.node_threat,
+            self.node_navigation,
+        ], name="MasterSelector")
+
+        self.tree = BehaviorTree(root=root, blackboard=self.blackboard)
+
+    def step(self, state):
+        return self.tree.tick(state)
+```
+
+### Invariants:
+- **Zero Hidden Mutations**: Nodes must NOT mutate arbitrary `self.*` attributes on `Policy`. Inter-node state is communicated strictly through `blackboard.get_var(key)` / `blackboard.set_var(key, val)`.
+- **Status Enum Flow**: Leaves return `NodeStatus.SUCCESS`, `NodeStatus.FAILURE`, or `NodeStatus.RUNNING` alongside optional actions, allowing sequences to manage multi-step actions cleanly.
+
+---
+
+## 4. Dual-Store Architecture (LanceDB + DuckDB)
+
+`LOX` separates unstructured scientific reasoning from high-throughput numerical telemetry using a dual-store model:
+
+| Dimension | **LanceDB Document Store** ([`lox/db/theories.py`](lox/db/theories.py)) | **DuckDB Analytical Warehouse** ([`lox/db/schema.py`](lox/db/schema.py)) |
+| :--- | :--- | :--- |
+| **Primary Data** | Unstructured hypotheses, qualitative discoveries, category plans, and reflection reports. | Structured episode runs, tail-sampled ticks, function call attribution, and exact LLM token/cost rates. |
+| **Search Engine** | Tantivy BM25 Full-Text Search (keyword indexing over markdown contents). | Vectorized SQL queries, analytical window functions, and columnar scans. |
+| **Storage Engine** | Apache Arrow native columnar tables (`theories.lance`). | DuckDB single-file database (`data/lox.duckdb`). |
+| **Agent Access** | `query_theories(query, doc_type)` | `query_db(sql)` |
+
+---
+
+## 5. Go-Explore Frontier Checkpoints & 3D MAP-Elites Archive
+
+### 5.1 Go-Explore Frontier Checkpoint Archive ([`lox/engine/frontier.py`](lox/engine/frontier.py))
+
+Evaluating deep-game combat (e.g. Dlvl 4 soldier ants, Sokoban boulder puzzles, or Castle drawbridges) from turn 0 wastes thousands of steps on early floor exploration. LOX archives verified milestone trajectories directly as raw action byte sequences:
+- **Instant Fast-Forward**: Harnesses reset with the recorded seed and replay action bytes in **~10–20 ms**, positioning the agent directly into mid-game tactical situations.
+- **Checkpoints Directory (`data/frontier/`)**: Persists `.json` metadata and `.bytes` raw sequences across Dlvl 2, 3, 4, 5, and beyond.
+- **Bootstrap Engine ([`lox/datasets/bootstrap_frontier.py`](lox/datasets/bootstrap_frontier.py))**: Extracts high-depth milestones directly from recorded historical runs and expert human ascensions.
+
+### 5.2 3D MAP-Elites Quality-Diversity Archive ([`lox/engine/map_elites.py`](lox/engine/map_elites.py))
+
+To prevent premature convergence on local optima, `LOX` maintains an **80-cell behavioral niche archive** across three orthogonal phenotypic dimensions:
+
+1. **Depth Progression (5 Bins)**: Dlvl 1, Dlvl 2, Dlvl 3, Dlvl 4, Dlvl 5+.
+2. **Caution & Deliberation (4 Bins)**: Proportion of search and wait actions (`[0, 0.10)`, `[0.10, 0.25)`, `[0.25, 0.50)`, `[0.50, 1.0]`).
+3. **Resource Mastery (4 Bins)**: Score density per turn (`[0, 0.20)`, `[0.20, 0.50)`, `[0.50, 1.0)`, `[1.0, inf)`).
+
+Each niche retains the highest-fitness policy discovered for that behavioral profile, providing diverse stepping stones for future mutations.
+
+---
+
+## 6. The Canonical Modification Modes
 
 Mode scheduling is governed by [`ModeScheduler`](lox/engine/scheduler.py):
 
@@ -111,69 +218,18 @@ Mode scheduling is governed by [`ModeScheduler`](lox/engine/scheduler.py):
 
 ---
 
-## 4. Pilot Revision Gate & Negative-Delta Abort
+## 7. Pilot Revision Gate & Negative-Delta Abort
 
 Before any candidate policy is allowed to run a full 150-seed rollout, it must pass through the **Execution-Guided Pilot Gate** inside `dry_run_policy`:
 
-1. **Paired Seed Pilot Evaluation**:
-   - Evaluates the candidate against the active champion across 30 paired baseline episodes in ~0.8 seconds.
-   - Measures exact paired wins, losses, ties, progression delta ($\Delta$), and behavioral stall telemetry (`avg_unique_tiles`, `pct_wait`, `pct_search`).
-2. **Empirical Revision Budget (`--pilot-revisions 4`)**:
-   - If a pilot revision fails, the author receives concrete paired regression traces (`Candidate < Baseline`) and failure diagnostics.
-   - The revision budget is capped at 4. Empirical calibration shows that attempts $\ge 5$ have a 0.0% promotion transfer rate; capping at 4 eliminates wasted LLM calls.
-3. **Negative-Delta Rollout Abort**:
-   - When `--pilot-fallback best` is enabled, candidate promotion to full rollout is permitted **if and only if its pilot delta is non-negative ($\Delta \ge 0.0$)**.
-   - If all pilot revisions show net negative progression ($\Delta < 0.0$), the generation is **immediately aborted** (`PILOT_GATE_ABORT`), saving 50–150 rollout episodes from executing a known regression.
-4. **Mutation Scope Intercept**:
-   - In `WRITE` mode, modifying $>2$ functions returns `MUTATION_SCOPE_ERROR` in 0ms, instructing the agent to narrow its patch before burning pilot runs.
+1. **Paired Seed Pilot Evaluation**: Evaluates the candidate against the active champion across 30 paired baseline episodes in ~0.8 seconds.
+2. **Empirical Revision Budget (`--pilot-revisions 4`)**: Capped at 4 revision attempts. Empirical calibration shows attempts $\ge 5$ yield 0.0% promotion transfer; capping at 4 eliminates wasted LLM calls.
+3. **Negative-Delta Rollout Abort**: When `--pilot-fallback best` is enabled, candidate promotion to full rollout is permitted **if and only if its pilot delta is non-negative ($\Delta \ge 0.0$)**. Known regressive candidates ($\Delta < 0.0$) abort the generation immediately (`PILOT_GATE_ABORT`), saving compute.
+4. **Mutation Scope Intercept**: In `WRITE` mode, modifying $>2$ functions returns `MUTATION_SCOPE_ERROR` in 0ms, instructing the agent to narrow its patch before burning pilot runs.
 
 ---
 
-## 5. Harness Architecture & High-Throughput Telemetry
-
-LOX achieves **285,000+ steps/second** on multi-core CPU instances through clean architectural separation:
-
-- **Lean Observations**: By default, `LEAN_OBSERVATION_KEYS` requests only the 15 necessary observation buffers from NLE (omitting `screen_descriptions` and `misc`). This eliminates expensive string formatting in C while preserving full terminal grids (`tty_chars`, `tty_colors`, `tty_cursor`).
-- **Zero-Turn Stall Detection**: In NetHack, invalid actions (e.g., walking into a solid wall, trying to eat an un-edible item) return a valid observation but consume 0 turns (`blstats[21]` does not advance). LOX tracks `state.turn_advanced`, `state.consecutive_stalls`, and `state.time_delta`, terminating runaway loops at 100 consecutive zero-turn steps with reason `stalled_zero_turn`.
-- **Interactive Prompt Passthrough**: Pure pagination prompts (`--More--`) are dismissed instantly via `SPACE`. Real decision prompts (`in_yn_function`, `in_getlin`) are passed through to the policy along with the prompt query string (`state.yn_prompt_query`), protected by a 3-step safety watchdog.
-
----
-
-## 6. Prefix-Replay Checkpoint Shards & Spatial WorldMemory
-
-### 6.1 3-Tier Stratified Checkpoint Prefix Shards ([`lox/db/shards.py`](lox/db/shards.py))
-Evaluating mid-game combat from turn 0 wastes thousands of steps on early floor exploration. LOX extracts up to 40 stratified **Checkpoint Prefix Shards** directly from baseline action bytes:
-1. **Pre-Death Windows**: Sliced 30 turns before a fatal encounter (`end_reason == 'died'`).
-2. **Pre-Stall Windows**: Sliced 5 turns before detected oscillation or timeout stagnation.
-3. **Floor-Entry Checkpoints**: Sliced at the exact turn the hero arrives on a deeper dungeon floor (`depth >= 2`).
-
-Shards are dynamically stratified across three tiers:
-- **Frontier Tier (≥ P90 Depth, up to 55%)**: Deepest floor entries and critical encounters. Deep floor entries (`depth >= 5`) receive an extended **400-step evaluation horizon**.
-- **Mid-Band Tier (Mean Depth to P90 Depth, up to 30%)**: Intermediate progression checkpoints.
-- **Foundation Tier (< Mean Depth, remaining 15%)**: Shallow robustness checkpoints.
-
-Workers replay prefix action bytes in microseconds (`harness.replay_bytes`), reset execution counters, and hand control to the candidate policy. Surviving a fatal pre-death shard earns a direct survival bonus in the composite progression metric.
-
-### 6.2 Dynamic Spatial WorldMemory & Numba Topology ([`lox/env/state.py`](lox/env/state.py), [`lox/env/grid_utils.py`](lox/env/grid_utils.py))
-Every [`GameState`](lox/env/state.py) maintains a persistent per-episode [`WorldMemory`](lox/env/state.py) (`state.mem`) that tracks spatial features across levels even when occluded:
-- `visited` & `visit_count`: 2D grids tracking explored tiles and per-tile visit frequency.
-- `passable_mask` & `door_mask`: Dynamically updated walkability and closed-door masks that remember walkable floor tiles when monsters step onto them and track locked doors.
-- `remembered_chars`: Preserves underlying terrain (`'>'`, `'<'`, `'_'`, `'{'`, `'+'`, `'#'`, `'.'`) when occluded by the hero `@` or monsters, preventing stair/altar occlusion loops.
-- `kv`: Persistent dictionary on `state.mem.kv` (and `state.kv`) synchronized across floor transitions and replay shards for tracking items, altars, and shop locations.
-- `recent_messages`: Ring buffer of recent non-empty message tuples `(turn, dlvl, message)` exposed via `state.recent_messages`.
-- `searched_counts`: 2D counter incremented around `(y, x)` on `Action.SEARCH` to guide secret door searches.
-- `stair_graph`: Bidirectional inter-floor dictionary mapping `(dlvl, y, x)` stair coordinates across levels.
-- `pos_history` & `is_oscillating`: Bounded coordinate history (`deque(maxlen=32)`) and automatic cycle detector.
-- **Numba-JIT Spatial Helpers** ([`lox/env/grid_utils.py`](lox/env/grid_utils.py)):
-  - `state.bfs_distance_map(sources, passable)` -> 2D int32 distance grid in `<50 µs`.
-  - `state.pathfind_step_to(target_y, target_x, passable, cost_grid)` -> 8-way A* first-step `(dy, dx)` with cardinal preference at doorways.
-  - `flood_fill_rooms(passable_mask)` -> Connected room component labeling.
-  - `find_chokepoints(passable_mask)` -> Boolean mask of 1-tile-wide corridor and doorway bottlenecks for tactical positioning.
-  - `line_of_sight_mask(y, x, opaque_mask, max_range)` -> 8-direction raycast visibility mask for ranged wand/missile alignment.
-
----
-
-## 7. Parameter-Free Sequential Hypothesis Testing
+## 8. Parameter-Free Sequential Hypothesis Testing
 
 The Author Agent never guesses numerical effect sizes. It emits a structured qualitative YAML hypothesis before its Python code:
 
@@ -195,51 +251,16 @@ Candidate policies are evaluated on paired seeds against the active baseline usi
 1. **Sequential Futility Early Stopping**: If after $n \ge 60$ paired triggered seeds the 95% Empirical Bernstein Confidence Sequence upper bound satisfies $U_n \le 0.0$, rollout halts immediately to preserve compute.
 2. **Positive Mean Progression Delta**: $\bar{d} \ge -0.005$ and strictly more improved seeds than regressed seeds ($\text{wins} > \text{losses}$).
 3. **Decisive-Pair Statistical Significance**: Either the 95% Confidence Sequence lower bound $L_N > 0.0$, the one-sided Paired Wilcoxon Signed-Rank test satisfies $p < 0.05$, or the decisive subset ($|\Delta| > 10^{-6}$) achieves positive significance ($L_{dec} > 0.0$ or $\text{wins} \ge 2 \times \text{losses}$ with $\bar{d}_{dec} \ge 0.15$). This eliminates the *tie-dilution trap* where 60–80% trajectory ties on mature baselines crush statistical power for modular patches.
-4. **Tie-Aware Directional Pilot Filtering**: Pilot validation verifies directional signal ($\text{wins} > \text{losses}$, $\bar{d} \ge 0$, and $p_{sign} \le 0.20$ or $\Delta_{depth} \ge 0.04$ or $\text{wins} \ge \text{losses} + 2$).
-5. **Decoupled Refactor Gate**: Evaluates `REFACTOR` on architectural modularization and behavioral preservation ($\bar{d} \ge -0.015$, $\text{losses} \le \text{wins} + 5$) rather than demanding strict statistical superiority ($p < 0.05$), enabling modular skill extraction into `skills/` without rejection.
 
 ---
 
-## 8. DuckDB Analytical Schema & Fault Attribution
+## 9. Automated LLM Token & USD Cost Accounting
 
-All experimental telemetry and reference human ascensions are stored in a single DuckDB database (`data/lox.duckdb`, defined in [`lox/db/schema.py`](lox/db/schema.py)):
+`LOX` automatically tracks every token generated across the Author Agent, Meta-Agent, and Category Workers directly in DuckDB:
 
-1. **`batches`**: Per-generation summary (`batch_id`, `generation`, `mode`, `target_functions`, `avg_depth`, `p90_depth`, `max_depth`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `seeds_evaluated`, `is_early_stopped`, `pilot_best_delta`).
-2. **`runs`**: Episode telemetry (`run_id`, `seed`, `max_depth`, `final_hp`, `final_ac`, `xp_level`, `score`, `turns`, `end_reason`, `death_message`, `summary_digest`, `game_log`, `milestones_json`, `is_outlier_good`, `outlier_z_score`, `auto_esc_count`, `subgen_preemptions`, `policy_exceptions`, `unique_tiles`, `pct_wait`, `pct_search`, `starved_with_food`, `died_unarmored`, `action_bytes`).
-3. **`ticks`**: Tail-sampled turn traces (`run_id`, `turn`, `dlvl`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `active_function`, `message`, `nearby_monsters`).
-4. **`function_stats`**: Spectrum-based fault attribution per method (`episodes_triggered`, `total_calls`, `total_turns_active`, `ochiai_good_run_score`, `liblit_failure_score`, `stagnation_turns`, `stagnation_share`, `livelock_score`).
-5. **`policies`**: Versioned snapshots of every candidate and promoted policy and skill file.
-6. **`experiments`**: Causal hypotheses, binding constraints, verified C rules, pilot diagnostics, and statistical verdicts.
-7. **`discoveries`**: Validated campaign breakthroughs (`discovery_id`, `generation`, `batch_id`, `mode`, `target_functions`, `binding_constraint`, `verified_c_rule`, `mechanism`, `mean_delta`, `avg_depth`, `p90_depth`, `max_depth`, `created_at`).
-8. **`expert_runs`** & **`expert_ticks`**: Real human NetHack ascensions (`archive.alt.org` xlogfile + dumplogs) and NLE reference trajectories stored in the exact same schema as `runs` and `ticks`.
-
----
-
-## 9. Long-Horizon Scaling & Unattended Operations
-
-Scaling an autonomous campaign to thousands of generations (and depths > 20 towards ascension) requires robust safeguards:
-
-### 9.1 Adaptive Step Horizon Scaling
-Early policies need short horizons to fail fast; deep policies need tens of thousands of steps to clear the Quest, Castle, and Gehennom. [`compute_adaptive_max_steps`](lox/engine/orchestrator.py) dynamically scales the episode horizon based on baseline depth milestones:
-- $D_{p90} < 4$: **5,000 steps**
-- $D_{p90} \in [4, 7]$: **10,000 steps**
-- $D_{p90} \in [8, 12]$: **18,000 steps**
-- $D_{p90} \in [13, 20]$: **30,000 steps**
-- $D_{p90} > 20$: **50,000 steps**
-
-When the horizon steps up, baseline timeout seeds are automatically refreshed at the new limit so paired hypothesis tests remain apples-to-apples.
-
-### 9.2 Preemptive Generator Interrupt
-Multi-step generator skills (such as tactical pathfinding, lock picking, or food searching) run through `_active_subgen`. If hero HP drops below critical ratio (`flee_hp_ratio`), an interactive prompt appears (`in_yn_prompt`, `in_text_prompt`), or hostile monsters appear adjacent, [`PolicyRunner.next_action`](lox/lang/compiler.py) preemptively clears `_active_subgen = None`, immediately returning control to the policy's primary dispatcher.
-
-### 9.3 Telemetry Pruning & Milestone Checkpointing
-- **Pruning**: Every 20 generations, [`prune_old_telemetry`](lox/db/logger.py) removes detailed turn-level `ticks` and failed `runs` older than 20 generations, executing a DuckDB `CHECKPOINT` to keep file size compact and query speeds under 100ms.
-- **Checkpoints**: Whenever a candidate achieves a new record average depth, record max depth, or an ascension, `data/workspace/checkpoints/gen_XXXX_dYY.YY/` archives `policy.py`, `skills/`, and `meta.json`.
-
-### 9.4 Fault-Tolerant Unattended Execution
-- **Transient Exception Recovery**: The generation loop catches unexpected exceptions, logs full stack traces to `data/workspace/campaign_errors.log`, sleeps briefly, and advances to the next generation without terminating the campaign.
-- **Live Markdown Dashboard**: Atomically updates [`data/workspace/STATUS.md`](data/workspace/STATUS.md) on every generation with campaign uptime, generation progress, progression overview tables, promoted discoveries, and diversity archive stats.
-- **Read-Only Check-In CLI**: [`scripts/status_lox.py`](scripts/status_lox.py) queries DuckDB with `read_only=True` to inspect depth velocity, recent promotions, and discoveries while `run_lox.py` is actively evaluating.
+- **Per-Model Rate Table (`llm_cost_rates`)**: Automatically initializes per-million token pricing for OpenRouter, DeepSeek, Anthropic, OpenAI, and Gemini models.
+- **Granular Token Logging (`synthesis_logs`)**: Records `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `agent_role`, and exact `cost_usd` per LLM interaction.
+- **Batch Aggregation (`batches`)**: Records `total_cost_usd` and `total_llm_tokens` directly in generation metadata for complete cost attribution.
 
 ---
 
@@ -258,51 +279,49 @@ lox/
 │   ├── nethack/            # NetHackAdapter & composite progression index
 │   └── state.py            # Lazy zero-copy GameState, WorldMemory, C struct LUTs, stall tracking
 ├── lang/
+│   ├── bt.py               # Modular Behavior Tree framework (PrioritySelector, Sequence, ActionLeaf, Blackboard)
 │   ├── compiler.py         # Compiles policy.py + skills into PolicyRunner instances
 │   ├── instrument.py       # ExecutionTracer, TunableParam, PolicyInstrumentTransformer
 │   ├── macros.py           # Persistent MacroLibrary manager
 │   └── validator.py        # Python 3.11+ AST sandbox validator, function splicer & contract linter
 ├── db/
 │   ├── logger.py           # High-throughput DuckDB batch logger with tail-based tick sampling
-│   ├── schema.py           # 8-table DuckDB analytical schema initialization & connections
+│   ├── schema.py           # 8-table DuckDB analytical schema, LLM cost rates & thread-safe init
 │   ├── shards.py           # 3-tier PrefixShard extractor (Frontier, Mid-Band, Foundation)
-│   └── summarizer.py       # RLE timeline compressor, stall analyzer, Ochiai/Liblit attribution
+│   ├── summarizer.py       # RLE timeline compressor, stall analyzer, Ochiai/Liblit attribution
+│   └── theories.py         # LanceDB embedded document store with Tantivy BM25 FTS index
 ├── datasets/
-│   ├── download_experts.py # Compiles NAO human ascensions & NLE traces into expert_runs / expert_ticks
-│   └── wiki.py             # Offline NetHack 3.6.6 Wiki SQLite FTS5 BM25 search engine
+│   ├── bootstrap_frontier.py # Bootstraps multi-depth frontier checkpoints from DuckDB into data/frontier/
+│   ├── download_experts.py   # Downloads Hardfought NetHack 3.6/3.7 human ascensions into expert_runs/ticks
+│   ├── symbols.py            # Pre-indexed C symbol tables over nle.nethack.permonst & objclass
+│   └── wiki.py               # Offline NetHack 3.6.6 Wiki SQLite FTS5 BM25 search engine
 ├── runner/
 │   └── pool.py             # Persistent multi-core worker pool & conditional trigger filter
 ├── author/
 │   ├── agent.py            # Stateless ReAct AuthorAgent with compiler-in-the-loop self-repair
 │   ├── prompts.py          # Epistemic System Prompt, dynamic User Prompt & Contrastive Digest
+│   ├── swarm_meta.py       # Meta-Agent dynamic macro-category discoverer & Behavior Tree assembler
+│   ├── swarm_worker.py     # Concurrent Category Worker agent with empirical checkpoint evaluation
 │   └── tools.py            # AuthorToolRegistry: query_db, query_wiki, query_policy_docs, dry_run_policy
 ├── engine/
+│   ├── frontier.py         # Go-Explore Frontier Checkpoint Archive & fast replay (~15ms)
 │   ├── hypothesis.py       # Empirical Bernstein Confidence Sequences, Wilcoxon Signed-Rank, Futility Early Stopping
+│   ├── map_elites.py       # 80-cell 3D Quality-Diversity MAP-Elites Behavioral Archive
 │   ├── modes.py            # ModeConfig & canonical mode configurations
-│   ├── orchestrator.py     # End-to-end CampaignOrchestrator, Adaptive Horizon & Status Reporter
-│   └── scheduler.py        # ModeScheduler (CREATE, WRITE, REFACTOR)
+│   ├── orchestrator.py     # Single-agent CampaignOrchestrator, Adaptive Horizon & Status Reporter
+│   ├── scheduler.py        # ModeScheduler (CREATE, WRITE, REFACTOR)
+│   └── swarm_orchestrator.py # Hierarchical Multi-Agent Swarm Campaign Orchestrator
 └── ui/
     └── console.py          # Compact ANSI console UI with single-line progress & summary tables
 scripts/
 ├── build_strategy_wiki.py  # Indexes high-level NetHack strategy & mechanics articles into wiki_index.db
 ├── build_wiki_db.py        # Builds data/wiki_index.db from data/nethackwikidata.json
 ├── calibrate_pilot.py      # Calibrates pilot revision budget and evaluates transfer rates from DuckDB
-├── download_experts.py     # Downloads and populates expert_runs and expert_ticks in data/lox.duckdb
+├── download_experts.py     # Compiles 1,000+ human ascensions into expert_runs and expert_ticks
 ├── reset_clean.py          # Resets campaign to Gen 0 while preserving expert corpus & wiki
-├── run_lox.py              # Main CLI entrypoint for running synthesis campaigns
+├── run_lox.py              # Single-agent synthesis campaign CLI entrypoint
+├── run_swarm.py            # Hierarchical Multi-Agent Swarm campaign CLI entrypoint
 └── status_lox.py           # Morning/evening read-only check-in dashboard CLI
-tests/
-├── test_author_and_ui.py   # Author YAML/code parser, macro verification, pilot revisions
-├── test_codebase_hardening.py # Typed contracts, alias synchronization, zero shard leakage
-├── test_db_summarizer.py   # RLE summarizer, outlier marker, Ochiai/Liblit, DuckDB logger
-├── test_harness_speed.py   # 1-to-1 actions, GameState queries, replay bit-identity
-├── test_lang_instrument.py # Python 3.11+ features, tracer, loop guard, splicing
-├── test_modes_and_eval.py  # Trigger filtering, hypothesis testing, SPSA tuning
-├── test_overhaul_verification.py       # End-to-end regression suite
-├── test_pilot_hardening_and_mutation_scope.py # Pilot revision capping, negative abort, mutation scope
-├── test_skill_graph_and_adapters.py    # Multi-benchmark adapter and skill compilation tests
-├── test_stall_and_prompt_passthrough.py# Stall telemetry, truncation, and prompt passthrough tests
-└── test_todo_architectural_overhaul.py # Spatial WorldMemory and prefix shard extraction tests
 ```
 
 ---
@@ -310,7 +329,7 @@ tests/
 ## 11. Quickstart & CLI Usage
 
 ### 1. Installation, Linting & Automated Tests
-LOX uses [`uv`](https://docs.astral.sh/uv/) for dependency management:
+LOX uses [`uv`](https://docs.astral.sh/uv/) for high-speed package and dependency management:
 ```bash
 # Clone the repository
 git clone git@github.com:saejin-moon/lox.git
@@ -319,64 +338,51 @@ cd lox
 # Install dependencies into .venv
 uv sync
 
-# Run linter, formatter checks, and full test suite
+# Run linter, formatter checks, and full test suite (107 automated tests)
 uv run ruff check --fix .
 uv run ruff format .
 uv run pytest -v
 ```
 
-### 2. Build Offline Wiki & Ingest Human Ascensions (Optional)
-*Note: The orchestrator automatically performs this if databases are missing.*
+### 2. Ingest 1,000+ Human Ascensions & Build Offline Wiki
 ```bash
+# Ingest 1,000+ real human ascensions from Hardfought into DuckDB
+uv run python scripts/download_experts.py --max-ascensions 1000 --fetch-dumplogs 25
+
+# Bootstrap multi-depth frontier checkpoints (Dlvl 2, 3, 4, 5)
+uv run python lox/datasets/bootstrap_frontier.py --db-path data/lox.duckdb
+
+# Build offline NetHack 3.6.6 Wiki FTS5 search engine
 uv run python scripts/build_wiki_db.py
 uv run python scripts/build_strategy_wiki.py
-uv run python scripts/download_experts.py --max-ascensions 50
 ```
 
-### 3. Launch an Autonomous Campaign
-Export your preferred LLM provider API key:
+### 3. Launch an Autonomous Hierarchical Swarm Campaign
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."
-# or export OPENAI_API_KEY="..."
 
-# Run interactive synthesis campaign
-uv run python scripts/run_lox.py \
+# Launch a 10-generation Swarm Campaign with 4 concurrent category workers:
+uv run python scripts/run_swarm.py \
+  --generations 10 \
+  --workers 4 \
+  --turns-per-worker 3 \
+  --seeds 8 \
   --provider openrouter \
-  --model z-ai/glm-5.3-flash:nitro \
-  --benchmark nethack \
-  --workers 16 \
-  --generations 50
+  --model z-ai/glm-5.3-flash:nitro
 ```
 
-### 4. Resume an Existing Campaign
-To resume directly from a checkpoint or specific directory without restarting from Gen 0:
+### 4. Fast Local Smoke Testing (Mock Provider)
 ```bash
-uv run python scripts/run_lox.py \
-  --provider openrouter \
-  --model z-ai/glm-5.3-flash:nitro \
-  --db-path forest/lox.duckdb \
-  --policy-path forest/workspace/policy.py \
-  --workers 16 \
-  --generations 50
+# Verify complete end-to-end swarm loop in ~3.5 seconds
+uv run python scripts/run_swarm.py \
+  --provider mock \
+  --generations 2 \
+  --workers 3 \
+  --turns-per-worker 1 \
+  --seeds 2
 ```
 
-### 5. Launch Long-Horizon Unattended Operations
-For multi-day runs, launch inside a detached `tmux` session:
-```bash
-tmux new -s lox
-
-uv run python scripts/run_lox.py \
-  --provider openrouter \
-  --model z-ai/glm-5.3-flash:nitro \
-  --generations 5000 \
-  --target-depth 50.0 \
-  --workers 16
-
-# Detach: Ctrl+B then D
-```
-
-### 6. Monitor Active Campaigns
-Inspect campaign status without disturbing workers:
+### 5. Monitor Active Campaigns
 ```bash
 # Read-only check-in CLI
 uv run python scripts/status_lox.py --since-hours 12
@@ -418,16 +424,18 @@ tail -f data/workspace/campaign_errors.log
 16. **Chen, X., Lin, M., Schärli, N., & Zhou, D.** (2023). *Teaching Large Language Models to Self-Debug.* International Conference on Learning Representations (ICLR).
 17. **Loi, M., et al.** (2026). *Contrastive Evaluation-Driven Program Synthesis for Long-Horizon Decision Making.* International Conference on Learning Representations (ICLR).
 
-### Exploration, Subsumption Control & Temporal Abstractions
+### Exploration, Subsumption Control, Behavior Trees & Multi-Agent Swarms
 18. **Ecoffet, A., Huizinga, J., Lehman, J., Stanley, K. O., & Clune, J.** (2021). *First return, then explore (Go-Explore).* Nature, 590, 580-586.
 19. **Brooks, R. A.** (1986). *A robust layered control system for a mobile robot (Subsumption Architecture).* IEEE Journal on Robotics and Automation, 2(1), 14-23.
-20. **Sutton, R. S., Precup, D., & Singh, S.** (1999). *Between MDPs and semi-MDPs: A framework for temporal abstraction in reinforcement learning (Options Framework).* Artificial Intelligence, 112(1-2), 181-211.
-21. **Böhme, M., Pham, V.-T., & Roychoudhury, A.** (2017). *Coverage-Based Greybox Fuzzing as Markov Chain (AFLFast).* IEEE Transactions on Software Engineering, 45(5), 489-506.
+20. **Colledanchise, M., & Ögren, P.** (2018). *Behavior Trees in Robotics and AI: An Introduction.* CRC Press.
+21. **Du, Y., Li, S., Torralba, A., Tenenbaum, J. B., & Mordatch, I.** (2023). *Improving Factuality and Reasoning in Language Models through Multiagent Debate.* arXiv:2305.14325.
+22. **Sutton, R. S., Precup, D., & Singh, S.** (1999). *Between MDPs and semi-MDPs: A framework for temporal abstraction in reinforcement learning (Options Framework).* Artificial Intelligence, 112(1-2), 181-211.
+23. **Böhme, M., Pham, V.-T., & Roychoudhury, A.** (2017). *Coverage-Based Greybox Fuzzing as Markov Chain (AFLFast).* IEEE Transactions on Software Engineering, 45(5), 489-506.
 
 ### Spectrum-Based Attribution, Stochastic Optimization & Sequential Hypothesis Testing
-22. **Abreu, R., Zoeteweij, P., & van Gemund, A. J. C.** (2007). *On the Accuracy of Spectrum-based Fault Localization (Ochiai).* Testing: Academic and Industrial Conference Practice and Research Techniques (TAICPART-MUTATION), 89-98.
-23. **Liblit, B., Naik, M., Zheng, A. X., Aiken, A., & Jordan, M I.** (2005). *Scalable statistical bug isolation.* ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI), 15-26.
-24. **Spall, J. C.** (1992). *Multivariate stochastic approximation using a simultaneous perturbation gradient approximation (SPSA).* IEEE Transactions on Automatic Control, 37(3), 332-341.
-25. **Kleijnen, J. P. C.** (2009). *Design and Analysis of Simulation Experiments (Common Random Numbers).* Springer Series in Statistics.
-26. **Howard, S. R., Ramdas, A., McAuliffe, J., & Sekhon, J.** (2021). *Time-uniform, nonparametric, nonasymptotic confidence sequences.* The Annals of Statistics, 49(2), 1055-1080.
-27. **Waudby-Smith, I., & Ramdas, A.** (2024). *Estimating means of bounded random variables by betting.* Journal of the Royal Statistical Society Series B: Statistical Methodology, 86(1), 1-27.
+24. **Abreu, R., Zoeteweij, P., & van Gemund, A. J. C.** (2007). *On the Accuracy of Spectrum-based Fault Localization (Ochiai).* Testing: Academic and Industrial Conference Practice and Research Techniques (TAICPART-MUTATION), 89-98.
+25. **Liblit, B., Naik, M., Zheng, A. X., Aiken, A., & Jordan, M I.** (2005). *Scalable statistical bug isolation.* ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI), 15-26.
+26. **Spall, J. C.** (1992). *Multivariate stochastic approximation using a simultaneous perturbation gradient approximation (SPSA).* IEEE Transactions on Automatic Control, 37(3), 332-341.
+27. **Kleijnen, J. P. C.** (2009). *Design and Analysis of Simulation Experiments (Common Random Numbers).* Springer Series in Statistics.
+28. **Howard, S. R., Ramdas, A., McAuliffe, J., & Sekhon, J.** (2021). *Time-uniform, nonparametric, nonasymptotic confidence sequences.* The Annals of Statistics, 49(2), 1055-1080.
+29. **Waudby-Smith, I., & Ramdas, A.** (2024). *Estimating means of bounded random variables by betting.* Journal of the Royal Statistical Society Series B: Statistical Methodology, 86(1), 1-27.
