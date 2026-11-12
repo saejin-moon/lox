@@ -141,7 +141,8 @@ class FrontierArchive:
         harness.reset(seed=checkpoint.seed)
         obs = None
         for b in checkpoint.action_bytes:
+            harness.action_bytes.append(b)
             obs, done = harness.nh.step(b)
             if done:
                 break
-        return harness._wrap_state(obs) if obs is not None else harness.get_state()
+        return harness.wrap_state(obs)

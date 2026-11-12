@@ -726,9 +726,9 @@ def parse_ttyrec_to_expert_run(
 
 def ingest_expert_runs_into_duckdb(
     db_path: str = DEFAULT_DB_PATH,
-    max_ascensions: int = 50,
-    fetch_dumplogs: int = 15,
-    timeout_sec: float = 20.0,
+    max_ascensions: int = 1000,
+    fetch_dumplogs: int = 25,
+    timeout_sec: float = 30.0,
     dumplog_paths: list[str] | None = None,
     ttyrec_paths: list[str] | None = None,
     urls: list[str] | None = None,
@@ -844,54 +844,69 @@ def ingest_expert_runs_into_duckdb(
         )
         tick_rows.extend(extract_milestone_ticks_from_dumplog(run_id, meta, dump_txt))
 
-    # 2. Ingest online Hardfought NetHack 3.6 ascensions & detailed dumplogs
+    # 2. Ingest online Hardfought NetHack 3.6 & 3.7 ascensions & detailed dumplogs
+    hardfought_sources = [
+        ("https://www.hardfought.org/xlogfiles/nethack36/xlogfile", "hardfought_nh36"),
+        ("https://www.hardfought.org/xlogfiles/nethack37/xlogfile", "hardfought_nh37"),
+        ("https://www.hardfought.org/xlogfiles/nh343/xlogfile", "hardfought_nh343"),
+    ]
     try:
         with httpx.Client(timeout=timeout_sec, follow_redirects=True) as client:
-            # Query last 6MB of the Hardfought NetHack 3.6 xlogfile
-            headers = {"Range": "bytes=10000000-16500000"}
-            resp = client.get(HARDFOUGHT_XLOGFILE_URL, headers=headers)
-            if resp.status_code in (200, 206) and resp.content:
-                raw_text = resp.content.decode("latin1", errors="ignore")
-                valk_asc: list[dict[str, str]] = []
-                other_asc: list[dict[str, str]] = []
-                for line in reversed(raw_text.splitlines()):
-                    if "death=ascended" in line:
-                        m = parse_xlogfile_line(line)
-                        if m.get("death") == "ascended":
-                            if m.get("role") == "Val":
-                                valk_asc.append(m)
-                            else:
-                                other_asc.append(m)
-                            if len(valk_asc) + len(other_asc) >= max_ascensions * 2:
-                                break
+            valk_asc: list[tuple[dict[str, str], str]] = []
+            other_asc: list[tuple[dict[str, str], str]] = []
+            for src_url, src_tag in hardfought_sources:
+                if len(valk_asc) + len(other_asc) >= max_ascensions:
+                    break
+                try:
+                    resp = client.get(src_url)
+                    if resp.status_code == 200 and resp.content:
+                        raw_text = resp.content.decode("latin1", errors="ignore")
+                        for line in reversed(raw_text.splitlines()):
+                            if "death=ascended" in line:
+                                m = parse_xlogfile_line(line)
+                                if m.get("death") == "ascended":
+                                    if m.get("role") == "Val":
+                                        valk_asc.append((m, src_tag))
+                                    else:
+                                        other_asc.append((m, src_tag))
+                                    if (
+                                        len(valk_asc) + len(other_asc)
+                                        >= max_ascensions * 2
+                                    ):
+                                        break
+                except Exception:
+                    continue
 
-                # Prioritize Valkyrie ascensions first, followed by other classes
-                selected_metas = (valk_asc + other_asc)[:max_ascensions]
-                for idx, m in enumerate(selected_metas):
-                    player = m.get("name", "player")
-                    starttime = m.get("starttime", str(idx))
-                    run_id = f"hdf_asc_{player}_{starttime}"
-                    dumplog_txt = ""
-                    if idx < fetch_dumplogs and player and starttime.isdigit():
-                        prefix = player[0]
-                        dumplog_url = f"{HARDFOUGHT_DUMPLOG_BASE}/{prefix}/{player}/nethack/dumplog/{starttime}.nh.txt"
+            selected_metas = (valk_asc + other_asc)[:max_ascensions]
+            for idx, (m, src_tag) in enumerate(selected_metas):
+                player = m.get("name", "player")
+                starttime = m.get("starttime", str(idx))
+                run_id = f"hdf_asc_{player}_{starttime}"
+                dumplog_txt = ""
+                if idx < fetch_dumplogs and player and starttime.isdigit():
+                    prefix = player[0]
+                    for dumplog_url in [
+                        f"{HARDFOUGHT_DUMPLOG_BASE}/{prefix}/{player}/nethack/dumplog/{starttime}.nh.txt",
+                        f"{HARDFOUGHT_DUMPLOG_BASE}/{prefix}/{player}/nethack37/dumplog/{starttime}.nh.txt",
+                    ]:
                         try:
-                            d_resp = client.get(dumplog_url, timeout=5.0)
+                            d_resp = client.get(dumplog_url, timeout=4.0)
                             if d_resp.status_code == 200 and len(d_resp.text) > 200:
                                 dumplog_txt = d_resp.text
+                                break
                         except Exception:
                             pass
 
-                    row = parse_dumplog_to_expert_run(
-                        run_id=run_id,
-                        meta=m,
-                        dumplog_text=dumplog_txt,
-                        source="hardfought_human",
-                    )
-                    expert_rows.append(row)
-                    tick_rows.extend(
-                        extract_milestone_ticks_from_dumplog(run_id, m, dumplog_txt)
-                    )
+                row = parse_dumplog_to_expert_run(
+                    run_id=run_id,
+                    meta=m,
+                    dumplog_text=dumplog_txt,
+                    source=src_tag,
+                )
+                expert_rows.append(row)
+                tick_rows.extend(
+                    extract_milestone_ticks_from_dumplog(run_id, m, dumplog_txt)
+                )
     except Exception:
         pass
 

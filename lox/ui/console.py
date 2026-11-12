@@ -62,6 +62,13 @@ class ConsoleUI:
         print(self._c(self.CYAN, "│ ") + f"{meta[:72]:<72}" + self._c(self.CYAN, " │"))
         print(self._c(self.CYAN, f"└{line}┘"))
 
+    def header(self, title: str) -> None:
+        if not self.enabled:
+            return
+        self._clear_progress()
+        line = "═" * max(10, 72 - len(title))
+        print("\n" + self._c(self.BOLD + self.CYAN, f"═══ {title} {line}"))
+
     def gen_header(
         self,
         gen: int,

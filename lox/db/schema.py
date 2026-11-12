@@ -13,6 +13,7 @@ Consolidates:
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import duckdb
@@ -377,124 +378,142 @@ def compute_llm_cost(
     return float(p_cost + c_cost + r_cost)
 
 
+_DB_INIT_LOCK = threading.Lock()
+_INITIALIZED_DBS: set[str] = set()
+
+
 def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
     """Initializes all DuckDB tables for LOX and automatically migrates outdated schemas."""
-    con = connect_db(db_path, read_only=False)
-    try:
-        tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
-        if "ticks" in tables:
-            cols = [r[1] for r in con.execute("PRAGMA table_info('ticks')").fetchall()]
-            if "run_id" not in cols or len(cols) < 20:
-                con.execute("DROP TABLE ticks")
-            elif "byte_offset" not in cols:
-                try:
-                    con.execute(
-                        "ALTER TABLE ticks ADD COLUMN byte_offset INTEGER DEFAULT 0"
-                    )
-                except Exception:
-                    pass
-        if "runs" in tables:
-            cols_runs = [
-                r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()
-            ]
-            for c_name, c_typ in [
-                ("is_shard", "BOOLEAN DEFAULT FALSE"),
-                ("shard_id", "VARCHAR DEFAULT ''"),
-                ("auto_esc_count", "INTEGER DEFAULT 0"),
-                ("subgen_preemptions", "INTEGER DEFAULT 0"),
-                ("policy_exceptions", "INTEGER DEFAULT 0"),
-                ("unique_tiles", "INTEGER DEFAULT 0"),
-                ("pct_wait", "DOUBLE DEFAULT 0.0"),
-                ("pct_search", "DOUBLE DEFAULT 0.0"),
-                ("starved_with_food", "BOOLEAN DEFAULT FALSE"),
-                ("died_unarmored", "BOOLEAN DEFAULT FALSE"),
-            ]:
-                if c_name not in cols_runs:
-                    try:
-                        con.execute(f"ALTER TABLE runs ADD COLUMN {c_name} {c_typ}")
-                    except Exception:
-                        pass
-        if "batches" in tables:
-            cols_b = [
-                r[1] for r in con.execute("PRAGMA table_info('batches')").fetchall()
-            ]
-            for c_name, c_typ in [
-                ("seeds_evaluated", "INTEGER DEFAULT 0"),
-                ("is_early_stopped", "BOOLEAN DEFAULT FALSE"),
-                ("pilot_best_delta", "DOUBLE DEFAULT 0.0"),
-                ("total_cost_usd", "DOUBLE DEFAULT 0.0"),
-                ("total_llm_tokens", "BIGINT DEFAULT 0"),
-            ]:
-                if c_name not in cols_b:
-                    try:
-                        con.execute(f"ALTER TABLE batches ADD COLUMN {c_name} {c_typ}")
-                    except Exception:
-                        pass
-        if "experiments" in tables:
-            cols_exp = [
-                r[1] for r in con.execute("PRAGMA table_info('experiments')").fetchall()
-            ]
-            for c_name, c_typ in [
-                ("seeds_evaluated", "INTEGER DEFAULT 0"),
-                ("is_early_stopped", "BOOLEAN DEFAULT FALSE"),
-                ("pilot_best_delta", "DOUBLE DEFAULT 0.0"),
-                ("total_cost_usd", "DOUBLE DEFAULT 0.0"),
-            ]:
-                if c_name not in cols_exp:
+    abs_path = os.path.abspath(db_path)
+    with _DB_INIT_LOCK:
+        con = connect_db(db_path, read_only=False)
+        if abs_path in _INITIALIZED_DBS:
+            return con
+        try:
+            tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
+            if "ticks" in tables:
+                cols = [
+                    r[1] for r in con.execute("PRAGMA table_info('ticks')").fetchall()
+                ]
+                if "run_id" not in cols or len(cols) < 20:
+                    con.execute("DROP TABLE ticks")
+                elif "byte_offset" not in cols:
                     try:
                         con.execute(
-                            f"ALTER TABLE experiments ADD COLUMN {c_name} {c_typ}"
+                            "ALTER TABLE ticks ADD COLUMN byte_offset INTEGER DEFAULT 0"
                         )
                     except Exception:
                         pass
-        if "synthesis_logs" in tables:
-            cols_syn = [
-                r[1]
-                for r in con.execute("PRAGMA table_info('synthesis_logs')").fetchall()
-            ]
-            for c_name, c_typ in [
-                ("agent_role", "VARCHAR DEFAULT 'author'"),
-                ("cost_usd", "DOUBLE DEFAULT 0.0"),
-            ]:
-                if c_name not in cols_syn:
-                    try:
-                        con.execute(
-                            f"ALTER TABLE synthesis_logs ADD COLUMN {c_name} {c_typ}"
-                        )
-                    except Exception:
-                        pass
-        if "function_stats" in tables:
-            cols_fs = [
-                r[1]
-                for r in con.execute("PRAGMA table_info('function_stats')").fetchall()
-            ]
-            for c_name, c_typ in [
-                ("stagnation_turns", "BIGINT"),
-                ("stagnation_share", "DOUBLE"),
-                ("livelock_score", "DOUBLE"),
-            ]:
-                if c_name not in cols_fs:
-                    try:
-                        con.execute(
-                            f"ALTER TABLE function_stats ADD COLUMN {c_name} {c_typ}"
-                        )
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    con.execute(SCHEMA_SQL)
-    try:
-        for m_name, rates in DEFAULT_LLM_COST_RATES.items():
-            con.execute(
-                """
-                INSERT OR IGNORE INTO llm_cost_rates (model, prompt_usd_per_m, completion_usd_per_m, reasoning_usd_per_m)
-                VALUES (?, ?, ?, ?)
-                """,
-                [m_name, rates["prompt"], rates["completion"], rates["reasoning"]],
-            )
-    except Exception:
-        pass
-    return con
+            if "runs" in tables:
+                cols_runs = [
+                    r[1] for r in con.execute("PRAGMA table_info('runs')").fetchall()
+                ]
+                for c_name, c_typ in [
+                    ("is_shard", "BOOLEAN DEFAULT FALSE"),
+                    ("shard_id", "VARCHAR DEFAULT ''"),
+                    ("auto_esc_count", "INTEGER DEFAULT 0"),
+                    ("subgen_preemptions", "INTEGER DEFAULT 0"),
+                    ("policy_exceptions", "INTEGER DEFAULT 0"),
+                    ("unique_tiles", "INTEGER DEFAULT 0"),
+                    ("pct_wait", "DOUBLE DEFAULT 0.0"),
+                    ("pct_search", "DOUBLE DEFAULT 0.0"),
+                    ("starved_with_food", "BOOLEAN DEFAULT FALSE"),
+                    ("died_unarmored", "BOOLEAN DEFAULT FALSE"),
+                ]:
+                    if c_name not in cols_runs:
+                        try:
+                            con.execute(f"ALTER TABLE runs ADD COLUMN {c_name} {c_typ}")
+                        except Exception:
+                            pass
+            if "batches" in tables:
+                cols_b = [
+                    r[1] for r in con.execute("PRAGMA table_info('batches')").fetchall()
+                ]
+                for c_name, c_typ in [
+                    ("seeds_evaluated", "INTEGER DEFAULT 0"),
+                    ("is_early_stopped", "BOOLEAN DEFAULT FALSE"),
+                    ("pilot_best_delta", "DOUBLE DEFAULT 0.0"),
+                    ("total_cost_usd", "DOUBLE DEFAULT 0.0"),
+                    ("total_llm_tokens", "BIGINT DEFAULT 0"),
+                ]:
+                    if c_name not in cols_b:
+                        try:
+                            con.execute(
+                                f"ALTER TABLE batches ADD COLUMN {c_name} {c_typ}"
+                            )
+                        except Exception:
+                            pass
+            if "experiments" in tables:
+                cols_exp = [
+                    r[1]
+                    for r in con.execute("PRAGMA table_info('experiments')").fetchall()
+                ]
+                for c_name, c_typ in [
+                    ("seeds_evaluated", "INTEGER DEFAULT 0"),
+                    ("is_early_stopped", "BOOLEAN DEFAULT FALSE"),
+                    ("pilot_best_delta", "DOUBLE DEFAULT 0.0"),
+                    ("total_cost_usd", "DOUBLE DEFAULT 0.0"),
+                ]:
+                    if c_name not in cols_exp:
+                        try:
+                            con.execute(
+                                f"ALTER TABLE experiments ADD COLUMN {c_name} {c_typ}"
+                            )
+                        except Exception:
+                            pass
+            if "synthesis_logs" in tables:
+                cols_syn = [
+                    r[1]
+                    for r in con.execute(
+                        "PRAGMA table_info('synthesis_logs')"
+                    ).fetchall()
+                ]
+                for c_name, c_typ in [
+                    ("agent_role", "VARCHAR DEFAULT 'author'"),
+                    ("cost_usd", "DOUBLE DEFAULT 0.0"),
+                ]:
+                    if c_name not in cols_syn:
+                        try:
+                            con.execute(
+                                f"ALTER TABLE synthesis_logs ADD COLUMN {c_name} {c_typ}"
+                            )
+                        except Exception:
+                            pass
+            if "function_stats" in tables:
+                cols_fs = [
+                    r[1]
+                    for r in con.execute(
+                        "PRAGMA table_info('function_stats')"
+                    ).fetchall()
+                ]
+                for c_name, c_typ in [
+                    ("stagnation_turns", "BIGINT"),
+                    ("stagnation_share", "DOUBLE"),
+                    ("livelock_score", "DOUBLE"),
+                ]:
+                    if c_name not in cols_fs:
+                        try:
+                            con.execute(
+                                f"ALTER TABLE function_stats ADD COLUMN {c_name} {c_typ}"
+                            )
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        con.execute(SCHEMA_SQL)
+        try:
+            for m_name, rates in DEFAULT_LLM_COST_RATES.items():
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO llm_cost_rates (model, prompt_usd_per_m, completion_usd_per_m, reasoning_usd_per_m)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [m_name, rates["prompt"], rates["completion"], rates["reasoning"]],
+                )
+        except Exception:
+            pass
+        _INITIALIZED_DBS.add(abs_path)
+        return con
 
 
 def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:

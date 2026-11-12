@@ -9,12 +9,16 @@ Specializes in one of 4 functional domains:
 
 from __future__ import annotations
 
+import inspect
 import json
+import random
 from typing import Any
 
 from lox.author.agent import AuthorAgent
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive, FrontierCheckpoint
+from lox.env.actions import Action
+from lox.env.harness import NetHackHarness
 from lox.ui.console import ui
 
 WORKER_ROLE_DESCRIPTIONS: dict[str, str] = {
@@ -43,6 +47,8 @@ class SwarmWorker:
     def __init__(
         self,
         role: str,
+        description: str = "",
+        target_metrics: list[str] | None = None,
         provider: str = "openrouter",
         model: str = "z-ai/glm-5.3-flash:nitro",
         db_path: str = "data/lox.duckdb",
@@ -51,6 +57,8 @@ class SwarmWorker:
         max_turns: int = 4,
     ) -> None:
         self.role = role.lower()
+        self.description = description
+        self.target_metrics = target_metrics or []
         self.provider = provider
         self.model = model
         self.db_path = db_path
@@ -68,9 +76,16 @@ class SwarmWorker:
         self.history: list[dict[str, Any]] = []
 
     def get_role_prompt(self) -> str:
-        desc = WORKER_ROLE_DESCRIPTIONS.get(self.role, "General Policy Specialist")
+        desc = self.description or WORKER_ROLE_DESCRIPTIONS.get(
+            self.role, "General Policy Specialist"
+        )
+        metrics_hint = (
+            f"\n### Target Telemetry Metrics: {self.target_metrics}"
+            if self.target_metrics
+            else ""
+        )
         return f"""You are the **{self.role.upper()} Specialist** in the LOX Multi-Agent Swarm.
-{desc}
+{desc}{metrics_hint}
 
 ### Strict Swarm & 'Hard Code Nothing' Invariants:
 1. **Behavior Tree Subtree Output**:
@@ -80,6 +95,65 @@ class SwarmWorker:
 3. **Empirical Verification**:
    Query `query_monster` for exact monster stats and corpse poison/nutrition, `query_item` for items, and `query_db` for telemetry.
 """
+
+    def evaluate_candidate(
+        self,
+        code_snippet: str,
+        checkpoint: FrontierCheckpoint | None = None,
+        steps: int = 25,
+    ) -> float:
+        """
+        Empirically evaluates candidate code directly on a frontier checkpoint or fresh seed.
+        Returns the true empirical progression score delta.
+        """
+        harness = NetHackHarness(max_steps=steps + 50)
+        try:
+            if checkpoint is not None:
+                st = self.frontier.replay_into(harness, checkpoint)
+            else:
+                st = harness.reset(seed=random.randint(1000, 9999))
+
+            start_score = st.score
+            start_hp = st.hp
+            start_depth = st.depth
+
+            local_scope: dict[str, Any] = {}
+            exec(code_snippet, globals(), local_scope)
+
+            node: Any = None
+            for candidate in local_scope.values():
+                if hasattr(candidate, "tick"):
+                    node = candidate
+                    break
+                elif inspect.isclass(candidate) and hasattr(candidate, "step"):
+                    node = candidate()
+                    break
+
+            if node is None:
+                return 0.0
+
+            for _ in range(steps):
+                if hasattr(node, "tick"):
+                    act = node.tick(st)
+                elif hasattr(node, "step"):
+                    act = node.step(st)
+                else:
+                    act = node(st)
+                if act is None:
+                    act = Action.SEARCH
+                st, done, _ = harness.step(act)
+                if done:
+                    break
+
+            score_gain = float(st.score - start_score)
+            hp_gain = float((st.hp - start_hp) * 5)
+            depth_gain = float((st.depth - start_depth) * 200)
+            survival_bonus = 20.0 if not harness.done else -50.0
+            return float(score_gain + hp_gain + depth_gain + survival_bonus)
+        except Exception:
+            return -10.0
+        finally:
+            harness.close()
 
     def run_cycle(
         self,
@@ -95,22 +169,25 @@ class SwarmWorker:
             f"Swarm Worker [{self.role}]: Starting Generation {generation} cycle ({self.max_turns} turns)..."
         )
         best_code = ""
-        best_delta = -1.0
+        best_delta = -999.0
 
         if checkpoint is None:
             checkpoint = self.frontier.sample_checkpoint()
 
         for turn in range(1, self.max_turns + 1):
-            # In mock or automated mode, synthesize candidate code
             if self.provider == "mock":
                 code_snippet = (
                     f"# Subtree for {self.role} Gen {generation} Turn {turn}\n"
                 )
-                if self.role == "dialog":
+                if "dialog" in self.role:
                     code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\ndialog_node = ActionLeaf(lambda st: Action.SPACE if getattr(st, 'waiting_for_space', False) else None)\n"
-                elif self.role == "threat":
-                    code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nthreat_node = ActionLeaf(lambda st, bb: Action.WAIT if bb.get_var('in_danger') else None)\n"
-                elif self.role == "survival":
+                elif "threat" in self.role or "combat" in self.role:
+                    code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nthreat_node = ActionLeaf(lambda st, bb: Action.WAIT if bb and bb.get_var('in_danger') else None)\n"
+                elif (
+                    "survival" in self.role
+                    or "health" in self.role
+                    or "resource" in self.role
+                ):
                     code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nsurvival_node = ActionLeaf(lambda st, bb: None)\n"
                 else:
                     code_snippet += "from lox.lang.bt import ActionLeaf\nfrom lox.env.actions import Action\nnavigation_node = ActionLeaf(lambda st: Action.SEARCH)\n"
@@ -120,7 +197,6 @@ class SwarmWorker:
                     "observation_from_db": "Empirical inspection from DuckDB",
                 }
             else:
-                # Real author agent synthesis
                 proposal = self.author.synthesize(
                     mode="WRITE",
                     generation=generation,
@@ -130,20 +206,26 @@ class SwarmWorker:
                 code_snippet = proposal.raw_code_patch
                 hyp = proposal.hypothesis
 
-            # Persist intermediate theory to LanceDB
+            # Empirically evaluate candidate code on the frontier checkpoint!
+            delta = self.evaluate_candidate(
+                code_snippet, checkpoint=checkpoint, steps=25
+            )
+            if delta > best_delta or not best_code:
+                best_delta = delta
+                best_code = code_snippet
+
+            # Persist intermediate theory to LanceDB with real empirical delta
             self.theories.save_document(
                 generation=generation,
                 agent_role=self.role,
                 doc_type="HYPOTHESIS",
-                title=f"{self.role.capitalize()} Hypothesis G{generation}T{turn}",
-                content=f"### Hypothesis\n{json.dumps(hyp, indent=2)}\n\n```python\n{code_snippet}\n```",
+                title=f"{self.role.capitalize()} Hypothesis G{generation}T{turn} (Delta: {delta:+.1f})",
+                content=f"### Hypothesis\n{json.dumps(hyp, indent=2)}\n\n```python\n{code_snippet}\n```\n\n**Empirical Checkpoint Delta**: {delta:+.2f}",
                 tags=[self.role, f"gen_{generation}"],
                 verified_c_rule=str(hyp.get("verified_c_rule", "")),
             )
-            best_code = code_snippet
-            best_delta = 0.5
 
-        # Compile final reflection report
+        # Compile final reflection report with real empirical delta
         report_content = f"""# {self.role.capitalize()} Reflection Report (Generation {generation})
 ## Best Verified Subtree:
 ```python
@@ -152,7 +234,7 @@ class SwarmWorker:
 ## Summary of Findings:
 - Domain: {self.role}
 - Completed {self.max_turns} exploration turns.
-- Best verified score delta: +{best_delta:.2f}
+- Best verified score delta: {best_delta:+.2f}
 """
         report_id = self.theories.save_document(
             generation=generation,
@@ -163,12 +245,13 @@ class SwarmWorker:
             tags=[self.role, f"gen_{generation}", "reflection"],
         )
         ui.info(
-            f"Swarm Worker [{self.role}]: Completed cycle. Saved report: {report_id}"
+            f"Swarm Worker [{self.role}]: Completed cycle (Best Delta: {best_delta:+.2f}). Saved report: {report_id}"
         )
 
         return {
             "role": self.role,
             "best_code": best_code,
+            "best_delta": best_delta,
             "report_id": report_id,
             "report_content": report_content,
         }

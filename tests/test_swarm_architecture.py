@@ -148,3 +148,62 @@ def test_swarm_worker_and_meta_agent_end_to_end(tmp_path):
         assert act in Action
     finally:
         h.close()
+
+
+def test_dynamic_macro_category_discovery(tmp_path):
+    theories_path = str(tmp_path / "theories.lance")
+    frontier_dir = str(tmp_path / "frontier")
+    db_path = str(tmp_path / "test_dyn.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    meta = SwarmMetaAgent(
+        provider="mock",
+        db_path=db_path,
+        theories_path=theories_path,
+        frontier_dir=frontier_dir,
+    )
+    categories = meta.discover_macro_categories(generation=1, n_categories=4)
+    assert len(categories) >= 3
+    for cat in categories:
+        assert "category_id" in cat
+        assert "name" in cat
+        assert "target_depth_tier" in cat
+        assert "target_metrics" in cat
+
+    # Verify category decomposition stored in LanceDB
+    docs = meta.theories.search_theories("decomposition", limit=5)
+    assert len(docs) >= 1
+    assert docs[0]["doc_type"] == "CATEGORY_DECOMPOSITION"
+
+
+def test_swarm_campaign_orchestrator_end_to_end(tmp_path):
+    workspace = tmp_path / "workspace"
+    frontier = tmp_path / "frontier"
+    db_path = str(tmp_path / "swarm_test.duckdb")
+
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+
+    orchestrator = SwarmCampaignOrchestrator(
+        db_path=db_path,
+        workspace_dir=str(workspace),
+        frontier_dir=str(frontier),
+        provider="mock",
+        num_workers=2,
+        turns_per_worker=1,
+        seeds_per_batch=2,
+    )
+    try:
+        history = orchestrator.run(generations=1)
+        assert len(history) == 1
+        assert history[0]["generation"] == 1
+        assert history[0]["avg_depth"] >= 1.0
+
+        con = duckdb.connect(db_path, read_only=True)
+        batches_cnt = con.execute("SELECT count(*) FROM batches").fetchone()[0]
+        runs_cnt = con.execute("SELECT count(*) FROM runs").fetchone()[0]
+        assert batches_cnt == 1
+        assert runs_cnt == 2
+        con.close()
+    finally:
+        orchestrator.close()

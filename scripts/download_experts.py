@@ -28,13 +28,13 @@ def main() -> None:
     parser.add_argument(
         "--max-ascensions",
         type=int,
-        default=50,
-        help="Max human ascensions to ingest from archive.alt.org.",
+        default=1000,
+        help="Max human ascensions to ingest from Hardfought / archive.alt.org.",
     )
     parser.add_argument(
         "--fetch-dumplogs",
         type=int,
-        default=15,
+        default=25,
         help="Number of detailed human dumplogs to fetch.",
     )
     parser.add_argument(

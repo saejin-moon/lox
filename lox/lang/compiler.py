@@ -51,6 +51,15 @@ from lox.env.state import (
     astar_next_step,
     bfs_distance_grid,
 )
+from lox.lang.bt import (
+    ActionLeaf,
+    BehaviorTree,
+    Blackboard,
+    ConditionLeaf,
+    NodeStatus,
+    PrioritySelector,
+    Sequence,
+)
 from lox.lang.instrument import (
     ExecutionTracer,
     PolicyInstrumentTransformer,
@@ -216,6 +225,14 @@ def _build_base_namespace(tracer: ExecutionTracer) -> dict[str, Any]:
         "VisibleObject": VisibleObject,
         "bfs_distance_grid": bfs_distance_grid,
         "astar_next_step": astar_next_step,
+        # Behavior Tree Components
+        "BehaviorTree": BehaviorTree,
+        "PrioritySelector": PrioritySelector,
+        "Sequence": Sequence,
+        "ActionLeaf": ActionLeaf,
+        "ConditionLeaf": ConditionLeaf,
+        "Blackboard": Blackboard,
+        "NodeStatus": NodeStatus,
         # Decorator no-op for `@macro`
         "macro": lambda fn: fn,
         # Global parameter helper `param("name", default, min_val, max_val)`

@@ -235,8 +235,15 @@ class NetHackHarness:
 
         self._last_raw_tuple = obs_tuple
         self.step_byte_offsets = [len(self.action_bytes)]
+        return self.wrap_state(obs_tuple)
+
+    def wrap_state(self, obs_tuple: tuple[np.ndarray, ...] | None = None) -> GameState:
+        """Wraps a raw NLE C observation tuple into a zero-copy lazy GameState."""
+        if obs_tuple is None:
+            obs_tuple = self._last_raw_tuple
+        self._last_raw_tuple = obs_tuple
         state = GameState(
-            obs_tuple, step_count=0, mem=self.mem, obs_keys=self._obs_keys
+            obs_tuple, step_count=self.step_count, mem=self.mem, obs_keys=self._obs_keys
         )
         self.mem.update(state)
         return state
