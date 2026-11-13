@@ -572,7 +572,7 @@ class AuthorAgent:
                         payload["model"] = payload["model"][: -len(suffix)]
                         break
             try:
-                with httpx.Client(timeout=180.0) as client:
+                with httpx.Client(timeout=60.0) as client:
                     resp = client.post(url, headers=headers, json=payload)
                     if resp.status_code in (401, 402, 403):
                         err_detail = resp.text[:200]
@@ -646,9 +646,13 @@ class AuthorAgent:
                 ValueError,
                 KeyError,
                 IndexError,
-            ):
+            ) as exc:
                 if attempt == 4:
                     raise
+                ui.warn(
+                    f"[{self.agent_role}] LLM API attempt {attempt + 1}/5 failed "
+                    f"({type(exc).__name__}: {str(exc)[:120]}); retrying..."
+                )
                 time.sleep(min(16.0, 2.0 * (2**attempt)))
         raise RuntimeError("Failed to obtain response from LLM API after retries.")
 
