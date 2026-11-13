@@ -860,6 +860,8 @@ class AuthorAgent:
 
         total_tool_calls = 0
         research_tools_called: set[str] = set()
+        called_expert_query = False
+        gen1_research_nudges = 0
         final_content = ""
         latest_hyp: dict[str, Any] = {}
         last_attempted_code = ""
@@ -920,6 +922,37 @@ class AuthorAgent:
                                 "1. Call `query_db(sql=...)` to compare `champion_runs` / `champion_function_stats` against `expert_runs` or `expert_ticks`.\n"
                                 "2. Call `query_wiki(query=...)` on the exact message strings from the top failure causes.\n"
                                 "Once you have gathered empirical C engine facts, formulate your hypothesis on Turn 2."
+                            ),
+                        }
+                    )
+                    continue
+
+                if (
+                    generation == 1
+                    and turn_idx <= max_tool_turns
+                    and not str(batch_digest).startswith("Self-Repair Required:")
+                    and (
+                        "query_wiki" not in research_tools_called
+                        or not called_expert_query
+                    )
+                    and gen1_research_nudges < 2
+                ):
+                    gen1_research_nudges += 1
+                    missing_g1 = []
+                    if "query_wiki" not in research_tools_called:
+                        missing_g1.append("`query_wiki`")
+                    if not called_expert_query:
+                        missing_g1.append(
+                            "`query_db` on `expert_runs` / `expert_ticks`"
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"🛑 GENERATION 1 MANDATORY RESEARCH: You have not yet called {' and '.join(missing_g1)}.\n"
+                                "In Generation 1, campaign tables (`runs`, `batches`, etc.) are disallowed; "
+                                "you MUST call both `query_wiki` and `query_db` (querying `expert_runs` / `expert_ticks`) "
+                                "before outputting final policy code."
                             ),
                         }
                     )
@@ -1136,6 +1169,10 @@ class AuthorAgent:
                 except Exception:
                     t_args = {}
                 tool_out = self._execute_tool_call(turn_idx, t_name, t_args)
+                if t_name == "query_db":
+                    sql_low = str((t_args or {}).get("sql", "")).lower()
+                    if "expert_runs" in sql_low or "expert_ticks" in sql_low:
+                        called_expert_query = True
                 tool_results_list.append(
                     {"name": t_name, "args": t_args, "output": str(tool_out)[:2000]}
                 )
@@ -1686,6 +1723,7 @@ class AuthorAgent:
         ]
         last_content = ""
         called_tools: set[str] = set()
+        called_expert_query = False
         req = [str(t) for t in (required_tools or []) if str(t).strip()]
         for turn_idx in range(1, max(1, int(max_tool_turns)) + 2):
             allow_tools = turn_idx <= max_tool_turns
@@ -1695,7 +1733,13 @@ class AuthorAgent:
                 last_content = content
             tcs = msg.get("tool_calls") or []
             if not tcs:
-                missing = [t for t in req if t not in called_tools]
+                missing: list[str] = []
+                for t in req:
+                    if t == "query_db:expert_runs":
+                        if not called_expert_query:
+                            missing.append("query_db (on expert_runs/expert_ticks)")
+                    elif t not in called_tools:
+                        missing.append(t)
                 if missing and turn_idx <= max_tool_turns:
                     messages.append({"role": "assistant", "content": content})
                     messages.append(
@@ -1703,8 +1747,8 @@ class AuthorAgent:
                             "role": "user",
                             "content": (
                                 f"Required tool(s) not yet called: {', '.join(missing)}. "
-                                f"You MUST call `{missing[0]}` first to research authoritative "
-                                "NetHack mechanics before returning your final JSON response."
+                                "You MUST call both `query_wiki` and `query_db` on `expert_runs` / `expert_ticks` "
+                                "before returning your final JSON response."
                             ),
                         }
                     )
@@ -1718,9 +1762,23 @@ class AuthorAgent:
                 }
             )
             for idx_tc, tc in enumerate(tcs, start=1):
-                fn_name = str((tc.get("function") or {}).get("name") or "")
+                fn_spec = tc.get("function") or {}
+                fn_name = str(fn_spec.get("name") or "")
                 if fn_name:
                     called_tools.add(fn_name)
+                    if fn_name == "query_db":
+                        raw_args = fn_spec.get("arguments", "{}")
+                        try:
+                            parsed_args = (
+                                json.loads(raw_args)
+                                if isinstance(raw_args, str)
+                                else dict(raw_args)
+                            )
+                        except Exception:
+                            parsed_args = {}
+                        sql_low = str((parsed_args or {}).get("sql", "")).lower()
+                        if "expert_runs" in sql_low or "expert_ticks" in sql_low:
+                            called_expert_query = True
                 res_out = self._dispatch_raw_tool_call(turn_idx, tc)
                 messages.append(
                     {
@@ -1769,7 +1827,11 @@ class AuthorAgent:
         self.tools.current_policy_code = scaffold_code or current_policy
 
         if self.provider == "mock":
-            self.tools.query_db("SELECT COUNT(*) FROM runs")
+            self.tools.query_db(
+                "SELECT COUNT(*) FROM expert_runs"
+                if generation == 1
+                else "SELECT COUNT(*) FROM runs"
+            )
             mock_hyps = [
                 {
                     "id": "H1",
@@ -1832,6 +1894,8 @@ class AuthorAgent:
         final_content = ""
         last_valid_code = ""
         nudges_used = 0
+        called_wiki = False
+        called_expert_query = False
         batch_id = f"swarm_g{generation}_{self.agent_role}"
 
         for turn_idx in range(1, turn_limit + 2):
@@ -1864,6 +1928,30 @@ class AuthorAgent:
 
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
+                if (
+                    generation == 1
+                    and (not called_wiki or not called_expert_query)
+                    and nudges_used < 2
+                    and turn_idx <= turn_limit
+                ):
+                    nudges_used += 1
+                    missing_g1 = []
+                    if not called_wiki:
+                        missing_g1.append("`query_wiki`")
+                    if not called_expert_query:
+                        missing_g1.append(
+                            "`query_db` on `expert_runs` / `expert_ticks`"
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Generation 1 requires BOTH `query_wiki` and `query_db` on `expert_runs` / `expert_ticks`. "
+                                f"You are missing {' and '.join(missing_g1)}. Call the missing tool(s) now before finalizing."
+                            ),
+                        }
+                    )
+                    continue
                 _, extracted_code = self.extract_yaml_and_python(clean_text)
                 distinct_hyp_count = len(
                     {
@@ -1927,6 +2015,12 @@ class AuthorAgent:
                 except Exception:
                     t_args = {}
                 t_out = self._execute_tool_call(turn_idx, t_name, t_args or {})
+                if t_name == "query_wiki":
+                    called_wiki = True
+                elif t_name == "query_db":
+                    sql_low = str((t_args or {}).get("sql", "")).lower()
+                    if "expert_runs" in sql_low or "expert_ticks" in sql_low:
+                        called_expert_query = True
                 messages.append(
                     {
                         "role": "tool",

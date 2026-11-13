@@ -697,14 +697,21 @@ def test_swarm_worker_multi_hypothesis_session(tmp_path):
                 ),
                 "tool_calls": [
                     {
-                        "id": "call_1",
+                        "id": "call_1a",
+                        "function": {
+                            "name": "query_wiki",
+                            "arguments": json.dumps({"query": "dungeon exploration"}),
+                        },
+                    },
+                    {
+                        "id": "call_1b",
                         "function": {
                             "name": "query_db",
                             "arguments": json.dumps(
-                                {"sql": "SELECT COUNT(*) AS n FROM runs"}
+                                {"sql": "SELECT COUNT(*) AS n FROM expert_runs"}
                             ),
                         },
-                    }
+                    },
                 ],
             }
         if call_idx == 2:

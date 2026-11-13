@@ -357,7 +357,7 @@ class Policy:
 
         proposal = agent.synthesize(
             mode="FUNC_MOD_ADD",
-            generation=1,
+            generation=2,
             current_policy="class Policy:\n    def run(self, state):\n        state = yield Action.WAIT",
             pool=pool,
             baseline_runs=baseline_runs,

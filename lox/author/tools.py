@@ -233,6 +233,18 @@ class AuthorToolRegistry:
                 "Error: Multiple SQL statements in a single query_db call are not allowed. Pass exactly ONE SELECT statement per query_db call.",
                 "error",
             )
+        if self.generation == 1:
+            forbidden_gen1 = re.search(
+                r"\b(runs|ticks|batches|function_stats|policies|experiments|discoveries)\b",
+                low_no_literals,
+            )
+            if forbidden_gen1:
+                tbl = forbidden_gen1.group(1)
+                return (
+                    f"Error: In Generation 1, campaign table '{tbl}' is empty (0 rows) and disallowed. "
+                    "Query ONLY `expert_runs` and `expert_ticks` in Generation 1 (and use `query_wiki` / `query_monster` / `query_item`).",
+                    "error",
+                )
         for word in (
             "insert",
             "update",
