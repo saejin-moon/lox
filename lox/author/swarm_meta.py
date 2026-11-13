@@ -80,7 +80,7 @@ class SwarmMetaAgent:
 
 Do NOT assume what the bottlenecks or regressions are. Use your tools (`query_db`, `query_policy_docs`, `read_skill`, `query_theories`) to inspect the database and codebase yourself:
 - Check `batches` across generations to see the full progression/regression trajectory.
-- Check `runs` (including `summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats`, and `policies` to diagnose what is actually happening.
+- Check `runs` (including `summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats`, and `policies` to diagnose what is actually happening (if `runs` has 0 rows on Gen 1, check `expert_runs`, `query_wiki`, and `query_policy_docs` instead).
 - Check `policy.py` (`query_policy_docs('policy')`) and `skills/` (`query_policy_docs('skills')` / `read_skill`) to see what already exists and where branches are failing or conflicting.
 - Reuse an existing `category_id` (skill module name) when a worker should refine or fix an existing skill, or introduce a new `category_id` when a distinct capability is missing.
 

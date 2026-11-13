@@ -521,7 +521,8 @@ def build_user_prompt(
 Follow these stages inside THIS conversation (your context, DB queries, and experiment results stay warm across all turns, and all tools remain available whenever you need to investigate further):
 
 1. **Investigate What Happened Yourself (do NOT guess)**:
-   - Use `query_db(sql)` (against `batches`, `runs` including `summary_digest` & `end_reason`, `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`), `query_theories`, `read_skill`, `query_policy_docs`, `query_wiki`, `query_monster`, and `query_item` to diagnose what is actually happening across generations and in the current `policy.py` / `skills/`.
+   - Use `query_db(sql)` (against `batches`, `runs` including `summary_digest` & `end_reason`, `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`), `query_wiki`, `query_monster`, `query_item`, `query_theories`, `read_skill`, and `query_policy_docs` to diagnose what is happening and verify exact C/game mechanics.
+   - Note: on a fresh Generation 1 start (`runs` / `batches` have 0 rows), use `expert_runs` / `expert_ticks`, `query_wiki`, `query_monster`, `query_item`, and `query_policy_docs` right away rather than repeatedly querying empty `runs`.
    - Check whether an existing branch is failing, stalling, or oscillating with another leaf, or whether a capability is missing.
 
 2. **Brainstorm {k_hyp} Distinct Competing Hypotheses BEFORE Coding**:
