@@ -635,7 +635,7 @@ def test_floor_residence_and_staircase_utilization_telemetry():
     # D2 avg = 200 turns
     assert "Dlvl 1 avg=550 turns" in digest
     assert "Dlvl 2 avg=200 turns" in digest
-    assert "Human Expert Reference: Dlvl 1 avg=40 turns, Dlvl 2 avg=85 turns" in digest
+    assert "Human Expert Reference" not in digest
 
     # Downstairs conversion: 1 of 2 runs with stairs descended to Dlvl 2+ (50.0%)
     assert "**Downstairs Conversion Rate**: 1/2 runs (50.0%)" in digest
@@ -718,8 +718,9 @@ def test_full_ascension_telemetry_digest():
 
     # 1. Descent readiness
     assert "Descent Readiness (Preparation at Floor Entry)" in digest
-    assert "Dlvl 2: XL=1.5 HP=16 (Exp: XL 2, HP 16)" in digest
-    assert "Dlvl 4: XL=5.0 HP=45 (Exp: XL 5, HP 42)" in digest
+    assert "Dlvl 2: XL=1.5 HP=16" in digest
+    assert "Dlvl 4: XL=5.0 HP=45" in digest
+    assert "(Exp:" not in digest
 
     # 2. Branch traversal
     assert "Dungeon Branch Traversal" in digest

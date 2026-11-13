@@ -18,11 +18,12 @@ from typing import Any
 
 import numpy as np
 
+from lox.author.swarm_critic import SwarmCriticAgent
 from lox.author.swarm_meta import SwarmMetaAgent
 from lox.author.swarm_worker import SwarmWorker
 from lox.core.contracts import BatchEvaluation
 from lox.db.logger import BatchDatabaseLogger
-from lox.db.schema import DEFAULT_DB_PATH, init_db
+from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
 from lox.engine.map_elites import MAPElitesArchive
@@ -87,6 +88,14 @@ class SwarmCampaignOrchestrator:
         )
         self.meta_agent.frontier = self.frontier
         self.meta_agent.author.tools.theories_store = self.meta_agent.theories
+        self.critic = SwarmCriticAgent(
+            provider=self.provider,
+            model=self.model,
+            db_path=self.db_path,
+            theories_store=self.theories,
+        )
+        self.champion_policy_id: str | None = self._load_latest_champion_id()
+        self.last_champion_runs: list[dict[str, Any]] = []
 
         # Initialize Multi-Core Persistent Eval Pool
         self.eval_pool = PersistentEvalPool(
@@ -95,6 +104,19 @@ class SwarmCampaignOrchestrator:
             max_steps=self.max_steps,
             benchmark=self.benchmark,
         )
+
+    def _load_latest_champion_id(self) -> str | None:
+        try:
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                row = con.execute(
+                    "SELECT policy_id FROM policies WHERE is_promoted = TRUE ORDER BY generation DESC LIMIT 1"
+                ).fetchone()
+                return str(row[0]) if row and row[0] else None
+            finally:
+                con.close()
+        except Exception:
+            return None
 
     def close(self) -> None:
         """Shuts down worker pool and logs completion."""
@@ -130,12 +152,21 @@ class SwarmCampaignOrchestrator:
             else {}
         )
 
+        # 0. Read-Only Critic Diagnostician (investigates DuckDB/diffs/wiki before category discovery)
+        diag_report = self.critic.diagnose_for_generation(
+            generation=generation,
+            champion_policy_id=self.champion_policy_id,
+            current_policy=current_policy,
+            skills=initial_skills,
+        )
+
         # 1. Dynamic Macro-Category Discovery (tool-enabled; agent investigates DB & codebase itself)
         categories = self.meta_agent.discover_macro_categories(
             generation=generation,
             n_categories=max(1, int(self.num_workers)),
             current_policy=current_policy,
             skills=initial_skills,
+            diagnostic_report=diag_report,
         )
         cat_names = [c["category_id"] for c in categories]
         ui.info(f"Gen {generation}: Active Categories: {cat_names}")
@@ -187,6 +218,9 @@ class SwarmCampaignOrchestrator:
             worker_reports=worker_reports,
             current_policy=current_policy,
             skills_dir=skills_dir,
+            eval_pool=self.eval_pool if generation > 1 else None,
+            baseline_runs=self.last_champion_runs if generation > 1 else None,
+            diagnostic_report=diag_report,
         )
         policy_path.write_text(master_policy_code, encoding="utf-8")
         skills_dict = (
@@ -202,11 +236,11 @@ class SwarmCampaignOrchestrator:
             f"Gen {generation}: Master policy saved to `{policy_path}` ({len(skills_dict)} skill modules in `{skills_dir}`)."
         )
 
-        # 4. Multi-Core Evaluation Batch on PersistentEvalPool
+        # 4. Multi-Core Paired Evaluation Batch on PersistentEvalPool
         ui.info(
-            f"Gen {generation}: Evaluating master policy on {self.seeds_per_batch} seeds..."
+            f"Gen {generation}: Evaluating master policy on {self.seeds_per_batch} paired seeds..."
         )
-        seeds = [1000 + generation * 100 + i for i in range(self.seeds_per_batch)]
+        seeds = [1000 + i for i in range(self.seeds_per_batch)]
         batch_eval: BatchEvaluation = self.eval_pool.evaluate_batch(
             batch_id=f"batch_swarm_g{generation}_{int(time.time())}",
             policy_code=master_policy_code,
@@ -217,7 +251,7 @@ class SwarmCampaignOrchestrator:
             record_ticks=True,
         )
 
-        # 5. Log Batch and Telemetry to DuckDB
+        # 5. Log Candidate Batch & Run Read-Only Critic Gate
         runs = batch_eval.get("runs", [])
         batch_id = str(batch_eval.get("batch_id", f"batch_swarm_g{generation}"))
         batch_metrics = {
@@ -233,6 +267,7 @@ class SwarmCampaignOrchestrator:
             "total_cost_usd": 0.0,
         }
         policy_id = f"policy_swarm_g{generation}"
+        parent_id = self.champion_policy_id or f"policy_swarm_g{max(0, generation - 1)}"
         self.db_logger.save_policy(
             policy_id=policy_id,
             generation=generation,
@@ -242,20 +277,66 @@ class SwarmCampaignOrchestrator:
             params={},
             avg_depth=float(batch_metrics["avg_depth"]),
             max_depth=int(batch_metrics["max_depth"]),
-            is_promoted=True,
+            is_promoted=False,
+            skills=skills_dict,
         )
         log_res = self.db_logger.save_batch(
             batch_id=batch_id,
             generation=generation,
             mode="SWARM",
-            parent_policy_id=f"policy_swarm_g{max(0, generation - 1)}",
+            parent_policy_id=parent_id,
             candidate_policy_id=policy_id,
             target_functions=[],
             runs=runs,
             episodes_discarded=int(batch_eval.get("episodes_discarded", 0)),
             batch_metrics=batch_metrics,
-            verdict={"passed": True, "reason": f"Swarm Generation {generation} Master"},
+            verdict={"passed": False, "reason": "Pending Critic Gate"},
         )
+
+        gate = self.critic.evaluate_and_gate(
+            generation=generation,
+            batch_id=batch_id,
+            candidate_policy_id=policy_id,
+            champion_policy_id=self.champion_policy_id,
+        )
+        promoted = gate.decision == "PROMOTE"
+        if promoted:
+            self.champion_policy_id = policy_id
+            self.last_champion_runs = [
+                dict(r) if isinstance(r, dict) else r.__dict__ for r in runs
+            ]
+            try:
+                con = connect_db(self.db_path, read_only=False)
+                try:
+                    con.execute(
+                        "UPDATE policies SET is_promoted = TRUE WHERE policy_id = ?",
+                        [policy_id],
+                    )
+                    con.execute(
+                        "UPDATE batches SET hypothesis_passed = TRUE WHERE batch_id = ?",
+                        [batch_id],
+                    )
+                finally:
+                    con.close()
+            except Exception:
+                pass
+            ui.info(f"Critic Gate: PROMOTED `{policy_id}` ({gate.reason})")
+        else:
+            ui.warn(
+                f"Critic Gate: ROLLED BACK `{policy_id}` -> `{gate.target_policy_id}` ({gate.reason})"
+            )
+            snap = self.db_logger.load_policy_snapshot(gate.target_policy_id)
+            if snap is not None:
+                champ_code, champ_skills = snap
+                policy_path.write_text(champ_code, encoding="utf-8")
+                if skills_dir.exists():
+                    for p in skills_dir.glob("*.py"):
+                        if p.stem != "__init__":
+                            p.unlink()
+                    for sk_name, sk_code in champ_skills.items():
+                        (skills_dir / f"{sk_name}.py").write_text(
+                            sk_code, encoding="utf-8"
+                        )
 
         # 6. Extract New Frontier Checkpoints from High-Performing Runs
         new_cps = 0

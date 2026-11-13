@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS policies (
     mode VARCHAR,
     policy_code TEXT,
     macros_code TEXT,
+    skills_json TEXT DEFAULT '{}',
     params_json VARCHAR,
     avg_depth DOUBLE,
     max_depth INTEGER,
@@ -425,6 +426,18 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                             con.execute(f"ALTER TABLE runs ADD COLUMN {c_name} {c_typ}")
                         except Exception:
                             pass
+            if "policies" in tables:
+                cols_pol = [
+                    r[1]
+                    for r in con.execute("PRAGMA table_info('policies')").fetchall()
+                ]
+                if "skills_json" not in cols_pol:
+                    try:
+                        con.execute(
+                            "ALTER TABLE policies ADD COLUMN skills_json TEXT DEFAULT '{}'"
+                        )
+                    except Exception:
+                        pass
             if "batches" in tables:
                 cols_b = [
                     r[1] for r in con.execute("PRAGMA table_info('batches')").fetchall()
@@ -532,7 +545,7 @@ def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:
 - **`batches`** (Per-generation batch overview):
   `batch_id`, `generation`, `mode`, `parent_policy_id`, `candidate_policy_id`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `seeds_evaluated` (INT), `is_early_stopped` (BOOLEAN), `pilot_best_delta` (DOUBLE), `total_cost_usd` (DOUBLE), `total_llm_tokens` (BIGINT), `created_at` (TIMESTAMP).
 - **`policies`** (Full source code & depth metrics for every generation's policy):
-  `policy_id` (VARCHAR), `generation` (INT), `mode` (VARCHAR), `policy_code` (TEXT), `macros_code` (TEXT), `params_json` (VARCHAR), `avg_depth` (DOUBLE), `max_depth` (INT), `is_promoted` (BOOLEAN), `created_at` (TIMESTAMP).
+  `policy_id` (VARCHAR), `generation` (INT), `mode` (VARCHAR), `policy_code` (TEXT), `macros_code` (TEXT), `skills_json` (TEXT: JSON map of `skills/*.py` modules), `params_json` (VARCHAR), `avg_depth` (DOUBLE), `max_depth` (INT), `is_promoted` (BOOLEAN), `created_at` (TIMESTAMP).
 - **`discoveries`** (Verified causal findings & binding constraints across generations):
   `discovery_id` (VARCHAR), `generation` (INT), `batch_id` (VARCHAR), `mode` (VARCHAR), `target_functions` (VARCHAR), `binding_constraint` (VARCHAR), `verified_c_rule` (VARCHAR), `mechanism` (TEXT), `mean_delta` (DOUBLE), `avg_depth` (DOUBLE), `p90_depth` (DOUBLE), `max_depth` (INT), `created_at` (TIMESTAMP).
 - **`archive_policies`** (Quality-Diversity MAP-Elites Behavioral Archive - 80 niches):

@@ -44,19 +44,13 @@ POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
   class Policy:
       def __init__(self):
           self.visited = set()
-          flee_hp = self.param("flee_hp", 0.30, 0.10, 0.70)
-          self.flee_hp = flee_hp
+          self.threshold = self.param("threshold", 0.50, 0.10, 0.90)
 
       def run(self, state: GameState):
           while True:
               self.visited.add((state.y, state.x))
-              act = (
-                  self.handle_emergency(state)
-                  or self.handle_combat(state)
-                  or self.handle_nutrition(state)
-                  or self.explore(state)
-              )
-              state = yield (act if act is not None else Action.SEARCH)
+              act = self.select_action(state)
+              state = yield (act if act is not None else Action.WAIT)
   ```
   - You can also write `def step(self, state: GameState) -> Action:` directly, or use generator subroutines via `state = yield from self.sub_gen(state)`.
   - **Zero-Turn Action & Stall Telemetry (`state.turn_advanced`, `state.consecutive_stalls`)**:
@@ -109,7 +103,7 @@ Nothing is hardcoded in the harness: whatever you `yield` (or `return` from `ste
 - **Multi-Keystroke Sequences (`seq(...)`), Extended Commands (`extcmd`), & Repeats (`repeat`)**:
   Many NetHack actions prompt for a direction, inventory slot letter, or text. Send the full sequence in one turn using `seq(...)`:
   - Open a door at `(dy, dx)`: `yield seq(Action.OPEN, DIR_DELTAS[(dy, dx)])`
-  - Kick a door at `(dy, dx)`: `yield seq(Action.KICK, DIR_DELTAS[(dy, dx)])` (breaks locked doors into `.` in 1-3 kicks)
+  - Kick in direction `(dy, dx)`: `yield seq(Action.KICK, DIR_DELTAS[(dy, dx)])`
   - Repeat action $N$ times: `yield repeat(10, Action.SEARCH)` or `yield repeat(5, Action.WAIT)`
   - Extended commands: `yield extcmd("pray", "y")`, `yield extcmd("terrain")`, `yield extcmd("sit")`
   - Eat inventory item in slot `'f'`: `yield seq(Action.EAT, 'f')`
@@ -124,7 +118,7 @@ Nothing is hardcoded in the harness: whatever you `yield` (or `return` from `ste
 Every turn, `state` exposes 100% of NetHack's observation arrays, terminal screens, and C symbol tables. Pay special attention to these crucial perception fields:
 - **Hero Vitals, Armor & Hunger**:
   - `state.hp` and `state.max_hp`: Hero current and max hit points.
-  - `state.ac`: Numerical armor class (starting AC is 10; lower is better; wearing armor drops AC and dramatically reduces monster melee hit chance).
+  - `state.ac`: Numerical armor class.
   - `state.hunger_state`: `0`=Satiated, `1`=Not Hungry, `2`=Hungry, `3`=Weak, `4`=Fainting, `5`=Fainted.
   - `state.y` (0..20), `state.x` (0..78), `state.pos` (`(y, x)`), `state.turn`, `state.step_count`.
   - `state.energy`, `state.max_energy`, `state.xp_level`, `state.xp`, `state.score`, `state.gold`.
@@ -248,7 +242,6 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    SELECT 'expert_ascensions' AS source, AVG(ac) AS avg_ac, AVG(hp) AS avg_hp, AVG(turn) AS avg_turns
    FROM expert_ticks WHERE depth = 2;
    ```
-   *Interpretation*: If expert runs spend ~40 turns on Dlvl 1 and ~85 turns on Dlvl 2 while your policy spends thousands of turns on Dlvl 1, your policy is chronically lingering instead of taking stairs down when found. If experts have AC <= 4 and your runs have AC 10, your policy is not equipping armor. If experts have 2x higher HP/XL, your policy is taking unnecessary melee damage or failing to level up.
 
 2. **Monster Encounter & Tactical Response Query**:
    ```sql
@@ -292,12 +285,6 @@ Do not guess why a run stalled or died. Formulate differential queries against D
           SUM(CASE WHEN died_unarmored THEN 1 ELSE 0 END) AS died_unarmored_cnt
    FROM champion_runs;
    ```
-   *Interpretation*:
-   - `avg_esc > 0`: Policy is trapped by text/naming prompts and relying on harness safety fallback.
-   - `avg_preempts >> 0`: Multi-step generator skills are frequently interrupted before completion.
-   - `avg_pct_wait > 30%` or `avg_pct_search > 40%`: Policy spends excessive turns idling or spamming search.
-   - `starved_with_food_cnt > 0`: Hero starved with food rations in pack (needs eating routine).
-   - `died_unarmored_cnt > 0`: Hero died with AC 10 despite having armor in pack (needs equip routine).
 
 ### Available Investigation & Verification Tools
 1. `query_db(sql)`: Run read-only SQL queries on DuckDB (`champion_runs`, `champion_function_stats`, `champion_ticks`, `latest_pilot_runs`, `runs`, `ticks`, `batches`, `function_stats`, `experiments`, `expert_runs`, `expert_ticks`).
@@ -599,8 +586,8 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
         return f"""### Generation {generation} — Mode: `CREATE` (Initial Baseline Synthesis)
 {stagnation_block}{discoveries_block}{failures_block}You are bootstrapping the policy from a **completely clean slate** (no pre-written policy is provided).
 Your task:
-1. Use multiple tool calls (`query_db` on `expert_runs` / `expert_ticks`, `query_wiki`, `query_policy_docs`) to study successful NetHack runs, early-game survival mechanics, dungeon navigation, door opening/kicking, stair descent, combat, and food/corpse consumption.
-2. Design a well-structured, modular `class Policy:` with clear methods (e.g. `run(self, state)`, `update_memory(self, state)`, `handle_combat(self, state)`, `handle_nutrition(self, state)`, `explore_level(self, state)`, etc.).
+1. Use multiple tool calls (`query_db` on `expert_runs` / `expert_ticks`, `query_wiki`, `query_policy_docs`) to study successful NetHack runs and C-engine mechanics.
+2. Design a well-structured, modular `class Policy:` with clear methods.
 3. Pre-Submission Invariant Checklist:
    - Generator Invariant: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
    - State Persistence: Specialist methods must update `self.*` attributes to prevent oscillations.

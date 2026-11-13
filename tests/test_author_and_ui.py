@@ -491,9 +491,9 @@ def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypat
 """
         msg, status = tools.dry_run_policy(failing_code)
         assert status.startswith("PILOT_FAILED")
-        assert "MANDATORY INVESTIGATION PROTOCOL" in msg
-        assert "query_wiki" in msg
-        assert "query_db" in msg
+        assert "PILOT BATCH" in msg
+        assert "End Reasons:" in msg
+        assert "MANDATORY INVESTIGATION PROTOCOL" not in msg
         assert tools.last_pilot_improved is False
 
         # 3. Agent synthesize sends scientific investigation guidance on pilot failure
@@ -891,5 +891,8 @@ def test_summarizer_level_stall_vs_livelock():
     ]
 
     digest = build_batch_contrast_digest(batch_stats, runs, fn_stats)
-    assert "PRIMARY BOTTLENECK: LEVEL EXPLORATION & STAIRCASE DESCENT FAILURE" in digest
-    assert "staircase location & descent" in digest
+    assert "Chronic Stagnation Rate" in digest
+    assert "Max-Steps Timeout Rate" in digest
+    assert "State Recurrence Rate during Stagnation" in digest
+    assert "handle_prompt" in digest
+    assert "PRIMARY BOTTLENECK" not in digest

@@ -567,6 +567,7 @@ class BatchDatabaseLogger:
         avg_depth: float,
         max_depth: int,
         is_promoted: bool,
+        skills: dict[str, str] | None = None,
     ) -> None:
         con = connect_db(self.db_path, read_only=False)
         try:
@@ -574,8 +575,8 @@ class BatchDatabaseLogger:
                 """
                 INSERT OR REPLACE INTO policies (
                     policy_id, generation, mode, policy_code, macros_code,
-                    params_json, avg_depth, max_depth, is_promoted, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    skills_json, params_json, avg_depth, max_depth, is_promoted, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     policy_id,
@@ -583,6 +584,7 @@ class BatchDatabaseLogger:
                     mode,
                     policy_code,
                     macros_code,
+                    json.dumps(skills or {}),
                     json.dumps(params),
                     float(avg_depth),
                     int(max_depth),
@@ -590,6 +592,31 @@ class BatchDatabaseLogger:
                     datetime.datetime.now(),
                 ],
             )
+        finally:
+            con.close()
+
+    def load_policy_snapshot(self, policy_id: str) -> tuple[str, dict[str, str]] | None:
+        """Loads `(policy_code, skills_dict)` for `policy_id` from DuckDB, or None."""
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            row = con.execute(
+                "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
+                [policy_id],
+            ).fetchone()
+            if not row:
+                return None
+            p_code = str(row[0] or "")
+            raw_skills = str(row[1] or "{}")
+            try:
+                parsed = json.loads(raw_skills)
+                skills_dict = (
+                    {str(k): str(v) for k, v in parsed.items()}
+                    if isinstance(parsed, dict)
+                    else {}
+                )
+            except Exception:
+                skills_dict = {}
+            return p_code, skills_dict
         finally:
             con.close()
 

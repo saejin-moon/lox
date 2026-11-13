@@ -41,6 +41,7 @@ class ObservationDigest:
     score_end: int = 0
     unique_tiles: int = 0
     actions_taken: dict[str, int] = field(default_factory=dict)
+    fn_turns: dict[str, int] = field(default_factory=dict)
     rle_trace: list[str] = field(default_factory=list)
     dialog_resolved: bool = False
     context_label: str = "seed"
@@ -68,6 +69,10 @@ class ObservationDigest:
             f"{k}:{v}"
             for k, v in sorted(self.actions_taken.items(), key=lambda x: -x[1])[:4]
         )
+        top_fns = ", ".join(
+            f"{k}:{v}"
+            for k, v in sorted(self.fn_turns.items(), key=lambda x: -x[1])[:5]
+        )
         total = self.total_eval_steps or self.steps_taken
         base = (
             f"Status: {status} | Context: {self.context_label} | "
@@ -75,6 +80,7 @@ class ObservationDigest:
             f"HP: {self.hp_end}/{self.hp_start} (Δ{self.hp_delta:+d}) | "
             f"Depth: Dlvl {self.depth_end} (Δ{self.depth_delta:+d}) | "
             f"Unique Tiles: {self.unique_tiles} | Actions: [{top_acts}]"
+            + (f" | BranchTurns: [{top_fns}]" if top_fns else "")
         )
         if self.rle_trace:
             tail = " -> ".join(self.rle_trace[-5:])
@@ -102,12 +108,27 @@ def sample_condition_fixtures(
     try:
         con = connect_db(db_path, read_only=True)
         seen_runs: set[str] = set()
+        allowed_order_cols = {
+            "max_depth",
+            "depth",
+            "turns",
+            "score",
+            "unique_tiles",
+            "pct_wait",
+            "pct_search",
+        }
+        metric_col = "turns"
+        for m in target_metrics or []:
+            m_clean = str(m).strip().lower()
+            if m_clean in allowed_order_cols:
+                metric_col = m_clean
+                break
         queries = [
-            """
+            f"""
             SELECT run_id, seed, max_depth, end_reason, action_bytes
             FROM runs
             WHERE octet_length(action_bytes) > 10 AND end_reason != 'active'
-            ORDER BY generation DESC, turns DESC
+            ORDER BY generation DESC, {metric_col} DESC
             LIMIT ?
             """,
             """

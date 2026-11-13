@@ -468,6 +468,15 @@ class AuthorAgent:
             skill_name = str(args.get("skill_name", ""))
             out, summary = self.tools.read_skill(skill_name)
             arg_disp = skill_name
+        elif name == "read_policy":
+            policy_id = str(args.get("policy_id", ""))
+            out, summary = self.tools.read_policy(policy_id)
+            arg_disp = policy_id
+        elif name == "diff_policies":
+            id_a = str(args.get("policy_id_a", ""))
+            id_b = str(args.get("policy_id_b", ""))
+            out, summary = self.tools.diff_policies(id_a, id_b)
+            arg_disp = f"{id_a}..{id_b}"
         elif name == "query_theories":
             q = str(args.get("query", ""))
             dt = str(args.get("doc_type", ""))
@@ -528,6 +537,7 @@ class AuthorAgent:
         self,
         messages: list[dict[str, Any]],
         allow_tools: bool = True,
+        tool_specs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Dispatches a single chat completion request to OpenRouter, OpenAI, or Gemini."""
         if self.provider == "openrouter":
@@ -552,7 +562,9 @@ class AuthorAgent:
             "temperature": 0.4,
         }
         if allow_tools:
-            payload["tools"] = OPENAI_TOOL_SPECS
+            payload["tools"] = (
+                tool_specs if tool_specs is not None else OPENAI_TOOL_SPECS
+            )
             payload["tool_choice"] = "auto"
         if self.provider == "openrouter" and self.reasoning_effort:
             payload["reasoning"] = {"effort": self.reasoning_effort}
@@ -1715,79 +1727,169 @@ class AuthorAgent:
         user_prompt: str,
         max_tool_turns: int = 5,
         required_tools: list[str] | None = None,
+        allowed_tools: set[str] | None = None,
+        generation: int = 0,
+        session_mode: str = "TOOL_SESSION",
+        agent_role_override: str = "",
     ) -> str:
         """Runs a lightweight tool-enabled conversation and returns the final assistant text."""
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+        tool_specs = (
+            [
+                spec
+                for spec in OPENAI_TOOL_SPECS
+                if (spec.get("function") or {}).get("name") in allowed_tools
+            ]
+            if allowed_tools is not None
+            else None
+        )
+        prev_role = self.agent_role
+        if agent_role_override:
+            self.agent_role = agent_role_override
         last_content = ""
         called_tools: set[str] = set()
         called_expert_query = False
         req = [str(t) for t in (required_tools or []) if str(t).strip()]
-        for turn_idx in range(1, max(1, int(max_tool_turns)) + 2):
-            allow_tools = turn_idx <= max_tool_turns
-            msg = self._call_llm_api(messages, allow_tools=allow_tools)
-            content = str(msg.get("content") or "").strip()
-            if content:
-                last_content = content
-            tcs = msg.get("tool_calls") or []
-            if not tcs:
-                missing: list[str] = []
-                for t in req:
-                    if t == "query_db:expert_runs":
-                        if not called_expert_query:
-                            missing.append("query_db (on expert_runs/expert_ticks)")
-                    elif t not in called_tools:
-                        missing.append(t)
-                if missing and turn_idx <= max_tool_turns:
-                    messages.append({"role": "assistant", "content": content})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Required tool(s) not yet called: {', '.join(missing)}. "
-                                "You MUST call both `query_wiki` and `query_db` on `expert_runs` / `expert_ticks` "
-                                "before returning your final JSON response."
-                            ),
-                        }
+        try:
+            for turn_idx in range(1, max(1, int(max_tool_turns)) + 2):
+                allow_tools = turn_idx <= max_tool_turns
+                t0_turn = time.perf_counter()
+                msg = (
+                    self._call_llm_api(
+                        messages, allow_tools=allow_tools, tool_specs=tool_specs
                     )
-                    continue
-                return last_content
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": msg.get("content") or "",
-                    "tool_calls": tcs,
-                }
-            )
-            for idx_tc, tc in enumerate(tcs, start=1):
-                fn_spec = tc.get("function") or {}
-                fn_name = str(fn_spec.get("name") or "")
-                if fn_name:
-                    called_tools.add(fn_name)
-                    if fn_name == "query_db":
-                        raw_args = fn_spec.get("arguments", "{}")
-                        try:
-                            parsed_args = (
-                                json.loads(raw_args)
-                                if isinstance(raw_args, str)
-                                else dict(raw_args)
-                            )
-                        except Exception:
-                            parsed_args = {}
-                        sql_low = str((parsed_args or {}).get("sql", "")).lower()
-                        if "expert_runs" in sql_low or "expert_ticks" in sql_low:
-                            called_expert_query = True
-                res_out = self._dispatch_raw_tool_call(turn_idx, tc)
+                    if tool_specs is not None
+                    else self._call_llm_api(messages, allow_tools=allow_tools)
+                )
+                turn_ms = (time.perf_counter() - t0_turn) * 1000.0
+                content = str(msg.get("content") or "").strip()
+                reasoning_text = str(msg.get("_reasoning") or "")
+                usage = msg.get("_usage") or {}
+                if content:
+                    last_content = content
+                tcs = msg.get("tool_calls") or []
+                if not tcs:
+                    missing: list[str] = []
+                    for t in req:
+                        if t == "query_db:expert_runs":
+                            if not called_expert_query:
+                                missing.append("query_db (on expert_runs/expert_ticks)")
+                        elif t not in called_tools:
+                            missing.append(t)
+                    if missing and turn_idx <= max_tool_turns:
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Required tool(s) not yet called: {', '.join(missing)}. "
+                                    "You MUST call both `query_wiki` and `query_db` on `expert_runs` / `expert_ticks` "
+                                    "before returning your final JSON response."
+                                ),
+                            }
+                        )
+                        continue
+                    try:
+                        self.db_logger.save_synthesis_log(
+                            log_id=f"syn_ts_{generation}_{self.agent_role}_{turn_idx}_{int(time.time() * 1000)}",
+                            generation=generation,
+                            batch_id=f"swarm_g{generation}_{self.agent_role}",
+                            mode=session_mode,
+                            turn_index=turn_idx,
+                            turn_type=session_mode,
+                            repair_idx=0,
+                            model=self.model,
+                            thinking_content=reasoning_text,
+                            message_content=content,
+                            tool_calls_json="[]",
+                            tool_results_json="[]",
+                            status="FINAL_RESPONSE",
+                            prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                            completion_tokens=int(usage.get("completion_tokens", 0)),
+                            reasoning_tokens=int(
+                                usage.get("completion_tokens_details", {}).get(
+                                    "reasoning_tokens", 0
+                                )
+                            ),
+                            agent_role=self.agent_role,
+                            wall_ms=turn_ms,
+                        )
+                    except Exception:
+                        pass
+                    return last_content
                 messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", f"tc_{turn_idx}_{idx_tc}"),
-                        "content": res_out,
+                        "role": "assistant",
+                        "content": msg.get("content") or "",
+                        "tool_calls": tcs,
                     }
                 )
-        return last_content
+                tool_results_list: list[dict[str, str]] = []
+                for idx_tc, tc in enumerate(tcs, start=1):
+                    fn_spec = tc.get("function") or {}
+                    fn_name = str(fn_spec.get("name") or "")
+                    if fn_name:
+                        called_tools.add(fn_name)
+                        if fn_name == "query_db":
+                            raw_args = fn_spec.get("arguments", "{}")
+                            try:
+                                parsed_args = (
+                                    json.loads(raw_args)
+                                    if isinstance(raw_args, str)
+                                    else dict(raw_args)
+                                )
+                            except Exception:
+                                parsed_args = {}
+                            sql_low = str((parsed_args or {}).get("sql", "")).lower()
+                            if "expert_runs" in sql_low or "expert_ticks" in sql_low:
+                                called_expert_query = True
+                    if allowed_tools is not None and fn_name not in allowed_tools:
+                        res_out = f"Error: Tool '{fn_name}' is not permitted in read-only mode."
+                    else:
+                        res_out = self._dispatch_raw_tool_call(turn_idx, tc)
+                    tool_results_list.append(
+                        {"name": fn_name, "result": str(res_out)[:2000]}
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", f"tc_{turn_idx}_{idx_tc}"),
+                            "content": res_out,
+                        }
+                    )
+                try:
+                    self.db_logger.save_synthesis_log(
+                        log_id=f"syn_ts_{generation}_{self.agent_role}_{turn_idx}_{int(time.time() * 1000)}",
+                        generation=generation,
+                        batch_id=f"swarm_g{generation}_{self.agent_role}",
+                        mode=session_mode,
+                        turn_index=turn_idx,
+                        turn_type=session_mode,
+                        repair_idx=0,
+                        model=self.model,
+                        thinking_content=reasoning_text,
+                        message_content=content,
+                        tool_calls_json=json.dumps(tcs),
+                        tool_results_json=json.dumps(tool_results_list),
+                        status="TOOL_CALLS",
+                        prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                        completion_tokens=int(usage.get("completion_tokens", 0)),
+                        reasoning_tokens=int(
+                            usage.get("completion_tokens_details", {}).get(
+                                "reasoning_tokens", 0
+                            )
+                        ),
+                        agent_role=self.agent_role,
+                        wall_ms=turn_ms,
+                    )
+                except Exception:
+                    pass
+            return last_content
+        finally:
+            self.agent_role = prev_role
 
     def run_swarm_worker_session(
         self,

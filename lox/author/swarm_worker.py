@@ -309,31 +309,33 @@ class SwarmWorker:
                 }
             )
 
-        # Pick winning verified subtree: clean > triggered > depth > unique_tiles > survived
+        # Pick winning verified subtree: never return crashing code.
         clean_recs = [
             r for r in evaluated_records if not r["error"] and r["code"].strip()
         ]
         if clean_recs:
-            selected = max(
-                clean_recs,
-                key=lambda r: (
-                    1 if r["triggered_steps"] > 0 else 0,
-                    max(
-                        (o.depth_end for o in r["obs_list"]), default=r["obs"].depth_end
-                    ),
-                    max(
-                        (o.unique_tiles for o in r["obs_list"]),
-                        default=r["obs"].unique_tiles,
-                    ),
-                    1 if r["obs"].survived else 0,
-                    r["triggered_steps"],
-                ),
-            )
-        else:
-            selected = evaluated_records[-1]
+            metric_keys = [str(m).strip().lower() for m in (self.target_metrics or [])]
 
-        best_code = selected["code"]
-        best_obs = selected["obs"]
+            def _score_rec(r: dict[str, Any]) -> tuple[Any, ...]:
+                obs_l = r["obs_list"] or [r["obs"]]
+                max_d = max((o.depth_end for o in obs_l), default=r["obs"].depth_end)
+                max_t = max(
+                    (o.unique_tiles for o in obs_l), default=r["obs"].unique_tiles
+                )
+                surv = 1 if r["obs"].survived else 0
+                trig = 1 if r["triggered_steps"] > 0 else 0
+                if "max_depth" in metric_keys or "depth" in metric_keys:
+                    return (trig, max_d, surv, max_t, r["triggered_steps"])
+                if "unique_tiles" in metric_keys:
+                    return (trig, max_t, max_d, surv, r["triggered_steps"])
+                return (trig, max_d, max_t, surv, r["triggered_steps"])
+
+            selected = max(clean_recs, key=_score_rec)
+            best_code = selected["code"]
+            best_obs = selected["obs"]
+        else:
+            best_code = ""
+            best_obs = evaluated_records[-1]["obs"]
 
         hyps_bullet = "\n".join(
             f"- {h.get('id', '?')}: {h.get('mechanism', str(h))}" for h in hyp_list

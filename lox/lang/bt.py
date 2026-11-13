@@ -28,6 +28,11 @@ class Blackboard(dict[str, Any]):
     def __init__(self, *args: Any, strict_errors: bool = False, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.strict_errors = strict_errors
+        self.leaf_errors: list[tuple[str, str]] = []
+
+    def record_leaf_error(self, node_name: str, exc: Exception) -> None:
+        if len(self.leaf_errors) < 50:
+            self.leaf_errors.append((str(node_name), f"{type(exc).__name__}: {exc}"))
 
     def get_var(self, key: str, default: Any = None) -> Any:
         return self.get(key, default)
@@ -83,7 +88,9 @@ class ActionLeaf(BehaviorNode):
                 act = self.action_fn(state, blackboard)
             else:
                 act = self.action_fn(state)
-        except Exception:
+        except Exception as exc:
+            if hasattr(blackboard, "record_leaf_error"):
+                blackboard.record_leaf_error(self.name, exc)
             if getattr(blackboard, "strict_errors", False):
                 raise
             return NodeStatus.FAILURE, None
@@ -117,7 +124,9 @@ class ConditionLeaf(BehaviorNode):
                 ok = bool(self.cond_fn(state, blackboard))
             else:
                 ok = bool(self.cond_fn(state))
-        except Exception:
+        except Exception as exc:
+            if hasattr(blackboard, "record_leaf_error"):
+                blackboard.record_leaf_error(self.name, exc)
             if getattr(blackboard, "strict_errors", False):
                 raise
             ok = False

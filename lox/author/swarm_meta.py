@@ -54,6 +54,7 @@ class SwarmMetaAgent:
         n_categories: int = 4,
         current_policy: str = "",
         skills: dict[str, str] | None = None,
+        diagnostic_report: Any = None,
     ) -> list[dict[str, Any]]:
         """
         Dynamically derives macro-categories for the upcoming generation via tool-enabled
@@ -77,10 +78,16 @@ class SwarmMetaAgent:
 
         categories: list[dict[str, Any]] = []
         if self.provider != "mock":
+            diag_block = (
+                f"\n{diagnostic_report.to_prompt_block()}\n"
+                if diagnostic_report is not None
+                and hasattr(diagnostic_report, "to_prompt_block")
+                else ""
+            )
             prompt = f"""Design {n_categories} specialist worker categories for Generation {generation}.
-
+{diag_block}
 Do NOT assume what the bottlenecks or regressions are. Follow this investigation order:
-1. **FIRST (MANDATORY)**: Call `query_wiki` (and `query_monster` / `query_item` as needed) to research authoritative NetHack 3.6.6 game mechanics (e.g. early dungeon survival, combat, doors/traps, hunger/corpses, stairs/exploration) BEFORE calling `query_db` or `query_theories`.
+1. **FIRST (MANDATORY)**: Call `query_wiki` (and `query_monster` / `query_item` as needed) to research authoritative NetHack 3.6.6 game mechanics BEFORE calling `query_db` or `query_theories`.
 2. **SECOND**: Call `query_db` (pass ONE `SELECT` statement per call — never multiple `;`-separated queries).
    - {"In Generation 1, campaign tables (`runs`, `batches`, `ticks`, `function_stats`, `policies`) are empty and DISALLOWED — you MUST query ONLY `expert_runs` and `expert_ticks` (real human ascensions)." if generation == 1 else "Inspect `batches`, `runs`, `function_stats`, `policies`, and `expert_runs` / `expert_ticks`."}
 3. **THIRD**: Check `policy.py` (`query_policy_docs('policy')`) and `skills/` (`query_policy_docs('skills')` / `read_skill`) to see what already exists and where branches are failing or conflicting. Only check `query_theories` AFTER `query_wiki` and `query_db`.
@@ -105,6 +112,9 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                         if generation == 1
                         else None
                     ),
+                    generation=generation,
+                    session_mode="META_DISCOVERY",
+                    agent_role_override="meta_agent",
                 )
                 if "```" in raw_txt:
                     import re
@@ -312,7 +322,20 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
             mod_code = f"# Auto-generated modular skill for specialist `{role}`\n{header}{raw_code}\n"
             try:
                 validate_python_code(mod_code)
-            except Exception:
+                # Verify runtime import/execution in isolation before writing to skills/
+                probe_policy = (
+                    "from lox.env.actions import Action\n"
+                    "class Policy:\n"
+                    "    def step(self, state):\n"
+                    "        return Action.WAIT\n"
+                )
+                compile_policy_package(
+                    probe_policy, skills={safe_name: mod_code}
+                ).create_runner()
+            except Exception as exc:
+                ui.warn(
+                    f"Meta-Agent: Skipping broken skill module `{safe_name}` ({type(exc).__name__}: {exc})"
+                )
                 continue
             skill_modules[safe_name] = mod_code
             if out_dir is not None:
@@ -372,6 +395,9 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         current_policy: str = "",
         max_repair_turns: int = 3,
         skills_dir: str | Any = None,
+        eval_pool: Any = None,
+        baseline_runs: list[dict[str, Any]] | None = None,
+        diagnostic_report: Any = None,
     ) -> str:
         """
         Gathers worker reports from LanceDB, checks DuckDB metrics, and synthesizes the master Policy code.
@@ -479,11 +505,18 @@ class Policy:
                     )
 
             context = "\n".join(reports_summary)
+            diag_block = (
+                f"\n{diagnostic_report.to_prompt_block()}\n\n"
+                if diagnostic_report is not None
+                and hasattr(diagnostic_report, "to_prompt_block")
+                else ""
+            )
             meta_prompt = (
                 f"You are the Meta-Agent Architect synthesizing the Generation {generation} master `class Policy`.\n"
+                f"{diag_block}"
                 f"Do NOT rely solely on worker proposals—prioritize `query_wiki`, `query_monster`, `query_item`, `query_db`, "
-                f"`read_skill`, and `query_policy_docs` (over `query_theories`) to inspect `batches`, `runs` (including `summary_digest`), "
-                f"`function_stats`, `policies`, `expert_runs`, and `skills/` yourself "
+                f"`read_policy`, `diff_policies`, `read_skill`, and `query_policy_docs` (over `query_theories`) to inspect "
+                f"`batches`, `runs` (`summary_digest`), `function_stats`, `policies`, `expert_runs`, and `skills/` yourself "
                 f"to see what is working, what regressed, and how branches interact.\n\n"
                 f"Specialist subtrees are saved in `skills/` (see Hierarchical Skill Registry):\n\n{context}\n\n"
                 f"Ensure the master policy defines `class Policy` with `def __init__(self)` and `def step(self, state): return self.tree.tick(state)`."
@@ -492,11 +525,24 @@ class Policy:
             proposal = self.author.synthesize(
                 mode="SWARM_META",
                 generation=generation,
-                current_policy=current_policy or default_template,
+                current_policy=current_policy,
                 batch_digest=meta_prompt,
                 skills=skill_modules,
+                pool=eval_pool,
+                baseline_runs=baseline_runs,
                 max_tool_turns=10,
             )
+            if proposal.skill_name and proposal.skill_code:
+                s_name = re.sub(
+                    r"[^a-zA-Z0-9_]", "_", proposal.skill_name.lower()
+                ).strip("_")
+                if s_name:
+                    skill_modules[s_name] = proposal.skill_code
+                    if skills_dir is not None:
+                        Path(skills_dir).mkdir(parents=True, exist_ok=True)
+                        (Path(skills_dir) / f"{s_name}.py").write_text(
+                            proposal.skill_code, encoding="utf-8"
+                        )
             candidate_code = proposal.full_policy_code or proposal.raw_code_patch
 
             # Live verification gate with self-repair turns

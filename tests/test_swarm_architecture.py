@@ -436,7 +436,7 @@ class Policy:
 """
     m_msg, m_status = tools.dry_run_policy(meta_code, seed=42, max_turns=15)
     assert m_status.startswith("PASSED"), m_msg
-    assert tools.last_pilot_improved is True
+    assert tools.last_pilot_improved is False
 
 
 def test_run_swarm_clean_resets_campaign_while_preserving_experts(tmp_path):
@@ -815,3 +815,111 @@ def test_swarm_worker_multi_hypothesis_session(tmp_path):
     latest_reports = worker.theories.get_latest_reports(generation=1)
     assert "navigation" in latest_reports
     assert res["observation"].steps_taken > 0
+
+
+def test_critic_gate_rollback_and_skill_isolation(tmp_path):
+    from lox.author.swarm_critic import READ_ONLY_CRITIC_TOOLS, SwarmCriticAgent
+    from lox.author.swarm_meta import SwarmMetaAgent
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.lang.bt import ActionLeaf, Blackboard, ConditionLeaf, NodeStatus
+
+    # 1. Blackboard records swallowed leaf exceptions
+    bb = Blackboard(strict_errors=False)
+
+    def broken_leaf(state, blackboard):
+        raise ZeroDivisionError("boom")
+
+    st, act = ActionLeaf(broken_leaf, name="BrokenAct").tick(None, bb)
+    assert st == NodeStatus.FAILURE and act is None
+    st2, _ = ConditionLeaf(broken_leaf, name="BrokenCond").tick(None, bb)
+    assert st2 == NodeStatus.FAILURE
+    assert len(bb.leaf_errors) == 2
+    assert bb.leaf_errors[0][0] == "BrokenAct"
+
+    # 2. _build_skill_modules rejects broken runtime skill (Gen 18 AttributeError pattern)
+    skills_dir = tmp_path / "skills"
+    worker_reports = {
+        "combat_tactics": {
+            "best_code": (
+                "from lox_policy import missing_symbol\n"
+                "subtree = ActionLeaf(missing_symbol, name='broken')\n"
+            )
+        },
+        "good_skill": {
+            "best_code": (
+                "def good_act(state, bb):\n"
+                "    return Action.WAIT\n"
+                "subtree = ActionLeaf(good_act, name='good')\n"
+            )
+        },
+    }
+    built = SwarmMetaAgent._build_skill_modules(worker_reports, skills_dir=skills_dir)
+    assert "combat_tactics" not in built
+    assert "good_skill" in built
+    assert not (skills_dir / "combat_tactics.py").exists()
+    assert (skills_dir / "good_skill.py").exists()
+
+    # 3. Critic Gate promotes improvement, rolls back regression, and diffs policies/skills
+    db_path = str(tmp_path / "critic.duckdb")
+    init_db(db_path).close()
+    logger = BatchDatabaseLogger(db_path=db_path)
+
+    logger.save_policy(
+        policy_id="policy_swarm_g1",
+        generation=1,
+        mode="SWARM",
+        policy_code="class Policy:\n    pass\n",
+        macros_code="",
+        params={},
+        avg_depth=2.5,
+        max_depth=5,
+        is_promoted=True,
+        skills={"good_skill": built["good_skill"]},
+    )
+    con = connect_db(db_path, read_only=False)
+    con.execute(
+        """
+        INSERT INTO batches (batch_id, generation, mode, candidate_policy_id, avg_depth, max_depth, avg_score, hypothesis_passed, created_at)
+        VALUES ('b1', 1, 'SWARM', 'policy_swarm_g1', 2.5, 5, 300.0, TRUE, CURRENT_TIMESTAMP)
+        """
+    )
+    logger.save_policy(
+        policy_id="policy_swarm_g2",
+        generation=2,
+        mode="SWARM",
+        policy_code="class Policy:\n    x = 1\n",
+        macros_code="",
+        params={},
+        avg_depth=1.2,
+        max_depth=2,
+        is_promoted=False,
+        skills={"good_skill": "# regressed\n"},
+    )
+    con.execute(
+        """
+        INSERT INTO batches (batch_id, generation, mode, candidate_policy_id, avg_depth, max_depth, avg_score, hypothesis_passed, created_at)
+        VALUES ('b2', 2, 'SWARM', 'policy_swarm_g2', 1.2, 2, 100.0, FALSE, CURRENT_TIMESTAMP)
+        """
+    )
+    con.close()
+
+    critic = SwarmCriticAgent(provider="mock", db_path=db_path)
+    assert "dry_run_policy" not in READ_ONLY_CRITIC_TOOLS
+    verdict = critic.evaluate_and_gate(
+        generation=2,
+        batch_id="b2",
+        candidate_policy_id="policy_swarm_g2",
+        champion_policy_id="policy_swarm_g1",
+    )
+    assert verdict.decision == "ROLLBACK"
+    assert verdict.target_policy_id == "policy_swarm_g1"
+
+    snap = logger.load_policy_snapshot("policy_swarm_g1")
+    assert snap is not None
+    assert "good_skill" in snap[1]
+
+    diff_txt, _ = critic.author.tools.diff_policies(
+        "policy_swarm_g1", "policy_swarm_g2"
+    )
+    assert "skills/good_skill.py" in diff_txt

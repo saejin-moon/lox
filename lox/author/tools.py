@@ -419,6 +419,98 @@ class AuthorToolRegistry:
             "not_found",
         )
 
+    def read_policy(self, policy_id: str) -> tuple[str, str]:
+        """Reads the full stored `policy_code` and `skills_json` snapshot for a historical `policy_id`."""
+        if not os.path.exists(self.db_path):
+            return "Database not found.", "not_found"
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            row = con.execute(
+                "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code, skills_json FROM policies WHERE policy_id = ?",
+                [policy_id.strip()],
+            ).fetchone()
+            if not row:
+                return f"Error: Policy '{policy_id}' not found.", "not_found"
+            gen, mode, avg_d, max_d, prom, p_code, s_json = row
+            try:
+                skills_map = json.loads(s_json or "{}")
+            except Exception:
+                skills_map = {}
+            skill_names = (
+                sorted(skills_map.keys()) if isinstance(skills_map, dict) else []
+            )
+            header = (
+                f"# policy_id: {policy_id} | generation: {gen} | mode: {mode} "
+                f"| avg_depth: {avg_d} | max_depth: {max_d} | is_promoted: {prom}\n"
+                f"# skills_snapshot: {skill_names}\n\n"
+            )
+            return header + str(
+                p_code or ""
+            ), f"{len(str(p_code or '').splitlines())} lines"
+        finally:
+            con.close()
+
+    def diff_policies(self, policy_id_a: str, policy_id_b: str) -> tuple[str, str]:
+        """Returns unified diffs of `policy_code` and all `skills_json` modules between two `policy_id`s."""
+        import difflib
+
+        if not os.path.exists(self.db_path):
+            return "Database not found.", "not_found"
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            row_a = con.execute(
+                "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
+                [policy_id_a.strip()],
+            ).fetchone()
+            row_b = con.execute(
+                "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
+                [policy_id_b.strip()],
+            ).fetchone()
+            if not row_a:
+                return f"Error: Policy '{policy_id_a}' not found.", "not_found"
+            if not row_b:
+                return f"Error: Policy '{policy_id_b}' not found.", "not_found"
+
+            diffs: list[str] = []
+            p_diff = list(
+                difflib.unified_diff(
+                    str(row_a[0] or "").splitlines(),
+                    str(row_b[0] or "").splitlines(),
+                    fromfile=f"{policy_id_a}/policy.py",
+                    tofile=f"{policy_id_b}/policy.py",
+                    lineterm="",
+                    n=2,
+                )
+            )
+            if p_diff:
+                diffs.append("\n".join(p_diff[:250]))
+            try:
+                sk_a = json.loads(row_a[1] or "{}") or {}
+                sk_b = json.loads(row_b[1] or "{}") or {}
+            except Exception:
+                sk_a, sk_b = {}, {}
+            for sk_name in sorted(set(sk_a) | set(sk_b)):
+                s_diff = list(
+                    difflib.unified_diff(
+                        str(sk_a.get(sk_name, "")).splitlines(),
+                        str(sk_b.get(sk_name, "")).splitlines(),
+                        fromfile=f"{policy_id_a}/skills/{sk_name}.py",
+                        tofile=f"{policy_id_b}/skills/{sk_name}.py",
+                        lineterm="",
+                        n=2,
+                    )
+                )
+                if s_diff:
+                    diffs.append("\n".join(s_diff[:150]))
+            out = (
+                "\n\n".join(diffs)
+                if diffs
+                else "No differences between policy snapshots."
+            )
+            return out[:14000], f"{len(diffs)} changed files"
+        finally:
+            con.close()
+
     def _verify_macro_on_real_states(self, code: str) -> tuple[str, str]:
         """
         Executes candidate macro code against real NetHack GameState fixtures
@@ -930,9 +1022,7 @@ class AuthorToolRegistry:
             unique_positions: set[tuple[int, int]] = set()
             positions_history: list[tuple[int, int]] = []
             oscillation_detected = False
-            locked_door_stalls = 0
-            pet_stalls = 0
-            boulder_stalls = 0
+            smoke_msg_counts: Counter[str] = Counter()
             prompt_repeat_count = 0
             last_prompt_text = ""
             prompt_livelock_detected = False
@@ -987,12 +1077,9 @@ class AuthorToolRegistry:
                 else:
                     prompt_repeat_count = 0
                     last_prompt_text = ""
-                if "locked" in msg_l:
-                    locked_door_stalls += 1
-                if "swap places with" in msg_l or "in the way" in msg_l:
-                    pet_stalls += 1
-                if "try to move the boulder" in msg_l:
-                    boulder_stalls += 1
+                msg_clean = (state.message or "").strip()
+                if msg_clean:
+                    smoke_msg_counts[msg_clean] += 1
                 pos = (state.y, state.x)
                 unique_positions.add(pos)
                 positions_history.append(pos)
@@ -1027,24 +1114,12 @@ class AuthorToolRegistry:
                     f"- INTERACTIVE PROMPT LIVELOCK DETECTED: The prompt '{livelock_prompt_msg}' was triggered repeatedly without resolving! "
                     "Ensure your prompt handling (e.g. handle_prompts) answers the prompt cleanly instead of looping indefinitely."
                 )
-            if locked_door_stalls >= 2:
-                warn_lines.append(
-                    f"- DOOR STALL TELEMETRY: Attempted Action.OPEN on locked door {locked_door_stalls} times! "
-                    "Engine returned message 'This door is locked.' with 0 position change. "
-                    "Call `query_wiki('door')` or inspect `expert_runs` to identify the appropriate action response."
+            if smoke_msg_counts:
+                top_msgs = ", ".join(
+                    f"{m!r}: {c}x" for m, c in smoke_msg_counts.most_common(4) if c >= 2
                 )
-            if pet_stalls >= 3:
-                warn_lines.append(
-                    f"- PET INTERACTION TELEMETRY: Hero swapped places with pet {pet_stalls} times! "
-                    "Engine returned message 'You swap places with your kitten/dog.' "
-                    "Call `query_wiki('pet')` or inspect `state.mem.is_oscillating` to handle pet pathing."
-                )
-            if boulder_stalls >= 2:
-                warn_lines.append(
-                    f"- BOULDER INTERACTION TELEMETRY: Movement blocked by boulder {boulder_stalls} times! "
-                    "Engine returned message 'You try to move the boulder, but in vain.' "
-                    "Inspect obstacle classification in your navigation mask."
-                )
+                if top_msgs:
+                    warn_lines.append(f"- REPEATED MESSAGES: {top_msgs}")
             if len(unique_positions) == 1 and harness.step_count >= 15:
                 warn_lines.append(
                     "- WARNING: Hero stayed on 1 tile ((y,x) did not change) across all steps! Verify movement logic."
@@ -1593,46 +1668,6 @@ class AuthorToolRegistry:
                 except Exception:
                     pass
 
-                research_hints_block = ""
-                if not improved:
-                    hints = []
-                    monsters: set[str] = set()
-                    for r in p_runs:
-                        er = str(r.get("end_reason", ""))
-                        m = re.search(
-                            r"killed by (?:an? )?([a-zA-Z\s]+?)(?:,|\.|$)", er
-                        )
-                        if m:
-                            m_name = m.group(1).strip()
-                            if (
-                                m_name
-                                and len(m_name) < 25
-                                and not m_name.startswith("while")
-                            ):
-                                monsters.add(m_name)
-                    for mon in sorted(monsters)[:2]:
-                        hints.append(
-                            f"query_wiki(query='{mon}')  # Inspect monster speed, melee damage & tactics"
-                        )
-                    if door_stalls > 0:
-                        hints.append(
-                            "query_wiki(query='door')  # Research C engine mechanics for locked doors"
-                        )
-                    if dlvl1_stalls > len(p_runs) * 0.4:
-                        hints.append(
-                            "query_wiki(query='stairs')  # Research stairs discovery & navigation mechanics"
-                        )
-                    hints.append(
-                        'query_db(sql="SELECT max_depth, max_hp, game_log, summary_digest FROM expert_runs WHERE max_depth >= 2 ORDER BY turns ASC LIMIT 2")'
-                    )
-
-                    hints_str = "\n".join(f"  • {h}" for h in hints)
-                    research_hints_block = (
-                        f"• MANDATORY INVESTIGATION PROTOCOL (Execute BEFORE Modifying Code):\n"
-                        f"  DO NOT guess code changes! Diagnose the exact failure using your research tools:\n"
-                        f"{hints_str}\n"
-                    )
-
                 rem = max_rev - rev_idx
                 pilot_diag = (
                     f"\n\n═══════════════════════════════════════════════════════════════════\n"
@@ -1640,15 +1675,9 @@ class AuthorToolRegistry:
                     f"{paired_line}"
                     f"• End Reasons: {{{end_reasons_str}}}\n"
                     f"• Dlvl 1 Progression: {dlvl1_stalls}/{len(p_runs)} runs stayed on Dlvl 1\n"
-                    + (
-                        f"• DOOR STALL ALERT: {door_stalls}/{len(p_runs)} runs stalled at closed/locked doors ('This door is locked.').\n"
-                        if door_stalls > 0
-                        else ""
-                    )
                     + (f"{regressions_block}" if regressions_block else "")
                     + f"• Worst / Stalled Pilot Runs:\n{worst_logs_str}\n"
                     f"• Best Pilot Run: {best_log_str}\n"
-                    + (f"{research_hints_block}" if research_hints_block else "")
                     + f"• Revisions Remaining: {rem} left before final hypothesis submission.\n"
                     f"{verdict_line}\n"
                     f"═══════════════════════════════════════════════════════════════════"
@@ -1696,11 +1725,14 @@ class AuthorToolRegistry:
                 )
 
             self.last_passed_code = code
-            if self.mode == "SWARM_META":
-                self.last_pilot_improved = True
-                self.last_pilot_summary = (
-                    f"Meta-Agent BT Policy smoke check ({harness.step_count} steps)"
-                )
+            if skill_name and skill_code is not None:
+                self.last_passed_skill_name = str(skill_name)
+                self.last_passed_skill_code = str(skill_code)
+            self.last_passed_pkg = CandidatePackage(
+                code=code,
+                skill_name=str(skill_name or ""),
+                skill_code=str(skill_code or ""),
+            )
             return (
                 f"Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
                 f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), UniqueTiles={len(unique_positions)}, HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"
@@ -1870,6 +1902,44 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     }
                 },
                 "required": ["skill_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_policy",
+            "description": "Read the stored `policy_code` and `skills_json` list for a historical `policy_id` from DuckDB.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "policy_id": {
+                        "type": "string",
+                        "description": "Policy ID from the `policies` table (e.g. 'policy_swarm_g12').",
+                    }
+                },
+                "required": ["policy_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "diff_policies",
+            "description": "Compute unified diffs of `policy.py` and `skills/*.py` between two stored `policy_id` snapshots.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "policy_id_a": {
+                        "type": "string",
+                        "description": "Baseline/earlier policy_id (e.g. 'policy_swarm_g12').",
+                    },
+                    "policy_id_b": {
+                        "type": "string",
+                        "description": "Target/newer policy_id (e.g. 'policy_swarm_g16').",
+                    },
+                },
+                "required": ["policy_id_a", "policy_id_b"],
             },
         },
     },

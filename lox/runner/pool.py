@@ -507,7 +507,14 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             "auto_esc_count": runner.auto_esc_count
             + int(getattr(harness, "prompt_aborts", 0)),
             "subgen_preemptions": runner.subgen_preemptions,
-            "policy_exceptions": runner.policy_exceptions,
+            "policy_exceptions": runner.policy_exceptions
+            + len(
+                getattr(
+                    getattr(getattr(runner, "instance", None), "blackboard", None),
+                    "leaf_errors",
+                    (),
+                )
+            ),
             "unique_tiles": len(visited_positions),
             "pct_wait": pct_wait,
             "pct_search": pct_search,

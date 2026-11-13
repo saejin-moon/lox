@@ -76,7 +76,7 @@ def ensure_wiki_ready(db_path: str = DEFAULT_WIKI_DB) -> bool:
     """
     Ensures that data/wiki_index.db exists and is populated.
     If missing, automatically builds it using scripts/build_wiki_db.py
-    and scripts/build_strategy_wiki.py.
+    (pure NetHack 3.6.6 encyclopedia without hardcoded strategy guides).
     """
     if os.path.exists(db_path) and os.path.getsize(db_path) > 100000:
         return True
@@ -85,15 +85,13 @@ def ensure_wiki_ready(db_path: str = DEFAULT_WIKI_DB) -> bool:
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
     build_script = os.path.join(repo_root, "scripts", "build_wiki_db.py")
-    strategy_script = os.path.join(repo_root, "scripts", "build_strategy_wiki.py")
 
-    if os.path.exists(build_script) and os.path.exists(strategy_script):
+    if os.path.exists(build_script):
         try:
             print(
                 "[LOX] `data/wiki_index.db` not found. Automatically building offline NetHack Wiki database..."
             )
             subprocess.run([sys.executable, build_script], check=True, cwd=repo_root)
-            subprocess.run([sys.executable, strategy_script], check=True, cwd=repo_root)
             return True
         except Exception as exc:
             print(f"[LOX] Warning: Could not auto-build full wiki index ({exc}).")

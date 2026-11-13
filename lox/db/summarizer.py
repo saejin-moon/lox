@@ -905,8 +905,7 @@ def build_batch_contrast_digest(
     ]
     if res_parts:
         lines.append(
-            f"- **Floor Residence (Turns per Depth)**: {', '.join(res_parts)} "
-            "(vs Human Expert Reference: Dlvl 1 avg=40 turns, Dlvl 2 avg=85 turns)."
+            f"- **Floor Residence (Turns per Depth)**: {', '.join(res_parts)}."
         )
 
     # Down stairs discovery, conversion and utilization
@@ -967,22 +966,12 @@ def build_batch_contrast_digest(
             ):
                 depth_entry_hp[int(d_str)].append(float(hp_pair[1]))  # Max HP
 
-    expert_prep = {
-        2: "Exp: XL 2, HP 16",
-        3: "Exp: XL 3, HP 28",
-        4: "Exp: XL 5, HP 42",
-        5: "Exp: XL 6, HP 50",
-        7: "Exp: XL 8, HP 65",
-        10: "Exp: XL 10, HP 85",
-    }
     readiness_parts = []
     for d_val in sorted(depth_entry_xl.keys()):
-        if d_val >= 2 and d_val in expert_prep and depth_entry_xl[d_val]:
+        if d_val >= 2 and depth_entry_xl[d_val]:
             avg_xl = np.mean(depth_entry_xl[d_val])
             avg_hp = np.mean(depth_entry_hp[d_val]) if depth_entry_hp[d_val] else 0.0
-            readiness_parts.append(
-                f"Dlvl {d_val}: XL={avg_xl:.1f} HP={avg_hp:.0f} ({expert_prep[d_val]})"
-            )
+            readiness_parts.append(f"Dlvl {d_val}: XL={avg_xl:.1f} HP={avg_hp:.0f}")
     if readiness_parts:
         lines.append(
             f"- **Descent Readiness (Preparation at Floor Entry)**: {' | '.join(readiness_parts[:3])}."
@@ -1335,26 +1324,12 @@ def build_batch_contrast_digest(
     if chronic_rate >= 0.20 or top_livelock_fns:
         avg_rec = float(np.mean(recurrence_values)) if recurrence_values else 0.0
         lines.append(
-            "\n### 🚨 Frontier Bottleneck & Root-Cause Telemetry:\n"
-            f"- **Chronic Stagnation Rate**: {chronic_rate * 100:.1f}% ({chronic_runs}/{len(runs)} runs spent >50% of runtime stalled after their last milestone).\n"
-            f"- **State Recurrence Rate during Stagnation**: {avg_rec:.2f} (values > 0.85 indicate compact limit cycles / oscillation; lower values indicate wandering across level without advancing depth)."
+            "\n### Frontier Stagnation & Recurrence Telemetry:\n"
+            f"- **Chronic Stagnation Rate**: {chronic_rate * 100:.1f}% ({chronic_runs}/{len(runs)} runs).\n"
+            f"- **Max-Steps Timeout Rate**: {max_steps_rate * 100:.1f}%.\n"
+            f"- **State Recurrence Rate during Stagnation**: {avg_rec:.2f}."
         )
-
-        if max_steps_rate >= 0.20 and avg_rec < 0.85:
-            lines.append(
-                "- **PRIMARY BOTTLENECK: LEVEL EXPLORATION & STAIRCASE DESCENT FAILURE**:\n"
-                f"  * {max_steps_rate * 100:.1f}% of episodes timed out at step limit with low recurrence ({avg_rec:.2f}), meaning the hero mapped accessible rooms but stalled on staircase location & descent."
-            )
-        elif avg_rec >= 0.85 and top_livelock_fns:
-            primary_sink = top_livelock_fns[0]["function_name"]
-            p_stag_turns = int(top_livelock_fns[0].get("stagnation_turns") or 0)
-            p_stag_share = float(top_livelock_fns[0].get("stagnation_share") or 0.0)
-            lines.append(
-                "- **PRIMARY BOTTLENECK: COMPACT LIMIT CYCLE / FRONTIER STALEMATE**:\n"
-                f"  * High recurrence ({avg_rec:.2f}) indicates the hero is ping-ponging between visited tiles or blocked against an obstacle.\n"
-                f"  * Top Function Active during Stagnation: `{primary_sink}` ({p_stag_turns:,} stalled turns, {p_stag_share * 100:.1f}% of stalled turns)."
-            )
-        elif top_livelock_fns:
+        if top_livelock_fns:
             lines.append(
                 "- **Functions Active During Zero-Progress Stagnation (by turn count)**:"
             )
