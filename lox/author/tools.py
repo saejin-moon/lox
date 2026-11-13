@@ -228,6 +228,11 @@ class AuthorToolRegistry:
         low = clean.lower()
         # Strip single-quoted string literals before checking mutative SQL keywords
         low_no_literals = re.sub(r"'[^']*'", "''", low)
+        if ";" in low_no_literals:
+            return (
+                "Error: Multiple SQL statements in a single query_db call are not allowed. Pass exactly ONE SELECT statement per query_db call.",
+                "error",
+            )
         for word in (
             "insert",
             "update",
@@ -1711,15 +1716,16 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
         "function": {
             "name": "query_db",
             "description": (
-                "Execute a read-only SELECT SQL query on the DuckDB database "
-                "(tables: runs, ticks, batches, function_stats, experiments, expert_runs, expert_ticks)."
+                "Execute ONE read-only SELECT SQL query on the DuckDB database "
+                "(tables: runs, ticks, batches, function_stats, policies, experiments, "
+                "discoveries, expert_runs, expert_ticks). Never pass multiple ;-separated statements."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sql": {
                         "type": "string",
-                        "description": "Read-only SQL SELECT query.",
+                        "description": "Single read-only SQL SELECT query (one statement only).",
                     }
                 },
                 "required": ["sql"],

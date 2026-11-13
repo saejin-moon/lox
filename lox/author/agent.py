@@ -1677,6 +1677,7 @@ class AuthorAgent:
         system_prompt: str,
         user_prompt: str,
         max_tool_turns: int = 5,
+        required_tools: list[str] | None = None,
     ) -> str:
         """Runs a lightweight tool-enabled conversation and returns the final assistant text."""
         messages: list[dict[str, Any]] = [
@@ -1684,6 +1685,8 @@ class AuthorAgent:
             {"role": "user", "content": user_prompt},
         ]
         last_content = ""
+        called_tools: set[str] = set()
+        req = [str(t) for t in (required_tools or []) if str(t).strip()]
         for turn_idx in range(1, max(1, int(max_tool_turns)) + 2):
             allow_tools = turn_idx <= max_tool_turns
             msg = self._call_llm_api(messages, allow_tools=allow_tools)
@@ -1692,6 +1695,20 @@ class AuthorAgent:
                 last_content = content
             tcs = msg.get("tool_calls") or []
             if not tcs:
+                missing = [t for t in req if t not in called_tools]
+                if missing and turn_idx <= max_tool_turns:
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Required tool(s) not yet called: {', '.join(missing)}. "
+                                f"You MUST call `{missing[0]}` first to research authoritative "
+                                "NetHack mechanics before returning your final JSON response."
+                            ),
+                        }
+                    )
+                    continue
                 return last_content
             messages.append(
                 {
@@ -1701,6 +1718,9 @@ class AuthorAgent:
                 }
             )
             for idx_tc, tc in enumerate(tcs, start=1):
+                fn_name = str((tc.get("function") or {}).get("name") or "")
+                if fn_name:
+                    called_tools.add(fn_name)
                 res_out = self._dispatch_raw_tool_call(turn_idx, tc)
                 messages.append(
                     {

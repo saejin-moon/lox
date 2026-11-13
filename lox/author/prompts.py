@@ -521,8 +521,8 @@ def build_user_prompt(
 Follow these stages inside THIS conversation (your context, DB queries, and experiment results stay warm across all turns, and all tools remain available whenever you need to investigate further):
 
 1. **Investigate What Happened Yourself (do NOT guess)**:
-   - Prioritize `query_wiki`, `query_monster`, `query_item` (authoritative C/game mechanics) and `query_db(sql)` (`batches`, `runs` including `summary_digest` & `end_reason`, `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`), along with `read_skill` and `query_policy_docs`, BEFORE checking `query_theories` (past worker notes).
-   - Note: on a fresh Generation 1 start (`runs` / `batches` have 0 rows), use `query_wiki`, `query_monster`, `query_item`, `expert_runs` / `expert_ticks`, and `query_policy_docs` right away rather than repeatedly querying empty `runs`.
+   - Call `query_wiki`, `query_monster`, `query_item` FIRST (authoritative C/game mechanics) and `query_db(sql)` (ONE `SELECT` statement per call — never `;`-separated multi-queries!) on `batches`, `runs` (`summary_digest`, `end_reason`), `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`, along with `read_skill` and `query_policy_docs`, BEFORE checking `query_theories` (past worker notes).
+   - Note: on Generation 1 (`runs` / `batches` have 0 rows), use `query_wiki`, `query_monster`, `query_item`, `expert_runs` / `expert_ticks`, and `query_policy_docs` right away — do NOT repeatedly query empty `runs`.
    - Check whether an existing branch is failing, stalling, or oscillating with another leaf, or whether a capability is missing.
 
 2. **Brainstorm {k_hyp} Distinct Competing Hypotheses BEFORE Coding**:
@@ -576,7 +576,7 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 
 ### Meta-Agent Diagnosis & Assembly Protocol:
 1. **Investigate the Full Trajectory & Root Causes Yourself**:
-   - Prioritize `query_wiki`, `query_monster`, `query_item` (authoritative game mechanics) and `query_db`, `read_skill`, `query_policy_docs` (over `query_theories`) to inspect `batches` across generations, `runs` (`summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats` (`stagnation_share`, `livelock_score`, `liblit_failure_score`, `ochiai_good_run_score`), `expert_runs`, and prior `policies`.
+   - Call `query_wiki`, `query_monster`, `query_item` FIRST (authoritative game mechanics) and `query_db` (ONE `SELECT` statement per call — never `;`-separated multi-queries!), `read_skill`, `query_policy_docs` (over `query_theories`) to inspect `batches` across generations, `runs` (`summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats` (`stagnation_share`, `livelock_score`, `liblit_failure_score`, `ochiai_good_run_score`), `expert_runs`, and prior `policies`.
    - If performance regressed compared to an earlier generation, inspect what changed in `policies` and `runs.summary_digest` and restore or repair the broken capability rather than blindly stacking new patches.
 2. **Modular Skill Imports (Keep `policy.py` Lean)**:
    - Specialist worker subtrees are saved as separate skill modules under `skills/<role>.py` (listed in `Hierarchical Skill Registry` above; inspect any full module with `read_skill(skill_name)`).

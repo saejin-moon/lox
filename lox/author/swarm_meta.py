@@ -78,11 +78,12 @@ class SwarmMetaAgent:
         if self.provider != "mock":
             prompt = f"""Design {n_categories} specialist worker categories for Generation {generation}.
 
-Do NOT assume what the bottlenecks or regressions are. Prioritize `query_wiki` / `query_monster` / `query_item` (authoritative game mechanics) and `query_db` (`batches`, `runs`, `function_stats`, `policies`, `expert_runs`), plus `query_policy_docs` / `read_skill`, BEFORE checking `query_theories`:
-- Check `batches` across generations to see the full progression/regression trajectory.
-- Check `runs` (including `summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats`, and `policies` to diagnose what is actually happening (if `runs` has 0 rows on Gen 1, inspect `expert_runs` / `expert_ticks` and `query_wiki` instead).
-- Check `policy.py` (`query_policy_docs('policy')`) and `skills/` (`query_policy_docs('skills')` / `read_skill`) to see what already exists and where branches are failing or conflicting.
-- Reuse an existing `category_id` (skill module name) when a worker should refine or fix an existing skill, or introduce a new `category_id` when a distinct capability is missing.
+Do NOT assume what the bottlenecks or regressions are. Follow this investigation order:
+1. **FIRST (MANDATORY)**: Call `query_wiki` (and `query_monster` / `query_item` as needed) to research authoritative NetHack 3.6.6 game mechanics (e.g. early dungeon survival, combat, doors/traps, hunger/corpses, stairs/exploration) BEFORE calling `query_db` or `query_theories`.
+2. **SECOND**: Call `query_db` (pass ONE `SELECT` statement per call — never multiple `;`-separated queries) to inspect `batches`, `runs`, `function_stats`, and `policies`.
+   - If `runs` / `batches` have 0 rows (e.g. Generation 1 before the first rollout), do NOT keep querying `runs`; query `expert_runs` and `expert_ticks` (real human ascensions) instead.
+3. **THIRD**: Check `policy.py` (`query_policy_docs('policy')`) and `skills/` (`query_policy_docs('skills')` / `read_skill`) to see what already exists and where branches are failing or conflicting. Only check `query_theories` AFTER `query_wiki` and `query_db`.
+4. Reuse an existing `category_id` (skill module name) when a worker should refine or fix an existing skill, or introduce a new `category_id` when a distinct capability is missing.
 
 ### Output Format:
 After finishing your tool calls, return ONLY a valid JSON array of {n_categories} objects, each with:
@@ -98,6 +99,7 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                     system_prompt=build_system_prompt(self.db_path),
                     user_prompt=prompt,
                     max_tool_turns=5,
+                    required_tools=["query_wiki"] if generation == 1 else None,
                 )
                 if "```" in raw_txt:
                     import re
