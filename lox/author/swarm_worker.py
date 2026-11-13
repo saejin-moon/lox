@@ -309,7 +309,7 @@ class SwarmWorker:
                 }
             )
 
-        # Pick winning verified subtree: clean > triggered > survived > depth > unique_tiles
+        # Pick winning verified subtree: clean > triggered > depth > unique_tiles > survived
         clean_recs = [
             r for r in evaluated_records if not r["error"] and r["code"].strip()
         ]
@@ -318,7 +318,6 @@ class SwarmWorker:
                 clean_recs,
                 key=lambda r: (
                     1 if r["triggered_steps"] > 0 else 0,
-                    1 if r["obs"].survived else 0,
                     max(
                         (o.depth_end for o in r["obs_list"]), default=r["obs"].depth_end
                     ),
@@ -326,6 +325,7 @@ class SwarmWorker:
                         (o.unique_tiles for o in r["obs_list"]),
                         default=r["obs"].unique_tiles,
                     ),
+                    1 if r["obs"].survived else 0,
                     r["triggered_steps"],
                 ),
             )

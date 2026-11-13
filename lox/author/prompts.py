@@ -547,7 +547,7 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
      - Do **NOT** wrap your subtree in `class Policy:` with `def run(self, state): yield ...`. Return `None` from `ActionLeaf` when the branch does not apply so `PrioritySelector` falls through to the rest of the live policy.
      - Test it using `dry_run_policy(code=..., hypothesis="H1: <short mechanism label>", max_turns=150)` (you may pass higher `max_turns` if needed).
      - `dry_run_policy` evaluates your subtree **inside the live baseline `policy.py` + `skills/`** across both the Frontier checkpoint and failure replays, returning `Triggered: k/N` and an **RLE execution trace**.
-     - If `dry_run_policy` reports an error, `Triggered: 0/N`, or an RLE stall/oscillation trace, investigate why (including checking `policy.py` / `skills/` interactions) and repair `Hi`.
+     - Focus on whether your `subtree:` actions fired cleanly without stalling/waiting in place; do NOT burn turns trying to fix unrelated `baseline:` segments. Do at most 1–2 quick repairs per hypothesis if it errors or never triggers, then move on and emit `<reflection>` + `<policy_code>` once all {k_hyp} are tested.
    - You MUST empirically test all {k_hyp} distinct hypotheses with `dry_run_policy(..., hypothesis=...)` before finishing.
 
 4. **Comparative Reflection & Final Winning Subtree**:

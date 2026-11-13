@@ -1805,7 +1805,7 @@ class AuthorAgent:
             {"role": "user", "content": user_prompt},
         ]
 
-        turn_limit = max_tool_turns or max(8, k_hyp * 4 + 4)
+        turn_limit = max_tool_turns or max(6, k_hyp * 2 + 2)
         total_tool_calls = 0
         parsed_hypotheses: list[dict[str, Any]] = []
         reflection_text = ""

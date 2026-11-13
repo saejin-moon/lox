@@ -77,7 +77,7 @@ class ObservationDigest:
             f"Unique Tiles: {self.unique_tiles} | Actions: [{top_acts}]"
         )
         if self.rle_trace:
-            tail = " -> ".join(self.rle_trace[-10:])
+            tail = " -> ".join(self.rle_trace[-5:])
             return f"{base}\n  RLE Trace (tail): {tail}"
         return base
 
