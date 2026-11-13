@@ -323,6 +323,32 @@ def test_swarm_worker_and_meta_dry_run_modes(tmp_path):
     assert obs.actions_taken.get("SEARCH", 0) == 5
     assert "RLE Trace (tail):" in obs.summary()
 
+    from lox.author.agent import AuthorAgent
+
+    ag = AuthorAgent(provider="mock", db_path=db_path)
+    calls = {"n": 0}
+
+    def fake_llm(messages, allow_tools=True):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "query_db",
+                            "arguments": '{"sql": "SELECT COUNT(*) FROM runs"}',
+                        },
+                    }
+                ],
+            }
+        return {"content": '[{"category_id": "test_cat"}]', "tool_calls": []}
+
+    ag._call_llm_api = fake_llm
+    tool_sess_out = ag.run_tool_session("sys", "usr", max_tool_turns=3)
+    assert "test_cat" in tool_sess_out
+
     meta_prompt = build_user_prompt(
         mode="SWARM_META",
         generation=1,

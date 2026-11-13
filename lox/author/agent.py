@@ -1496,7 +1496,9 @@ class AuthorAgent:
                         }
                     )
                     for idx_tc, tc in enumerate(tcs, start=1):
-                        res_out, _ = self._execute_tool_call(tc)
+                        res_out = self._dispatch_raw_tool_call(
+                            max_tool_turns + repair_idx + 1, tc
+                        )
                         messages.append(
                             {
                                 "role": "tool",
@@ -1653,6 +1655,19 @@ class AuthorAgent:
             f"Author Agent failed to produce valid compiling code after {self.max_repair_turns} repair attempts. Last error: {diag}"
         )
 
+    def _dispatch_raw_tool_call(self, turn_idx: int, tc: dict[str, Any]) -> str:
+        """Parses an OpenAI-format tool call dict and executes it via `_execute_tool_call`."""
+        fn_spec = tc.get("function") or {}
+        t_name = str(fn_spec.get("name") or "")
+        raw_args = fn_spec.get("arguments", "{}")
+        try:
+            t_args = (
+                json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+            )
+        except Exception:
+            t_args = {}
+        return self._execute_tool_call(turn_idx, t_name, t_args)
+
     def run_tool_session(
         self,
         system_prompt: str,
@@ -1682,7 +1697,7 @@ class AuthorAgent:
                 }
             )
             for idx_tc, tc in enumerate(tcs, start=1):
-                res_out, _ = self._execute_tool_call(tc)
+                res_out = self._dispatch_raw_tool_call(turn_idx, tc)
                 messages.append(
                     {
                         "role": "tool",
