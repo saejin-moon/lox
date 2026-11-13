@@ -78,9 +78,9 @@ class SwarmMetaAgent:
         if self.provider != "mock":
             prompt = f"""Design {n_categories} specialist worker categories for Generation {generation}.
 
-Do NOT assume what the bottlenecks or regressions are. Use your tools (`query_db`, `query_policy_docs`, `read_skill`, `query_theories`) to inspect the database and codebase yourself:
+Do NOT assume what the bottlenecks or regressions are. Prioritize `query_wiki` / `query_monster` / `query_item` (authoritative game mechanics) and `query_db` (`batches`, `runs`, `function_stats`, `policies`, `expert_runs`), plus `query_policy_docs` / `read_skill`, BEFORE checking `query_theories`:
 - Check `batches` across generations to see the full progression/regression trajectory.
-- Check `runs` (including `summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats`, and `policies` to diagnose what is actually happening (if `runs` has 0 rows on Gen 1, check `expert_runs`, `query_wiki`, and `query_policy_docs` instead).
+- Check `runs` (including `summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats`, and `policies` to diagnose what is actually happening (if `runs` has 0 rows on Gen 1, inspect `expert_runs` / `expert_ticks` and `query_wiki` instead).
 - Check `policy.py` (`query_policy_docs('policy')`) and `skills/` (`query_policy_docs('skills')` / `read_skill`) to see what already exists and where branches are failing or conflicting.
 - Reuse an existing `category_id` (skill module name) when a worker should refine or fix an existing skill, or introduce a new `category_id` when a distinct capability is missing.
 
@@ -474,8 +474,9 @@ class Policy:
             context = "\n".join(reports_summary)
             meta_prompt = (
                 f"You are the Meta-Agent Architect synthesizing the Generation {generation} master `class Policy`.\n"
-                f"Do NOT rely solely on worker proposals—use `query_db`, `read_skill`, `query_policy_docs`, and `query_theories` "
-                f"to inspect `batches`, `runs` (including `summary_digest`), `function_stats`, `policies`, and `skills/` yourself "
+                f"Do NOT rely solely on worker proposals—prioritize `query_wiki`, `query_monster`, `query_item`, `query_db`, "
+                f"`read_skill`, and `query_policy_docs` (over `query_theories`) to inspect `batches`, `runs` (including `summary_digest`), "
+                f"`function_stats`, `policies`, `expert_runs`, and `skills/` yourself "
                 f"to see what is working, what regressed, and how branches interact.\n\n"
                 f"Specialist subtrees are saved in `skills/` (see Hierarchical Skill Registry):\n\n{context}\n\n"
                 f"Ensure the master policy defines `class Policy` with `def __init__(self)` and `def step(self, state): return self.tree.tick(state)`."
