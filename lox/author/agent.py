@@ -468,6 +468,12 @@ class AuthorAgent:
             skill_name = str(args.get("skill_name", ""))
             out, summary = self.tools.read_skill(skill_name)
             arg_disp = skill_name
+        elif name == "query_theories":
+            q = str(args.get("query", ""))
+            dt = str(args.get("doc_type", ""))
+            lim = int(args.get("limit", 6) or 6)
+            out, summary = self.tools.query_theories(query=q, doc_type=dt, limit=lim)
+            arg_disp = q[:40]
         elif name == "dry_run_policy":
             code = str(args.get("code", "")).strip()
             s_name = args.get("skill_name")
@@ -1479,7 +1485,26 @@ class AuthorAgent:
                 messages.append({"role": "user", "content": repair_prompt})
 
                 t0_rep = time.perf_counter()
-                repair_msg = self._call_llm_api(messages, allow_tools=False)
+                repair_msg = self._call_llm_api(messages, allow_tools=True)
+                if repair_msg.get("tool_calls"):
+                    tcs = repair_msg.get("tool_calls") or []
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": repair_msg.get("content") or "",
+                            "tool_calls": tcs,
+                        }
+                    )
+                    for idx_tc, tc in enumerate(tcs, start=1):
+                        res_out, _ = self._execute_tool_call(tc)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", f"rep_tc_{idx_tc}"),
+                                "content": res_out,
+                            }
+                        )
+                    repair_msg = self._call_llm_api(messages, allow_tools=False)
                 rep_ms = (time.perf_counter() - t0_rep) * 1000.0
 
                 rep_text = repair_msg.get("content") or ""
@@ -1628,6 +1653,45 @@ class AuthorAgent:
             f"Author Agent failed to produce valid compiling code after {self.max_repair_turns} repair attempts. Last error: {diag}"
         )
 
+    def run_tool_session(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tool_turns: int = 5,
+    ) -> str:
+        """Runs a lightweight tool-enabled conversation and returns the final assistant text."""
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        last_content = ""
+        for turn_idx in range(1, max(1, int(max_tool_turns)) + 2):
+            allow_tools = turn_idx <= max_tool_turns
+            msg = self._call_llm_api(messages, allow_tools=allow_tools)
+            content = str(msg.get("content") or "").strip()
+            if content:
+                last_content = content
+            tcs = msg.get("tool_calls") or []
+            if not tcs:
+                return last_content
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": msg.get("content") or "",
+                    "tool_calls": tcs,
+                }
+            )
+            for idx_tc, tc in enumerate(tcs, start=1):
+                res_out, _ = self._execute_tool_call(tc)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", f"tc_{turn_idx}_{idx_tc}"),
+                        "content": res_out,
+                    }
+                )
+        return last_content
+
     def run_swarm_worker_session(
         self,
         generation: int,
@@ -1638,11 +1702,12 @@ class AuthorAgent:
         frontier: Any = None,
         replay_fixtures: list[dict[str, Any]] | None = None,
         scaffold_code: str = "",
+        skills: dict[str, str] | None = None,
         max_tool_turns: int | None = None,
     ) -> dict[str, Any]:
         """
         Runs a single warm conversation for a SwarmWorker:
-        1. Empirical audit upfront (tools stay active across turns)
+        1. Empirical audit (tools stay active across turns)
         2. Brainstorm `num_hypotheses` distinct mechanisms in <hypotheses>
         3. Sequentially translate & test each hypothesis via `dry_run_policy(..., hypothesis=...)`
         4. Emit <reflection> comparing tested candidates + winning `<policy_code>` subtree
@@ -1653,6 +1718,7 @@ class AuthorAgent:
             baseline_runs=[],
             max_pilot_runs=max(12, k_hyp * 4),
             pilot_episodes=1,
+            skills=skills,
             generation=generation,
             benchmark=self.benchmark,
             mode="SWARM_WORKER",
@@ -1710,8 +1776,9 @@ class AuthorAgent:
         user_prompt = build_user_prompt(
             mode="SWARM_WORKER",
             generation=generation,
-            current_policy=current_policy,
+            current_policy=current_policy or scaffold_code,
             batch_digest=brief,
+            skills=skills,
             num_hypotheses=k_hyp,
         )
         messages: list[dict[str, Any]] = [

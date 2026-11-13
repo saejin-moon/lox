@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from lox.author.agent import AuthorAgent
+from lox.author.prompts import build_system_prompt
 from lox.db.schema import connect_db
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
@@ -45,158 +46,59 @@ class SwarmMetaAgent:
             db_path=db_path,
             agent_role="meta_agent",
         )
+        self.author.tools.theories_store = self.theories
 
     def discover_macro_categories(
         self,
         generation: int,
         n_categories: int = 4,
+        current_policy: str = "",
+        skills: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Dynamically derives macro-categories for the upcoming generation by querying DuckDB
-        for current failure bottlenecks, frontier depth progression, and expert run references.
-        'Hard Code Nothing': categories change dynamically as LOX penetrates deeper dungeon tiers.
+        Dynamically derives macro-categories for the upcoming generation via tool-enabled
+        investigation of DuckDB, LanceDB, policy.py, and skills/ (zero pre-fed summaries).
         """
         ui.info(
-            f"Meta-Agent: Dynamically analyzing DuckDB bottlenecks for Generation {generation}..."
+            f"Meta-Agent: Dynamically analyzing DuckDB & codebase for Generation {generation}..."
         )
-
-        avg_depth = 1.0
-        max_depth = 1
-        avg_turns = 0.0
-        avg_tiles = 0.0
-        mortality_causes: list[tuple[str, str, int]] = []
-        top_fn_turns: list[tuple[str, int, int, float]] = []
-        auto_escs = 0
-        died_unarmored = 0
-        starved_with_food = 0
-        latest_gen: int | None = None
-
-        # Query DuckDB for recent empirical performance & function turn distribution
-        try:
-            con = connect_db(self.db_path, read_only=True)
-            try:
-                max_gen_row = con.execute("SELECT max(generation) FROM runs").fetchone()
-                latest_gen = (
-                    max_gen_row[0]
-                    if max_gen_row and max_gen_row[0] is not None
-                    else None
-                )
-
-                if latest_gen is not None:
-                    mort_rows = con.execute(
-                        """
-                        SELECT end_reason, death_message, count(*) as cnt
-                        FROM runs
-                        WHERE generation = ?
-                        GROUP BY end_reason, death_message
-                        ORDER BY cnt DESC
-                        LIMIT 6
-                        """,
-                        [latest_gen],
-                    ).fetchall()
-                    mortality_causes = [
-                        (str(r[0]), str(r[1]), int(r[2])) for r in mort_rows
-                    ]
-
-                    metrics_row = con.execute(
-                        """
-                        SELECT
-                            coalesce(avg(depth), 1.0),
-                            coalesce(max(depth), 1),
-                            coalesce(avg(turns), 0.0),
-                            coalesce(avg(unique_tiles), 0.0),
-                            coalesce(sum(case when auto_esc_count > 0 then 1 else 0 end), 0),
-                            coalesce(sum(case when died_unarmored then 1 else 0 end), 0),
-                            coalesce(sum(case when starved_with_food then 1 else 0 end), 0)
-                        FROM runs
-                        WHERE generation = ?
-                        """,
-                        [latest_gen],
-                    ).fetchone()
-                    if metrics_row:
-                        avg_depth = float(metrics_row[0])
-                        max_depth = int(metrics_row[1])
-                        avg_turns = float(metrics_row[2])
-                        avg_tiles = float(metrics_row[3])
-                        auto_escs = int(metrics_row[4])
-                        died_unarmored = int(metrics_row[5])
-                        starved_with_food = int(metrics_row[6])
-
-                    fn_rows = con.execute(
-                        """
-                        SELECT function_name, episodes_triggered, total_turns_active,
-                               coalesce(liblit_failure_score, 0.0)
-                        FROM function_stats
-                        WHERE generation = ? AND total_turns_active > 0
-                        ORDER BY total_turns_active DESC
-                        LIMIT 10
-                        """,
-                        [latest_gen],
-                    ).fetchall()
-                    top_fn_turns = [
-                        (str(r[0]), int(r[1]), int(r[2]), float(r[3])) for r in fn_rows
-                    ]
-            finally:
-                con.close()
-        except Exception:
-            pass
+        self.author.tools.current_policy_code = str(current_policy or "")
+        if skills is not None:
+            self.author.tools.skills = dict(skills)
+        self.author.tools.theories_store = self.theories
 
         frontier_depths = (
             sorted({cp.depth for cp in self.frontier.checkpoints.values()})
             if self.frontier.checkpoints
             else [1]
         )
-        active_frontier_depth = max(
-            max_depth, max(frontier_depths) if frontier_depths else 1
-        )
+        active_frontier_depth = max(frontier_depths) if frontier_depths else 1
 
         categories: list[dict[str, Any]] = []
         if self.provider != "mock":
-            # Dynamically synthesize orthogonal specialist categories via Meta-Agent LLM
-            recent_decomps = self.theories.search_theories(
-                "CATEGORY_DECOMPOSITION", limit=2, doc_type="CATEGORY_DECOMPOSITION"
-            )
-            prev_cats_note = (
-                "\n".join(
-                    f"- Gen {d.get('generation')}: {str(d.get('content', ''))[:400]}"
-                    for d in recent_decomps
-                )
-                if recent_decomps
-                else "None yet."
-            )
-            prompt = f"""Analyze the empirical telemetry from Generation {latest_gen if latest_gen is not None else 0} and design {n_categories} orthogonal specialist worker categories for Generation {generation}.
+            prompt = f"""Design {n_categories} specialist worker categories for Generation {generation}.
 
-### Empirical Telemetry:
-- avg_depth={avg_depth:.2f}, max_depth={max_depth}, active_frontier_depth={active_frontier_depth}
-- avg_turns={avg_turns:.1f}, avg_unique_tiles={avg_tiles:.1f}
-- diagnostic_flags: auto_escs={auto_escs}, died_unarmored={died_unarmored}, starved_with_food={starved_with_food}
-- top_end_reasons: {mortality_causes}
-- top_active_functions (name, episodes, turns_active, liblit_fail): {top_fn_turns}
-
-### Previous Category Decompositions (avoid repeating stale categories if bottlenecks shifted):
-{prev_cats_note}
+Do NOT assume what the bottlenecks or regressions are. Use your tools (`query_db`, `query_policy_docs`, `read_skill`, `query_theories`) to inspect the database and codebase yourself:
+- Check `batches` across generations to see the full progression/regression trajectory.
+- Check `runs` (including `summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats`, and `policies` to diagnose what is actually happening.
+- Check `policy.py` (`query_policy_docs('policy')`) and `skills/` (`query_policy_docs('skills')` / `read_skill`) to see what already exists and where branches are failing or conflicting.
+- Reuse an existing `category_id` (skill module name) when a worker should refine or fix an existing skill, or introduce a new `category_id` when a distinct capability is missing.
 
 ### Output Format:
-Return ONLY a valid JSON array of {n_categories} objects, each with:
-- "category_id": short_snake_case_identifier (unique, descriptive of the specific empirical bottleneck)
+After finishing your tool calls, return ONLY a valid JSON array of {n_categories} objects, each with:
+- "category_id": short_snake_case_identifier
 - "name": Human-readable title
-- "description": Concrete empirical problem & scope for this specialist (without hardcoding unverified game rules)
+- "description": Concrete empirical problem & scope for this specialist
 - "target_depth_tier": [min_depth, max_depth]
 - "target_metrics": list of telemetry column names (e.g. ["max_depth", "unique_tiles", "turns"])
 - "blackboard_keys": list of 2-3 Blackboard variable names this branch should coordinate
 """
             try:
-                resp = self.author._call_llm_api(
-                    [
-                        {
-                            "role": "system",
-                            "content": "You are the LOX Meta-Agent Architect. Output strictly valid JSON.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    allow_tools=False,
+                raw_txt = self.author.run_tool_session(
+                    system_prompt=build_system_prompt(self.db_path),
+                    user_prompt=prompt,
+                    max_tool_turns=5,
                 )
-                raw_txt = str(resp.get("content") or "").strip()
                 if "```" in raw_txt:
                     import re
 
@@ -250,7 +152,7 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
                 (
                     "progression_and_exploration",
                     "Progression & Spatial Exploration",
-                    f"Maximizes map exploration and level transitions (current avg_tiles={avg_tiles:.1f}, avg_depth={avg_depth:.2f}).",
+                    "Maximizes map exploration and level transitions based on DuckDB telemetry.",
                     (1, active_frontier_depth + 1),
                     ["unique_tiles", "max_depth", "depth"],
                     ["target_tile", "frontier_path"],
@@ -258,7 +160,7 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
                 (
                     "risk_and_survival",
                     "Risk & Threat Response",
-                    f"Mitigates top termination causes ({mortality_causes[:2]}) and preserves HP under hostile encounters.",
+                    "Mitigates top termination causes and preserves HP under hostile encounters.",
                     (1, active_frontier_depth),
                     ["final_hp", "turns", "killed_monsters"],
                     ["danger_level", "last_target"],
@@ -266,7 +168,7 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
                 (
                     "resource_management",
                     "Resource & State Optimization",
-                    f"Improves resource utilization and endurance (avg_turns={avg_turns:.1f}, starved_with_food={starved_with_food}, died_unarmored={died_unarmored}).",
+                    "Improves resource utilization and endurance across recorded episodes.",
                     (1, active_frontier_depth),
                     ["turns", "final_ac", "xp_level"],
                     ["resource_needed", "emergency_action"],
@@ -274,7 +176,7 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
                 (
                     "interactive_state_handling",
                     "Interactive State & Stall Recovery",
-                    f"Resolves blocking prompts and zero-progress stalls cleanly (auto_escs={auto_escs}).",
+                    "Resolves blocking prompts and zero-progress stalls cleanly.",
                     (1, max(2, active_frontier_depth)),
                     ["auto_esc_count", "stagnation_turns"],
                     ["in_prompt", "stall_recovery"],
@@ -300,10 +202,7 @@ Return ONLY a valid JSON array of {n_categories} objects, each with:
         decomp_json = json.dumps(
             {
                 "generation": generation,
-                "avg_depth": avg_depth,
-                "max_depth": max_depth,
                 "active_frontier_depth": active_frontier_depth,
-                "mortality_causes": mortality_causes,
                 "categories": categories,
             },
             indent=2,
@@ -562,8 +461,6 @@ class Policy:
                 )
                 rep_doc = str(rep.get("report_content") or "").strip()
                 if rep_doc:
-                    if len(rep_doc) > 3500:
-                        rep_doc = rep_doc[:3500] + "\n... [truncated]"
                     reports_summary.append(
                         f"### Specialist Worker: {role}\n{rep_doc}\n"
                     )
@@ -574,13 +471,13 @@ class Policy:
                         f"```python\n{code_snip}\n```\n"
                     )
 
-            fn_telemetry_block = self._query_function_telemetry()
             context = "\n".join(reports_summary)
             meta_prompt = (
-                f"You are the Meta-Agent Architect. Synthesize a modular, lean `class Policy` utilizing Behavior Trees "
-                f"(`BehaviorTree`, `PrioritySelector`, `ActionLeaf`, `ConditionLeaf`, `Blackboard`) for Generation {generation}.\n"
-                f"{fn_telemetry_block}\n"
-                f"Specialist subtrees are saved in `skills/` (see Hierarchical Skill Registry). Import and compose them cleanly while pruning any hijacking or dead branches:\n\n{context}\n\n"
+                f"You are the Meta-Agent Architect synthesizing the Generation {generation} master `class Policy`.\n"
+                f"Do NOT rely solely on worker proposals—use `query_db`, `read_skill`, `query_policy_docs`, and `query_theories` "
+                f"to inspect `batches`, `runs` (including `summary_digest`), `function_stats`, `policies`, and `skills/` yourself "
+                f"to see what is working, what regressed, and how branches interact.\n\n"
+                f"Specialist subtrees are saved in `skills/` (see Hierarchical Skill Registry):\n\n{context}\n\n"
                 f"Ensure the master policy defines `class Policy` with `def __init__(self)` and `def step(self, state): return self.tree.tick(state)`."
             )
 
@@ -606,7 +503,7 @@ class Policy:
                     mode="SWARM_META",
                     generation=generation,
                     current_policy=candidate_code,
-                    batch_digest=f"Self-Repair Required: Master policy failed verification:\n{diag}",
+                    batch_digest=f"Self-Repair Required: Master policy failed verification:\n{diag}\n\n---\n{meta_prompt}",
                     skills=skill_modules,
                     max_tool_turns=4,
                 )

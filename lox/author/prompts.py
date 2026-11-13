@@ -322,8 +322,8 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 4. **Empirical Root-Cause Discovery**:
    Inspect the raw termination breakdown, death counts, and RLE phase timelines in the batch digest and DuckDB.
    Do not guess which subsystem failed based on preconceived notions or simple turn counts. Formulate targeted SQL queries (`query_db`) over `runs` and `ticks` to inspect the exact state, position, messages, and action history in the turns leading up to death or timeout before writing code.
-5. **Anti-Hallucination & Dungeon Context Anchor**:
-   Anchor your reasoning to your current dungeon depth (`state.depth`). On Dungeons of Doom levels 1–4, there are NO Sokoban boulders, NO Medusa stoning, and NO Quest portals. Use `state.mem.passable_mask` (or ensure `ord('-')`, `ord('|')`, and `ord(' ')` are strictly False in custom masks) and remember monsters attack across all 8 adjacent tiles (`max(abs(dy), abs(dx)) == 1`).
+5. **Ground Reasoning in Observed State**:
+   Anchor your reasoning to observed `state` fields (`state.depth`, `state.dungeon_num`, `state.message`, `state.mem.passable_mask`) and C-engine rules verified via `query_wiki` / `query_monster` / `query_item` rather than unverified assumptions. Use `state.mem.passable_mask` (or ensure `ord('-')`, `ord('|')`, and `ord(' ')` are strictly False in custom masks) and remember monsters attack across all 8 adjacent tiles (`max(abs(dy), abs(dx)) == 1`).
 6. **Pre-Submission Invariant Checklist**:
    Before outputting code, mentally verify all 4 invariants:
    - *Generator Invariant*: `run()` receives state via `state = yield act`. Subgenerators are called via `state = yield from self.subgen(state)`. Never use a bare `return act` inside a generator.
@@ -509,23 +509,23 @@ def build_user_prompt(
     if canon_mode == "SWARM_WORKER":
         k_hyp = max(1, int(num_hypotheses))
         prev_subtree_block = (
-            f"\n### Previous Generation Subtree Reference:\n```python\n{current_policy}\n```\n"
+            f"\n### Current Live `policy.py` Reference:\n```python\n{current_policy}\n```\n"
             if current_policy.strip()
             else ""
         )
         return f"""### Generation {generation} — Mode: `SWARM_WORKER` (Warm Multi-Hypothesis Behavior Tree Synthesis)
-{digest_block}{prev_subtree_block}
+{digest_block}{prev_subtree_block}{skills_block}
 {BEHAVIOR_TREE_DOCS}
 
 ### Warm Scientific Method Protocol ({k_hyp} Competing Hypotheses, Hard Code Nothing):
-Follow these 4 stages sequentially inside THIS conversation (your context, DB queries, and experiment results stay warm across all turns):
+Follow these stages inside THIS conversation (your context, DB queries, and experiment results stay warm across all turns, and all tools remain available whenever you need to investigate further):
 
-1. **Empirical Audit (1× upfront — do NOT guess mechanics from memory)**:
-   - Use `query_db(sql)` (against `runs`, `ticks`, `expert_runs`, `expert_ticks`, `function_stats`), `query_wiki(query)`, `query_monster(name)`, and `query_item(name)` once upfront to gather exact NetHack 3.6.6 facts and failure modes for your category.
-   - Check the **Prior Theories** and **Condition-Matched Failure Fixtures** in your brief above so you never repeat previously refuted mechanisms.
+1. **Investigate What Happened Yourself (do NOT guess)**:
+   - Use `query_db(sql)` (against `batches`, `runs` including `summary_digest` & `end_reason`, `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`), `query_theories`, `read_skill`, `query_policy_docs`, `query_wiki`, `query_monster`, and `query_item` to diagnose what is actually happening across generations and in the current `policy.py` / `skills/`.
+   - Check whether an existing branch is failing, stalling, or oscillating with another leaf, or whether a capability is missing.
 
 2. **Brainstorm {k_hyp} Distinct Competing Hypotheses BEFORE Coding**:
-   - Emit a `<hypotheses>` YAML block listing {k_hyp} genuinely different mechanisms (`H1` .. `H{k_hyp}`) addressing your category:
+   - Emit a `<hypotheses>` YAML block listing {k_hyp} genuinely different mechanisms (`H1` .. `H{k_hyp}`) addressing your findings:
      ```xml
      <hypotheses>
      - id: H1
@@ -543,19 +543,19 @@ Follow these 4 stages sequentially inside THIS conversation (your context, DB qu
 3. **Sequential Translate, Test & Repair (`H1` .. `H{k_hyp}` — never stop at 1 candidate)**:
    - For each hypothesis `Hi`:
      - Translate `Hi` into a standalone Behavior Tree subtree (multiple helper functions are welcome—there is **no 2-function limit**) assigning `subtree = PrioritySelector([...], name="...")` or `subtree = ActionLeaf(...)` / `Sequence(...)`.
-     - Do **NOT** wrap your subtree in `class Policy:` with `def run(self, state): yield ...`. Return `None` from `ActionLeaf` when the branch does not apply so `PrioritySelector` falls through to lower-priority branches.
-     - Test it using `dry_run_policy(code=..., hypothesis="H1: <short mechanism label>", max_turns=150)` (you may pass higher `max_turns` if needed for mid-game triggers; there is no 40-step cap).
-     - `dry_run_policy` evaluates your subtree **directly inside the baseline master scaffold** across both the Frontier checkpoint and condition-matched failure replays, and returns exact step telemetry including `Triggered: k/N` steps.
-     - If `dry_run_policy` reports a compile/runtime error OR `Triggered: 0/N` (never fired!), diagnose why and repair `Hi` immediately before moving to the next hypothesis.
+     - Do **NOT** wrap your subtree in `class Policy:` with `def run(self, state): yield ...`. Return `None` from `ActionLeaf` when the branch does not apply so `PrioritySelector` falls through to the rest of the live policy.
+     - Test it using `dry_run_policy(code=..., hypothesis="H1: <short mechanism label>", max_turns=150)` (you may pass higher `max_turns` if needed).
+     - `dry_run_policy` evaluates your subtree **inside the live baseline `policy.py` + `skills/`** across both the Frontier checkpoint and failure replays, returning `Triggered: k/N` and an **RLE execution trace**.
+     - If `dry_run_policy` reports an error, `Triggered: 0/N`, or an RLE stall/oscillation trace, investigate why (including checking `policy.py` / `skills/` interactions) and repair `Hi`.
    - You MUST empirically test all {k_hyp} distinct hypotheses with `dry_run_policy(..., hypothesis=...)` before finishing.
 
 4. **Comparative Reflection & Final Winning Subtree**:
-   - After testing all {k_hyp} hypotheses, emit a `<reflection>` block summarizing what worked, what failed or was ruled out (e.g., never triggered, caused loop, died), and why the winner beat the alternatives:
+   - After testing all {k_hyp} hypotheses, emit a `<reflection>` block summarizing what worked, what failed or was ruled out, and why the winner beat the alternatives:
      ```xml
      <reflection>
      winner: H...
      comparison:
-       - H1: <observed triggered count, survival/depth outcome, verdict>
+       - H1: <observed triggered count, trace outcome, verdict>
        - H2: ...
      ruled_out: <key pitfall / edge case future generations must avoid>
      </reflection>
@@ -573,22 +573,24 @@ Follow these 4 stages sequentially inside THIS conversation (your context, DB qu
 {digest_block}{existing_policy_block}{skills_block}
 {BEHAVIOR_TREE_DOCS}
 
-### Meta-Agent Assembly & Pruning Protocol:
-1. **Modular Skill Imports (Keep `policy.py` Lean)**:
+### Meta-Agent Diagnosis & Assembly Protocol:
+1. **Investigate the Full Trajectory & Root Causes Yourself**:
+   - Use `query_db`, `read_skill`, `query_policy_docs`, and `query_theories` to inspect `batches` across generations, `runs` (`summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats` (`stagnation_share`, `livelock_score`, `liblit_failure_score`, `ochiai_good_run_score`), and prior `policies`.
+   - If performance regressed compared to an earlier generation, inspect what changed in `policies` and `runs.summary_digest` and restore or repair the broken capability rather than blindly stacking new patches.
+2. **Modular Skill Imports (Keep `policy.py` Lean)**:
    - Specialist worker subtrees are saved as separate skill modules under `skills/<role>.py` (listed in `Hierarchical Skill Registry` above; inspect any full module with `read_skill(skill_name)`).
-   - Import and compose them inside `class Policy.__init__` (e.g. `from skills.<role> import subtree as <role>_subtree` or `import skills.<role>`) rather than pasting all worker helper code into `policy.py`. Keep `policy.py` a clean, lean priority coordinator!
-2. **Complete `class Policy:` Wrapping `BehaviorTree`**:
+   - Import and compose them cleanly inside `class Policy.__init__` rather than pasting worker helper code into `policy.py`. Treat worker outputs as proposals—only wire branches that genuinely help and do not conflict or oscillate with other branches.
+3. **Complete `class Policy:` Wrapping `BehaviorTree`**:
    - In `def __init__(self):`, initialize `self.blackboard = Blackboard()`, wire the priority branches (`PrioritySelector([...])`), and construct `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`.
    - Define `def step(self, state):` returning `self.tree.tick(state) or Action.WAIT` (or include a safe final fallback `ActionLeaf` so `step(state)` never returns `None`).
    - Every node function invoked during `self.tree.tick(state)` must be cleanly defined in `policy.py` or imported from `skills.*`.
-3. **Prune & Merge True Hijacking or Dead Branches (Preserve Core Capabilities)**:
-   - Check the **Function Telemetry** in the brief above: **high turn-share alone is NOT hijacking** — whichever branch handles a frequent default capability will naturally carry most of the turn share.
-   - Identify true hijacking, thrashing, or broken branches via **high `stagnation_share`**, **high `livelock`**, **high `liblit_fail`**, or `dry_run_policy` traces showing repeated no-op/fallback actions without progress.
-   - **Never prune a working branch that provides a core capability unless you have verified in `dry_run_policy` that its replacement actually fires and makes progress** (not returning `None` or falling through to `Action.WAIT` / fallback).
-   - Prune dead/unused branches and merge redundant helpers instead of blindly appending new code onto the old policy.
-4. **Verify Before Finishing**:
-   - Call `dry_run_policy(code=...)` on your complete `class Policy:` source to confirm clean AST compilation and multi-step execution in `NetHackHarness`.
-5. **Output Format**:
+4. **Prune & Merge True Hijacking or Dead Branches (Preserve Core Capabilities)**:
+   - Remember: **high turn-share alone is NOT hijacking** — whichever branch handles a frequent default capability will naturally carry most of the turn share.
+   - Identify true hijacking, thrashing, or broken branches from `stagnation_share`, `livelock_score`, `liblit_failure_score`, `summary_digest`, or `dry_run_policy` RLE traces showing repeated no-op/oscillating steps without progress.
+   - **Never prune a working branch that provides a core capability unless you have verified in `dry_run_policy` that its replacement actually fires and makes progress**.
+5. **Verify Before Finishing**:
+   - Call `dry_run_policy(code=...)` on your complete `class Policy:` source to confirm clean AST compilation and healthy execution in `NetHackHarness`.
+6. **Output Format**:
    - Output your complete, self-contained Python `class Policy:` coordinator inside `<policy_code> ... </policy_code>` tags or a standard ```python ... ``` code block.
 """
 

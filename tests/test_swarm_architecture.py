@@ -286,12 +286,42 @@ def test_swarm_worker_and_meta_dry_run_modes(tmp_path):
     worker_prompt = build_user_prompt(
         mode="SWARM_WORKER",
         generation=1,
-        current_policy="",
+        current_policy="class Policy:\n    pass\n",
         batch_digest="Role: survival",
+        skills={"nav": "def move(): return None"},
     )
     assert "PrioritySelector" in worker_prompt
     assert "SWARM_WORKER" in worker_prompt
     assert "no 2-function limit" in worker_prompt
+    assert "Hierarchical Skill Registry" in worker_prompt
+    assert "Current Live `policy.py` Reference" in worker_prompt
+
+    from lox.db.schema import get_schema_markdown
+
+    schema_md = get_schema_markdown(db_path)
+    assert "`policies`" in schema_md
+    assert "`discoveries`" in schema_md
+    assert "`latest_pilot_ticks`" in schema_md
+    assert "`llm_cost_rates`" in schema_md
+
+    from lox.author.bt_eval import evaluate_bt_subtree
+
+    obs, err = evaluate_bt_subtree(
+        "def noop(st, bb): return None\nsubtree = ActionLeaf(noop, name='noop')",
+        seed=42,
+        steps=5,
+        baseline_policy_code=(
+            "from skills.nav import fallback_search\n"
+            "class Policy:\n"
+            "    def step(self, state): return fallback_search(state)\n"
+        ),
+        skills={
+            "nav": "from lox.env.actions import Action\ndef fallback_search(state): return Action.SEARCH\n"
+        },
+    )
+    assert err == ""
+    assert obs.actions_taken.get("SEARCH", 0) == 5
+    assert "RLE Trace (tail):" in obs.summary()
 
     meta_prompt = build_user_prompt(
         mode="SWARM_META",

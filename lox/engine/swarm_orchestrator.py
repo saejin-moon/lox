@@ -86,6 +86,7 @@ class SwarmCampaignOrchestrator:
             frontier_dir=self.frontier_dir,
         )
         self.meta_agent.frontier = self.frontier
+        self.meta_agent.author.tools.theories_store = self.meta_agent.theories
 
         # Initialize Multi-Core Persistent Eval Pool
         self.eval_pool = PersistentEvalPool(
@@ -114,9 +115,27 @@ class SwarmCampaignOrchestrator:
         t0 = time.time()
         ui.header(f"LOX Swarm Campaign - Generation {generation}")
 
-        # 1. Dynamic Macro-Category Discovery
+        policy_path = self.workspace_dir / "policy.py"
+        skills_dir = self.workspace_dir / "skills"
+        current_policy = (
+            policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
+        )
+        initial_skills = (
+            {
+                p.stem: p.read_text(encoding="utf-8")
+                for p in sorted(skills_dir.glob("*.py"))
+                if p.stem != "__init__"
+            }
+            if skills_dir.exists()
+            else {}
+        )
+
+        # 1. Dynamic Macro-Category Discovery (tool-enabled; agent investigates DB & codebase itself)
         categories = self.meta_agent.discover_macro_categories(
-            generation=generation, n_categories=max(1, int(self.num_workers))
+            generation=generation,
+            n_categories=max(1, int(self.num_workers)),
+            current_policy=current_policy,
+            skills=initial_skills,
         )
         cat_names = [c["category_id"] for c in categories]
         ui.info(f"Gen {generation}: Active Categories: {cat_names}")
@@ -140,7 +159,12 @@ class SwarmCampaignOrchestrator:
             # Sample relevant checkpoint matching target depth tier
             target_depth = cat.get("target_depth_tier", (1, 2))[0]
             cp = self.frontier.sample_checkpoint(min_depth=target_depth)
-            return worker.run_cycle(generation=generation, checkpoint=cp)
+            return worker.run_cycle(
+                generation=generation,
+                checkpoint=cp,
+                scaffold_code=current_policy,
+                skills=initial_skills,
+            )
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(categories)
@@ -158,11 +182,6 @@ class SwarmCampaignOrchestrator:
                     ui.warn(f"Worker [{c_id}] failed: {e}")
 
         # 3. Meta-Agent Policy Synthesis & Modular Skill Assembly
-        policy_path = self.workspace_dir / "policy.py"
-        skills_dir = self.workspace_dir / "skills"
-        current_policy = (
-            policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
-        )
         master_policy_code = self.meta_agent.assemble_policy(
             generation=generation,
             worker_reports=worker_reports,

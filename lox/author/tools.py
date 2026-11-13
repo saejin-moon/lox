@@ -45,10 +45,17 @@ def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
     if not cur.description:
         return "status: ok", 0
     headers = [d[0] for d in cur.description]
-    rows = cur.fetchall()[:max_rows]
+    all_rows = cur.fetchall()
+    rows_truncated = len(all_rows) > max_rows
+    rows = all_rows[:max_rows]
     if not rows:
         return "results: []", 0
-    max_chars = 4500 if len(rows) <= 5 else (1800 if len(rows) <= 15 else 700)
+    max_chars = (
+        16000
+        if len(rows) <= 3
+        else (6000 if len(rows) <= 8 else (2500 if len(rows) <= 15 else 900))
+    )
+    truncated_fields = 0
     lines = ["results:"]
     for r in rows:
         parts = []
@@ -62,11 +69,21 @@ def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
             else:
                 s = str(v)
                 if len(s) > max_chars:
-                    s = s[: max_chars // 2] + " ... " + s[-max_chars // 2 :]
+                    truncated_fields += 1
+                    s = (
+                        s[: max_chars // 2]
+                        + f" ... [TRUNCATED {len(s) - max_chars} chars; query single row for more] ... "
+                        + s[-max_chars // 2 :]
+                    )
                 s_esc = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
                 parts.append(f'{h}: "{s_esc}"')
         lines.append("  - {" + ", ".join(parts) + "}")
-    return "```yaml\n" + "\n".join(lines) + "\n```", len(rows)
+    note = ""
+    if rows_truncated:
+        note += f"\n# NOTE: Showing {len(rows)} of {len(all_rows)} rows (cap={max_rows}). Use LIMIT/OFFSET or narrower WHERE."
+    if truncated_fields:
+        note += f"\n# NOTE: {truncated_fields} long field(s) middle-truncated at {max_chars} chars (select 1-3 rows for up to 16000 chars)."
+    return "```yaml\n" + "\n".join(lines) + "\n```" + note, len(rows)
 
 
 class AuthorToolRegistry:
@@ -98,6 +115,7 @@ class AuthorToolRegistry:
         self.last_cand_depths: list[float] = []
         self.last_base_depths: list[float] = []
         self.skills: dict[str, str] = {}
+        self.theories_store: Any = None
         self.generation: int = 0
         self.mode: str = "WRITE"
         self.swarm_checkpoint: Any = None
@@ -232,13 +250,16 @@ class AuthorToolRegistry:
                 "error",
             )
 
-        if "limit" not in low_no_literals:
+        auto_limited = "limit" not in low_no_literals
+        if auto_limited:
             clean += " LIMIT 30"
 
         con = connect_db(self.db_path, read_only=True)
         try:
             cur = con.execute(clean)
             text, count = _format_cursor_yaml(cur)
+            if auto_limited and count >= 30:
+                text += "\n# NOTE: Implicit LIMIT 30 applied; specify explicit LIMIT/OFFSET to paginate."
             return text, f"{count} rows"
         except Exception as exc:
             return f"SQL Error: {exc}", "sql_error"
@@ -296,28 +317,69 @@ class AuthorToolRegistry:
         )
 
     def query_policy_docs(self, topic: str = "all") -> tuple[str, str]:
-        """Returns policy language specs and registered macro definitions/docstrings."""
+        """Returns policy language specs, current policy.py, skill registry, and macros.py."""
         macros_code = self.macro_lib.load_code()
         macros_section = (
             f"\n### Current `macros.py` Source:\n```python\n{macros_code}\n```"
             if macros_code
             else "\n### Current `macros.py`: (Empty - no custom macros defined yet)"
         )
+        skill_names = sorted(self.skills.keys())
+        skills_dir = Path(self.macro_lib.path).parent / "skills"
+        if skills_dir.exists():
+            for p in sorted(skills_dir.glob("*.py")):
+                if p.stem != "__init__" and p.stem not in skill_names:
+                    skill_names.append(p.stem)
+        skills_section = (
+            f"\n### Available `skills/` Modules ({len(skill_names)}): {', '.join(sorted(skill_names)) or '(none)'}\n"
+            f"(Call `read_skill(skill_name)` to inspect full source of any module.)"
+        )
         t = (topic or "all").lower()
         if "policy" in t:
             pol_src = self.current_policy_code or "(Empty policy)"
             return (
-                f"### Current `policy.py` Full Source:\n```python\n{pol_src}\n```",
+                f"### Current `policy.py` Full Source:\n```python\n{pol_src}\n```{skills_section}",
                 "policy source",
             )
+        if "skill" in t:
+            return skills_section.strip(), f"{len(skill_names)} skills"
         if "action" in t:
             return FULL_ACTION_DOCS, "action docs"
         if "macro" in t:
             return self.macro_lib.format_docs() + macros_section, "macros docs"
+        pol_src = self.current_policy_code or "(Empty policy)"
         return (
-            POLICY_LANG_DOCS + "\n" + self.macro_lib.format_docs() + macros_section,
+            POLICY_LANG_DOCS
+            + "\n"
+            + self.macro_lib.format_docs()
+            + macros_section
+            + skills_section
+            + f"\n### Current `policy.py` Source:\n```python\n{pol_src}\n```",
             "full docs",
         )
+
+    def query_theories(
+        self, query: str = "", doc_type: str = "", limit: int = 6
+    ) -> tuple[str, str]:
+        """Searches LanceDB theories/reflections/decompositions without aggressive truncation."""
+        if self.theories_store is None:
+            return "LanceDB theories store not attached in this session.", "unavailable"
+        try:
+            lim = max(1, min(15, int(limit or 6)))
+            dt = str(doc_type or "").strip() or None
+            q = str(query or "").strip() or "failure stall depth"
+            docs = self.theories_store.search_theories(q, limit=lim, doc_type=dt)
+            if not docs:
+                return "No matching theory documents found.", "0 docs"
+            blocks = []
+            for d in docs:
+                blocks.append(
+                    f"### [Gen {d.get('generation', '?')} | {d.get('doc_type', 'DOC')} | {d.get('agent_role', '')}] "
+                    f"{d.get('title', '')}\n{str(d.get('content', '')).strip()}"
+                )
+            return "\n\n---\n\n".join(blocks), f"{len(docs)} docs"
+        except Exception as exc:
+            return f"Theories query error: {exc}", "error"
 
     def read_skill(self, skill_name: str) -> tuple[str, str]:
         """Reads the full Python source code of an individual skill module from the skill library."""
@@ -597,7 +659,7 @@ class AuthorToolRegistry:
                 )
             else:
                 contexts.append({"seed": int(seed)})
-            for fix in self.swarm_replay_fixtures[:2]:
+            for fix in self.swarm_replay_fixtures:
                 contexts.append({"replay_fixture": fix})
 
         observations = []
@@ -611,10 +673,21 @@ class AuthorToolRegistry:
                 seed=ctx.get("seed"),
                 steps=steps,
                 baseline_policy_code=scaffold,
+                skills=self.skills,
             )
             if err:
                 errors.append(err)
-                break
+                first_line = err.strip().splitlines()[0] if err.strip() else ""
+                if any(
+                    tag in first_line
+                    for tag in (
+                        "SyntaxError",
+                        "PolicyValidationError",
+                        "CompileError",
+                    )
+                ):
+                    break
+                continue
             observations.append(obs)
 
         if errors:
@@ -644,8 +717,14 @@ class AuthorToolRegistry:
                     "passed": False,
                 }
             )
+            partial_obs = (
+                "\n\nSuccessful contexts:\n"
+                + "\n".join(f"- {o.summary()}" for o in observations)
+                if observations
+                else ""
+            )
             return (
-                f"Subtree {status_tag} for [{hyp_label}]:\n{err_msg}",
+                f"Subtree {status_tag} for [{hyp_label}]:\n{err_msg}{partial_obs}",
                 status_tag,
             )
 
@@ -1719,10 +1798,40 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                 "properties": {
                     "topic": {
                         "type": "string",
-                        "description": "'all', 'macros', 'state', or 'actions'.",
+                        "description": "'all', 'policy', 'skills', 'macros', 'state', or 'actions'.",
                         "default": "all",
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_theories",
+            "description": (
+                "Search LanceDB knowledge store for prior worker THEORY experiments, "
+                "REFLECTION_REPORTs, CATEGORY_DECOMPOSITIONs, and META_SYNTHESIS docs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search keywords (e.g. 'doorway stall', 'starvation', 'oscillation').",
+                    },
+                    "doc_type": {
+                        "type": "string",
+                        "description": "Optional filter: 'THEORY', 'REFLECTION_REPORT', 'CATEGORY_DECOMPOSITION', or 'META_SYNTHESIS'.",
+                        "default": "",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max documents to return (default 6).",
+                        "default": 6,
+                    },
+                },
+                "required": ["query"],
             },
         },
     },

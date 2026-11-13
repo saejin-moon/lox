@@ -41,6 +41,7 @@ class ObservationDigest:
     score_end: int = 0
     unique_tiles: int = 0
     actions_taken: dict[str, int] = field(default_factory=dict)
+    rle_trace: list[str] = field(default_factory=list)
     dialog_resolved: bool = False
     context_label: str = "seed"
 
@@ -68,13 +69,17 @@ class ObservationDigest:
             for k, v in sorted(self.actions_taken.items(), key=lambda x: -x[1])[:4]
         )
         total = self.total_eval_steps or self.steps_taken
-        return (
+        base = (
             f"Status: {status} | Context: {self.context_label} | "
             f"Triggered: {self.triggered_steps}/{total} | Steps: {self.steps_taken} | "
             f"HP: {self.hp_end}/{self.hp_start} (Δ{self.hp_delta:+d}) | "
             f"Depth: Dlvl {self.depth_end} (Δ{self.depth_delta:+d}) | "
             f"Unique Tiles: {self.unique_tiles} | Actions: [{top_acts}]"
         )
+        if self.rle_trace:
+            tail = " -> ".join(self.rle_trace[-10:])
+            return f"{base}\n  RLE Trace (tail): {tail}"
+        return base
 
 
 def sample_condition_fixtures(
@@ -177,6 +182,7 @@ def evaluate_bt_subtree(
     seed: int | None = None,
     steps: int = 150,
     baseline_policy_code: str = "",
+    skills: dict[str, str] | None = None,
 ) -> tuple[ObservationDigest, str]:
     """
     Validates, compiles, and empirically executes a Behavior Tree subtree on:
@@ -195,7 +201,9 @@ def evaluate_bt_subtree(
     baseline_runner = None
     if baseline_policy_code and baseline_policy_code.strip():
         try:
-            compiled_base = compile_policy_package(baseline_policy_code)
+            compiled_base = compile_policy_package(
+                baseline_policy_code, skills=skills or {}
+            )
             baseline_runner = compiled_base.create_runner()
         except Exception:
             baseline_runner = None
@@ -228,30 +236,67 @@ def evaluate_bt_subtree(
         bb = Blackboard(strict_errors=True)
         action_counts: dict[str, int] = collections.defaultdict(int)
         visited_tiles: set[tuple[int, int]] = set()
+        rle_runs: list[dict[str, Any]] = []
         triggered_steps = 0
         eval_steps = 0
 
-        for _ in range(steps):
+        for step_idx in range(1, steps + 1):
             eval_steps += 1
-            visited_tiles.add((st.y, st.x))
+            pre_pos = (int(st.y), int(st.x))
+            pre_turn = int(st.turn)
+            visited_tiles.add(pre_pos)
             cand_act = _tick_node(node, st, bb)
             if cand_act is not None:
                 triggered_steps += 1
                 chosen_act = cand_act
+                act_source = "subtree"
             elif baseline_runner is not None:
                 base_act, _ = baseline_runner.next_action(st)
                 chosen_act = base_act if base_act is not None else Action.WAIT
+                act_source = "baseline" if base_act is not None else "wait_fallback"
             else:
                 chosen_act = Action.WAIT
+                act_source = "wait_fallback"
 
             act_name = (
                 chosen_act.name if hasattr(chosen_act, "name") else str(chosen_act)
             )
             action_counts[act_name] += 1
             st, done, _ = harness.step(chosen_act)
+            post_pos = (int(st.y), int(st.x))
+            turn_adv = int(st.turn) - pre_turn
+
+            if (
+                rle_runs
+                and rle_runs[-1]["source"] == act_source
+                and rle_runs[-1]["act"] == act_name
+            ):
+                seg = rle_runs[-1]
+                seg["end_step"] = step_idx
+                seg["count"] += 1
+                seg["end_pos"] = post_pos
+                seg["turn_adv"] += turn_adv
+            else:
+                rle_runs.append(
+                    {
+                        "start_step": step_idx,
+                        "end_step": step_idx,
+                        "count": 1,
+                        "source": act_source,
+                        "act": act_name,
+                        "start_pos": pre_pos,
+                        "end_pos": post_pos,
+                        "turn_adv": turn_adv,
+                    }
+                )
             if done:
                 break
 
+        rle_trace = [
+            f"[S{seg['start_step']}..{seg['end_step']} ({seg['count']}x) {seg['source']}:{seg['act']} "
+            f"{seg['start_pos']}->{seg['end_pos']} dt={seg['turn_adv']}]"
+            for seg in rle_runs
+        ]
         visited_tiles.add((st.y, st.x))
         obs = ObservationDigest(
             survived=not harness.done,
@@ -267,6 +312,7 @@ def evaluate_bt_subtree(
             score_end=int(st.score),
             unique_tiles=len(visited_tiles),
             actions_taken=dict(action_counts),
+            rle_trace=rle_trace,
             dialog_resolved=not getattr(st, "waiting_for_space", False)
             and not getattr(st, "in_text_prompt", False),
             context_label=ctx_label,

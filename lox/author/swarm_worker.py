@@ -55,6 +55,7 @@ class SwarmWorker:
             db_path=db_path,
             agent_role=self.role,
         )
+        self.author.tools.theories_store = self.theories
         self.best_candidate_code: str = ""
         self.best_score: float = -1e9
         self.history: list[dict[str, Any]] = []
@@ -139,6 +140,7 @@ class SwarmWorker:
         steps: int = 25,
         replay_fixture: dict[str, Any] | None = None,
         baseline_policy_code: str = "",
+        skills: dict[str, str] | None = None,
     ) -> tuple[ObservationDigest, str]:
         """
         Empirically evaluates candidate code directly on a frontier checkpoint, failure replay, or fresh seed.
@@ -151,6 +153,7 @@ class SwarmWorker:
             replay_fixture=replay_fixture,
             steps=steps,
             baseline_policy_code=baseline_policy_code,
+            skills=skills,
         )
 
     def _load_baseline_scaffold(self, explicit_scaffold: str = "") -> str:
@@ -164,17 +167,32 @@ class SwarmWorker:
             pass
         return ""
 
+    def _load_skills(
+        self, explicit_skills: dict[str, str] | None = None
+    ) -> dict[str, str]:
+        if explicit_skills is not None:
+            return dict(explicit_skills)
+        skills_dir = Path(self.db_path).parent / "workspace" / "skills"
+        if skills_dir.exists():
+            return {
+                p.stem: p.read_text(encoding="utf-8")
+                for p in sorted(skills_dir.glob("*.py"))
+                if p.stem != "__init__"
+            }
+        return {}
+
     def run_cycle(
         self,
         generation: int,
         checkpoint: FrontierCheckpoint | None = None,
         scaffold_code: str = "",
+        skills: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """
         Runs a single warm multi-hypothesis exploration cycle for this category:
-        1. Audits DuckDB / Wiki / LanceDB upfront
+        1. Audits DuckDB / Wiki / LanceDB / Skills
         2. Brainstorms `self.max_turns` competing hypotheses (`H1..HK`)
-        3. Translates, dry-runs (with baseline scaffold + failure fixtures), and repairs each sequentially
+        3. Translates, dry-runs (with baseline scaffold + skills + failure fixtures), and repairs each sequentially
         4. Persists per-hypothesis THEORY docs and a comparative REFLECTION_REPORT to LanceDB.
         """
         ui.info(
@@ -184,6 +202,7 @@ class SwarmWorker:
             checkpoint = self.frontier.sample_checkpoint()
 
         active_scaffold = self._load_baseline_scaffold(scaffold_code)
+        active_skills = self._load_skills(skills)
         replay_fixtures = sample_condition_fixtures(
             self.db_path,
             self.role,
@@ -200,11 +219,13 @@ class SwarmWorker:
         session = self.author.run_swarm_worker_session(
             generation=generation,
             brief=brief,
+            current_policy=active_scaffold,
             num_hypotheses=self.max_turns,
             checkpoint=checkpoint,
             frontier=self.frontier,
             replay_fixtures=replay_fixtures,
             scaffold_code=active_scaffold,
+            skills=active_skills,
         )
 
         raw_exps = list(session.get("experiments") or [])
@@ -226,6 +247,7 @@ class SwarmWorker:
                 checkpoint=checkpoint,
                 steps=25,
                 baseline_policy_code=active_scaffold,
+                skills=active_skills,
             )
             experiments.append(
                 {
