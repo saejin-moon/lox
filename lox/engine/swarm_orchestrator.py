@@ -293,8 +293,11 @@ class SwarmCampaignOrchestrator:
             if skills_dir.exists()
             else {}
         )
+        skills_dict = self.meta_agent.prune_unused_skills(
+            master_policy_code, skills_dict, skills_dir=skills_dir
+        )
         ui.info(
-            f"Gen {generation}: Draft master policy saved to `{policy_path}` ({len(skills_dict)} skill modules in `{skills_dir}`)."
+            f"Gen {generation}: Draft master policy saved to `{policy_path}` ({len(skills_dict)} active skill module(s) in `{skills_dir}`)."
         )
 
         # 5. Evaluate Draft Policy on Paired Seeds & Persist to DuckDB
@@ -366,7 +369,9 @@ class SwarmCampaignOrchestrator:
         )
         if was_revised:
             master_policy_code = revised_code
-            skills_dict = revised_skills
+            skills_dict = self.meta_agent.prune_unused_skills(
+                master_policy_code, revised_skills, skills_dir=skills_dir
+            )
             policy_path.write_text(master_policy_code, encoding="utf-8")
             ui.info(
                 f"Gen {generation}: Re-evaluating Post-Critic revised policy on {self.seeds_per_batch} paired seeds..."

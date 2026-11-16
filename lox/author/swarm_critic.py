@@ -634,6 +634,8 @@ Return ONLY a valid JSON object:
                 generation=generation,
                 session_mode="CRITIC_PRE_GUIDE",
                 agent_role_override="critic",
+                require_json=True,
+                expected_json_type="object",
             )
             guidance.raw_summary = raw
             parsed = self._parse_json_object(raw)
@@ -748,6 +750,8 @@ Return ONLY a valid JSON object:
                 generation=generation,
                 session_mode="CRITIC_POST_REVIEW",
                 agent_role_override="critic",
+                require_json=True,
+                expected_json_type="object",
             )
             critique.raw_summary = raw
             parsed = self._parse_json_object(raw)

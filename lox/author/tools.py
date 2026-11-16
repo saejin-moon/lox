@@ -1816,6 +1816,87 @@ class AuthorToolRegistry:
                     "PASSED (smoke check)",
                 )
 
+            replay_checks_block = ""
+            if (
+                self.mode == "SWARM_META"
+                and not replay_run_id
+                and os.path.exists(self.db_path)
+            ):
+                replay_summaries: list[str] = []
+                try:
+                    con_rep = connect_db(self.db_path, read_only=True)
+                    try:
+                        fail_rows = con_rep.execute(
+                            """
+                            SELECT run_id, seed, end_reason, action_bytes
+                            FROM runs
+                            WHERE octet_length(action_bytes) > 20
+                              AND end_reason NOT IN ('ascended', 'max_steps')
+                            ORDER BY generation DESC, turns DESC
+                            LIMIT 2
+                            """
+                        ).fetchall()
+                    finally:
+                        con_rep.close()
+                    for f_rid, f_seed, f_end, f_bytes in fail_rows:
+                        r_buf = bytes(f_bytes or b"")
+                        if not r_buf:
+                            continue
+                        cut_pt = (
+                            max(1, len(r_buf) - 50)
+                            if len(r_buf) > 60
+                            else max(1, len(r_buf) - 10)
+                        )
+                        rh = NetHackHarness(max_steps=120)
+                        try:
+                            r_runner = compiled.create_runner()
+                            r_st = rh.replay_bytes(
+                                seed=int(f_seed),
+                                recorded_bytes=r_buf,
+                                stop_at_byte_idx=cut_pt,
+                            )
+                            rh.step_count = 0
+                            r_acts: list[str] = []
+                            r_tiles: set[tuple[int, int]] = {(r_st.y, r_st.x)}
+                            for _ in range(120):
+                                ra, _ = r_runner.next_action(r_st)
+                                r_st, r_done, r_info = rh.step(ra)
+                                r_acts.append(str(r_info.get("action_name", "")))
+                                r_tiles.add((r_st.y, r_st.x))
+                                if r_done:
+                                    break
+                            r_leaf_errs = extract_runner_leaf_errors(r_runner)
+                            if r_leaf_errs:
+                                err_lines = "\n".join(
+                                    f"- Leaf `{n}` raised {e}"
+                                    for n, e in r_leaf_errs[:5]
+                                )
+                                return (
+                                    f"Runtime Error in BehaviorTree leaf during failure-replay ({f_rid}):\n{err_lines}",
+                                    "RUNTIME_ERROR",
+                                )
+                            top_r_acts = ", ".join(
+                                f"{k}:{v}" for k, v in Counter(r_acts).most_common(4)
+                            )
+                            r_status = (
+                                f"ENDED({r_st.end_reason})"
+                                if rh.done
+                                else "SURVIVED(120 steps)"
+                            )
+                            replay_summaries.append(
+                                f"  * `{f_rid}` (prior `{f_end}`, rewound -50B): {r_status} | "
+                                f"Dlvl={r_st.depth} | HP={r_st.hp}/{r_st.max_hp} | Tiles={len(r_tiles)} | Acts=[{top_r_acts}]"
+                            )
+                        finally:
+                            rh.close()
+                except Exception:
+                    pass
+                if replay_summaries:
+                    replay_checks_block = (
+                        "\n- Mid-Game Failure-Replay Checks:\n"
+                        + "\n".join(replay_summaries)
+                    )
+
             self.last_passed_code = code
             if skill_name and skill_code is not None:
                 self.last_passed_skill_name = str(skill_name)
@@ -1831,7 +1912,7 @@ class AuthorToolRegistry:
                 f"- Functions Called: {{{fn_summary}}}\n"
                 f"- Action Breakdown: {{{act_counts}}}\n"
                 f"- Registered Params: {{{params_summary}}}\n"
-                f"- First 10 Actions: {sample_acts}{warn_block}",
+                f"- First 10 Actions: {sample_acts}{replay_checks_block}{warn_block}",
                 f"PASSED ({harness.step_count} steps)",
             )
         except Exception as exc:

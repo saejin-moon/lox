@@ -7,6 +7,7 @@ and receives Pass 2 comparative feedback from SwarmCriticAgent to finalize the p
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import traceback
@@ -180,6 +181,8 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                     generation=generation,
                     session_mode="META_DISCOVERY",
                     agent_role_override="meta_agent",
+                    require_json=True,
+                    expected_json_type="array",
                 )
                 parsed_items = self._parse_categories_json(raw_txt)
                 for item in parsed_items[:n_categories]:
@@ -579,6 +582,95 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
 
         return master_policy_code
 
+    @staticmethod
+    def prune_unused_skills(
+        policy_code: str,
+        skills: dict[str, str],
+        skills_dir: str | Path | None = None,
+    ) -> dict[str, str]:
+        """
+        Finds the exact transitive set of `skills.<name>` modules imported by `policy_code`
+        (including skill-to-skill imports) and removes orphaned `.py` files from `skills_dir`
+        and `skills` so workspace prompts and `sys.modules` stay lean across generations.
+        """
+        if not skills:
+            return {}
+
+        def _extract_skill_imports(src: str) -> set[str]:
+            refs: set[str] = set()
+            try:
+                tree = ast.parse(src)
+            except Exception:
+                return refs
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    if node.module == "skills":
+                        for alias in node.names:
+                            refs.add(alias.name.split(".")[0])
+                    elif node.module.startswith("skills."):
+                        refs.add(node.module.split(".")[1])
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.startswith("skills."):
+                            refs.add(alias.name.split(".")[1])
+            return refs
+
+        keep: set[str] = set()
+        queue = list(_extract_skill_imports(policy_code))
+        while queue:
+            s_name = queue.pop(0)
+            if s_name in keep or s_name not in skills:
+                continue
+            keep.add(s_name)
+            queue.extend(_extract_skill_imports(skills[s_name]))
+
+        pruned = {k: v for k, v in skills.items() if k in keep}
+        removed = sorted(set(skills.keys()) - keep)
+        if skills_dir is not None:
+            s_dir = Path(skills_dir)
+            if s_dir.exists():
+                for p in s_dir.glob("*.py"):
+                    if p.stem != "__init__" and p.stem not in keep:
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+        if removed:
+            ui.info(
+                f"Meta-Agent: Pruned {len(removed)} unused skill module(s) from workspace "
+                f"(kept {len(pruned)} active): {removed[:8]}"
+                + ("..." if len(removed) > 8 else "")
+            )
+        return pruned
+
+    def _get_recent_failing_run_ids(self, generation: int, limit: int = 3) -> list[str]:
+        """Queries DuckDB for recent failing run_ids in `generation` so Meta-Agent can replay-test fixes."""
+        if not self.db_path or not Path(self.db_path).exists():
+            return []
+        try:
+            from lox.db.schema import connect_db
+
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                rows = con.execute(
+                    """
+                    SELECT run_id, end_reason, max_depth, turns
+                    FROM runs
+                    WHERE generation = ? AND end_reason NOT IN ('ascended', 'max_steps')
+                    ORDER BY turns DESC, max_depth ASC
+                    LIMIT ?
+                    """,
+                    [generation, limit],
+                ).fetchall()
+                return [
+                    f"`{r[0]}` (end=`{r[1]}`, max_depth={r[2]}, turns={r[3]})"
+                    for r in rows
+                ]
+            finally:
+                con.close()
+        except Exception:
+            return []
+
     def revise_policy_with_critic(
         self,
         generation: int,
@@ -613,6 +705,14 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
             if pre_gen_guide is not None and hasattr(pre_gen_guide, "to_prompt_block")
             else ""
         )
+        failing_runs = self._get_recent_failing_run_ids(generation=generation, limit=3)
+        replay_hint = (
+            "- **Failure-Replay Verification**: You can verify any fix directly on the actual mid/late-game failing states from this generation via `dry_run_policy(code=..., replay_run_id='<run_id>')`:\n  "
+            + "\n  ".join(f"* {fr}" for fr in failing_runs)
+            + "\n"
+            if failing_runs
+            else ""
+        )
         revision_prompt = (
             f"You are the Meta-Agent Architect completing the Post-Critic Review for Generation {generation}.\n"
             f"Your initial draft policy (`policy_swarm_g{generation}`) was evaluated on the batch seeds, and the Read-Only Critic "
@@ -623,6 +723,7 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
             f'- There are NO automatic rollbacks in the harness—YOU decide the final `class Policy` (and optional `<skill_code module="name">...</skill_code>` updates) for Generation {generation}.\n'
             f"- If your draft policy `policy_swarm_g{generation}` improved or performed well and needs no changes, simply output the current `class Policy` unchanged.\n"
             f"- If the Critic identified a regression, hijacking branch, `0-TURN` starved branch, or dropped capability compared to an earlier generation, use `query_db`, `diff_policies`, `read_policy`, `read_skill(skill_name, policy_id=...)`, and `dry_run_policy` to fix the issue or restore the working component from an earlier `policy_id`.\n"
+            f"{replay_hint}"
             f'- Output your final `class Policy` inside `<policy_code>...</policy_code>` (or a ```python ... ``` block), and any updated skill modules inside `<skill_code module="name">...</skill_code>`.'
         )
 

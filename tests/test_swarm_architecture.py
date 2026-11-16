@@ -1072,3 +1072,51 @@ class Policy:
     )
     assert sum_err == "error"
     assert "disallowed" in out_err
+
+    # 7. Verify require_json nudges past Turn-1 plain-text planning in run_tool_session
+    nudge_calls = {"n": 0}
+
+    def fake_nudge_llm(messages, allow_tools=True, tool_specs=None):
+        nudge_calls["n"] += 1
+        if nudge_calls["n"] == 1:
+            return {
+                "content": "Investigate: diff g8 vs g9, look at runs, function stats.",
+                "tool_calls": [],
+            }
+        return {
+            "content": '{"needs_revision": false, "comparison_to_prev_gens": "ok", "identified_issues": [], "recommendations_for_meta": []}',
+            "tool_calls": [],
+        }
+
+    critic_g1.author._call_llm_api = fake_nudge_llm  # type: ignore[method-assign]
+    nudged_out = critic_g1.author.run_tool_session(
+        "sys",
+        "usr",
+        max_tool_turns=3,
+        require_json=True,
+        expected_json_type="object",
+    )
+    assert nudge_calls["n"] == 2
+    assert '"needs_revision": false' in nudged_out
+
+    # 8. Verify prune_unused_skills removes orphaned files while preserving transitive imports
+    prune_dir = tmp_path / "prune_skills"
+    prune_dir.mkdir(parents=True)
+    for nm, code_s in {
+        "used_a": "from skills.used_helper import h\n",
+        "used_helper": "h = 1\n",
+        "orphaned_old": "x = 2\n",
+    }.items():
+        (prune_dir / f"{nm}.py").write_text(code_s, encoding="utf-8")
+    kept = SwarmMetaAgent.prune_unused_skills(
+        "from skills.used_a import h\nclass Policy:\n    pass\n",
+        {
+            "used_a": "from skills.used_helper import h\n",
+            "used_helper": "h = 1\n",
+            "orphaned_old": "x = 2\n",
+        },
+        skills_dir=prune_dir,
+    )
+    assert sorted(kept.keys()) == ["used_a", "used_helper"]
+    assert not (prune_dir / "orphaned_old.py").exists()
+    assert (prune_dir / "used_helper.py").exists()

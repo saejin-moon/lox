@@ -1767,6 +1767,39 @@ class AuthorAgent:
             t_args = {}
         return self._execute_tool_call(turn_idx, t_name, t_args)
 
+    @staticmethod
+    def _has_valid_json(text: str, expected_type: str = "object") -> bool:
+        """Checks if `text` contains a valid JSON object (`{...}`) or array (`[...]`)."""
+        txt = re.sub(
+            r"<think>.*?</think>", "", str(text or ""), flags=re.DOTALL
+        ).strip()
+        if "```" in txt:
+            m = re.search(r"```(?:json)?\s*\n(.*?)```", txt, flags=re.DOTALL)
+            if m:
+                txt = m.group(1).strip()
+        want_type = list if expected_type == "array" else dict
+        try:
+            parsed = json.loads(txt)
+            if isinstance(parsed, want_type):
+                return True
+            if (
+                expected_type == "array"
+                and isinstance(parsed, dict)
+                and isinstance(parsed.get("categories"), list)
+            ):
+                return True
+        except Exception:
+            pass
+        pattern = r"\[.*\]" if expected_type == "array" else r"\{.*\}"
+        m_sub = re.search(pattern, txt, flags=re.DOTALL)
+        if m_sub:
+            try:
+                parsed = json.loads(m_sub.group(0))
+                return isinstance(parsed, want_type)
+            except Exception:
+                pass
+        return False
+
     def run_tool_session(
         self,
         system_prompt: str,
@@ -1777,6 +1810,8 @@ class AuthorAgent:
         generation: int = 0,
         session_mode: str = "TOOL_SESSION",
         agent_role_override: str = "",
+        require_json: bool = False,
+        expected_json_type: str = "object",
     ) -> str:
         """Runs a lightweight tool-enabled conversation and returns the final assistant text."""
         messages: list[dict[str, Any]] = [
@@ -1798,6 +1833,7 @@ class AuthorAgent:
         last_content = ""
         called_tools: set[str] = set()
         called_expert_query = False
+        json_nudges = 0
         req = [str(t) for t in (required_tools or []) if str(t).strip()]
         try:
             for turn_idx in range(1, max(1, int(max_tool_turns)) + 2):
@@ -1850,6 +1886,29 @@ class AuthorAgent:
                                     f"Required tool(s) not yet called: {', '.join(missing)}. "
                                     "You MUST call both `query_wiki` and `query_db` on `expert_runs` / `expert_ticks` "
                                     "before returning your final JSON response."
+                                ),
+                            }
+                        )
+                        continue
+                    if (
+                        require_json
+                        and not self._has_valid_json(content, expected_json_type)
+                        and json_nudges < 2
+                        and turn_idx <= max_tool_turns
+                    ):
+                        json_nudges += 1
+                        shape_desc = (
+                            "a valid JSON array `[...]`"
+                            if expected_json_type == "array"
+                            else "a valid JSON object `{...}`"
+                        )
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Your previous response did not contain {shape_desc} and made no tool calls. "
+                                    f"Either invoke your tools to investigate first, or return ONLY {shape_desc} matching the required schema."
                                 ),
                             }
                         )
