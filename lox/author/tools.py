@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 
 from lox.author.bt_eval import evaluate_bt_subtree
-from lox.author.prompts import FULL_ACTION_DOCS, POLICY_LANG_DOCS
+from lox.author.prompts import BEHAVIOR_TREE_DOCS, FULL_ACTION_DOCS, POLICY_LANG_DOCS
 from lox.core.contracts import CandidatePackage
 from lox.datasets.symbols import SYMBOL_REGISTRY
 from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
@@ -251,7 +251,7 @@ class AuthorToolRegistry:
             )
         if self.generation == 1 and self._campaign_tables_empty():
             forbidden_gen1 = re.search(
-                r"\b(runs|ticks|batches|function_stats|policies|experiments|discoveries)\b",
+                r"\b(?:from|join)\s+(runs|ticks|batches|function_stats|policies|experiments|discoveries|champion_runs|champion_ticks|champion_function_stats|latest_pilot_runs|latest_pilot_ticks)\b",
                 low_no_literals,
             )
             if forbidden_gen1:
@@ -381,6 +381,15 @@ class AuthorToolRegistry:
         if "macro" in t:
             return self.macro_lib.format_docs() + macros_section, "macros docs"
         pol_src = self.current_policy_code or "(Empty policy)"
+        if self.mode in ("SWARM_WORKER", "SWARM_META"):
+            return (
+                BEHAVIOR_TREE_DOCS
+                + "\n"
+                + POLICY_LANG_DOCS
+                + skills_section
+                + f"\n### Current `policy.py` Source:\n```python\n{pol_src}\n```",
+                "full docs",
+            )
         return (
             POLICY_LANG_DOCS
             + "\n"

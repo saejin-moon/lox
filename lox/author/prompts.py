@@ -254,7 +254,7 @@ Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stat
 
 4. **Expert Ascension Comparison**:
    ```sql
-   SELECT depth, COUNT(DISTINCT run_id) AS runs, AVG(max_t - min_t) AS avg_turns_on_floor
+   SELECT depth, COUNT(DISTINCT run_id) AS expert_run_cnt, AVG(max_t - min_t) AS avg_turns_on_floor
    FROM (
        SELECT run_id, depth, MIN(turn) AS min_t, MAX(turn) AS max_t
        FROM expert_ticks

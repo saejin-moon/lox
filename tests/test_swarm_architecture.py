@@ -1057,3 +1057,18 @@ class Policy:
     assert changed is False
     assert rev_code == sample_policy
     assert extract_runner_leaf_errors(None) == []
+
+    # 6. Verify Gen 1 empty-DB check allows `AS runs` / `AS ticks` aliases on expert_ticks while blocking `FROM runs`
+    empty_db = str(tmp_path / "empty_gen1.duckdb")
+    init_db(empty_db).close()
+    critic_g1 = SwarmCriticAgent(provider="mock", db_path=empty_db)
+    critic_g1.author.tools.generation = 1
+    out_ok, sum_ok = critic_g1.author.tools.query_db(
+        "SELECT depth, COUNT(DISTINCT run_id) AS runs, COUNT(*) AS ticks FROM expert_ticks GROUP BY depth"
+    )
+    assert sum_ok != "error", out_ok
+    out_err, sum_err = critic_g1.author.tools.query_db(
+        "SELECT end_reason, COUNT(*) AS n FROM runs GROUP BY end_reason"
+    )
+    assert sum_err == "error"
+    assert "disallowed" in out_err

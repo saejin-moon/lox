@@ -916,6 +916,16 @@ class AuthorAgent:
             allow_tools = turn_idx <= max_tool_turns and not getattr(
                 self.tools, "last_pilot_improved", False
             )
+            if not allow_tools and messages and messages[-1].get("role") == "tool":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Tool turn budget reached. Do NOT call any more tools or emit `<tool_call>` tags—"
+                            "output your final Python policy code now."
+                        ),
+                    }
+                )
             if self.agent_role in ("", "author"):
                 ui.status(
                     f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
@@ -1792,6 +1802,16 @@ class AuthorAgent:
         try:
             for turn_idx in range(1, max(1, int(max_tool_turns)) + 2):
                 allow_tools = turn_idx <= max_tool_turns
+                if not allow_tools:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Tool turn budget reached. Do NOT call any more tools or emit `<tool_call>` tags—"
+                                "output your final required JSON response now based on the evidence gathered above."
+                            ),
+                        }
+                    )
                 t0_turn = time.perf_counter()
                 msg = (
                     self._call_llm_api(
@@ -1804,6 +1824,9 @@ class AuthorAgent:
                 raw_content = str(msg.get("content") or "")
                 content = re.sub(
                     r"<think>.*?</think>", "", raw_content, flags=re.DOTALL
+                )
+                content = re.sub(
+                    r"<tool_call>.*?</tool_call>", "", content, flags=re.DOTALL
                 ).strip()
                 reasoning_text = str(msg.get("_reasoning") or "")
                 usage = msg.get("_usage") or {}
@@ -2041,6 +2064,16 @@ class AuthorAgent:
 
         for turn_idx in range(1, turn_limit + 2):
             allow_tools = turn_idx <= turn_limit
+            if not allow_tools and messages and messages[-1].get("role") == "tool":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Tool turn budget reached. Do NOT call any more tools or emit `<tool_call>` tags—"
+                            "output your `<reflection>` and final winning `<policy_code>` subtree now."
+                        ),
+                    }
+                )
             t0_turn = time.perf_counter()
             msg = self._call_llm_api(messages, allow_tools=allow_tools)
             turn_ms = (time.perf_counter() - t0_turn) * 1000.0
@@ -2048,8 +2081,9 @@ class AuthorAgent:
             reasoning_text = msg.get("_reasoning") or ""
             usage = msg.get("_usage") or {}
 
+            clean_text = re.sub(r"<think>.*?</think>", "", msg_text, flags=re.DOTALL)
             clean_text = re.sub(
-                r"<think>.*?</think>", "", msg_text, flags=re.DOTALL
+                r"<tool_call>.*?</tool_call>", "", clean_text, flags=re.DOTALL
             ).strip()
             clean_msg: dict[str, Any] = {"role": "assistant", "content": clean_text}
             if msg.get("tool_calls"):
