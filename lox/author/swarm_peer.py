@@ -22,6 +22,7 @@ from lox.author.agent import AuthorAgent
 from lox.author.swarm_critic import extract_priority_selector_branches
 from lox.author.swarm_deficits import DeficitCluster, DeficitReport
 from lox.author.swarm_meta import SwarmMetaAgent
+from lox.author.tools import merge_skill_module_update
 from lox.env.harness import NetHackHarness
 from lox.lang.bt import extract_runner_leaf_errors
 from lox.lang.compiler import _COMPILE_EXEC_LOCK, compile_policy_package
@@ -585,7 +586,9 @@ class SwarmPeerAgent:
         for s_name, s_src in (getattr(proposal, "skill_modules", {}) or {}).items():
             clean_s = str(s_name or "").strip().removesuffix(".py")
             if clean_s and str(s_src or "").strip():
-                updated_skills[clean_s] = str(s_src).strip()
+                updated_skills[clean_s] = merge_skill_module_update(
+                    updated_skills.get(clean_s, ""), str(s_src)
+                )
 
         explicit_prunes: list[str] = []
         raw_prunes = hyp.get("skills_to_prune")

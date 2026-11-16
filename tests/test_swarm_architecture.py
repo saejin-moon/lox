@@ -1754,3 +1754,195 @@ def test_ast_modularizer_hysteresis_incremental_and_orchestrator(tmp_path):
         assert fp in orch._attempted_ast_modular_fps
     finally:
         orch.close()
+
+
+def test_gen41_xml_bundle_and_partial_skill_patch_preservation(tmp_path):
+    from lox.author.agent import AuthorAgent
+    from lox.author.tools import (
+        OPENAI_TOOL_SPECS,
+        AuthorToolRegistry,
+        merge_skill_module_update,
+    )
+
+    # 1. OpenAI schema omits untyped additionalProperties `skills` dict
+    dry_run_spec = next(
+        s for s in OPENAI_TOOL_SPECS if s["function"]["name"] == "dry_run_policy"
+    )
+    props = dry_run_spec["function"]["parameters"]["properties"]
+    assert "skills" not in props
+    assert "<skill_code" in props["code"]["description"]
+
+    # 2. Partial # PATCH update to existing skill preserves untouched exports (_delta_of)
+    existing_shared = (
+        "from lox.env.actions import Action\n\n"
+        "def _delta_of(a, b):\n"
+        "    return (b[0] - a[0], b[1] - a[1])\n\n"
+        "def choose_move(state, bb):\n"
+        "    return Action.WAIT\n"
+    )
+    partial_patch = (
+        "# PATCH\n"
+        "def choose_move(state, bb):\n"
+        "    dx, dy = _delta_of((0, 0), (1, 0))\n"
+        "    return Action.SEARCH if dx == 1 and dy == 0 else Action.WAIT\n"
+    )
+    merged = merge_skill_module_update(existing_shared, partial_patch)
+    assert "def _delta_of(a, b):" in merged
+    assert "return Action.SEARCH" in merged
+
+    # 3. dry_run_policy unpacks XML bundle (<skill_code> + <policy_code>) and keeps _delta_of
+    base_policy = (
+        "from lox.env.actions import Action\n"
+        "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n"
+        "from skills.shared import _delta_of, choose_move\n\n"
+        "def build_tree(bb):\n"
+        "    return PrioritySelector([ActionLeaf(choose_move, name='mv')], name='root')\n\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.blackboard = Blackboard()\n"
+        "        self.tree = BehaviorTree(root=build_tree(self.blackboard), blackboard=self.blackboard)\n"
+        "    def step(self, state):\n"
+        "        _ = _delta_of((0, 0), (0, 1))\n"
+        "        return self.tree.tick(state) or Action.WAIT\n"
+    )
+    tools = AuthorToolRegistry(db_path=str(tmp_path / "xml.duckdb"))
+    tools.configure_generation(
+        mode="SWARM_PEER",
+        generation=41,
+        skills={"shared": existing_shared},
+    )
+    tools.current_policy_code = base_policy
+
+    xml_skill_only = (
+        '<skill_code module="shared">\n'
+        "# PATCH: update choose_move without deleting _delta_of\n"
+        "def choose_move(state, bb):\n"
+        "    dx, _ = _delta_of((0, 0), (1, 0))\n"
+        "    return Action.SEARCH if dx == 1 else Action.WAIT\n"
+        "</skill_code>\n"
+    )
+    res_x, sum_x = tools.dry_run_policy(
+        code=xml_skill_only,
+        max_turns=20,
+        smoke_only=True,
+    )
+    assert sum_x.startswith("PASSED"), res_x
+    assert "def _delta_of(a, b):" in tools.last_passed_skills["shared"]
+    assert "Action.SEARCH" in tools.last_passed_skills["shared"]
+
+    # 4. XML bundle with both <skill_code> and <policy_code> splice
+    xml_both = (
+        '<skill_code module="shared">\n'
+        "def choose_move(state, bb):\n"
+        "    return Action.SEARCH\n"
+        "</skill_code>\n"
+        "<policy_code>\n"
+        "def build_tree(bb):\n"
+        "    return PrioritySelector([ActionLeaf(choose_move, name='mv2')], name='root')\n"
+        "</policy_code>\n"
+    )
+    res_b, sum_b = tools.dry_run_policy(code=xml_both, max_turns=20, smoke_only=True)
+    assert sum_b.startswith("PASSED"), res_b
+    assert "mv2" in tools.last_passed_code
+    assert "def _delta_of(a, b):" in tools.last_passed_skills["shared"]
+
+    # 5. AuthorAgent._execute_tool_call rescues <skill_code> emitted in assistant_text
+    agent = AuthorAgent(db_path=str(tmp_path / "xml.duckdb"), provider="mock")
+    agent.tools = tools
+    out = agent._execute_tool_call(
+        turn_idx=1,
+        name="dry_run_policy",
+        args={"code": "", "max_turns": 20},
+        assistant_text=xml_skill_only,
+    )
+    assert "SMOKE" in out or "Compile" in out or "PASSED" in out or "Pilot" in out
+    assert "def _delta_of(a, b):" in tools.last_passed_skills["shared"]
+
+
+def test_gen41_zero_row_sql_hints_and_deficit_telemetry_window(tmp_path):
+    from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster
+    from lox.author.tools import AuthorToolRegistry
+
+    db_path = str(tmp_path / "hints.duckdb")
+    con = init_db(db_path)
+    try:
+        con.execute(
+            """
+            INSERT INTO batches (batch_id, generation, mode, candidate_policy_id, seeds_evaluated, avg_score, avg_depth, p90_depth, max_depth, avg_turns)
+            VALUES ('b14', 14, 'SWARM', 'pol_14', 4, 10.0, 1.0, 1, 1, 50.0),
+                   ('b40', 40, 'SWARM', 'pol_40', 4, 50.0, 2.0, 2, 2, 120.0)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, role, depth, max_depth, turns, end_reason)
+            VALUES ('run_g14_s1', 'b14', 14, 1, 'val-hum-law-fem', 1, 1, 50, 'died'),
+                   ('run_g40_s1', 'b40', 40, 1, 'val-hum-law-fem', 2, 2, 120, 'died')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO ticks (run_id, step_idx, turn, depth, hp, max_hp, action_name, active_function)
+            VALUES ('run_g40_s1', 0, 1, 1, 12, 12, 'WAIT', 'leaf_a')
+            """
+        )
+    finally:
+        con.close()
+
+    tools = AuthorToolRegistry(db_path=db_path)
+    tools.configure_generation(mode="SWARM_PEER", generation=41)
+
+    q_future, sum_future = tools.query_db(
+        "SELECT run_id FROM runs WHERE generation = 41"
+    )
+    assert sum_future == "0 rows" and "results: []" in q_future
+    assert "40" in q_future and "champion_runs" in q_future
+
+    q_pruned, sum_pruned = tools.query_db(
+        "SELECT * FROM ticks WHERE run_id = 'run_g14_s1'"
+    )
+    assert sum_pruned == "0 rows" and "results: []" in q_pruned
+    assert "champion_ticks" in q_pruned and "40" in q_pruned
+
+    analyzer = DeficitAnalyzer(db_path=db_path)
+    report = analyzer.analyze(generation=41, current_policy="")
+    assert report.latest_completed_gen == 40
+    assert report.ticks_min_gen == 40
+    report.fail_clusters = [
+        DeficitCluster(
+            cluster_id="c_test",
+            kind="early_death",
+            label="Early combat death",
+            run_count=2,
+            avg_depth=1.5,
+            avg_turns=80.0,
+            sample_run_ids=["run_g40_s1"],
+            dominant_fns=["leaf_a"],
+            evidence="hp dropped",
+        )
+    ]
+    brief = report.format_brief()
+    assert "latest_completed_gen=40" in brief
+    assert "Gen 41 is currently running" in brief
+    assert "run_ids=['run_g40_s1']" in brief
+
+
+def test_gen41_prompt_grounding_and_xml_instructions():
+    from lox.author.prompts import build_system_prompt, build_user_prompt
+
+    sys_prompt = build_system_prompt(is_swarm=True)
+    assert "champion_runs" in sys_prompt
+    assert "champion_ticks" in sys_prompt
+    assert "champion_function_stats" in sys_prompt
+
+    usr_prompt = build_user_prompt(
+        mode="SWARM_PEER",
+        generation=41,
+        current_policy="class Policy:\n    pass\n",
+        batch_digest="Gen 40 summary",
+    )
+    assert "query_wiki" in usr_prompt
+    assert "BEFORE your first `dry_run_policy" in usr_prompt
+    assert '<skill_code module="name">' in usr_prompt
+    assert "<policy_code>" in usr_prompt
+    assert "skills={{" not in usr_prompt

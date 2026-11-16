@@ -19,7 +19,11 @@ import yaml
 from dotenv import load_dotenv
 
 from lox.author.prompts import build_system_prompt, build_user_prompt
-from lox.author.tools import OPENAI_TOOL_SPECS, AuthorToolRegistry
+from lox.author.tools import (
+    OPENAI_TOOL_SPECS,
+    AuthorToolRegistry,
+    merge_skill_module_update,
+)
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH
 from lox.lang.macros import DEFAULT_MACROS_PATH
@@ -507,7 +511,14 @@ class AuthorAgent:
 
         return hypotheses, reflection
 
-    def _execute_tool_call(self, turn_idx: int, name: str, args: dict[str, Any]) -> str:
+    def _execute_tool_call(
+        self,
+        turn_idx: int,
+        name: str,
+        args: dict[str, Any],
+        assistant_text: str = "",
+        latest_hyp: str = "",
+    ) -> str:
         t0 = time.perf_counter()
         if name == "query_db":
             sql = str(args.get("sql", ""))
@@ -554,7 +565,20 @@ class AuthorAgent:
             code = str(args.get("code", "")).strip()
             s_name = args.get("skill_name")
             s_code = args.get("skill_code")
-            s_map = args.get("skills") if isinstance(args.get("skills"), dict) else None
+            merged_s_map: dict[str, str] = {}
+            if assistant_text:
+                for k, v in (
+                    self.extract_all_skill_codes(assistant_text, latest_hyp) or {}
+                ).items():
+                    clean_k = str(k or "").strip().removesuffix(".py")
+                    if clean_k and str(v or "").strip():
+                        merged_s_map[clean_k] = str(v)
+            if isinstance(args.get("skills"), dict):
+                for k, v in args["skills"].items():
+                    clean_k = str(k or "").strip().removesuffix(".py")
+                    if clean_k and str(v or "").strip():
+                        merged_s_map[clean_k] = str(v)
+            s_map = merged_s_map or None
             if (
                 not code
                 and not (s_name and s_code)
@@ -1322,7 +1346,13 @@ class AuthorAgent:
                     )
                 except Exception:
                     t_args = {}
-                tool_out = self._execute_tool_call(turn_idx, t_name, t_args)
+                tool_out = self._execute_tool_call(
+                    turn_idx,
+                    t_name,
+                    t_args,
+                    assistant_text=msg_text,
+                    latest_hyp=latest_hyp,
+                )
                 if t_name == "query_db":
                     sql_low = str((t_args or {}).get("sql", "")).lower()
                     if "expert_runs" in sql_low or "expert_ticks" in sql_low:
@@ -1496,10 +1526,19 @@ class AuthorAgent:
             extracted_skills_map = self.extract_all_skill_codes(
                 final_content, hyp or latest_hyp
             )
-            merged_skills_map = {
+            base_skills = dict(getattr(self.tools, "skills", {}) or {})
+            merged_skills_map: dict[str, str] = {
                 **(getattr(self.tools, "last_passed_skills", {}) or {}),
-                **(extracted_skills_map or {}),
             }
+            for s_mod, s_src in (extracted_skills_map or {}).items():
+                clean_mod = str(s_mod or "").strip().removesuffix(".py")
+                if clean_mod and str(s_src or "").strip():
+                    existing_mod_src = merged_skills_map.get(
+                        clean_mod, base_skills.get(clean_mod, "")
+                    )
+                    merged_skills_map[clean_mod] = merge_skill_module_update(
+                        existing_mod_src, str(s_src)
+                    )
             if (
                 canon_mode in ("SWARM_META", "SWARM_PEER")
                 and self.tools.last_passed_code

@@ -225,7 +225,7 @@ Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigati
 {schema_md}
 
 ### Empirical Differential Diagnostics (SQL Investigation Templates)
-Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`) to isolate empirical root causes:
+Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stats`, `policies`, `champion_runs`, `champion_ticks`, `champion_function_stats`, `expert_runs`, `expert_ticks`) to isolate empirical root causes:
 
 1. **Cross-Generation Progression & Regression Check**:
    ```sql
@@ -238,19 +238,18 @@ Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stat
    ```sql
    SELECT function_name, episodes_triggered, total_calls, total_turns_active,
           stagnation_share, livelock_score, liblit_failure_score, ochiai_good_run_score
-   FROM function_stats
-   WHERE generation = (SELECT MAX(generation) FROM function_stats)
+   FROM champion_function_stats
    ORDER BY total_turns_active DESC LIMIT 20;
    ```
 
-3. **Run-Level Termination, Digest & Leaf Error Inspection**:
+3. **Champion & Latest Run-Level Termination Inspection**:
    ```sql
    SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, unique_tiles,
           policy_exceptions, last_active_function, end_reason, summary_digest
-   FROM runs
-   WHERE generation = (SELECT MAX(generation) FROM runs)
+   FROM champion_runs
    ORDER BY max_depth ASC, turns DESC LIMIT 8;
    ```
+   *(Note: Older `ticks` are periodically pruned; query `champion_ticks` for champion turn traces or `ticks` only for the `run_id`s returned by the latest completed `runs` generation. The current in-progress generation is NOT yet in `batches`/`runs`.)*
 
 4. **Expert Ascension Comparison**:
    ```sql
@@ -633,21 +632,22 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 {BEHAVIOR_TREE_DOCS}
 
 ### Peer Author Protocol (Isolated Sandbox + CRN Tournament):
-1. **Focus on Your Claimed Empirical Deficit**:
-   - Inspect your claimed failure cluster (`D_fail`) and protected high-Ochiai branches (`D_succ`) using `query_db`, `read_policy`, `diff_policies`, `read_skill`, `query_wiki`, `query_monster`, and `query_item`.
+1. **Focus on Your Claimed Empirical Deficit & Ground Mechanics First (No Guessing)**:
+   - Inspect your claimed failure cluster (`D_fail`) and protected high-Ochiai branches (`D_succ`) using `query_db` (`champion_runs`, `champion_ticks`, `champion_function_stats`, and `expert_runs`/`expert_ticks`), `read_policy`, `diff_policies`, and `read_skill`.
+   - **Mandatory Wiki Grounding:** Call `query_wiki(query=...)` at least once BEFORE your first `dry_run_policy(...)` call (along with `query_monster` / `query_item` when relevant) to verify NetHack 3.6.6 C mechanics for the failure mode instead of relying on zero-shot assumptions.
    - Preserve high-Ochiai `D_succ` branches unless you have verified a strict improvement across both failure replays and `D_succ` guard runs.
-2. **Surgical Edits & Modular Skill Decomposition (Ditch the Monolith)**:
+2. **Surgical Edits & Unified XML Bundle Format (Ditch the Monolith)**:
    - **NEVER re-type 1,000+ lines of unchanged boilerplate when editing one subsystem**, and **never** emit comment placeholders like `"# Same full class Policy..."`.
-   - You have three fast, clean ways to work:
-     1. **Targeted Function Patch (fastest):** If modifying 1–2 helpers/leaves inside `policy.py`, pass **only** the modified/new `def ...` functions in `dry_run_policy(code=...)` and `<policy_code>...</policy_code>` — LOX automatically splices them into the existing `policy.py`.
-     2. **Modular Skill Updates:** When editing an existing subsystem under `skills/<module>.py`, emit updated `<skill_code module="name"> ... </skill_code>` blocks (and pass `skills={{"mod": ...}}` in `dry_run_policy`). Large monolith decomposition is handled automatically by LOX's bit-identical AST splitter between generations, so you do **not** need to burn turns restructuring unrelated files.
+   - Use the **same XML tag bundle format** inside BOTH `dry_run_policy(code=...)` AND your final submission:
+     1. **Skill Module Updates (`<skill_code module="name"> ... </skill_code>`):** Put each added/updated skill inside its own `<skill_code module="name">...</skill_code>` block (inside `dry_run_policy(code=...)` AND your final output). Partial `def ...` / `# PATCH` updates to an existing module automatically splice into `skills/<name>.py` while preserving all untouched functions and exports (e.g., helpers in `shared`). Large monolith decomposition happens automatically between generations.
+     2. **Policy Updates (`<policy_code> ... </policy_code>`):** When modifying helpers/leaves inside `policy.py`, pass **only** the modified/new `def ...` functions (or full `class Policy:`) inside `<policy_code>...</policy_code>`. If modifying only skills, `<policy_code>` can be omitted.
      3. **Clean Modular Architecture Advantage:** Keeping subsystems separated under `skills/*.py` eliminates syntax typos, cuts response latency dramatically, and allows `SwarmReferee` to automatically merge disjoint `skills/` wins from two different peers in the same generation!
    - Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin so native leaf attribution remains exact, and use `ActionLeaf(..., min_commit=N)` for multi-step commitment instead of ad-hoc post-step gates.
 3. **Verify in Sandbox Before Submission**:
-   - Call `dry_run_policy(...)` (passing `skills={{...}}` if creating/updating multiple skills) to verify AST compilation, zero swallowed leaf errors, and mid-game frontier/failure replays.
+   - Call `dry_run_policy(code="<skill_code module=...>...</skill_code>\n<policy_code>...</policy_code>")` to verify AST compilation, zero swallowed leaf errors, and mid-game frontier/failure replays.
    - Your candidate will be incubated on an isolated paired shard + frontier checkpoints against the incumbent and must pass CRN evaluation without collapsing score to be promoted.
 4. **Output Format**:
-   - Output your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by any added/updated skill modules inside `<skill_code module="name"> ... </skill_code>` blocks, and either your surgical `def ...` patch or complete `class Policy:` inside `<policy_code> ... </policy_code>` (if you already passed `dry_run_policy` and only updated skills, you may also emit just `<skill_code>`).
+   - Output your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by any added/updated skill modules inside `<skill_code module="name"> ... </skill_code>` blocks, and either your surgical `def ...` patch or complete `class Policy:` inside `<policy_code> ... </policy_code>` (if you only updated skills, emit just `<skill_code module="name">...</skill_code>`).
 """
 
     if canon_mode == "SWARM_META":

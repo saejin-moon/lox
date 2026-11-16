@@ -37,8 +37,116 @@ from lox.lang.validator import (
     is_ast_equivalent,
     normalize_mode,
     prune_extracted_skill_functions,
+    smart_dedent,
     splice_functions_into_policy,
 )
+
+
+def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
+    """
+    Merges an edited skill module safely into `existing_src`.
+    If `candidate_src` is a partial function/constant patch (omits existing imports,
+    starts with a patch comment, or drops more than half of `existing_src`'s top-level
+    definitions), splices it cleanly via `splice_functions_into_policy` so existing
+    exports (e.g. `_delta_of`) are never wiped out.
+    """
+    cand = smart_dedent(str(candidate_src or "")).strip()
+    if not existing_src or not existing_src.strip():
+        return cand
+    if not cand:
+        return existing_src
+
+    try:
+        ex_tree = ast.parse(existing_src)
+        ca_tree = ast.parse(cand)
+    except Exception:
+        return cand
+
+    ex_has_imports = any(
+        isinstance(n, (ast.Import, ast.ImportFrom)) for n in ex_tree.body
+    )
+    ca_has_imports = any(
+        isinstance(n, (ast.Import, ast.ImportFrom)) for n in ca_tree.body
+    )
+    ex_defs = {
+        n.name
+        for n in ex_tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    ca_defs = {
+        n.name
+        for n in ca_tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    first_line = cand.splitlines()[0].strip().lower() if cand.splitlines() else ""
+    looks_patch_comment = (
+        first_line.startswith("# patch")
+        or "other functions unchanged" in cand[:300].lower()
+    )
+    dropped_most_defs = len(ex_defs) >= 3 and len(ca_defs) < max(2, len(ex_defs) // 2)
+    missing_imports = (
+        ex_has_imports and not ca_has_imports and len(ca_defs) < len(ex_defs)
+    )
+
+    if looks_patch_comment or dropped_most_defs or missing_imports:
+        try:
+            spliced, _ = splice_functions_into_policy(existing_src, cand)
+            return spliced
+        except Exception:
+            return cand
+    return cand
+
+
+def _strip_fences(src: str) -> str:
+    text = str(src or "").strip()
+    fence_m = re.match(
+        r"^```(?:python)?\s*\n(.*?)```\s*$", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    if fence_m:
+        return fence_m.group(1).strip()
+    return text
+
+
+def _unpack_xml_bundle(raw_code: str) -> tuple[str, dict[str, str]]:
+    """
+    Extracts `<skill_code module="name">...</skill_code>` blocks and `<policy_code>...</policy_code>`
+    from `raw_code`. Supports both XML bundles and raw tagless Python cleanly.
+    """
+    raw_str = str(raw_code or "")
+    text = raw_str.strip()
+    if not text:
+        return "", {}
+
+    skills_found: dict[str, str] = {}
+    skill_pat = re.compile(
+        r"<(?P<tag>skill_code|skill)(?:\s+(?:module|name)=[\"'](?P<mod>[^\"']+)[\"'])?[^>]*>(?P<code>.*?)</(?P=tag)>",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    for m in skill_pat.finditer(text):
+        mod_raw = (m.group("mod") or "").strip().removesuffix(".py")
+        mod_name = re.sub(r"[^a-zA-Z0-9_]", "_", mod_raw.lower()).strip("_")
+        inner = smart_dedent(_strip_fences(m.group("code")))
+        if mod_name and inner.strip():
+            skills_found[mod_name] = inner.strip()
+
+    pol_pat = re.compile(
+        r"<(?P<tag>policy_code|policy)>(?P<code>.*?)</(?P=tag)>",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    pol_match = pol_pat.search(text)
+    if pol_match:
+        pol_src = smart_dedent(_strip_fences(pol_match.group("code"))).strip()
+        return pol_src, skills_found
+
+    if skills_found:
+        rem = skill_pat.sub("", text).strip()
+        rem = smart_dedent(_strip_fences(rem)).strip()
+        return rem, skills_found
+
+    unfenced = _strip_fences(raw_str)
+    if unfenced != text:
+        return smart_dedent(unfenced).strip(), {}
+    return raw_str, {}
 
 
 def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
@@ -299,7 +407,11 @@ class AuthorToolRegistry:
         try:
             cur = con.execute(clean)
             text, count = _format_cursor_yaml(cur)
-            if auto_limited and count >= 30:
+            if count == 0:
+                hint = self._build_zero_row_hint(con, clean, low_no_literals)
+                if hint:
+                    text += f"\n# NOTE: {hint}"
+            elif auto_limited and count >= 30:
                 text += "\n# NOTE: Implicit LIMIT 30 applied; specify explicit LIMIT/OFFSET to paginate."
             return text, f"{count} rows"
         except Exception as exc:
@@ -334,6 +446,45 @@ class AuthorToolRegistry:
             return err_msg, "sql_error"
         finally:
             con.close()
+
+    def _build_zero_row_hint(self, con: Any, raw_sql: str, low_no_literals: str) -> str:
+        """Explains common 0-row causes (in-progress generation filter or pruned old ticks)."""
+        try:
+            max_gen_row = con.execute(
+                "SELECT COALESCE(MAX(generation), 0) FROM runs"
+            ).fetchone()
+            latest_gen = int(max_gen_row[0] or 0) if max_gen_row else 0
+            if self.generation > 0 and latest_gen < self.generation:
+                cur_gen = int(self.generation)
+                if (
+                    re.search(rf"\bgeneration\s*=\s*{cur_gen}\b", low_no_literals)
+                    or f"g{cur_gen}" in raw_sql.lower()
+                ):
+                    return (
+                        f"Gen {cur_gen} has not completed yet (latest completed generation is Gen {latest_gen}). "
+                        f"Query `champion_runs` / `champion_ticks` / `champion_function_stats` or `WHERE generation = {latest_gen}`."
+                    )
+            if re.search(r"\bfrom\s+ticks\b", low_no_literals):
+                rid_m = re.search(r"run_id\s*=\s*'([^']+)'", raw_sql)
+                if rid_m:
+                    rid = rid_m.group(1)
+                    r_gen = con.execute(
+                        "SELECT generation FROM runs WHERE run_id = ? LIMIT 1", [rid]
+                    ).fetchone()
+                    min_t = con.execute(
+                        "SELECT MIN(r.generation) FROM ticks t JOIN runs r ON t.run_id = r.run_id"
+                    ).fetchone()
+                    min_t_gen = (
+                        int(min_t[0] or 0) if min_t and min_t[0] is not None else 0
+                    )
+                    if r_gen and min_t_gen and int(r_gen[0]) < min_t_gen:
+                        return (
+                            f"`{rid}` is from Gen {int(r_gen[0])}, whose raw ticks were pruned "
+                            f"(ticks retained for Gen >= {min_t_gen}). Query `champion_ticks` or runs from Gen {latest_gen}."
+                        )
+        except Exception:
+            pass
+        return ""
 
     def query_wiki(self, query: str, top_k: int = 3) -> tuple[str, str]:
         """Searches the offline NetHack 3.6.6 Wiki."""
@@ -1035,6 +1186,8 @@ class AuthorToolRegistry:
         self.last_dry_run_passed = False
         self.last_dry_run_diag = ""
 
+        code, bundle_skills = _unpack_xml_bundle(code)
+
         cand_skills = dict(self.skills)
         for prev_k, prev_v in self.last_passed_skills.items():
             if prev_v:
@@ -1043,21 +1196,26 @@ class AuthorToolRegistry:
             for k, v in skills.items():
                 clean_k = str(k or "").strip().removesuffix(".py")
                 if clean_k and str(v or "").strip():
-                    cand_skills[clean_k] = str(v).strip()
+                    cleaned_v = _strip_fences(str(v))
+                    cand_skills[clean_k] = merge_skill_module_update(
+                        cand_skills.get(clean_k, ""), cleaned_v
+                    )
+        for k, v in bundle_skills.items():
+            cand_skills[k] = merge_skill_module_update(cand_skills.get(k, ""), v)
         if skill_name and skill_code:
             clean_sn = str(skill_name).strip().removesuffix(".py")
             if clean_sn:
-                cand_skills[clean_sn] = skill_code
+                cleaned_sc = _strip_fences(str(skill_code))
+                cand_skills[clean_sn] = merge_skill_module_update(
+                    cand_skills.get(clean_sn, ""), cleaned_sc
+                )
 
-        skill_matches = (
-            skill_code is None
-            and not isinstance(skills, dict)
-            or (
-                self.last_passed_skill_code is not None
-                and skill_code is not None
-                and skill_code.strip() == self.last_passed_skill_code.strip()
-                and not isinstance(skills, dict)
-            )
+        has_extra_skills = bool(bundle_skills) or isinstance(skills, dict)
+        skill_matches = (skill_code is None and not has_extra_skills) or (
+            self.last_passed_skill_code is not None
+            and skill_code is not None
+            and skill_code.strip() == self.last_passed_skill_code.strip()
+            and not has_extra_skills
         )
 
         has_replay = bool(str(replay_run_id or "").strip())
@@ -2081,9 +2239,18 @@ class AuthorToolRegistry:
             import traceback
 
             tb = traceback.format_exc(limit=4)
-            self.last_dry_run_diag = f"{type(exc).__name__}: {exc}"
+            extra_hint = ""
+            if isinstance(exc, ImportError) and "skills." in str(exc):
+                extra_hint = (
+                    "\nHINT: Wrap every new or modified skill inside "
+                    '`<skill_code module="name">...</skill_code>` inside `dry_run_policy(code=...)` '
+                    "(alongside `<policy_code>...</policy_code>` if editing `policy.py`). "
+                    "When editing an existing skill, keep existing exports or emit a function patch — "
+                    "partial patches splice cleanly without dropping unchanged helpers."
+                )
+            self.last_dry_run_diag = f"{type(exc).__name__}: {exc}{extra_hint}"
             return (
-                f"Runtime Error during Dry-Run on seed {seed}:\n{type(exc).__name__}: {exc}\n{tb}",
+                f"Runtime Error during Dry-Run on seed {seed}:\n{type(exc).__name__}: {exc}\n{tb}{extra_hint}",
                 "RUNTIME_ERROR",
             )
         finally:
@@ -2299,7 +2466,11 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Python code (class Policy, method definitions, or macro functions) to validate and dry-run.",
+                        "description": (
+                            "Candidate code bundle to validate and dry-run. Wrap any new/updated skills inside "
+                            "<skill_code module='name'>...</skill_code> tags and policy edits/root inside "
+                            "<policy_code>...</policy_code> (raw Python also accepted)."
+                        ),
                     },
                     "is_macro": {
                         "type": "boolean",
@@ -2328,16 +2499,11 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     },
                     "skill_name": {
                         "type": "string",
-                        "description": "Optional name of a single skill module (e.g., 'combat', 'nutrition', 'navigation') to test or update alongside policy code.",
+                        "description": "Legacy single-skill name (prefer `<skill_code module='name'>` inside `code`).",
                     },
                     "skill_code": {
                         "type": "string",
-                        "description": "Optional Python source code for the skill module identified by skill_name.",
-                    },
-                    "skills": {
-                        "type": "object",
-                        "additionalProperties": {"type": "string"},
-                        "description": "Optional mapping of multiple skill module names to their Python source (e.g. {'combat': '...', 'navigation': '...'}) to validate multi-file modularization cleanly in one call.",
+                        "description": "Legacy single-skill source (prefer `<skill_code module='name'>` inside `code`).",
                     },
                     "hypothesis": {
                         "type": "string",

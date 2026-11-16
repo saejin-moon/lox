@@ -46,6 +46,8 @@ class DeficitReport:
     rolling_depth_delta: float = 0.0
     incumbent_avg_depth: float = 1.0
     incumbent_max_depth: int = 1
+    latest_completed_gen: int = 0
+    ticks_min_gen: int = 0
     d_succ_seeds: list[int] = field(default_factory=list)
     d_succ_run_ids: list[str] = field(default_factory=list)
     protected_branches: list[dict[str, Any]] = field(default_factory=list)
@@ -69,6 +71,16 @@ class DeficitReport:
                 else ""
             ),
         ]
+        if self.latest_completed_gen > 0:
+            ticks_note = (
+                f", ticks stored for gen >= {self.ticks_min_gen}"
+                if self.ticks_min_gen > 0
+                else ""
+            )
+            lines.append(
+                f"- DB Telemetry Window: latest_completed_gen={self.latest_completed_gen} "
+                f"(Gen {self.generation} is currently running and NOT yet in `batches`/`runs`{ticks_note})"
+            )
         if self.protected_branches:
             prot_str = ", ".join(
                 f"{b['fn']} (ochiai={b['ochiai']:.2f}, turns={b['turns']})"
@@ -95,8 +107,9 @@ class DeficitReport:
         if self.fail_clusters:
             lines.append("- Domain-Agnostic Trajectory Slices (D_fail):")
             for c in self.fail_clusters:
+                r_ids = f", run_ids={c.sample_run_ids[:2]}" if c.sample_run_ids else ""
                 lines.append(
-                    f"  * [{c.cluster_id}] {c.label} (runs={c.run_count}, avg_depth={c.avg_depth:.2f}, avg_turns={c.avg_turns:.0f}, fns={c.dominant_fns[:3]}): {c.evidence}"
+                    f"  * [{c.cluster_id}] {c.label} (runs={c.run_count}, avg_depth={c.avg_depth:.2f}, avg_turns={c.avg_turns:.0f}, fns={c.dominant_fns[:3]}{r_ids}): {c.evidence}"
                 )
         return "\n".join(lines)
 
@@ -146,6 +159,7 @@ class DeficitAnalyzer:
         con = None
         try:
             con = connect_db(self.db_path, read_only=True)
+            self._populate_telemetry_window(con, report)
             self._populate_plateau_signal(con, report)
             self._populate_d_succ_and_branches(con, report, raw_branches)
             self._populate_d_fail_clusters(con, report)
@@ -180,6 +194,26 @@ class DeficitAnalyzer:
                 evidence="Ensure valid actions, prompt dismissal safety, and positive tile coverage.",
             ),
         ]
+
+    @staticmethod
+    def _populate_telemetry_window(con: Any, report: DeficitReport) -> None:
+        try:
+            row = con.execute(
+                "SELECT COALESCE(MAX(generation), 0) FROM runs"
+            ).fetchone()
+            if row and row[0] is not None:
+                report.latest_completed_gen = int(row[0])
+        except Exception:
+            pass
+        try:
+            t_row = con.execute(
+                "SELECT COALESCE(MIN(r.generation), 0) "
+                "FROM ticks t JOIN runs r ON t.run_id = r.run_id"
+            ).fetchone()
+            if t_row and t_row[0] is not None:
+                report.ticks_min_gen = int(t_row[0])
+        except Exception:
+            pass
 
     @staticmethod
     def _populate_plateau_signal(con: Any, report: DeficitReport) -> None:
