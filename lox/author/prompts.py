@@ -107,7 +107,7 @@ Nothing is hardcoded in the harness: whatever you `yield` (or `return` from `ste
   - Repeat action $N$ times: `yield repeat(10, Action.SEARCH)` or `yield repeat(5, Action.WAIT)`
   - Extended commands: `yield extcmd("pray", "y")`, `yield extcmd("terrain")`, `yield extcmd("sit")`
   - Eat inventory item in slot `'f'`: `yield seq(Action.EAT, 'f')`
-  - Eat a corpse on the floor (`'y'` to confirm): `yield seq(Action.EAT, 'y')` (Hero must be standing on the exact corpse tile: `c.y == state.y and c.x == state.x`. If adjacent, step onto the corpse tile first!)
+  - Eat a corpse on the floor (`'y'` to confirm): `yield seq(Action.EAT, 'y')` (`Action.EAT` on a floor item applies to objects on the hero's current tile `(state.y, state.x)` via `state.objects_here()`).
   - Quaff potion in slot `'h'`: `yield seq(Action.QUAFF, 'h')`
   - Wear armor in slot `'d'`: `yield seq(Action.WEAR, 'd')`
   - Wield weapon in slot `'a'`: `yield seq(Action.WIELD, 'a')`
@@ -137,7 +137,7 @@ Every turn, `state` exposes 100% of NetHack's observation arrays, terminal scree
   - `m.is_adjacent_to(state.y, state.x)` (8-way Chebyshev adjacency—monsters attack diagonally as well as orthogonally!), `m.is_pet`, `m.is_statue`, `m.is_invisible`.
   - `m.info` (`MonsterInfo` 1-to-1 C `permonst` struct): `m.info.difficulty`, `m.info.ac`, `m.info.speed`, `m.info.level`, `m.info.mr`, `m.info.nutrition`, `m.info.weight`, `m.info.size`, `m.info.resistances_mask`, `m.info.conveys_mask`, `m.info.flags1`, `m.info.flags2`, and C bitmask properties: `is_acidic`, `is_poisonous`, `is_undead`, `is_were`, `is_human`, `is_elf`, `is_dwarf`, `is_gnome`, `is_orc`, `is_demon`, `is_giant`, `is_shapeshifter`, `is_domestic`, `conveys_poison_res`, `conveys_fire_res`, `conveys_cold_res`, `conveys_sleep_res`, `conveys_shock_res`, `conveys_disint_res`, `conveys_stone_flag`, `conveys_see_invis`, `conveys_teleport`, `conveys_teleport_control`.
   `state.adjacent_monsters(exclude_pets=True)` returns all visible non-pet monsters in the 8 Chebyshev adjacent squares around the hero.
-  *Note on Peaceful vs. Hostile Monsters*: In NetHack, the C screen glyphs do NOT expose whether a monster is currently hostile or peaceful. Peaceful creatures (e.g. domestic animals, shopkeepers, Minetown watchmen, co-aligned priests) spawn peaceful; bumping into them triggers a `Really attack <name>? [yn]` prompt. Your policy must handle peaceful vs hostile distinctions dynamically (handling prompts, tracking who attacked in messages, or using wiki monster data).
+  *Note on Peaceful vs. Hostile Monsters*: In NetHack, the C screen glyphs do NOT expose whether a monster is currently hostile or peaceful. Peaceful creatures (e.g. domestic animals, shopkeepers, Minetown watchmen, co-aligned priests) spawn peaceful; bumping into them triggers a `Really attack <name>? [yn]` prompt (`state.in_yn_prompt == True`).
 - **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`) and Objects Here (`state.objects_here() -> list[VisibleObject]`)**:
   `state.visible_objects()` returns all visible items on the floor (including items on the hero's tile `(state.y, state.x)`).
   `state.objects_here()` returns only items directly on the hero's tile `(state.y, state.x)` (e.g. to inspect before pickup or eating).
@@ -205,13 +205,86 @@ The harness automatically maintains deterministic, zero-heuristic spatial and ep
 - `state.mem.stair_graph`: `dict[tuple[int, int, int, int], tuple[int, int, int, int]]` mapping `(dnum_from, dlvl_from, y_from, x_from) -> (dnum_to, dlvl_to, y_to, x_to)` bidirectional inter-floor transition graph recording stairs taken across dungeons (Dungeons of Doom, Gnomish Mines, Sokoban).
 - `state.mem.locked_doors`: `set[tuple[int, int]]` containing coordinates `(y, x)` on the current floor confirmed to be locked doors.
 - `state.mem.pos_history`: `deque[tuple[int, int, int, int]]` of the last 16 `(dungeon_num, level_num, y, x)` positions.
-- `state.mem.is_oscillating`: `bool`, `True` if <= 3 unique tiles were visited in the last 12 steps on the same floor (useful for anti-stall escape triggers).
+- `state.mem.is_oscillating`: `bool`, `True` if <= 3 unique tiles were visited in the last 12 steps on the same floor.
 - `state.mem.get_floor(dnum, dlvl)`: returns the `FloorMemory` for any visited dungeon level.
 """
 
 
-def build_system_prompt(db_path: str = "data/lox.duckdb") -> str:
+def build_system_prompt(
+    db_path: str = "data/lox.duckdb", is_swarm: bool = False
+) -> str:
     schema_md = get_schema_markdown(db_path)
+    if is_swarm:
+        return f"""You are a LOX Autonomous Synthesis Agent operating in the Hierarchical Behavior Tree Swarm.
+Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigation, combat, and resource management live in your modular Behavior Tree policy (`policy.py`) and skill packages (`skills/*.py`).**
+
+{BEHAVIOR_TREE_DOCS}
+
+{POLICY_LANG_DOCS}
+
+{schema_md}
+
+### Empirical Differential Diagnostics (SQL Investigation Templates)
+Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`) to isolate empirical root causes:
+
+1. **Cross-Generation Progression & Regression Check**:
+   ```sql
+   SELECT generation, candidate_policy_id, avg_depth, p90_depth, max_depth, avg_score, avg_turns
+   FROM batches
+   ORDER BY generation DESC LIMIT 10;
+   ```
+
+2. **Function Turn Share, Stagnation & Livelock Attribution**:
+   ```sql
+   SELECT function_name, episodes_triggered, total_calls, total_turns_active,
+          stagnation_share, livelock_score, liblit_failure_score, ochiai_good_run_score
+   FROM function_stats
+   WHERE generation = (SELECT MAX(generation) FROM function_stats)
+   ORDER BY total_turns_active DESC LIMIT 20;
+   ```
+
+3. **Run-Level Termination, Digest & Leaf Error Inspection**:
+   ```sql
+   SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, unique_tiles,
+          policy_exceptions, last_active_function, end_reason, summary_digest
+   FROM runs
+   WHERE generation = (SELECT MAX(generation) FROM runs)
+   ORDER BY max_depth ASC, turns DESC LIMIT 8;
+   ```
+
+4. **Expert Ascension Comparison**:
+   ```sql
+   SELECT depth, COUNT(DISTINCT run_id) AS runs, AVG(max_t - min_t) AS avg_turns_on_floor
+   FROM (
+       SELECT run_id, depth, MIN(turn) AS min_t, MAX(turn) AS max_t
+       FROM expert_ticks
+       GROUP BY run_id, depth
+   ) GROUP BY depth ORDER BY depth LIMIT 10;
+   ```
+
+### Available Investigation & Verification Tools
+1. `query_db(sql)`: Run read-only SQL queries on DuckDB (`batches`, `runs`, `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`). Pass ONE `SELECT` statement per call.
+2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact game mechanics, monster properties, item effects, intrinsics, and dungeon branches.
+3. `query_monster(name)`: Query the exact C-level engine `permonst` struct for any monster (level, AC, speed, magic resistance, corpse weight, corpse nutrition, conveyed intrinsics, resistances).
+4. `query_item(name)`: Query the exact C-level engine `objclass` struct for any item (class, cost, weight, nutrition).
+5. `read_policy(policy_id)`: Read the stored `policy_code` and `skills_json` snapshot list for any historical `policy_id` in `policies`.
+6. `diff_policies(policy_id_a, policy_id_b)`: View unified diffs of `policy.py` and `skills/*.py` between any two stored `policy_id` snapshots.
+7. `read_skill(skill_name, policy_id="")`: Read the full Python source code of a skill module from the current workspace (`policy_id=""`) or from a historical policy snapshot (`policy_id="policy_swarm_g..."`).
+8. `query_policy_docs(topic="all")`: View the policy language specification, current `policy.py`, and available `skills/` modules.
+9. `query_theories(query, doc_type="", limit=6)`: Search LanceDB for prior worker `THEORY` notes, `REFLECTION_REPORT`s, `CRITIC_PRE_GUIDE`, and `CRITIC_POST_REVIEW` documents.
+10. `dry_run_policy(code, seed=42, max_turns=150, replay_run_id="", replay_steps=0, hypothesis="")`: Compile and empirically test candidate Behavior Tree subtrees or `class Policy` code in `NetHackHarness`.
+
+### Scientific Investigation Protocol (Swarm Behavior Trees)
+1. **Never Guess from Intuition**: Verify NetHack C mechanics via `query_wiki`, `query_monster`, and `query_item`, and verify empirical bottlenecks via `query_db`, `read_policy`, `diff_policies`, and `read_skill`.
+2. **Behavior Tree & Blackboard Discipline**:
+   - Subtrees (`SWARM_WORKER`) define `subtree = PrioritySelector([...])` / `ActionLeaf(...)` / `Sequence(...)` and coordinate state via `Blackboard` (`bb.get_var` / `bb.set_var`).
+   - Master Policies (`SWARM_META`) define `class Policy:` with `self.blackboard = Blackboard()`, `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`, and `def step(self, state): return self.tree.tick(state) or Action.WAIT`.
+   - Every `ActionLeaf` must return `None` when its specific condition does not apply so `PrioritySelector` falls through cleanly to lower-priority branches without starving them.
+3. **Passability & 8-Way Adjacency**:
+   - Never mark `ord('-')`, `ord('|')`, or `ord(' ')` (solid wall/stone) as passable; prefer `state.mem.passable_mask`.
+   - Remember NetHack adjacency is 8-way Chebyshev (`max(abs(dy), abs(dx)) == 1`).
+"""
+
     return f"""You are the LOX Policy Author Agent.
 Your job is to synthesize and evolve a pure Python NetHack policy (`class Policy`) and reusable macro library (`macros.py`) that map game states 1-to-1 to NetHack actions.
 Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigation, combat, and resource management live in your Python policy and macros.**
@@ -225,31 +298,28 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 
 1. **Floor Residence & Physical State Contrast Query (Compare Turns per Depth vs Experts)**:
    ```sql
-   -- Contrast turns spent per depth between expert ascensions and champion runs
-   -- 1A. How many turns do expert ascensions spend exploring Dlvl 1, 2, 3?
+   -- 1A. How many turns do expert ascensions spend exploring each depth?
    SELECT depth, COUNT(DISTINCT run_id) AS runs, AVG(max_t - min_t) AS avg_turns_on_floor
    FROM (
        SELECT run_id, depth, MIN(turn) AS min_t, MAX(turn) AS max_t
        FROM expert_ticks
-       WHERE depth <= 4
        GROUP BY run_id, depth
-   ) GROUP BY depth ORDER BY depth;
+   ) GROUP BY depth ORDER BY depth LIMIT 10;
 
-   -- 1B. Physical deficit and total turns at failure depth:
+   -- 1B. Compare champion runs vs expert ascensions:
    SELECT 'champion_failures' AS source, AVG(final_ac) AS avg_ac, AVG(max_hp) AS avg_hp, AVG(turns) AS avg_turns
-   FROM champion_runs WHERE depth = 2
+   FROM champion_runs
    UNION ALL
    SELECT 'expert_ascensions' AS source, AVG(ac) AS avg_ac, AVG(hp) AS avg_hp, AVG(turn) AS avg_turns
-   FROM expert_ticks WHERE depth = 2;
+   FROM expert_ticks;
    ```
 
 2. **Monster Encounter & Tactical Response Query**:
    ```sql
-   -- How did expert ascensions act when encountering specific hazards or depths?
-   SELECT action_name, COUNT(*) AS freq
+   -- How did expert ascensions act across depths?
+   SELECT depth, action_name, COUNT(*) AS freq
    FROM expert_ticks
-   WHERE depth <= 4
-   GROUP BY action_name ORDER BY freq DESC LIMIT 8;
+   GROUP BY depth, action_name ORDER BY depth, freq DESC LIMIT 15;
    ```
 
 3. **Outlier & Failure Trace Inspection Query (Full Lossless Ticks & Specialist Attribution)**:
@@ -268,7 +338,6 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    SELECT r.seed, t.turn, t.depth, t.hp, t.ac, t.active_function, t.action_name, t.message, t.visible_monsters, t.inventory_summary
    FROM latest_pilot_ticks t
    JOIN latest_pilot_runs r ON t.run_id = r.run_id
-   WHERE r.seed = 42
    ORDER BY t.turn DESC LIMIT 20;
    ```
 
@@ -294,7 +363,7 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 3. `query_monster(name)`: Query the exact C-level engine `permonst` struct for any monster (e.g. `jackal`, `floating eye`, `lichen`, `orc`). Returns exact level, AC, movement speed, magic resistance, corpse weight, corpse nutrition, conveyed intrinsics (e.g. poison resistance), and monster innate resistances.
 4. `query_item(name)`: Query the exact C-level engine `objclass` struct for any item (e.g. `food ration`, `potion of extra healing`, `long sword`). Returns exact object class, cost, weight, and nutrition value.
 5. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py` (or call `query_policy_docs("actions")` for the complete command index).
-6. `read_skill(skill_name)`: Retrieve the complete Python source code of any modular skill package currently residing in `skills/` (e.g. `skills/survival.py`, `skills/navigation.py`).
+6. `read_skill(skill_name, policy_id="")`: Retrieve the complete Python source code of any modular skill package currently residing in `skills/` (or from a historical `policy_id` snapshot).
 7. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
    - Tests candidate Python code in a live NetHack sandbox.
    - **Step 1 (Smoke Check & Behavioral Critic)**: Verifies AST, checks reachability, detects oscillations and search spam. Optional `replay_run_id` fast-forwards into any recorded mid-game run in ~10ms.
@@ -303,7 +372,7 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 ### Scientific Investigation Protocol (MANDATORY)
 1. **Never Guess from Intuition**: NetHack mechanics are strictly ruled by the C engine (e.g. traps, secret doors, searching probabilities, hunger increments, prayer timeouts, pet displacement, monster ranged attacks). Guessing code changes without empirical research causes catastrophic regressions.
 2. **Mechanistic Trace Inversion via `query_wiki`**:
-   Every event in NetHack (messages, status changes, deaths) is governed by an exact C function. Isolate the exact message string from the final 3 lines of `game_log` (e.g. "You feel hungry", "The door resists", "The jackal bites!"), strip proper nouns, and pass that phrase to `query_wiki(query=...)` to learn the exact C rule that caused it.
+   Every event in NetHack (messages, status changes, deaths) is governed by an exact C function. Isolate the exact message string from the final 3 lines of `game_log`, strip proper nouns, and pass that phrase to `query_wiki(query=...)` to learn the exact C rule that caused it.
 3. **The Binding Constraint Rule**:
    Always inspect the Termination Breakdown and Stall Diagnostics in the batch digest. Address the single failure mode responsible for the LARGEST percentage of failures (the binding constraint). Never spend a generation fixing a 2% edge case when 70% of runs died to the same primary cause.
 4. **Empirical Root-Cause Discovery**:
@@ -508,8 +577,8 @@ def build_user_prompt(
 Follow these stages inside THIS conversation (your context, DB queries, and experiment results stay warm across all turns, and all tools remain available whenever you need to investigate further):
 
 1. **Investigate What Happened Yourself (do NOT guess)**:
-   - Call `query_wiki`, `query_monster`, `query_item` FIRST (authoritative C/game mechanics) and `query_db(sql)` (ONE `SELECT` statement per call — never `;`-separated multi-queries!) on `batches`, `runs` (`summary_digest`, `end_reason`), `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`, along with `read_skill` and `query_policy_docs`, BEFORE checking `query_theories` (past worker notes).
-   - Note: on Generation 1, campaign tables (`runs`, `batches`, `ticks`, `function_stats`, `policies`) are empty and DISALLOWED — you MUST call BOTH `query_wiki` and `query_db` on `expert_runs` / `expert_ticks`.
+   - Use `query_db(sql)` (ONE `SELECT` statement per call — never `;`-separated multi-queries!) on `batches`, `runs` (`summary_digest`, `end_reason`), `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`, along with `query_wiki`, `query_monster`, `query_item` (authoritative C/game mechanics), `read_skill`, and `query_policy_docs` BEFORE checking `query_theories` (past worker notes).
+   - Note: when campaign tables (`runs`, `batches`, `ticks`, `function_stats`, `policies`) are empty (initial Generation 1 bootstrap), you MUST call BOTH `query_wiki` and `query_db` on `expert_runs` / `expert_ticks`.
    - Check whether an existing branch is failing, stalling, or oscillating with another leaf, or whether a capability is missing.
 
 2. **Brainstorm {k_hyp} Distinct Competing Hypotheses BEFORE Coding**:
@@ -563,8 +632,8 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 
 ### Meta-Agent Diagnosis & Assembly Protocol:
 1. **Investigate the Full Trajectory & Root Causes Yourself**:
-   - Call `query_wiki`, `query_monster`, `query_item` FIRST (authoritative game mechanics) and `query_db` (ONE `SELECT` statement per call — never `;`-separated multi-queries!), `read_skill`, `query_policy_docs` (over `query_theories`) to inspect `batches` across generations, `runs` (`summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats` (`stagnation_share`, `livelock_score`, `liblit_failure_score`, `ochiai_good_run_score`), `expert_runs`, and prior `policies` (in Generation 1, campaign tables are disallowed and both `query_wiki` and `query_db` on `expert_runs`/`expert_ticks` are mandatory).
-   - If performance regressed compared to an earlier generation, inspect what changed in `policies` and `runs.summary_digest` and restore or repair the broken capability rather than blindly stacking new patches.
+   - Use `query_db` (ONE `SELECT` statement per call — never `;`-separated multi-queries!), `read_policy`, `diff_policies`, `read_skill(skill_name, policy_id=...)`, `query_wiki`, `query_monster`, `query_item`, and `query_policy_docs` (over `query_theories`) to inspect `batches` across generations, `runs` (`summary_digest`, `end_reason`, `unique_tiles`, `pct_wait`, `pct_search`), `function_stats` (`stagnation_share`, `livelock_score`, `liblit_failure_score`, `ochiai_good_run_score`), `expert_runs`, and prior `policies` (when campaign tables are empty on initial Generation 1 bootstrap, both `query_wiki` and `query_db` on `expert_runs`/`expert_ticks` are mandatory).
+   - If performance regressed compared to an earlier generation, inspect what changed in `policies` (`read_policy`, `read_skill(..., policy_id=...)`, `diff_policies`) and `runs.summary_digest` and restore or repair the broken capability rather than blindly stacking new patches.
 2. **Modular Skill Imports (Keep `policy.py` Lean)**:
    - Specialist worker subtrees are saved as separate skill modules under `skills/<role>.py` (listed in `Hierarchical Skill Registry` above; inspect any full module with `read_skill(skill_name)`).
    - Import and compose them cleanly inside `class Policy.__init__` rather than pasting worker helper code into `policy.py`. Treat worker outputs as proposals—only wire branches that genuinely help and do not conflict or oscillate with other branches.

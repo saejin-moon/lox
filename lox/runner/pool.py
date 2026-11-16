@@ -465,9 +465,19 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
 
+    from lox.lang.bt import extract_runner_leaf_errors
+
+    leaf_errors = extract_runner_leaf_errors(runner)
+    dedup_leaf_errs = list(dict.fromkeys(f"{n}: {e}" for n, e in leaf_errors))[:10]
     if isinstance(milestones, dict):
         milestones["final_inventory"] = last_inv_summary
         milestones["final_ac_true"] = last_ac
+        if dedup_leaf_errs:
+            milestones["leaf_errors"] = dedup_leaf_errs
+    if dedup_leaf_errs and "LeafErrors:" not in summary_digest:
+        summary_digest = (
+            f"{summary_digest}\nLeafErrors: {'; '.join(dedup_leaf_errs[:4])}"
+        )
 
     total_steps = max(1, harness.step_count)
     pct_wait = round((wait_count / total_steps) * 100.0, 2)
@@ -507,14 +517,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             "auto_esc_count": runner.auto_esc_count
             + int(getattr(harness, "prompt_aborts", 0)),
             "subgen_preemptions": runner.subgen_preemptions,
-            "policy_exceptions": runner.policy_exceptions
-            + len(
-                getattr(
-                    getattr(getattr(runner, "instance", None), "blackboard", None),
-                    "leaf_errors",
-                    (),
-                )
-            ),
+            "policy_exceptions": runner.policy_exceptions + len(leaf_errors),
             "unique_tiles": len(visited_positions),
             "pct_wait": pct_wait,
             "pct_search": pct_search,

@@ -219,6 +219,22 @@ class AuthorToolRegistry:
         if benchmark is not None:
             self.benchmark = str(benchmark)
 
+    def _campaign_tables_empty(self) -> bool:
+        """Returns True if both `batches` and `runs` have 0 rows in DuckDB."""
+        if not os.path.exists(self.db_path):
+            return True
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            b_cnt = int(
+                (con.execute("SELECT COUNT(*) FROM batches").fetchone() or [0])[0]
+            )
+            r_cnt = int((con.execute("SELECT COUNT(*) FROM runs").fetchone() or [0])[0])
+            return b_cnt == 0 and r_cnt == 0
+        except Exception:
+            return True
+        finally:
+            con.close()
+
     def query_db(self, sql: str) -> tuple[str, str]:
         """Executes a read-only SQL query against DuckDB."""
         if not os.path.exists(self.db_path):
@@ -233,7 +249,7 @@ class AuthorToolRegistry:
                 "Error: Multiple SQL statements in a single query_db call are not allowed. Pass exactly ONE SELECT statement per query_db call.",
                 "error",
             )
-        if self.generation == 1:
+        if self.generation == 1 and self._campaign_tables_empty():
             forbidden_gen1 = re.search(
                 r"\b(runs|ticks|batches|function_stats|policies|experiments|discoveries)\b",
                 low_no_literals,
@@ -241,8 +257,8 @@ class AuthorToolRegistry:
             if forbidden_gen1:
                 tbl = forbidden_gen1.group(1)
                 return (
-                    f"Error: In Generation 1, campaign table '{tbl}' is empty (0 rows) and disallowed. "
-                    "Query ONLY `expert_runs` and `expert_ticks` in Generation 1 (and use `query_wiki` / `query_monster` / `query_item`).",
+                    f"Error: In Generation 1 (before any batch is evaluated), campaign table '{tbl}' is empty (0 rows) and disallowed. "
+                    "Query ONLY `expert_runs` and `expert_ticks` (and use `query_wiki` / `query_monster` / `query_item`).",
                     "error",
                 )
         for word in (
@@ -398,9 +414,38 @@ class AuthorToolRegistry:
         except Exception as exc:
             return f"Theories query error: {exc}", "error"
 
-    def read_skill(self, skill_name: str) -> tuple[str, str]:
-        """Reads the full Python source code of an individual skill module from the skill library."""
+    def read_skill(self, skill_name: str, policy_id: str = "") -> tuple[str, str]:
+        """Reads the full Python source code of an individual skill module from the skill library or a historical policy snapshot."""
         clean_name = skill_name.strip().removeprefix("skills/").removesuffix(".py")
+        pid = str(policy_id or "").strip()
+        if pid:
+            if not os.path.exists(self.db_path):
+                return "Database not found.", "not_found"
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                try:
+                    row = con.execute(
+                        "SELECT skills_json FROM policies WHERE policy_id = ?",
+                        [pid],
+                    ).fetchone()
+                except Exception:
+                    row = None
+                if not row:
+                    return f"Error: Policy '{pid}' not found.", "not_found"
+                try:
+                    skills_map = json.loads(row[0] or "{}") or {}
+                except Exception:
+                    skills_map = {}
+                if clean_name in skills_map:
+                    code = str(skills_map[clean_name])
+                    return code, f"{len(code.splitlines())} lines ({pid})"
+                return (
+                    f"Error: Skill '{clean_name}' not found in policy '{pid}'. Available skills in '{pid}': {sorted(skills_map.keys()) or 'None'}",
+                    "not_found",
+                )
+            finally:
+                con.close()
+
         if clean_name in self.skills:
             code = self.skills[clean_name]
             return code, f"{len(code.splitlines())} lines"
@@ -425,10 +470,17 @@ class AuthorToolRegistry:
             return "Database not found.", "not_found"
         con = connect_db(self.db_path, read_only=True)
         try:
-            row = con.execute(
-                "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code, skills_json FROM policies WHERE policy_id = ?",
-                [policy_id.strip()],
-            ).fetchone()
+            try:
+                row = con.execute(
+                    "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code, skills_json FROM policies WHERE policy_id = ?",
+                    [policy_id.strip()],
+                ).fetchone()
+            except Exception:
+                row_legacy = con.execute(
+                    "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code FROM policies WHERE policy_id = ?",
+                    [policy_id.strip()],
+                ).fetchone()
+                row = (*row_legacy, "{}") if row_legacy else None
             if not row:
                 return f"Error: Policy '{policy_id}' not found.", "not_found"
             gen, mode, avg_d, max_d, prom, p_code, s_json = row
@@ -439,10 +491,16 @@ class AuthorToolRegistry:
             skill_names = (
                 sorted(skills_map.keys()) if isinstance(skills_map, dict) else []
             )
+            tip = (
+                f"# Tip: call read_skill('<skill_name>', policy_id='{policy_id.strip()}') to read full source of any skill from this snapshot.\n"
+                if skill_names
+                else ""
+            )
             header = (
                 f"# policy_id: {policy_id} | generation: {gen} | mode: {mode} "
                 f"| avg_depth: {avg_d} | max_depth: {max_d} | is_promoted: {prom}\n"
-                f"# skills_snapshot: {skill_names}\n\n"
+                f"# skills_snapshot: {skill_names}\n"
+                f"{tip}\n"
             )
             return header + str(
                 p_code or ""
@@ -458,14 +516,26 @@ class AuthorToolRegistry:
             return "Database not found.", "not_found"
         con = connect_db(self.db_path, read_only=True)
         try:
-            row_a = con.execute(
-                "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
-                [policy_id_a.strip()],
-            ).fetchone()
-            row_b = con.execute(
-                "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
-                [policy_id_b.strip()],
-            ).fetchone()
+            try:
+                row_a = con.execute(
+                    "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
+                    [policy_id_a.strip()],
+                ).fetchone()
+                row_b = con.execute(
+                    "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
+                    [policy_id_b.strip()],
+                ).fetchone()
+            except Exception:
+                ra = con.execute(
+                    "SELECT policy_code FROM policies WHERE policy_id = ?",
+                    [policy_id_a.strip()],
+                ).fetchone()
+                rb = con.execute(
+                    "SELECT policy_code FROM policies WHERE policy_id = ?",
+                    [policy_id_b.strip()],
+                ).fetchone()
+                row_a = (ra[0], "{}") if ra else None
+                row_b = (rb[0], "{}") if rb else None
             if not row_a:
                 return f"Error: Policy '{policy_id_a}' not found.", "not_found"
             if not row_b:
@@ -1003,7 +1073,7 @@ class AuthorToolRegistry:
                         )
             else:
                 spliced_policy = code
-                changed_fns = ["run"]
+                changed_fns = [] if self.mode == "SWARM_META" else ["run"]
             compiled = compile_policy_package(
                 spliced_policy, macros_code, skills=cand_skills
             )
@@ -1105,6 +1175,19 @@ class AuthorToolRegistry:
                 or "none"
             )
             sample_acts = " -> ".join(actions_taken[:10])
+
+            from lox.lang.bt import extract_runner_leaf_errors
+
+            swallowed_leaf_errs = extract_runner_leaf_errors(runner)
+            if swallowed_leaf_errs:
+                err_lines = "\n".join(
+                    f"- Leaf `{n}` raised {e}" for n, e in swallowed_leaf_errs[:8]
+                )
+                return (
+                    f"Runtime Error in BehaviorTree leaf during smoke test:\n{err_lines}\n"
+                    "Fix the crashing leaf or missing attribute/import before finalizing.",
+                    "RUNTIME_ERROR",
+                )
 
             warn_lines: list[str] = []
             for h_warn in audit_policy_ast_hygiene(spliced_policy):
@@ -1891,7 +1974,7 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
             "name": "read_skill",
             "description": (
                 "Retrieve the complete Python source code of a specific skill module (e.g., 'survival', 'combat', 'exploration') "
-                "from the hierarchical skill registry."
+                "from the current workspace or from a historical `policy_id` snapshot in DuckDB."
             ),
             "parameters": {
                 "type": "object",
@@ -1899,7 +1982,12 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     "skill_name": {
                         "type": "string",
                         "description": "Name of the skill module to read (e.g. 'survival', 'combat', 'identification').",
-                    }
+                    },
+                    "policy_id": {
+                        "type": "string",
+                        "description": "Optional historical policy_id (e.g. 'policy_swarm_g12') to read that policy's stored version of the skill.",
+                        "default": "",
+                    },
                 },
                 "required": ["skill_name"],
             },

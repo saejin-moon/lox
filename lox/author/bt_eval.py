@@ -213,12 +213,6 @@ def evaluate_bt_subtree(
     If `baseline_policy_code` is provided, falling through (`act is None`) delegates to
     the baseline runner so `triggered_steps` tracks real subtree activation cleanly.
     """
-    try:
-        node = compile_bt_subtree(code_snippet)
-    except Exception as exc:
-        tb = traceback.format_exc()
-        return ObservationDigest(), f"{type(exc).__name__}: {exc}\n{tb}"
-
     baseline_runner = None
     if baseline_policy_code and baseline_policy_code.strip():
         try:
@@ -228,6 +222,14 @@ def evaluate_bt_subtree(
             baseline_runner = compiled_base.create_runner()
         except Exception:
             baseline_runner = None
+
+    try:
+        node = compile_bt_subtree(code_snippet, skills=skills)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        return ObservationDigest(), f"{type(exc).__name__}: {exc}\n{tb}"
+
+    subtree_tracer = getattr(node, "_lox_tracer", None)
 
     harness = NetHackHarness(max_steps=steps + 50)
     try:
@@ -271,6 +273,8 @@ def evaluate_bt_subtree(
                 triggered_steps += 1
                 chosen_act = cand_act
                 act_source = "subtree"
+                if subtree_tracer is not None:
+                    subtree_tracer.record_turn_yield()
             elif baseline_runner is not None:
                 base_act, _ = baseline_runner.next_action(st)
                 chosen_act = base_act if base_act is not None else Action.WAIT
@@ -333,6 +337,9 @@ def evaluate_bt_subtree(
             score_end=int(st.score),
             unique_tiles=len(visited_tiles),
             actions_taken=dict(action_counts),
+            fn_turns=dict(subtree_tracer.fn_turns)
+            if subtree_tracer is not None
+            else {},
             rle_trace=rle_trace,
             dialog_resolved=not getattr(st, "waiting_for_space", False)
             and not getattr(st, "in_text_prompt", False),

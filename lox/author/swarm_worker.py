@@ -1,14 +1,12 @@
 """
-Swarm Worker Agent for category-specialized policy synthesis.
-Specializes in one of 4 functional domains:
-- 'dialog': interactive text prompts, --More-- pagination, y/n traps
-- 'threat': tactical combat, kiting, retreat thresholds, melee
-- 'survival': hunger thresholds, corpse safety (query_monster), prayer, armor
-- 'navigation': BFS pathfinding, room exploration, secret/locked doors, stairs
+Swarm Worker Agent for category-specialized Behavior Tree synthesis.
+Executes a warm multi-hypothesis exploration session on assigned dynamic macro-categories,
+evaluating candidate subtrees against Go-Explore frontier checkpoints and DuckDB failure fixtures.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -75,11 +73,11 @@ class SwarmWorker:
 
 ### Strict Swarm & 'Hard Code Nothing' Invariants:
 1. **Behavior Tree Subtree Output**:
-   Your output MUST be a clean Behavior Tree component (`ActionLeaf`, `ConditionLeaf`, `Sequence`, or `PrioritySelector`) or specialist method that plugs into the shared `Blackboard`.
+   Your output MUST be a clean Behavior Tree component (`ActionLeaf`, `ConditionLeaf`, `Sequence`, or `PrioritySelector`) assigned to `subtree` that plugs into the shared `Blackboard`.
 2. **Zero Arbitrary Attributes**:
    Do NOT mutate or expect raw `self.*` attributes on Policy. Inter-node state MUST read and write through `blackboard.get_var(key)` / `blackboard.set_var(key, val)`.
 3. **Empirical Verification**:
-   Query `query_monster` for exact monster stats and corpse poison/nutrition, `query_item` for items, and `query_db` for telemetry.
+   Use `query_db`, `query_wiki`, `query_monster`, `query_item`, `read_policy`, and `read_skill` to verify game mechanics and empirical telemetry relevant to your assigned category.
 """
 
     def _build_worker_brief(
@@ -309,33 +307,70 @@ class SwarmWorker:
                 }
             )
 
-        # Pick winning verified subtree: never return crashing code.
+        # Honor the Worker LLM's chosen winner from <reflection> or <policy_code> (if clean/error-free),
+        # without overriding via a hardcoded trigger-count ranking formula.
         clean_recs = [
             r for r in evaluated_records if not r["error"] and r["code"].strip()
         ]
-        if clean_recs:
-            metric_keys = [str(m).strip().lower() for m in (self.target_metrics or [])]
+        selected: dict[str, Any] | None = None
+        win_m = re.search(
+            r"winner\s*:\s*([A-Za-z0-9_#-]+)",
+            reflection_text,
+            flags=re.IGNORECASE,
+        )
+        winner_token = win_m.group(1).strip().lower() if win_m else ""
+        final_emitted = str(session.get("final_code") or "").strip()
 
-            def _score_rec(r: dict[str, Any]) -> tuple[Any, ...]:
-                obs_l = r["obs_list"] or [r["obs"]]
-                max_d = max((o.depth_end for o in obs_l), default=r["obs"].depth_end)
-                max_t = max(
-                    (o.unique_tiles for o in obs_l), default=r["obs"].unique_tiles
-                )
-                surv = 1 if r["obs"].survived else 0
-                trig = 1 if r["triggered_steps"] > 0 else 0
-                if "max_depth" in metric_keys or "depth" in metric_keys:
-                    return (trig, max_d, surv, max_t, r["triggered_steps"])
-                if "unique_tiles" in metric_keys:
-                    return (trig, max_t, max_d, surv, r["triggered_steps"])
-                return (trig, max_d, max_t, surv, r["triggered_steps"])
+        if clean_recs and winner_token:
+            for r in reversed(clean_recs):
+                h_low = str(r["hypothesis"]).strip().lower()
+                if (
+                    h_low == winner_token
+                    or h_low.startswith(f"{winner_token}:")
+                    or h_low.startswith(f"{winner_token} ")
+                ):
+                    selected = r
+                    break
 
-            selected = max(clean_recs, key=_score_rec)
+        if selected is None and clean_recs and final_emitted:
+            for r in reversed(clean_recs):
+                if r["code"].strip() == final_emitted:
+                    selected = r
+                    break
+
+        if selected is None and final_emitted:
+            obs_em, err_em = self.evaluate_candidate(
+                final_emitted,
+                checkpoint=checkpoint,
+                steps=25,
+                baseline_policy_code=active_scaffold,
+                skills=active_skills,
+            )
+            if not err_em:
+                selected = {
+                    "idx": len(evaluated_records) + 1,
+                    "hypothesis": winner_token.upper()
+                    if winner_token
+                    else "emitted_policy_code",
+                    "code": final_emitted,
+                    "obs": obs_em,
+                    "obs_list": [obs_em],
+                    "triggered_steps": obs_em.triggered_steps,
+                    "total_steps": obs_em.total_eval_steps or obs_em.steps_taken,
+                    "error": "",
+                }
+
+        if selected is None and clean_recs:
+            trig_recs = [r for r in clean_recs if r["triggered_steps"] > 0]
+            selected = trig_recs[-1] if trig_recs else clean_recs[-1]
+
+        if selected is not None:
             best_code = selected["code"]
             best_obs = selected["obs"]
         else:
+            selected = evaluated_records[-1]
             best_code = ""
-            best_obs = evaluated_records[-1]["obs"]
+            best_obs = selected["obs"]
 
         hyps_bullet = "\n".join(
             f"- {h.get('id', '?')}: {h.get('mechanism', str(h))}" for h in hyp_list

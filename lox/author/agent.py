@@ -10,7 +10,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -47,6 +47,7 @@ class SynthesisProposal:
     target_functions: list[str]
     tool_calls_made: int = 0
     skill_code: str = ""
+    skill_modules: dict[str, str] = field(default_factory=dict)
     aborted: bool = False
     abort_reason: str = ""
     pilot_best_delta: float = 0.0
@@ -405,6 +406,34 @@ class AuthorAgent:
         return fallback_skill_code
 
     @staticmethod
+    def extract_all_skill_codes(
+        content: str,
+        hyp: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """Extracts all `<skill_code module="name">...</skill_code>` blocks from an LLM response."""
+        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL)
+        out: dict[str, str] = {}
+        for m in re.finditer(
+            r"<(?:skill_code|skill)(?:\s+(?:module|name)=[\"'](?P<mod>[^\"']+)[\"'])?[^>]*>(?P<code>.*?)</(?:skill_code|skill)>",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        ):
+            mod_name = (m.group("mod") or (hyp or {}).get("skill_module") or "").strip()
+            mod_name = re.sub(r"[^a-zA-Z0-9_]", "_", mod_name.lower()).strip("_")
+            if not mod_name:
+                continue
+            s_raw = m.group("code").strip()
+            fence_m = re.search(
+                r"```(?:python)?\s*\n(.*?)```", s_raw, flags=re.DOTALL | re.IGNORECASE
+            )
+            if fence_m:
+                s_raw = fence_m.group(1).strip()
+            s_clean = AuthorAgent._sanitize_skill_code(s_raw)
+            if s_clean:
+                out[mod_name] = smart_dedent(s_clean)
+        return out
+
+    @staticmethod
     def extract_hypotheses_and_reflection(
         text: str,
     ) -> tuple[list[dict[str, Any]], str]:
@@ -466,8 +495,9 @@ class AuthorAgent:
             arg_disp = topic
         elif name == "read_skill":
             skill_name = str(args.get("skill_name", ""))
-            out, summary = self.tools.read_skill(skill_name)
-            arg_disp = skill_name
+            policy_id = str(args.get("policy_id", ""))
+            out, summary = self.tools.read_skill(skill_name, policy_id=policy_id)
+            arg_disp = f"{skill_name}@{policy_id}" if policy_id else skill_name
         elif name == "read_policy":
             policy_id = str(args.get("policy_id", ""))
             out, summary = self.tools.read_policy(policy_id)
@@ -851,7 +881,10 @@ class AuthorAgent:
                 24 if canon_mode == "CREATE" else max(18, max_pilot_runs + 10)
             )
 
-        sys_prompt = build_system_prompt(self.db_path)
+        sys_prompt = build_system_prompt(
+            self.db_path,
+            is_swarm=canon_mode in ("SWARM_WORKER", "SWARM_META"),
+        )
         user_prompt = build_user_prompt(
             mode=mode,
             generation=generation,
@@ -941,6 +974,7 @@ class AuthorAgent:
 
                 if (
                     generation == 1
+                    and self.tools._campaign_tables_empty()
                     and turn_idx <= max_tool_turns
                     and not str(batch_digest).startswith("Self-Repair Required:")
                     and (
@@ -1507,6 +1541,7 @@ class AuthorAgent:
                     target_functions=list(changed_fns),
                     tool_calls_made=total_tool_calls,
                     skill_code=skill_code,
+                    skill_modules=self.extract_all_skill_codes(final_content, hyp),
                 )
 
             if repair_idx < self.max_repair_turns:
@@ -1701,6 +1736,7 @@ class AuthorAgent:
                 target_functions=list(changed_fns),
                 tool_calls_made=total_tool_calls,
                 skill_code=skill_code,
+                skill_modules=self.extract_all_skill_codes(final_content, latest_hyp),
                 pilot_best_delta=best_delta,
             )
 
@@ -1765,7 +1801,10 @@ class AuthorAgent:
                     else self._call_llm_api(messages, allow_tools=allow_tools)
                 )
                 turn_ms = (time.perf_counter() - t0_turn) * 1000.0
-                content = str(msg.get("content") or "").strip()
+                raw_content = str(msg.get("content") or "")
+                content = re.sub(
+                    r"<think>.*?</think>", "", raw_content, flags=re.DOTALL
+                ).strip()
                 reasoning_text = str(msg.get("_reasoning") or "")
                 usage = msg.get("_usage") or {}
                 if content:
@@ -1975,7 +2014,7 @@ class AuthorAgent:
                 "tool_calls_made": len(mock_hyps) + 1,
             }
 
-        sys_prompt = build_system_prompt(self.db_path)
+        sys_prompt = build_system_prompt(self.db_path, is_swarm=True)
         user_prompt = build_user_prompt(
             mode="SWARM_WORKER",
             generation=generation,
@@ -2032,6 +2071,7 @@ class AuthorAgent:
             if not tool_calls:
                 if (
                     generation == 1
+                    and self.tools._campaign_tables_empty()
                     and (not called_wiki or not called_expert_query)
                     and nudges_used < 2
                     and turn_idx <= turn_limit

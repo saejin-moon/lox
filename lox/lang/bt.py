@@ -229,3 +229,26 @@ class BehaviorTree:
         """Ticks the tree and returns the resulting action (or None if all failed)."""
         status, act = self.root.tick(state, self.blackboard)
         return act
+
+
+def extract_runner_leaf_errors(runner_or_instance: Any) -> list[tuple[str, str]]:
+    """Extracts any swallowed `(node_name, error_str)` entries from a PolicyRunner or Policy instance's Blackboard."""
+    if runner_or_instance is None:
+        return []
+    inst = getattr(runner_or_instance, "instance", runner_or_instance)
+    candidates = [
+        getattr(inst, "blackboard", None),
+        getattr(inst, "bb", None),
+        getattr(getattr(inst, "tree", None), "blackboard", None),
+        getattr(runner_or_instance, "blackboard", None),
+    ]
+    seen: list[tuple[str, str]] = []
+    for bb in candidates:
+        errs = getattr(bb, "leaf_errors", None)
+        if isinstance(errs, list):
+            for item in errs:
+                if isinstance(item, tuple) and len(item) == 2:
+                    pair = (str(item[0]), str(item[1]))
+                    if pair not in seen:
+                        seen.append(pair)
+    return seen

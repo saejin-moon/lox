@@ -1,17 +1,24 @@
 """
-Dedicated Read-Only Critic & Diagnostician Agent for LOX Swarm Synthesis.
+Two-Pass Read-Only Advisory Critic Agent for LOX Swarm Synthesis ("Hard Code Nothing").
 
-Strictly separated from implementation (ZERO code-writing or `dry_run_policy` tools):
-1. Post-Eval Gate (`evaluate_and_gate`): Compares Gen N against the true champion
-   and issues a binding PROMOTE or ROLLBACK verdict.
-2. Pre-Gen Diagnostician (`diagnose_for_generation`): Investigates DuckDB, policy
-   diffs, and NetHack Wiki mechanics to produce a grounded `DiagnosticReport`
-   (root causes, protected invariants, and next-gen focus scopes).
+Strictly separated from code implementation (ZERO code-writing, ZERO `dry_run_policy`,
+and ZERO hardcoded rollback gates or metric thresholds):
+1. Pass 1 — Pre-Generation High-Level Guide (`guide_before_generation`):
+   Called as the very first agent every generation. Investigates DuckDB telemetry,
+   cross-generation progression, `PrioritySelector` branch attribution, policy diffs,
+   and NetHack Wiki mechanics to provide the Meta-Agent with a high-level strategic guide.
+2. Pass 2 — Post-Assembly Comparative Review (`review_after_assembly`):
+   Called once after the Meta-Agent finishes its initial policy assembly and evaluation.
+   Compares the candidate's empirical results, actions, and branch turn shares against
+   previous generations and informs the Meta-Agent so the Meta-Agent can decide whether
+   and how to revise its policy.
 """
 
 from __future__ import annotations
 
+import ast
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,54 +42,445 @@ READ_ONLY_CRITIC_TOOLS: set[str] = {
 }
 
 
-@dataclass
-class GateVerdict:
-    decision: str  # "PROMOTE" | "ROLLBACK"
-    target_policy_id: str
-    reason: str
-    regressions: list[str] = field(default_factory=list)
+def extract_priority_selector_branches(policy_code: str) -> list[dict[str, str]]:
+    """
+    Parses `policy_code` AST to extract the ordered list of children in the root
+    `PrioritySelector([...])` (priority `#1..#K`, `leaf_name`, and `fn_name`).
+    """
+    if not policy_code or not policy_code.strip():
+        return []
+    try:
+        tree = ast.parse(policy_code)
+    except Exception:
+        return []
+
+    selector_calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func_id = ""
+            if isinstance(node.func, ast.Name):
+                func_id = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                func_id = node.func.attr
+            if func_id == "PrioritySelector" and node.args:
+                if isinstance(node.args[0], (ast.List, ast.Tuple)):
+                    selector_calls.append(node)
+
+    if not selector_calls:
+        return []
+
+    target_call = selector_calls[-1]
+    for c in selector_calls:
+        for kw in c.keywords:
+            if (
+                kw.arg == "name"
+                and isinstance(kw.value, ast.Constant)
+                and "master" in str(kw.value.value).lower()
+            ):
+                target_call = c
+                break
+
+    seq_node = target_call.args[0]
+    elts = getattr(seq_node, "elts", [])
+    branches: list[dict[str, str]] = []
+
+    def _expr_name(expr: ast.AST) -> str:
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Attribute):
+            base = _expr_name(expr.value)
+            return f"{base}.{expr.attr}" if base else expr.attr
+        return ""
+
+    for idx, elt in enumerate(elts, start=1):
+        leaf_name = ""
+        fn_name = ""
+        if isinstance(elt, ast.Call):
+            for kw in elt.keywords:
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                    leaf_name = str(kw.value.value)
+            if elt.args:
+                first_arg = elt.args[0]
+                if isinstance(first_arg, (ast.List, ast.Tuple)):
+                    sub_fns = []
+                    for sub in first_arg.elts:
+                        if isinstance(sub, ast.Call) and sub.args:
+                            s_fn = _expr_name(sub.args[0]).split(".")[-1]
+                            if s_fn:
+                                sub_fns.append(s_fn)
+                    fn_name = "+".join(sub_fns)
+                else:
+                    fn_name = _expr_name(first_arg).split(".")[-1]
+            if not leaf_name:
+                leaf_name = fn_name or _expr_name(elt.func)
+        else:
+            raw_ref = _expr_name(elt)
+            leaf_name = raw_ref
+            fn_name = raw_ref.split(".")[-1]
+
+        branches.append(
+            {
+                "priority": str(idx),
+                "leaf_name": leaf_name or f"branch_{idx}",
+                "fn_name": fn_name or leaf_name or f"branch_{idx}",
+            }
+        )
+    return branches
+
+
+def build_swarm_diagnostic_digest(
+    db_path: str,
+    current_policy: str = "",
+    target_generation: int | None = None,
+) -> str:
+    """
+    Constructs an objective, cross-generation diagnostic digest from DuckDB and `current_policy`:
+    1. Cross-Generation Progression Table (`batches` + `runs` aggregates, highlighting historical bests).
+    2. Ordered `PrioritySelector` Branch Telemetry Table (`#1..#K` joined with `function_stats`).
+    3. Active Function Shifts (functions active in prior/best generation missing in current generation).
+    4. Swallowed `Blackboard.leaf_errors` & Top Termination Causes.
+    """
+    if not db_path or not os.path.exists(db_path):
+        return ""
+
+    con = connect_db(db_path, read_only=True)
+    sections: list[str] = []
+    try:
+        batch_rows = con.execute(
+            """
+            SELECT b.generation,
+                   b.candidate_policy_id,
+                   b.avg_depth,
+                   b.p90_depth,
+                   b.max_depth,
+                   b.avg_score,
+                   b.max_score,
+                   b.avg_turns,
+                   COALESCE(AVG(r.unique_tiles), 0.0) AS avg_tiles,
+                   COALESCE(SUM(r.policy_exceptions), 0) AS total_exc
+            FROM batches b
+            LEFT JOIN runs r ON r.batch_id = b.batch_id
+            GROUP BY b.generation, b.candidate_policy_id, b.avg_depth, b.p90_depth,
+                     b.max_depth, b.avg_score, b.max_score, b.avg_turns, b.created_at
+            ORDER BY b.generation ASC, b.created_at ASC
+            """
+        ).fetchall()
+
+        if not batch_rows:
+            return ""
+
+        best_depth_gen = max(
+            batch_rows,
+            key=lambda r: (float(r[2] or 0.0), int(r[4] or 0), float(r[5] or 0.0)),
+        )
+        best_gen_num = int(best_depth_gen[0])
+        latest_gen_num = (
+            int(target_generation)
+            if target_generation is not None
+            else int(batch_rows[-1][0])
+        )
+
+        # 1. Cross-Generation Progression Table
+        table_lines = [
+            "### Cross-Generation Progression Overview (`batches` & `runs`):",
+            "| Gen | Policy ID | Avg Depth | P90 Depth | Max Depth | Avg Score | Max Score | Avg Turns | Avg Tiles | Exceptions | Notes |",
+            "|---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|:---|",
+        ]
+        # Show up to last 8 generations plus best generation if earlier
+        display_rows = batch_rows[-8:]
+        if best_depth_gen not in display_rows:
+            display_rows = [best_depth_gen, *display_rows]
+
+        for r in display_rows:
+            g_num = int(r[0])
+            p_id = str(r[1] or f"policy_swarm_g{g_num}")
+            avg_d = float(r[2] or 1.0)
+            p90_d = float(r[3] or 1.0)
+            max_d = int(r[4] or 1)
+            avg_s = float(r[5] or 0.0)
+            max_s = int(r[6] or 0)
+            avg_t = float(r[7] or 0.0)
+            avg_tiles = float(r[8] or 0.0)
+            tot_exc = int(r[9] or 0)
+            tags = []
+            if g_num == best_gen_num:
+                tags.append("PEAK_DEPTH")
+            if g_num == latest_gen_num:
+                tags.append("LATEST")
+            note_str = ", ".join(tags)
+            table_lines.append(
+                f"| {g_num} | `{p_id}` | {avg_d:.2f} | {p90_d:.1f} | {max_d} | "
+                f"{avg_s:.1f} | {max_s} | {avg_t:.0f} | {avg_tiles:.1f} | {tot_exc} | {note_str} |"
+            )
+        sections.append("\n".join(table_lines))
+
+        # 2. Termination Breakdown & Leaf Errors for latest_gen_num
+        end_rows = con.execute(
+            """
+            SELECT end_reason, COUNT(*) AS cnt, ROUND(AVG(max_depth), 2) AS avg_d, ROUND(AVG(turns), 0) AS avg_t
+            FROM runs
+            WHERE generation = ?
+            GROUP BY end_reason
+            ORDER BY cnt DESC
+            LIMIT 6
+            """,
+            [latest_gen_num],
+        ).fetchall()
+        if end_rows:
+            end_bullets = [
+                f"- `{r[0]}`: {r[1]} run(s) (avg_max_depth={r[2]}, avg_turns={int(r[3] or 0)})"
+                for r in end_rows
+            ]
+            sections.append(
+                f"### Generation {latest_gen_num} Top Termination Causes:\n"
+                + "\n".join(end_bullets)
+            )
+
+        # Check for swallowed leaf_errors in milestones_json
+        milestone_rows = con.execute(
+            "SELECT run_id, milestones_json FROM runs WHERE generation = ? AND policy_exceptions > 0 LIMIT 10",
+            [latest_gen_num],
+        ).fetchall()
+        leaf_err_samples: list[str] = []
+        for r_id, m_json in milestone_rows:
+            try:
+                m_dict = json.loads(m_json or "{}")
+                for le in m_dict.get("leaf_errors") or []:
+                    sample = f"`{r_id}` -> {le}"
+                    if sample not in leaf_err_samples:
+                        leaf_err_samples.append(sample)
+            except Exception:
+                continue
+        if leaf_err_samples:
+            sections.append(
+                f"### Generation {latest_gen_num} Swallowed BehaviorTree Leaf Errors (`policy_exceptions`):\n"
+                + "\n".join(f"- {s}" for s in leaf_err_samples[:6])
+            )
+
+        # 3. Function Stats & Ordered PrioritySelector Branch Table
+        fn_rows = con.execute(
+            """
+            SELECT function_name, episodes_triggered, total_calls, total_turns_active,
+                   COALESCE(stagnation_share, 0.0),
+                   COALESCE(livelock_score, 0.0),
+                   COALESCE(liblit_failure_score, 0.0),
+                   COALESCE(ochiai_good_run_score, 0.0)
+            FROM function_stats
+            WHERE generation = ?
+            ORDER BY total_turns_active DESC, total_calls DESC
+            """,
+            [latest_gen_num],
+        ).fetchall()
+        fn_map: dict[str, dict[str, Any]] = {}
+        total_active_turns = sum(int(r[3] or 0) for r in fn_rows) or 1
+        for r in fn_rows:
+            fn_map[str(r[0])] = {
+                "episodes": int(r[1] or 0),
+                "calls": int(r[2] or 0),
+                "turns": int(r[3] or 0),
+                "share_pct": 100.0 * int(r[3] or 0) / total_active_turns,
+                "stag": float(r[4] or 0.0),
+                "livelock": float(r[5] or 0.0),
+                "liblit": float(r[6] or 0.0),
+                "ochiai": float(r[7] or 0.0),
+            }
+
+        branches = extract_priority_selector_branches(current_policy)
+        if branches:
+            b_lines = [
+                f"### Ordered `PrioritySelector` Branch Telemetry (Gen {latest_gen_num}):",
+                "| Priority | Leaf Name | Function | Episodes | Calls | Active Turns (% Share) | Stagnation | Livelock | Liblit Fail | Status |",
+                "|---:|:---|:---|---:|---:|---:|---:|---:|---:|:---|",
+            ]
+            for b in branches:
+                fn_key = b["fn_name"]
+                part_keys = [k.strip() for k in fn_key.split("+") if k.strip()]
+                stats = fn_map.get(fn_key)
+                if stats is None and part_keys:
+                    for pk in part_keys:
+                        if pk in fn_map:
+                            stats = fn_map[pk]
+                            break
+                if stats is None:
+                    b_lines.append(
+                        f"| #{b['priority']} | `{b['leaf_name']}` | `{fn_key}` | 0 | 0 | 0 (0.0%) | 0.00 | 0.00 | 0.00 | 0-TURN (UNTRIGGERED/PREEMPTED) |"
+                    )
+                else:
+                    status_flags = []
+                    if stats["turns"] == 0:
+                        status_flags.append("0-TURN (PREEMPTED/COND_FALSE)")
+                    if stats["stag"] >= 0.40:
+                        status_flags.append("HIGH_STAGNATION")
+                    if stats["livelock"] >= 0.35:
+                        status_flags.append("HIGH_LIVELOCK")
+                    status_str = ", ".join(status_flags) or "ACTIVE"
+                    b_lines.append(
+                        f"| #{b['priority']} | `{b['leaf_name']}` | `{fn_key}` | {stats['episodes']} | {stats['calls']} | "
+                        f"{stats['turns']} ({stats['share_pct']:.1f}%) | {stats['stag']:.2f} | {stats['livelock']:.2f} | "
+                        f"{stats['liblit']:.2f} | {status_str} |"
+                    )
+            sections.append("\n".join(b_lines))
+        elif fn_rows:
+            f_lines = [
+                f"### Top Active Functions in Generation {latest_gen_num}:",
+            ]
+            for r in fn_rows[:12]:
+                if int(r[3] or 0) > 0 or int(r[2] or 0) > 0:
+                    share = 100.0 * int(r[3] or 0) / total_active_turns
+                    f_lines.append(
+                        f"- `{r[0]}`: turns={r[3]} ({share:.1f}%), calls={r[2]}, eps={r[1]}, "
+                        f"stag={float(r[4]):.2f}, livelock={float(r[5]):.2f}, liblit={float(r[6]):.2f}"
+                    )
+            sections.append("\n".join(f_lines))
+
+        # 4. Compare active functions against previous generation and peak generation
+        compare_gens = sorted(
+            {
+                g
+                for g in (latest_gen_num - 1, best_gen_num)
+                if g >= 1 and g != latest_gen_num
+            }
+        )
+        dropped_notes: list[str] = []
+        for cg in compare_gens:
+            prior_fns = con.execute(
+                """
+                SELECT function_name, total_turns_active
+                FROM function_stats
+                WHERE generation = ? AND total_turns_active > 0
+                ORDER BY total_turns_active DESC
+                """,
+                [cg],
+            ).fetchall()
+            missing = [
+                f"`{pf[0]}` ({pf[1]} turns in Gen {cg})"
+                for pf in prior_fns
+                if str(pf[0]) not in fn_map or fn_map[str(pf[0])]["turns"] == 0
+            ]
+            if missing:
+                label = "Peak" if cg == best_gen_num else "Previous"
+                dropped_notes.append(
+                    f"- Active in {label} Gen {cg} (`policy_swarm_g{cg}`) but 0 active turns in Gen {latest_gen_num}: {', '.join(missing[:8])}"
+                )
+        if dropped_notes:
+            sections.append(
+                "### Branch Activity Shifts vs. Prior Generations:\n"
+                + "\n".join(dropped_notes)
+            )
+    except Exception:
+        pass
+    finally:
+        con.close()
+
+    return "\n\n".join(s for s in sections if s.strip())
 
 
 @dataclass
-class DiagnosticReport:
+class CriticGuidance:
+    """High-level strategic guide produced by Critic Pass 1 at the start of a generation."""
+
     generation: int
-    champion_policy_id: str
+    reference_policy_id: str = "none"
+    high_level_summary: str = ""
     root_causes: list[dict[str, Any]] = field(default_factory=list)
-    protected_invariants: list[str] = field(default_factory=list)
-    next_gen_focus: list[str] = field(default_factory=list)
+    working_capabilities: list[str] = field(default_factory=list)
+    high_level_priorities: list[str] = field(default_factory=list)
+    diagnostic_digest: str = ""
     raw_summary: str = ""
 
+    @property
+    def champion_policy_id(self) -> str:
+        return self.reference_policy_id
+
+    @property
+    def protected_invariants(self) -> list[str]:
+        return self.working_capabilities
+
+    @property
+    def next_gen_focus(self) -> list[str]:
+        return self.high_level_priorities
+
     def to_prompt_block(self) -> str:
-        if (
-            not self.root_causes
-            and not self.protected_invariants
-            and not self.next_gen_focus
-        ):
-            return self.raw_summary
         parts = [
-            f"### Critic Diagnostic Report (Baseline Champion: `{self.champion_policy_id}`)"
+            f"### Critic Pre-Generation High-Level Guide (Generation {self.generation})"
         ]
+        if self.high_level_summary:
+            parts.append(f"**High-Level Assessment:** {self.high_level_summary}")
         if self.root_causes:
-            parts.append("**Empirical Root Causes:**")
+            parts.append("**Empirical Root Causes & Bottlenecks:**")
             for rc in self.root_causes:
                 sym = rc.get("symptom", "")
                 fn = rc.get("offending_function_or_skill", "")
                 rids = rc.get("evidence_run_ids", [])
                 mech = rc.get("mechanism", "")
                 parts.append(f"- [{fn}] {sym} (runs={rids}): {mech}")
-        if self.protected_invariants:
-            parts.append("**Protected Invariants (DO NOT remove or preempt):**")
-            for inv in self.protected_invariants:
-                parts.append(f"- {inv}")
-        if self.next_gen_focus:
-            parts.append("**Recommended Focus Scopes:**")
-            for foc in self.next_gen_focus:
-                parts.append(f"- {foc}")
-        return "\n".join(parts)
+        if self.working_capabilities:
+            parts.append("**Working Capabilities Observed in History:**")
+            for cap in self.working_capabilities:
+                parts.append(f"- {cap}")
+        if self.high_level_priorities:
+            parts.append("**High-Level Priorities for This Generation:**")
+            for pri in self.high_level_priorities:
+                parts.append(f"- {pri}")
+        if len(parts) == 1 and self.raw_summary:
+            parts.append(self.raw_summary)
+        if self.diagnostic_digest:
+            parts.append(self.diagnostic_digest)
+        return "\n\n".join(parts)
+
+
+# Backward-compatible alias
+DiagnosticReport = CriticGuidance
+
+
+@dataclass
+class PostAssemblyCritique:
+    """Comparative review produced by Critic Pass 2 after Meta-Agent finishes its initial assembly."""
+
+    generation: int
+    candidate_policy_id: str
+    needs_revision: bool = False
+    comparison_to_prev_gens: str = ""
+    identified_issues: list[str] = field(default_factory=list)
+    recommendations_for_meta: list[str] = field(default_factory=list)
+    diagnostic_digest: str = ""
+    raw_summary: str = ""
+
+    def to_prompt_block(self) -> str:
+        parts = [
+            f"### Critic Post-Assembly Comparative Review (Generation {self.generation} Draft: `{self.candidate_policy_id}`)",
+            f"- **Advisory Revision Recommended**: `{self.needs_revision}`",
+        ]
+        if self.comparison_to_prev_gens:
+            parts.append(
+                f"**Comparison vs. Previous Generations:**\n{self.comparison_to_prev_gens}"
+            )
+        if self.identified_issues:
+            parts.append("**Identified Issues / Regressions / Branch Conflicts:**")
+            for iss in self.identified_issues:
+                parts.append(f"- {iss}")
+        if self.recommendations_for_meta:
+            parts.append("**High-Level Recommendations for Meta-Agent:**")
+            for rec in self.recommendations_for_meta:
+                parts.append(f"- {rec}")
+        if (
+            not self.comparison_to_prev_gens
+            and not self.identified_issues
+            and not self.recommendations_for_meta
+            and self.raw_summary
+        ):
+            parts.append(self.raw_summary)
+        if self.diagnostic_digest:
+            parts.append(self.diagnostic_digest)
+        return "\n\n".join(parts)
 
 
 class SwarmCriticAgent:
-    """Read-only empirical critic & diagnostician (no code-writing or dry-run tools)."""
+    """
+    Two-Pass Read-Only Empirical Critic & High-Level Guide for the Meta-Agent.
+    Contains ZERO hardcoded rollbacks or threshold gates; empowers the Meta-Agent
+    with structured cross-generation diagnostics before and after assembly.
+    """
 
     def __init__(
         self,
@@ -97,7 +495,7 @@ class SwarmCriticAgent:
         self.theories = theories_store or TheoryDocumentStore()
         self.author = AuthorAgent(
             provider=provider,
-            model=model,
+            model=model or "z-ai/glm-5.3-flash:nitro",
             db_path=db_path,
             agent_role="critic",
         )
@@ -105,7 +503,9 @@ class SwarmCriticAgent:
 
     @staticmethod
     def _parse_json_object(raw_txt: str) -> dict[str, Any]:
-        txt = str(raw_txt or "").strip()
+        txt = re.sub(
+            r"<think>.*?</think>", "", str(raw_txt or ""), flags=re.DOTALL
+        ).strip()
         if "```" in txt:
             m = re.search(r"```(?:json)?\s*\n(.*?)```", txt, flags=re.DOTALL)
             if m:
@@ -123,224 +523,88 @@ class SwarmCriticAgent:
                     pass
         return {}
 
-    def _fetch_batch_pair_metrics(
-        self, candidate_policy_id: str, champion_policy_id: str
-    ) -> tuple[dict[str, float] | None, dict[str, float] | None]:
-        try:
-            con = connect_db(self.db_path, read_only=True)
-            try:
-                cand_row = con.execute(
-                    """
-                    SELECT avg_depth, max_depth, avg_score, max_score, avg_turns
-                    FROM batches
-                    WHERE candidate_policy_id = ?
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    [candidate_policy_id],
-                ).fetchone()
-                champ_row = con.execute(
-                    """
-                    SELECT avg_depth, max_depth, avg_score, max_score, avg_turns
-                    FROM batches
-                    WHERE candidate_policy_id = ?
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    [champion_policy_id],
-                ).fetchone()
-
-                def _to_dict(r: Any) -> dict[str, float] | None:
-                    if not r:
-                        return None
-                    return {
-                        "avg_depth": float(r[0] or 0.0),
-                        "max_depth": float(r[1] or 0.0),
-                        "avg_score": float(r[2] or 0.0),
-                        "max_score": float(r[3] or 0.0),
-                        "avg_turns": float(r[4] or 0.0),
-                    }
-
-                return _to_dict(cand_row), _to_dict(champ_row)
-            finally:
-                con.close()
-        except Exception:
-            return None, None
-
-    def evaluate_and_gate(
+    def guide_before_generation(
         self,
         generation: int,
-        batch_id: str,
-        candidate_policy_id: str,
-        champion_policy_id: str | None,
-    ) -> GateVerdict:
-        """
-        Post-Eval Gate: compares `candidate_policy_id` (`batch_id`) against
-        `champion_policy_id` and decides PROMOTE vs ROLLBACK.
-        """
-        if (
-            generation <= 1
-            or not champion_policy_id
-            or champion_policy_id == candidate_policy_id
-        ):
-            return GateVerdict(
-                decision="PROMOTE",
-                target_policy_id=candidate_policy_id,
-                reason="Initial Generation 1 baseline promoted.",
-            )
-
-        cand_m, champ_m = self._fetch_batch_pair_metrics(
-            candidate_policy_id, champion_policy_id
-        )
-        hard_regressions: list[str] = []
-        if cand_m and champ_m:
-            if cand_m["avg_depth"] < champ_m["avg_depth"] - 0.15:
-                hard_regressions.append(
-                    f"avg_depth regressed ({champ_m['avg_depth']:.2f} -> {cand_m['avg_depth']:.2f})"
-                )
-            if (
-                champ_m["avg_score"] > 0
-                and cand_m["avg_score"] < champ_m["avg_score"] * 0.80
-            ):
-                hard_regressions.append(
-                    f"avg_score regressed ({champ_m['avg_score']:.1f} -> {cand_m['avg_score']:.1f})"
-                )
-
-        if self.provider == "mock":
-            if hard_regressions:
-                return GateVerdict(
-                    decision="ROLLBACK",
-                    target_policy_id=champion_policy_id,
-                    reason="; ".join(hard_regressions),
-                    regressions=hard_regressions,
-                )
-            return GateVerdict(
-                decision="PROMOTE",
-                target_policy_id=candidate_policy_id,
-                reason="Mock gate non-inferior to champion.",
-            )
-
-        ui.info(
-            f"Critic Gate: Comparing `{candidate_policy_id}` (batch `{batch_id}`) vs champion `{champion_policy_id}`..."
-        )
-        self.author.tools.generation = int(generation)
-        prompt = f"""You are the Read-Only Critic Gate for Generation {generation}.
-Compare candidate `{candidate_policy_id}` (batch `{batch_id}`) against the current champion `{champion_policy_id}`.
-
-Use your read-only tools (`query_db`, `diff_policies`, `read_policy`, `read_skill`, `query_wiki`) to inspect:
-1. Paired metrics in `batches` and `runs` (depth, score, `end_reason` shifts, `starved_with_food`, `policy_exceptions`, `stalled_zero_turn`).
-2. `function_stats` (`stagnation_share`, `livelock_score`, `liblit_failure_score`) for `{batch_id}` vs champion.
-3. `diff_policies('{champion_policy_id}', '{candidate_policy_id}')` to see what changed in `policy.py` and `skills/*.py`.
-
-Return ONLY a valid JSON object:
-{{
-  "decision": "PROMOTE" or "ROLLBACK",
-  "reason": "Concise empirical justification citing observed numbers and run_ids",
-  "regressions": ["list of any observed regressions or empty list"]
-}}
-"""
-        decision = "ROLLBACK" if hard_regressions else "PROMOTE"
-        reason = (
-            "; ".join(hard_regressions)
-            if hard_regressions
-            else "Non-inferior to champion."
-        )
-        regressions = list(hard_regressions)
-
-        try:
-            raw = self.author.run_tool_session(
-                system_prompt=build_system_prompt(self.db_path),
-                user_prompt=prompt,
-                max_tool_turns=4,
-                allowed_tools=READ_ONLY_CRITIC_TOOLS,
-                generation=generation,
-                session_mode="CRITIC_GATE",
-                agent_role_override="critic",
-            )
-            parsed = self._parse_json_object(raw)
-            llm_dec = str(parsed.get("decision", "")).strip().upper()
-            if llm_dec in ("PROMOTE", "ROLLBACK"):
-                # Deterministic safety backstop: never promote a hard depth/score collapse
-                decision = "ROLLBACK" if hard_regressions else llm_dec
-                reason = str(parsed.get("reason") or reason)
-                if isinstance(parsed.get("regressions"), list):
-                    regressions = [
-                        str(x) for x in parsed["regressions"] if str(x).strip()
-                    ]
-                    for hr in hard_regressions:
-                        if hr not in regressions:
-                            regressions.append(hr)
-        except Exception as exc:
-            ui.warn(f"Critic Gate fallback ({exc})")
-
-        target_id = (
-            champion_policy_id if decision == "ROLLBACK" else candidate_policy_id
-        )
-        return GateVerdict(
-            decision=decision,
-            target_policy_id=target_id,
-            reason=reason,
-            regressions=regressions,
-        )
-
-    def diagnose_for_generation(
-        self,
-        generation: int,
-        champion_policy_id: str | None,
+        reference_policy_id: str | None = None,
         current_policy: str = "",
         skills: dict[str, str] | None = None,
-    ) -> DiagnosticReport:
+        champion_policy_id: str | None = None,
+    ) -> CriticGuidance:
         """
-        Pre-Gen Diagnostician: investigates DuckDB, policy diffs, and NetHack Wiki
-        to identify root causes, protected invariants, and next-gen focus scopes.
+        Pass 1 (Pre-Generation Guide): Called as the very first agent in Generation `generation`.
+        Audits DuckDB history, `PrioritySelector` branch telemetry, policy diffs, and NetHack Wiki
+        mechanics to give the Meta-Agent a high-level strategic guide for the generation.
         """
-        champ_id = champion_policy_id or "none"
+        ref_id = (
+            reference_policy_id
+            or champion_policy_id
+            or (f"policy_swarm_g{generation - 1}" if generation > 1 else "none")
+        )
+        digest = build_swarm_diagnostic_digest(
+            self.db_path,
+            current_policy=current_policy,
+            target_generation=generation - 1 if generation > 1 else None,
+        )
+
         if self.provider == "mock":
-            return DiagnosticReport(
+            return CriticGuidance(
                 generation=generation,
-                champion_policy_id=champ_id,
+                reference_policy_id=ref_id,
+                high_level_summary=f"Pre-generation high-level guide for Generation {generation}.",
                 root_causes=[
                     {
-                        "symptom": "Early exploration/survival baseline",
+                        "symptom": "Early exploration and progression baseline",
                         "offending_function_or_skill": "none",
                         "evidence_run_ids": [],
-                        "mechanism": "Mock diagnostic baseline.",
+                        "mechanism": "Mock pre-generation diagnostic baseline.",
                     }
                 ],
-                protected_invariants=[
-                    "Preserve working navigation and dialog handling"
+                working_capabilities=[
+                    "Preserve working navigation and prompt handling branches"
                 ],
-                next_gen_focus=["exploration", "survival"],
-                raw_summary="Mock DiagnosticReport",
+                high_level_priorities=[
+                    "progression_and_exploration",
+                    "threat_and_survival",
+                ],
+                diagnostic_digest=digest,
+                raw_summary="Mock CriticGuidance",
             )
 
         ui.info(
-            f"Critic Diagnostician: Analyzing empirical state for Generation {generation} (champion=`{champ_id}`)..."
+            f"Critic Pass 1 (Pre-Gen Guide): Auditing campaign state for Generation {generation}..."
         )
         self.author.tools.generation = int(generation)
         self.author.tools.current_policy_code = str(current_policy or "")
         if skills is not None:
             self.author.tools.skills = dict(skills)
 
-        gen1_note = (
-            "In Generation 1, campaign tables (`runs`, `batches`, `ticks`, `function_stats`, `policies`) "
-            "are empty and DISALLOWED. Call BOTH `query_wiki` and `query_db` on `expert_runs` / `expert_ticks`."
-            if generation == 1
+        empty_campaign = self.author.tools._campaign_tables_empty()
+        gen_instruction = (
+            "Campaign tables (`runs`, `batches`, `ticks`, `function_stats`, `policies`) are currently empty. "
+            "Call BOTH `query_wiki` and `query_db` on `expert_runs` / `expert_ticks` to study how human ascensions progress."
+            if empty_campaign
             else (
-                f"Inspect `batches`, `runs` (`champion_runs` / recent rolled-back runs), `ticks`, `function_stats`, "
-                f"`policies` (`read_policy('{champ_id}')` / `diff_policies`), `expert_runs`, and `query_wiki`."
+                "Review the Cross-Generation & Branch Telemetry below and use your read-only tools "
+                "(`query_db`, `read_policy`, `diff_policies`, `read_skill`, `query_wiki`, `query_monster`, `query_item`) "
+                "to compare recent generations against the best historical generation in `batches` and `policies`."
             )
         )
-        prompt = f"""You are the Read-Only Critic & Diagnostician for Generation {generation}.
-Your sole job is empirical diagnosis — you DO NOT write code.
+        digest_section = f"\n{digest}\n" if digest else ""
+        prompt = f"""You are the High-Level Critic & Strategic Guide (Pass 1 — Start of Generation {generation}).
+You are the very first agent called in Generation {generation}. Your role is to investigate what happened in previous generations (or expert runs on Gen 1) and provide a high-level strategic guide to the Meta-Agent. You DO NOT write code.
+{digest_section}
+{gen_instruction}
 
-{gen1_note}
-
-Identify:
-1. Top empirical root causes (cite concrete `run_id`s, `function_stats`, `end_reason`s, and C mechanics from `query_wiki`).
-2. `protected_invariants`: existing branches/priorities in the champion that are working and MUST NOT be removed or preempted.
-3. `next_gen_focus`: 2–4 non-overlapping problem scopes for the next generation's workers.
+Determine:
+1. `high_level_summary`: Concise synthesis of how the policy is performing across generations (including whether recent generations improved or regressed compared to earlier policies, and why).
+2. `root_causes`: Top empirical bottlenecks holding the agent back (cite concrete `run_id`s, `function_stats`, `end_reason`s, or C mechanics from `query_wiki`).
+3. `working_capabilities`: Existing branches, skills, or historical policy components that are working well and should be preserved or restored by the Meta-Agent.
+4. `high_level_priorities`: 2–4 high-level problem areas for the Meta-Agent and its specialist workers to focus on this generation.
 
 Return ONLY a valid JSON object:
 {{
+  "high_level_summary": "...",
   "root_causes": [
     {{
       "symptom": "...",
@@ -349,53 +613,169 @@ Return ONLY a valid JSON object:
       "mechanism": "..."
     }}
   ],
-  "protected_invariants": ["..."],
-  "next_gen_focus": ["..."]
+  "working_capabilities": ["..."],
+  "high_level_priorities": ["..."]
 }}
 """
-        report = DiagnosticReport(
+        guidance = CriticGuidance(
             generation=generation,
-            champion_policy_id=champ_id,
+            reference_policy_id=ref_id,
+            diagnostic_digest=digest,
         )
         try:
             raw = self.author.run_tool_session(
-                system_prompt=build_system_prompt(self.db_path),
+                system_prompt=build_system_prompt(self.db_path, is_swarm=True),
                 user_prompt=prompt,
                 max_tool_turns=5,
                 required_tools=(
-                    ["query_wiki", "query_db:expert_runs"] if generation == 1 else None
+                    ["query_wiki", "query_db:expert_runs"] if empty_campaign else None
                 ),
                 allowed_tools=READ_ONLY_CRITIC_TOOLS,
                 generation=generation,
-                session_mode="CRITIC_DIAGNOSIS",
+                session_mode="CRITIC_PRE_GUIDE",
                 agent_role_override="critic",
             )
-            report.raw_summary = raw
+            guidance.raw_summary = raw
             parsed = self._parse_json_object(raw)
+            guidance.high_level_summary = str(parsed.get("high_level_summary") or "")
             if isinstance(parsed.get("root_causes"), list):
-                report.root_causes = [
+                guidance.root_causes = [
                     rc for rc in parsed["root_causes"] if isinstance(rc, dict)
                 ]
-            if isinstance(parsed.get("protected_invariants"), list):
-                report.protected_invariants = [
-                    str(x) for x in parsed["protected_invariants"] if str(x).strip()
-                ]
-            if isinstance(parsed.get("next_gen_focus"), list):
-                report.next_gen_focus = [
-                    str(x) for x in parsed["next_gen_focus"] if str(x).strip()
+            caps = parsed.get("working_capabilities") or parsed.get(
+                "protected_invariants"
+            )
+            if isinstance(caps, list):
+                guidance.working_capabilities = [str(x) for x in caps if str(x).strip()]
+            pris = parsed.get("high_level_priorities") or parsed.get("next_gen_focus")
+            if isinstance(pris, list):
+                guidance.high_level_priorities = [
+                    str(x) for x in pris if str(x).strip()
                 ]
         except Exception as exc:
-            ui.warn(f"Critic Diagnostician fallback ({exc})")
+            ui.warn(f"Critic Pass 1 fallback ({exc})")
 
         try:
             self.theories.save_document(
                 generation=generation,
                 agent_role="critic",
-                doc_type="CRITIC_DIAGNOSIS",
-                title=f"Critic Diagnosis G{generation} (Champion: {champ_id})",
-                content=report.to_prompt_block(),
-                tags=["critic", f"gen_{generation}", "diagnosis"],
+                doc_type="CRITIC_PRE_GUIDE",
+                title=f"Critic Pre-Gen Guide G{generation}",
+                content=guidance.to_prompt_block(),
+                tags=["critic", f"gen_{generation}", "pre_guide"],
             )
         except Exception:
             pass
-        return report
+        return guidance
+
+    # Alias for callers using the previous method name
+    diagnose_for_generation = guide_before_generation
+
+    def review_after_assembly(
+        self,
+        generation: int,
+        batch_id: str,
+        candidate_policy_id: str,
+        current_policy: str = "",
+        skills: dict[str, str] | None = None,
+    ) -> PostAssemblyCritique:
+        """
+        Pass 2 (Post-Assembly Comparative Review): Called once after the Meta-Agent finishes
+        its initial policy assembly and the candidate batch (`batch_id`) has been evaluated.
+        Compares the candidate's empirical results, actions, and `PrioritySelector` branch
+        behavior against previous generations, and informs the Meta-Agent.
+        """
+        digest = build_swarm_diagnostic_digest(
+            self.db_path,
+            current_policy=current_policy,
+            target_generation=generation,
+        )
+
+        if self.provider == "mock":
+            return PostAssemblyCritique(
+                generation=generation,
+                candidate_policy_id=candidate_policy_id,
+                needs_revision=False,
+                comparison_to_prev_gens=(
+                    f"Mock post-assembly comparison for `{candidate_policy_id}` (`{batch_id}`)."
+                ),
+                identified_issues=[],
+                recommendations_for_meta=[
+                    "Draft policy executed cleanly in mock evaluation."
+                ],
+                diagnostic_digest=digest,
+                raw_summary="Mock PostAssemblyCritique",
+            )
+
+        ui.info(
+            f"Critic Pass 2 (Post-Assembly Review): Comparing `{candidate_policy_id}` (`{batch_id}`) against previous generations..."
+        )
+        self.author.tools.generation = int(generation)
+        self.author.tools.current_policy_code = str(current_policy or "")
+        if skills is not None:
+            self.author.tools.skills = dict(skills)
+
+        digest_section = f"\n{digest}\n" if digest else ""
+        prompt = f"""You are the High-Level Critic & Advisor (Pass 2 — Post-Assembly Review for Generation {generation}).
+The Meta-Agent has assembled its candidate policy `{candidate_policy_id}` and evaluated it in batch `{batch_id}`.
+Your job is to compare `{candidate_policy_id}`'s empirical results, actions, and `PrioritySelector` branch telemetry against previous generations (and `expert_runs` if Gen 1), and advise the Meta-Agent on whether any revision is needed before Generation {generation} concludes.
+There are NO automatic rollbacks—the Meta-Agent relies on your analysis to decide whether to keep `{candidate_policy_id}` as-is, fix a bug/hijacking branch, or restore code from an earlier policy in `policies`.
+{digest_section}
+Use your read-only tools (`query_db`, `diff_policies`, `read_policy`, `read_skill`, `query_wiki`) to inspect:
+1. How `{candidate_policy_id}` (`{batch_id}`) compares to previous generations (`batches`, `runs.summary_digest`, `end_reason`, `avg_depth`, `max_depth`, `avg_score`, `unique_tiles`, `policy_exceptions`).
+2. Whether any newly wired `PrioritySelector` branch is monopolizing turns with high stagnation/livelock, throwing `leaf_errors`, or starving lower-priority branches (`0-TURN`), or whether a working branch from an earlier policy (`diff_policies`) was accidentally dropped.
+3. Concrete, high-level recommendations for the Meta-Agent (`needs_revision`: `true` if the Meta-Agent should revise `{candidate_policy_id}` or restore a capability from an earlier `policy_id`; `false` if `{candidate_policy_id}` is healthy and ready).
+
+Return ONLY a valid JSON object:
+{{
+  "needs_revision": true or false,
+  "comparison_to_prev_gens": "Empirical comparison of depth, score, turns, actions, and branch behavior vs previous generations",
+  "identified_issues": ["concrete regressions, hijacking branches, leaf errors, or dropped capabilities (or empty list if none)"],
+  "recommendations_for_meta": ["actionable guidance for the Meta-Agent (e.g. which branch to fix/reorder or which policy_id/skill to inspect/restore)"]
+}}
+"""
+        critique = PostAssemblyCritique(
+            generation=generation,
+            candidate_policy_id=candidate_policy_id,
+            diagnostic_digest=digest,
+        )
+        try:
+            raw = self.author.run_tool_session(
+                system_prompt=build_system_prompt(self.db_path, is_swarm=True),
+                user_prompt=prompt,
+                max_tool_turns=4,
+                allowed_tools=READ_ONLY_CRITIC_TOOLS,
+                generation=generation,
+                session_mode="CRITIC_POST_REVIEW",
+                agent_role_override="critic",
+            )
+            critique.raw_summary = raw
+            parsed = self._parse_json_object(raw)
+            if "needs_revision" in parsed:
+                critique.needs_revision = bool(parsed["needs_revision"])
+            critique.comparison_to_prev_gens = str(
+                parsed.get("comparison_to_prev_gens") or ""
+            )
+            if isinstance(parsed.get("identified_issues"), list):
+                critique.identified_issues = [
+                    str(x) for x in parsed["identified_issues"] if str(x).strip()
+                ]
+            if isinstance(parsed.get("recommendations_for_meta"), list):
+                critique.recommendations_for_meta = [
+                    str(x) for x in parsed["recommendations_for_meta"] if str(x).strip()
+                ]
+        except Exception as exc:
+            ui.warn(f"Critic Pass 2 fallback ({exc})")
+
+        try:
+            self.theories.save_document(
+                generation=generation,
+                agent_role="critic",
+                doc_type="CRITIC_POST_REVIEW",
+                title=f"Critic Post-Assembly Review G{generation} ({candidate_policy_id})",
+                content=critique.to_prompt_block(),
+                tags=["critic", f"gen_{generation}", "post_review"],
+            )
+        except Exception:
+            pass
+        return critique

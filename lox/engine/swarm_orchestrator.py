@@ -1,11 +1,19 @@
 """
-LOX Swarm Campaign Orchestrator.
-Coordinates the Hierarchical Multi-Agent Swarm:
-1. Dynamic Macro-Category Discovery by the Meta-Agent based on empirical DuckDB bottlenecks & frontier progression.
-2. Concurrent Category Workers exploring assigned domains on tier checkpoints and logging to LanceDB.
-3. Meta-Agent Policy Synthesis assembling verified subtrees into Behavior Tree policies.
-4. Multi-Core Worker Pool evaluating master policies on NetHack and logging to DuckDB.
-5. Automated Frontier Checkpoint creation and MAP-Elites archive maintenance.
+LOX Swarm Campaign Orchestrator ("Hard Code Nothing").
+Coordinates the Hierarchical Multi-Agent Swarm with a Two-Pass Advisory Critic
+and ZERO hardcoded rollbacks:
+1. Critic Pass 1 (`guide_before_generation`): Runs as the very first agent every
+   generation to audit DuckDB telemetry, branch turn shares, and game mechanics,
+   providing a high-level strategic guide to the Meta-Agent.
+2. Meta-Agent Dynamic Macro-Category Discovery (`discover_macro_categories`).
+3. Concurrent Category Workers (`SwarmWorker.run_cycle`) exploring hypotheses on
+   frontier checkpoints and failure fixtures.
+4. Meta-Agent Initial Policy Assembly (`assemble_policy`) + Paired Seed Evaluation.
+5. Critic Pass 2 (`review_after_assembly`): Compares the Meta-Agent's evaluated draft
+   and actions against previous generations and informs the Meta-Agent.
+6. Meta-Agent Post-Critic Revision (`revise_policy_with_critic`): The Meta-Agent
+   decides for itself whether to keep its draft or revise/restore capabilities.
+7. Frontier Checkpoint extraction and MAP-Elites diversity archive maintenance.
 """
 
 from __future__ import annotations
@@ -78,7 +86,7 @@ class SwarmCampaignOrchestrator:
         # Initialize MAP-Elites Diversity Archive
         self.map_elites = MAPElitesArchive()
 
-        # Initialize Meta-Agent (share live FrontierArchive so depth tiers stay in sync)
+        # Initialize Meta-Agent & Two-Pass Advisory Critic
         self.meta_agent = SwarmMetaAgent(
             provider=self.provider,
             model=self.model,
@@ -94,8 +102,6 @@ class SwarmCampaignOrchestrator:
             db_path=self.db_path,
             theories_store=self.theories,
         )
-        self.champion_policy_id: str | None = self._load_latest_champion_id()
-        self.last_champion_runs: list[dict[str, Any]] = []
 
         # Initialize Multi-Core Persistent Eval Pool
         self.eval_pool = PersistentEvalPool(
@@ -105,19 +111,6 @@ class SwarmCampaignOrchestrator:
             benchmark=self.benchmark,
         )
 
-    def _load_latest_champion_id(self) -> str | None:
-        try:
-            con = connect_db(self.db_path, read_only=True)
-            try:
-                row = con.execute(
-                    "SELECT policy_id FROM policies WHERE is_promoted = TRUE ORDER BY generation DESC LIMIT 1"
-                ).fetchone()
-                return str(row[0]) if row and row[0] else None
-            finally:
-                con.close()
-        except Exception:
-            return None
-
     def close(self) -> None:
         """Shuts down worker pool and logs completion."""
         try:
@@ -125,14 +118,50 @@ class SwarmCampaignOrchestrator:
         except Exception:
             pass
 
+    def _delete_batch_artifacts(self, batch_id: str) -> None:
+        """Removes draft run/tick/function_stats rows when replacing a batch after Meta-Agent revision."""
+        try:
+            con = connect_db(self.db_path, read_only=False)
+            try:
+                con.execute(
+                    "DELETE FROM ticks WHERE run_id IN (SELECT run_id FROM runs WHERE batch_id = ?)",
+                    [batch_id],
+                )
+                con.execute("DELETE FROM runs WHERE batch_id = ?", [batch_id])
+                con.execute("DELETE FROM function_stats WHERE batch_id = ?", [batch_id])
+            finally:
+                con.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _extract_batch_metrics(
+        batch_eval: BatchEvaluation, runs: list[Any]
+    ) -> dict[str, Any]:
+        return {
+            "avg_depth": float(batch_eval.get("avg_depth", 1.0)),
+            "p90_depth": float(batch_eval.get("p90_depth", 1.0)),
+            "max_depth": int(batch_eval.get("max_depth", 1)),
+            "avg_score": float(batch_eval.get("avg_score", 0.0)),
+            "max_score": int(batch_eval.get("max_score", 0)),
+            "avg_turns": float(batch_eval.get("avg_turns", 0.0)),
+            "seeds_evaluated": len(runs),
+            "is_early_stopped": bool(batch_eval.get("early_stopped", False)),
+            "pilot_best_delta": 0.0,
+            "total_cost_usd": 0.0,
+        }
+
     def run_generation(self, generation: int) -> dict[str, Any]:
         """
         Executes a single generation of the Hierarchical Swarm loop:
-        1. Meta-Agent discovers dynamic macro-categories from empirical DuckDB bottlenecks.
-        2. Dispatches concurrent workers to formulate, code, and test on frontier checkpoints.
-        3. Meta-Agent integrates worker reflection reports into unified Behavior Tree policy.
-        4. PersistentEvalPool evaluates master policy across seeds.
-        5. Logs batch to DuckDB and extracts new frontier checkpoints and MAP-Elites niches.
+        1. Critic Pass 1 (`guide_before_generation`): First agent called; produces high-level guide.
+        2. Meta-Agent discovers dynamic macro-categories informed by Critic Pass 1.
+        3. Concurrent workers explore hypotheses on frontier checkpoints & failure fixtures.
+        4. Meta-Agent integrates worker reports into initial Behavior Tree policy.
+        5. PersistentEvalPool evaluates draft policy across paired seeds and logs to DuckDB.
+        6. Critic Pass 2 (`review_after_assembly`): Compares draft results & actions vs prior generations.
+        7. Meta-Agent Post-Critic Revision (`revise_policy_with_critic`): Meta-Agent decides whether
+           to revise `policy.py` / `skills/*.py` (zero hardcoded orchestrator rollbacks).
         """
         t0 = time.time()
         ui.header(f"LOX Swarm Campaign - Generation {generation}")
@@ -152,26 +181,25 @@ class SwarmCampaignOrchestrator:
             else {}
         )
 
-        # 0. Read-Only Critic Diagnostician (investigates DuckDB/diffs/wiki before category discovery)
-        diag_report = self.critic.diagnose_for_generation(
+        # 1. Critic Pass 1: Pre-Generation High-Level Guide (very first agent called)
+        pre_gen_guide = self.critic.guide_before_generation(
             generation=generation,
-            champion_policy_id=self.champion_policy_id,
             current_policy=current_policy,
             skills=initial_skills,
         )
 
-        # 1. Dynamic Macro-Category Discovery (tool-enabled; agent investigates DB & codebase itself)
+        # 2. Dynamic Macro-Category Discovery (informed by Critic Pass 1)
         categories = self.meta_agent.discover_macro_categories(
             generation=generation,
             n_categories=max(1, int(self.num_workers)),
             current_policy=current_policy,
             skills=initial_skills,
-            diagnostic_report=diag_report,
+            pre_gen_guide=pre_gen_guide,
         )
         cat_names = [c["category_id"] for c in categories]
         ui.info(f"Gen {generation}: Active Categories: {cat_names}")
 
-        # 2. Concurrent Worker Exploration
+        # 3. Concurrent Worker Exploration
         worker_reports: dict[str, dict[str, Any]] = {}
         theories_path = os.path.join(self.workspace_dir, "theories.lance")
 
@@ -187,7 +215,6 @@ class SwarmCampaignOrchestrator:
                 frontier_dir=self.frontier_dir,
                 max_turns=self.turns_per_worker,
             )
-            # Sample relevant checkpoint matching target depth tier
             target_depth = cat.get("target_depth_tier", (1, 2))[0]
             cp = self.frontier.sample_checkpoint(min_depth=target_depth)
             return worker.run_cycle(
@@ -212,15 +239,13 @@ class SwarmCampaignOrchestrator:
                 except Exception as e:
                     ui.warn(f"Worker [{c_id}] failed: {e}")
 
-        # 3. Meta-Agent Policy Synthesis & Modular Skill Assembly
+        # 4. Meta-Agent Initial Policy Assembly
         master_policy_code = self.meta_agent.assemble_policy(
             generation=generation,
             worker_reports=worker_reports,
             current_policy=current_policy,
             skills_dir=skills_dir,
-            eval_pool=self.eval_pool if generation > 1 else None,
-            baseline_runs=self.last_champion_runs if generation > 1 else None,
-            diagnostic_report=diag_report,
+            pre_gen_guide=pre_gen_guide,
         )
         policy_path.write_text(master_policy_code, encoding="utf-8")
         skills_dict = (
@@ -233,16 +258,17 @@ class SwarmCampaignOrchestrator:
             else {}
         )
         ui.info(
-            f"Gen {generation}: Master policy saved to `{policy_path}` ({len(skills_dict)} skill modules in `{skills_dir}`)."
+            f"Gen {generation}: Draft master policy saved to `{policy_path}` ({len(skills_dict)} skill modules in `{skills_dir}`)."
         )
 
-        # 4. Multi-Core Paired Evaluation Batch on PersistentEvalPool
+        # 5. Evaluate Draft Policy on Paired Seeds & Persist to DuckDB
         ui.info(
             f"Gen {generation}: Evaluating master policy on {self.seeds_per_batch} paired seeds..."
         )
         seeds = [1000 + i for i in range(self.seeds_per_batch)]
+        batch_id = f"batch_swarm_g{generation}_{int(time.time())}"
         batch_eval: BatchEvaluation = self.eval_pool.evaluate_batch(
-            batch_id=f"batch_swarm_g{generation}_{int(time.time())}",
+            batch_id=batch_id,
             policy_code=master_policy_code,
             macros_code="",
             skills=skills_dict,
@@ -251,23 +277,12 @@ class SwarmCampaignOrchestrator:
             record_ticks=True,
         )
 
-        # 5. Log Candidate Batch & Run Read-Only Critic Gate
         runs = batch_eval.get("runs", [])
-        batch_id = str(batch_eval.get("batch_id", f"batch_swarm_g{generation}"))
-        batch_metrics = {
-            "avg_depth": float(batch_eval.get("avg_depth", 1.0)),
-            "p90_depth": float(batch_eval.get("p90_depth", 1.0)),
-            "max_depth": int(batch_eval.get("max_depth", 1)),
-            "avg_score": float(batch_eval.get("avg_score", 0.0)),
-            "max_score": int(batch_eval.get("max_score", 0)),
-            "avg_turns": float(batch_eval.get("avg_turns", 0.0)),
-            "seeds_evaluated": len(runs),
-            "is_early_stopped": bool(batch_eval.get("early_stopped", False)),
-            "pilot_best_delta": 0.0,
-            "total_cost_usd": 0.0,
-        }
+        batch_id = str(batch_eval.get("batch_id", batch_id))
+        batch_metrics = self._extract_batch_metrics(batch_eval, runs)
         policy_id = f"policy_swarm_g{generation}"
-        parent_id = self.champion_policy_id or f"policy_swarm_g{max(0, generation - 1)}"
+        parent_id = f"policy_swarm_g{max(0, generation - 1)}"
+
         self.db_logger.save_policy(
             policy_id=policy_id,
             generation=generation,
@@ -277,7 +292,7 @@ class SwarmCampaignOrchestrator:
             params={},
             avg_depth=float(batch_metrics["avg_depth"]),
             max_depth=int(batch_metrics["max_depth"]),
-            is_promoted=False,
+            is_promoted=True,
             skills=skills_dict,
         )
         log_res = self.db_logger.save_batch(
@@ -290,55 +305,77 @@ class SwarmCampaignOrchestrator:
             runs=runs,
             episodes_discarded=int(batch_eval.get("episodes_discarded", 0)),
             batch_metrics=batch_metrics,
-            verdict={"passed": False, "reason": "Pending Critic Gate"},
+            verdict={"passed": True, "reason": "Swarm Generation Evaluation"},
         )
 
-        gate = self.critic.evaluate_and_gate(
+        # 6. Critic Pass 2: Post-Assembly Comparative Review
+        post_critique = self.critic.review_after_assembly(
             generation=generation,
             batch_id=batch_id,
             candidate_policy_id=policy_id,
-            champion_policy_id=self.champion_policy_id,
+            current_policy=master_policy_code,
+            skills=skills_dict,
         )
-        promoted = gate.decision == "PROMOTE"
-        if promoted:
-            self.champion_policy_id = policy_id
-            self.last_champion_runs = [
-                dict(r) if isinstance(r, dict) else r.__dict__ for r in runs
-            ]
-            try:
-                con = connect_db(self.db_path, read_only=False)
-                try:
-                    con.execute(
-                        "UPDATE policies SET is_promoted = TRUE WHERE policy_id = ?",
-                        [policy_id],
-                    )
-                    con.execute(
-                        "UPDATE batches SET hypothesis_passed = TRUE WHERE batch_id = ?",
-                        [batch_id],
-                    )
-                finally:
-                    con.close()
-            except Exception:
-                pass
-            ui.info(f"Critic Gate: PROMOTED `{policy_id}` ({gate.reason})")
-        else:
-            ui.warn(
-                f"Critic Gate: ROLLED BACK `{policy_id}` -> `{gate.target_policy_id}` ({gate.reason})"
-            )
-            snap = self.db_logger.load_policy_snapshot(gate.target_policy_id)
-            if snap is not None:
-                champ_code, champ_skills = snap
-                policy_path.write_text(champ_code, encoding="utf-8")
-                if skills_dir.exists():
-                    for p in skills_dir.glob("*.py"):
-                        if p.stem != "__init__":
-                            p.unlink()
-                    for sk_name, sk_code in champ_skills.items():
-                        (skills_dir / f"{sk_name}.py").write_text(
-                            sk_code, encoding="utf-8"
-                        )
 
-        # 6. Extract New Frontier Checkpoints from High-Performing Runs
+        # 7. Meta-Agent Post-Critic Revision (Meta-Agent decides; zero hardcoded rollbacks)
+        revised_code, revised_skills, was_revised = (
+            self.meta_agent.revise_policy_with_critic(
+                generation=generation,
+                draft_policy=master_policy_code,
+                skills_dir=skills_dir,
+                skills=skills_dict,
+                post_critique=post_critique,
+                pre_gen_guide=pre_gen_guide,
+            )
+        )
+        if was_revised:
+            master_policy_code = revised_code
+            skills_dict = revised_skills
+            policy_path.write_text(master_policy_code, encoding="utf-8")
+            ui.info(
+                f"Gen {generation}: Re-evaluating Post-Critic revised policy on {self.seeds_per_batch} paired seeds..."
+            )
+            batch_eval = self.eval_pool.evaluate_batch(
+                batch_id=batch_id,
+                policy_code=master_policy_code,
+                macros_code="",
+                skills=skills_dict,
+                target_episodes=self.seeds_per_batch,
+                priority_seeds=seeds,
+                record_ticks=True,
+            )
+            runs = batch_eval.get("runs", [])
+            batch_metrics = self._extract_batch_metrics(batch_eval, runs)
+            self._delete_batch_artifacts(batch_id)
+            self.db_logger.save_policy(
+                policy_id=policy_id,
+                generation=generation,
+                mode="SWARM",
+                policy_code=master_policy_code,
+                macros_code="",
+                params={},
+                avg_depth=float(batch_metrics["avg_depth"]),
+                max_depth=int(batch_metrics["max_depth"]),
+                is_promoted=True,
+                skills=skills_dict,
+            )
+            log_res = self.db_logger.save_batch(
+                batch_id=batch_id,
+                generation=generation,
+                mode="SWARM",
+                parent_policy_id=parent_id,
+                candidate_policy_id=policy_id,
+                target_functions=[],
+                runs=runs,
+                episodes_discarded=int(batch_eval.get("episodes_discarded", 0)),
+                batch_metrics=batch_metrics,
+                verdict={
+                    "passed": True,
+                    "reason": "Swarm Post-Critic Revised Evaluation",
+                },
+            )
+
+        # 8. Extract New Frontier Checkpoints from High-Performing Runs
         new_cps = 0
         for ep in runs:
             ep_dict = dict(ep) if isinstance(ep, dict) else ep.__dict__
@@ -364,7 +401,7 @@ class SwarmCampaignOrchestrator:
                     )
                     new_cps += 1
 
-        # 7. Ingest into MAP-Elites Diversity Archive
+        # 9. Ingest into MAP-Elites Diversity Archive
         avg_depth = float(batch_eval.get("avg_depth", 1.0))
         max_d = int(batch_eval.get("max_depth", 1))
         avg_score = float(batch_eval.get("avg_score", 0.0))
@@ -405,6 +442,7 @@ class SwarmCampaignOrchestrator:
             "new_frontier_checkpoints": new_cps,
             "elapsed_sec": elapsed,
             "worker_reports": len(worker_reports),
+            "revised_after_critic": was_revised,
         }
 
     def run(self, generations: int = 5) -> list[dict[str, Any]]:

@@ -1,7 +1,8 @@
 """
-Meta-Agent Coordinator for the LOX Multi-Agent Swarm.
-Integrates reflection reports from specialized category workers (dialog, threat, survival, navigation),
-queries DuckDB for causal metrics, and assembles the unified Behavior Tree policy.
+Meta-Agent Coordinator for the LOX Multi-Agent Swarm ("Hard Code Nothing").
+Receives Pass 1 high-level guidance from SwarmCriticAgent, dynamically discovers
+specialist worker categories, integrates worker subtrees into `skills/` and `policy.py`,
+and receives Pass 2 comparative feedback from SwarmCriticAgent to finalize the policy.
 """
 
 from __future__ import annotations
@@ -14,14 +15,40 @@ from typing import Any
 
 from lox.author.agent import AuthorAgent
 from lox.author.prompts import build_system_prompt
-from lox.db.schema import connect_db
+from lox.author.swarm_critic import build_swarm_diagnostic_digest
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
 from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
+from lox.lang.bt import extract_runner_leaf_errors
 from lox.lang.compiler import compile_policy_package
-from lox.lang.validator import validate_python_code
+from lox.lang.validator import is_ast_equivalent, validate_python_code
 from lox.ui.console import ui
+
+
+def _minimal_bt_stub(generation: int) -> str:
+    """Minimal domain-agnostic BehaviorTree coordinator stub (used for mock mode or empty bootstrap fallback)."""
+    return f"""# Master Behavior Tree Policy (Gen {generation})
+from lox.env.actions import Action
+from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
+
+
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+
+        def explore_step(state, bb):
+            return Action.SEARCH
+
+        root = PrioritySelector(
+            [ActionLeaf(explore_step, name="ExploreLeaf")],
+            name="MasterSelector",
+        )
+        self.tree = BehaviorTree(root=root, blackboard=self.blackboard)
+
+    def step(self, state):
+        return self.tree.tick(state) or Action.SEARCH
+"""
 
 
 class SwarmMetaAgent:
@@ -48,18 +75,51 @@ class SwarmMetaAgent:
         )
         self.author.tools.theories_store = self.theories
 
+    @staticmethod
+    def _parse_categories_json(raw_txt: str) -> list[dict[str, Any]]:
+        """Robustly extracts a JSON array of category dicts from LLM output."""
+        txt = re.sub(
+            r"<think>.*?</think>", "", str(raw_txt or ""), flags=re.DOTALL
+        ).strip()
+        if "```" in txt:
+            m = re.search(r"```(?:json)?\s*\n(.*?)```", txt, flags=re.DOTALL)
+            if m:
+                txt = m.group(1).strip()
+        for candidate in (txt,):
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, list):
+                    return [x for x in parsed if isinstance(x, dict)]
+                if isinstance(parsed, dict) and isinstance(
+                    parsed.get("categories"), list
+                ):
+                    return [x for x in parsed["categories"] if isinstance(x, dict)]
+            except Exception:
+                pass
+        m_arr = re.search(r"\[.*\]", txt, flags=re.DOTALL)
+        if m_arr:
+            try:
+                parsed = json.loads(m_arr.group(0))
+                if isinstance(parsed, list):
+                    return [x for x in parsed if isinstance(x, dict)]
+            except Exception:
+                pass
+        return []
+
     def discover_macro_categories(
         self,
         generation: int,
         n_categories: int = 4,
         current_policy: str = "",
         skills: dict[str, str] | None = None,
+        pre_gen_guide: Any = None,
         diagnostic_report: Any = None,
     ) -> list[dict[str, Any]]:
         """
         Dynamically derives macro-categories for the upcoming generation via tool-enabled
-        investigation of DuckDB, LanceDB, policy.py, and skills/ (zero pre-fed summaries).
+        investigation of DuckDB, LanceDB, policy.py, and skills/ informed by Critic Pass 1.
         """
+        guide = pre_gen_guide if pre_gen_guide is not None else diagnostic_report
         ui.info(
             f"Meta-Agent: Dynamically analyzing DuckDB & codebase for Generation {generation}..."
         )
@@ -78,20 +138,25 @@ class SwarmMetaAgent:
 
         categories: list[dict[str, Any]] = []
         if self.provider != "mock":
-            diag_block = (
-                f"\n{diagnostic_report.to_prompt_block()}\n"
-                if diagnostic_report is not None
-                and hasattr(diagnostic_report, "to_prompt_block")
+            guide_block = (
+                f"\n{guide.to_prompt_block()}\n"
+                if guide is not None and hasattr(guide, "to_prompt_block")
                 else ""
             )
+            empty_campaign = self.author.tools._campaign_tables_empty()
+            db_guidance = (
+                "Campaign tables (`runs`, `batches`, `ticks`, `function_stats`, `policies`) are currently empty — "
+                "call BOTH `query_wiki` and `query_db` on `expert_runs` / `expert_ticks` (real human ascensions)."
+                if empty_campaign
+                else "Inspect `batches`, `runs`, `function_stats`, `policies`, `expert_runs`, and `query_wiki` / `query_monster` / `query_item`."
+            )
             prompt = f"""Design {n_categories} specialist worker categories for Generation {generation}.
-{diag_block}
-Do NOT assume what the bottlenecks or regressions are. Follow this investigation order:
-1. **FIRST (MANDATORY)**: Call `query_wiki` (and `query_monster` / `query_item` as needed) to research authoritative NetHack 3.6.6 game mechanics BEFORE calling `query_db` or `query_theories`.
-2. **SECOND**: Call `query_db` (pass ONE `SELECT` statement per call — never multiple `;`-separated queries).
-   - {"In Generation 1, campaign tables (`runs`, `batches`, `ticks`, `function_stats`, `policies`) are empty and DISALLOWED — you MUST query ONLY `expert_runs` and `expert_ticks` (real human ascensions)." if generation == 1 else "Inspect `batches`, `runs`, `function_stats`, `policies`, and `expert_runs` / `expert_ticks`."}
-3. **THIRD**: Check `policy.py` (`query_policy_docs('policy')`) and `skills/` (`query_policy_docs('skills')` / `read_skill`) to see what already exists and where branches are failing or conflicting. Only check `query_theories` AFTER `query_wiki` and `query_db`.
-4. Reuse an existing `category_id` (skill module name) when a worker should refine or fix an existing skill, or introduce a new `category_id` when a distinct capability is missing.
+{guide_block}
+Do NOT assume what the bottlenecks or regressions are. Follow this investigation protocol:
+1. Call `query_db` (pass ONE `SELECT` statement per call — never multiple `;`-separated queries) and `query_wiki` / `query_monster` / `query_item`:
+   - {db_guidance}
+2. Check `policy.py` (`query_policy_docs('policy')`) and `skills/` (`query_policy_docs('skills')` / `read_skill`) to see what already exists and where branches are failing, starving, or conflicting.
+3. Reuse an existing `category_id` (skill module name) when a worker should refine or fix an existing skill, or introduce a new `category_id` when a distinct capability is missing.
 
 ### Output Format:
 After finishing your tool calls, return ONLY a valid JSON array of {n_categories} objects, each with:
@@ -104,67 +169,55 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
 """
             try:
                 raw_txt = self.author.run_tool_session(
-                    system_prompt=build_system_prompt(self.db_path),
+                    system_prompt=build_system_prompt(self.db_path, is_swarm=True),
                     user_prompt=prompt,
                     max_tool_turns=5,
                     required_tools=(
                         ["query_wiki", "query_db:expert_runs"]
-                        if generation == 1
+                        if empty_campaign
                         else None
                     ),
                     generation=generation,
                     session_mode="META_DISCOVERY",
                     agent_role_override="meta_agent",
                 )
-                if "```" in raw_txt:
-                    import re
-
-                    m = re.search(
-                        r"```(?:json)?\s*\n(.*?)```", raw_txt, flags=re.DOTALL
-                    )
-                    if m:
-                        raw_txt = m.group(1).strip()
-                parsed = json.loads(raw_txt)
-                if isinstance(parsed, list):
-                    for item in parsed[:n_categories]:
-                        if isinstance(item, dict) and item.get("category_id"):
-                            tier = item.get("target_depth_tier") or [
-                                1,
-                                active_frontier_depth,
-                            ]
-                            if isinstance(tier, list) and len(tier) >= 2:
-                                tier_tup = (int(tier[0]), int(tier[1]))
-                            else:
-                                tier_tup = (1, active_frontier_depth)
-                            categories.append(
-                                {
-                                    "category_id": str(item["category_id"])
-                                    .strip()
-                                    .lower()
-                                    .replace(" ", "_"),
-                                    "name": str(
-                                        item.get("name") or item["category_id"]
-                                    ),
-                                    "description": str(item.get("description") or ""),
-                                    "target_depth_tier": tier_tup,
-                                    "target_metrics": [
-                                        str(m)
-                                        for m in (
-                                            item.get("target_metrics")
-                                            or ["max_depth", "unique_tiles"]
-                                        )
-                                    ],
-                                    "blackboard_keys": [
-                                        str(k)
-                                        for k in (item.get("blackboard_keys") or [])
-                                    ],
-                                }
-                            )
+                parsed_items = self._parse_categories_json(raw_txt)
+                for item in parsed_items[:n_categories]:
+                    if item.get("category_id"):
+                        tier = item.get("target_depth_tier") or [
+                            1,
+                            active_frontier_depth,
+                        ]
+                        if isinstance(tier, list) and len(tier) >= 2:
+                            tier_tup = (int(tier[0]), int(tier[1]))
+                        else:
+                            tier_tup = (1, active_frontier_depth)
+                        categories.append(
+                            {
+                                "category_id": str(item["category_id"])
+                                .strip()
+                                .lower()
+                                .replace(" ", "_"),
+                                "name": str(item.get("name") or item["category_id"]),
+                                "description": str(item.get("description") or ""),
+                                "target_depth_tier": tier_tup,
+                                "target_metrics": [
+                                    str(m)
+                                    for m in (
+                                        item.get("target_metrics")
+                                        or ["max_depth", "unique_tiles"]
+                                    )
+                                ],
+                                "blackboard_keys": [
+                                    str(k) for k in (item.get("blackboard_keys") or [])
+                                ],
+                            }
+                        )
             except Exception as exc:
                 ui.warn(f"Meta-Agent LLM category discovery fallback ({exc})")
 
         if not categories:
-            # Domain-agnostic structural fallback (mock mode or LLM parse failure)
+            # Neutral domain-agnostic structural fallback (mock mode or LLM parse failure)
             generic_specs = [
                 (
                     "progression_and_exploration",
@@ -175,28 +228,28 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                     ["target_tile", "frontier_path"],
                 ),
                 (
-                    "risk_and_survival",
-                    "Risk & Threat Response",
-                    "Mitigates top termination causes and preserves HP under hostile encounters.",
+                    "threat_and_survival",
+                    "Threat Response & Survival",
+                    "Mitigates top termination causes and preserves HP under encounters.",
                     (1, active_frontier_depth),
-                    ["final_hp", "turns", "killed_monsters"],
-                    ["danger_level", "last_target"],
+                    ["final_hp", "turns", "max_depth"],
+                    ["active_threat", "last_target"],
                 ),
                 (
-                    "resource_management",
-                    "Resource & State Optimization",
-                    "Improves resource utilization and endurance across recorded episodes.",
+                    "resource_and_equipment",
+                    "Resource & Equipment Management",
+                    "Improves resource utilization, nutrition, and equipment state across episodes.",
                     (1, active_frontier_depth),
                     ["turns", "final_ac", "xp_level"],
-                    ["resource_needed", "emergency_action"],
+                    ["resource_state", "equipped_state"],
                 ),
                 (
-                    "interactive_state_handling",
-                    "Interactive State & Stall Recovery",
-                    "Resolves blocking prompts and zero-progress stalls cleanly.",
+                    "environment_interaction",
+                    "Environment & Feature Interaction",
+                    "Handles environmental features, transitions, and interactive prompts cleanly.",
                     (1, max(2, active_frontier_depth)),
-                    ["auto_esc_count", "stagnation_turns"],
-                    ["in_prompt", "stall_recovery"],
+                    ["max_depth", "unique_tiles", "auto_esc_count"],
+                    ["feature_target", "prompt_state"],
                 ),
             ]
             for cid, cname, cdesc, ctier, cmetrics, cbkeys in generic_specs[
@@ -247,7 +300,8 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
     ) -> tuple[bool, str]:
         """
         Validates Python syntax/AST, compiles the policy (with optional skill modules),
-        and executes a smoke test in NetHackHarness for `steps` ticks.
+        executes a smoke test in NetHackHarness for `steps` ticks, and verifies that
+        no BehaviorTree leaf threw a swallowed runtime exception on `blackboard.leaf_errors`.
         """
         try:
             validate_python_code(code)
@@ -268,6 +322,13 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                     st, done, _ = harness.step(act)
                     if done or harness.done:
                         break
+                leaf_errors = extract_runner_leaf_errors(runner)
+                if leaf_errors:
+                    err_fmt = "; ".join(f"{n}: {e}" for n, e in leaf_errors[:5])
+                    return (
+                        False,
+                        f"BehaviorTree leaf raised runtime exception during verification: {err_fmt}",
+                    )
                 if steps_run >= 10 and non_wait_actions == 0 and not harness.done:
                     return (
                         False,
@@ -289,8 +350,6 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         Extracts each worker's winning subtree into a standalone skill module under `skills/<role>.py`
         so `policy.py` stays a lean Behavior Tree coordinator importing `skills.<role>`.
         """
-        from pathlib import Path
-
         skill_modules: dict[str, str] = {}
         out_dir = Path(skills_dir) if skills_dir else None
         if out_dir is not None:
@@ -322,7 +381,6 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
             mod_code = f"# Auto-generated modular skill for specialist `{role}`\n{header}{raw_code}\n"
             try:
                 validate_python_code(mod_code)
-                # Verify runtime import/execution in isolation before writing to skills/
                 probe_policy = (
                     "from lox.env.actions import Action\n"
                     "class Policy:\n"
@@ -330,7 +388,7 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                     "        return Action.WAIT\n"
                 )
                 compile_policy_package(
-                    probe_policy, skills={safe_name: mod_code}
+                    probe_policy, skills={**skill_modules, safe_name: mod_code}
                 ).create_runner()
             except Exception as exc:
                 ui.warn(
@@ -342,51 +400,37 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                 (out_dir / f"{safe_name}.py").write_text(mod_code, encoding="utf-8")
         return skill_modules
 
-    def _query_function_telemetry(self) -> str:
-        """Queries DuckDB for the previous generation's function turn shares."""
-        try:
-            con = connect_db(self.db_path, read_only=True)
+    @staticmethod
+    def _apply_proposal_skills(
+        proposal: Any,
+        skill_modules: dict[str, str],
+        skills_dir: str | Path | None = None,
+    ) -> None:
+        """Applies any `<skill_code module="...">` updates emitted by the Meta-Agent."""
+        updates: dict[str, str] = {}
+        if getattr(proposal, "skill_modules", None):
+            updates.update(proposal.skill_modules)
+        s_name_single = getattr(proposal, "skill_name", None) or (
+            (getattr(proposal, "hypothesis", None) or {}).get("skill_module")
+        )
+        s_code_single = getattr(proposal, "skill_code", "")
+        if s_name_single and s_code_single:
+            clean_s = re.sub(r"[^a-zA-Z0-9_]", "_", str(s_name_single).lower()).strip(
+                "_"
+            )
+            if clean_s:
+                updates[clean_s] = s_code_single
+
+        for s_name, s_code in updates.items():
             try:
-                prev_gen_row = con.execute(
-                    "SELECT max(generation) FROM function_stats"
-                ).fetchone()
-                prev_gen = (
-                    prev_gen_row[0]
-                    if prev_gen_row and prev_gen_row[0] is not None
-                    else None
-                )
-                if prev_gen is None:
-                    return ""
-                fn_rows = con.execute(
-                    """
-                    SELECT function_name, episodes_triggered, total_turns_active,
-                           coalesce(liblit_failure_score, 0.0),
-                           coalesce(stagnation_share, 0.0),
-                           coalesce(livelock_score, 0.0)
-                    FROM function_stats
-                    WHERE generation = ? AND total_turns_active > 0
-                    ORDER BY total_turns_active DESC
-                    LIMIT 12
-                    """,
-                    [prev_gen],
-                ).fetchall()
-                tot_turns = sum(int(r[2]) for r in fn_rows) or 1
-                if not fn_rows:
-                    return ""
-                fn_lines = "\n".join(
-                    f"- `{r[0]}`: {r[2]} turns ({100.0 * int(r[2]) / tot_turns:.1f}% share), "
-                    f"episodes={r[1]}, stagnation_share={float(r[4]):.2f}, "
-                    f"livelock={float(r[5]):.2f}, liblit_fail={float(r[3]):.3f}"
-                    for r in fn_rows
-                )
-                return (
-                    f"\n### Function Telemetry (Gen {prev_gen} — separate healthy workhorse share from stagnation/livelock/failure):\n"
-                    f"{fn_lines}\n"
-                )
-            finally:
-                con.close()
-        except Exception:
-            return ""
+                validate_python_code(s_code, filename=f"skills/{s_name}.py")
+            except Exception as exc:
+                ui.warn(f"Meta-Agent: Skipping invalid skill update `{s_name}` ({exc})")
+                continue
+            skill_modules[s_name] = s_code
+            if skills_dir is not None:
+                Path(skills_dir).mkdir(parents=True, exist_ok=True)
+                (Path(skills_dir) / f"{s_name}.py").write_text(s_code, encoding="utf-8")
 
     def assemble_policy(
         self,
@@ -397,13 +441,14 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         skills_dir: str | Any = None,
         eval_pool: Any = None,
         baseline_runs: list[dict[str, Any]] | None = None,
+        pre_gen_guide: Any = None,
         diagnostic_report: Any = None,
     ) -> str:
         """
-        Gathers worker reports from LanceDB, checks DuckDB metrics, and synthesizes the master Policy code.
-        Runs compiler-in-the-loop and live NetHackHarness verification with up to `max_repair_turns`
-        self-repair turns if candidate code fails.
+        Gathers worker reports from LanceDB, checks DuckDB metrics & Critic Pass 1 guide,
+        and synthesizes the draft master Policy code.
         """
+        guide = pre_gen_guide if pre_gen_guide is not None else diagnostic_report
         if worker_reports is None:
             worker_reports = self.theories.get_latest_reports(generation=generation)
 
@@ -412,79 +457,20 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
             f"{len(worker_reports)} worker report(s): {list(worker_reports.keys())}"
         )
 
-        # Standard clean Behavior Tree master template
-        default_template = f"""# Master Behavior Tree Policy - Synthesized by Meta-Agent (Gen {generation})
-import numpy as np
-from lox.env.actions import Action, DIR_DELTAS, seq
-from lox.lang.bt import BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, Blackboard
-
-class Policy:
-    def __init__(self):
-        self.blackboard = Blackboard()
-
-        # Priority 1: Interactive Prompts & --More-- Pagination
-        def dialog_action(state):
-            if getattr(state, "waiting_for_space", False):
-                return Action.SPACE
-            if getattr(state, "in_text_prompt", False) or getattr(state, "in_yn_prompt", False):
-                return Action.ESC
-            return None
-        self.node_dialog = ActionLeaf(dialog_action, name="DialogLeaf")
-
-        # Priority 2: Tactical Threat & Melee Combat
-        def threat_action(state, bb):
-            if hasattr(state, "adjacent_monsters"):
-                hostiles = state.adjacent_monsters(exclude_pets=True)
-                if hostiles:
-                    m = hostiles[0]
-                    bb.set_var("last_target", (m.y, m.x))
-                    return DIR_DELTAS.get((m.y - state.y, m.x - state.x), Action.WAIT)
-            return None
-        self.node_threat = ActionLeaf(threat_action, name="ThreatLeaf")
-
-        # Priority 3: Survival & Nutrition
-        def survival_action(state, bb):
-            return None
-        self.node_survival = ActionLeaf(survival_action, name="SurvivalLeaf")
-
-        # Priority 4: Spatial Exploration & Stair Descent
-        def navigation_action(state, bb):
-            if state.char_at(state.y, state.x) == ">":
-                return Action.DOWN
-            stairs = np.argwhere(state.chars == ord(">"))
-            if len(stairs) > 0:
-                ty, tx = stairs[0]
-                dy = int(np.sign(ty - state.y))
-                dx = int(np.sign(tx - state.x))
-                return DIR_DELTAS.get((dy, dx), Action.SEARCH)
-            return Action.SEARCH
-        self.node_navigation = ActionLeaf(navigation_action, name="NavigationLeaf")
-
-        # Assemble Master Root Priority Selector
-        root = PrioritySelector([
-            self.node_dialog,
-            self.node_threat,
-            self.node_survival,
-            self.node_navigation,
-        ], name="MasterSelector")
-
-        self.tree = BehaviorTree(root=root, blackboard=self.blackboard)
-
-    def step(self, state):
-        return self.tree.tick(state)
-"""
+        fallback_code = (
+            current_policy.strip()
+            if current_policy and current_policy.strip()
+            else _minimal_bt_stub(generation)
+        )
         skill_modules = self._build_skill_modules(worker_reports, skills_dir=skills_dir)
         if self.provider == "mock":
-            master_policy_code = default_template
+            master_policy_code = fallback_code
             is_valid, diag = self.verify_policy(
                 master_policy_code, skills=skill_modules
             )
             if not is_valid:
-                raise RuntimeError(
-                    f"Default master template failed verification: {diag}"
-                )
+                master_policy_code = _minimal_bt_stub(generation)
         else:
-            # Build synthesis prompt summarizing worker discoveries & comparative hypotheses
             reports_summary = []
             for role, rep in worker_reports.items():
                 code_snip = rep.get("best_code", "")
@@ -505,19 +491,28 @@ class Policy:
                     )
 
             context = "\n".join(reports_summary)
-            diag_block = (
-                f"\n{diagnostic_report.to_prompt_block()}\n\n"
-                if diagnostic_report is not None
-                and hasattr(diagnostic_report, "to_prompt_block")
+            guide_block = (
+                f"\n{guide.to_prompt_block()}\n\n"
+                if guide is not None and hasattr(guide, "to_prompt_block")
                 else ""
             )
+            if not guide_block:
+                auto_digest = build_swarm_diagnostic_digest(
+                    self.db_path,
+                    current_policy=current_policy,
+                    target_generation=generation - 1 if generation > 1 else None,
+                )
+                if auto_digest:
+                    guide_block = f"\n{auto_digest}\n\n"
+
             meta_prompt = (
                 f"You are the Meta-Agent Architect synthesizing the Generation {generation} master `class Policy`.\n"
-                f"{diag_block}"
-                f"Do NOT rely solely on worker proposals—prioritize `query_wiki`, `query_monster`, `query_item`, `query_db`, "
-                f"`read_policy`, `diff_policies`, `read_skill`, and `query_policy_docs` (over `query_theories`) to inspect "
+                f"{guide_block}"
+                f"Do NOT rely solely on worker proposals—use `query_db`, `read_policy`, `diff_policies`, `read_skill(skill_name, policy_id=...)`, "
+                f"`query_wiki`, `query_monster`, `query_item`, and `query_policy_docs` (over `query_theories`) to inspect "
                 f"`batches`, `runs` (`summary_digest`), `function_stats`, `policies`, `expert_runs`, and `skills/` yourself "
-                f"to see what is working, what regressed, and how branches interact.\n\n"
+                f"to see what is working, what regressed, and how branches interact.\n"
+                f'You can also emit `<skill_code module="name">...</skill_code>` if you want to directly repair or restore a skill module.\n\n'
                 f"Specialist subtrees are saved in `skills/` (see Hierarchical Skill Registry):\n\n{context}\n\n"
                 f"Ensure the master policy defines `class Policy` with `def __init__(self)` and `def step(self, state): return self.tree.tick(state)`."
             )
@@ -528,24 +523,13 @@ class Policy:
                 current_policy=current_policy,
                 batch_digest=meta_prompt,
                 skills=skill_modules,
-                pool=eval_pool,
-                baseline_runs=baseline_runs,
+                pool=None,
+                baseline_runs=None,
                 max_tool_turns=10,
             )
-            if proposal.skill_name and proposal.skill_code:
-                s_name = re.sub(
-                    r"[^a-zA-Z0-9_]", "_", proposal.skill_name.lower()
-                ).strip("_")
-                if s_name:
-                    skill_modules[s_name] = proposal.skill_code
-                    if skills_dir is not None:
-                        Path(skills_dir).mkdir(parents=True, exist_ok=True)
-                        (Path(skills_dir) / f"{s_name}.py").write_text(
-                            proposal.skill_code, encoding="utf-8"
-                        )
+            self._apply_proposal_skills(proposal, skill_modules, skills_dir=skills_dir)
             candidate_code = proposal.full_policy_code or proposal.raw_code_patch
 
-            # Live verification gate with self-repair turns
             is_valid, diag = self.verify_policy(candidate_code, skills=skill_modules)
             repair_turns = 0
             while not is_valid and repair_turns < max_repair_turns:
@@ -559,7 +543,12 @@ class Policy:
                     current_policy=candidate_code,
                     batch_digest=f"Self-Repair Required: Master policy failed verification:\n{diag}\n\n---\n{meta_prompt}",
                     skills=skill_modules,
+                    pool=None,
+                    baseline_runs=None,
                     max_tool_turns=4,
+                )
+                self._apply_proposal_skills(
+                    repair_proposal, skill_modules, skills_dir=skills_dir
                 )
                 candidate_code = (
                     repair_proposal.full_policy_code or repair_proposal.raw_code_patch
@@ -571,15 +560,14 @@ class Policy:
             if is_valid:
                 master_policy_code = candidate_code
                 ui.info(
-                    f"Meta-Agent: Successfully assembled and verified master Behavior Tree policy (Repairs: {repair_turns})."
+                    f"Meta-Agent: Successfully assembled and verified draft Behavior Tree policy (Repairs: {repair_turns})."
                 )
             else:
                 ui.warn(
-                    f"Meta-Agent: Repairs exhausted; falling back to default Behavior Tree template. Error was: {diag[:200]}"
+                    f"Meta-Agent: Repairs exhausted; retaining prior/fallback policy. Error was: {diag[:200]}"
                 )
-                master_policy_code = default_template
+                master_policy_code = fallback_code
 
-        # Save synthesis reflection into LanceDB
         self.theories.save_document(
             generation=generation,
             agent_role="meta_agent",
@@ -590,3 +578,135 @@ class Policy:
         )
 
         return master_policy_code
+
+    def revise_policy_with_critic(
+        self,
+        generation: int,
+        draft_policy: str,
+        skills_dir: str | Path | None,
+        skills: dict[str, str],
+        post_critique: Any,
+        pre_gen_guide: Any = None,
+        max_repair_turns: int = 3,
+    ) -> tuple[str, dict[str, str], bool]:
+        """
+        Receives Critic Pass 2's comparative review (`post_critique`) after `draft_policy`
+        has been evaluated against previous generations, allowing the Meta-Agent to decide
+        whether to keep `draft_policy` as-is or revise `policy.py` / `skills/*.py`.
+        Returns `(final_policy_code, final_skills_dict, was_modified)`.
+        """
+        updated_skills = dict(skills or {})
+        if self.provider == "mock" or post_critique is None:
+            return draft_policy, updated_skills, False
+
+        ui.info(
+            f"Meta-Agent: Reviewing Critic Pass 2 feedback for Generation {generation} "
+            f"(advisory needs_revision={getattr(post_critique, 'needs_revision', False)})..."
+        )
+        critique_block = (
+            post_critique.to_prompt_block()
+            if hasattr(post_critique, "to_prompt_block")
+            else str(post_critique)
+        )
+        pre_block = (
+            f"\n{pre_gen_guide.to_prompt_block()}\n"
+            if pre_gen_guide is not None and hasattr(pre_gen_guide, "to_prompt_block")
+            else ""
+        )
+        revision_prompt = (
+            f"You are the Meta-Agent Architect completing the Post-Critic Review for Generation {generation}.\n"
+            f"Your initial draft policy (`policy_swarm_g{generation}`) was evaluated on the batch seeds, and the Read-Only Critic "
+            f"has compared its results, actions, and `PrioritySelector` branch telemetry against previous generations:\n\n"
+            f"{critique_block}\n"
+            f"{pre_block}\n"
+            f"### Your Decision & Authority (Zero Hardcoded Rollbacks):\n"
+            f'- There are NO automatic rollbacks in the harness—YOU decide the final `class Policy` (and optional `<skill_code module="name">...</skill_code>` updates) for Generation {generation}.\n'
+            f"- If your draft policy `policy_swarm_g{generation}` improved or performed well and needs no changes, simply output the current `class Policy` unchanged.\n"
+            f"- If the Critic identified a regression, hijacking branch, `0-TURN` starved branch, or dropped capability compared to an earlier generation, use `query_db`, `diff_policies`, `read_policy`, `read_skill(skill_name, policy_id=...)`, and `dry_run_policy` to fix the issue or restore the working component from an earlier `policy_id`.\n"
+            f'- Output your final `class Policy` inside `<policy_code>...</policy_code>` (or a ```python ... ``` block), and any updated skill modules inside `<skill_code module="name">...</skill_code>`.'
+        )
+
+        try:
+            proposal = self.author.synthesize(
+                mode="SWARM_META",
+                generation=generation,
+                current_policy=draft_policy,
+                batch_digest=revision_prompt,
+                skills=updated_skills,
+                pool=None,
+                baseline_runs=None,
+                max_tool_turns=6,
+            )
+        except Exception as exc:
+            ui.warn(
+                f"Meta-Agent post-critic revision session failed ({exc}); keeping verified draft policy."
+            )
+            return draft_policy, updated_skills, False
+
+        cand_skills = dict(updated_skills)
+        self._apply_proposal_skills(proposal, cand_skills, skills_dir=None)
+        candidate_code = (
+            proposal.full_policy_code or proposal.raw_code_patch or draft_policy
+        )
+
+        skills_changed = set(cand_skills.keys()) != set(updated_skills.keys()) or any(
+            not is_ast_equivalent(cand_skills[k], updated_skills[k])
+            for k in cand_skills
+            if k in updated_skills
+        )
+        policy_changed = not is_ast_equivalent(candidate_code, draft_policy)
+        if not policy_changed and not skills_changed:
+            ui.info(
+                f"Meta-Agent: Confirmed Generation {generation} draft policy with no changes required."
+            )
+            return draft_policy, updated_skills, False
+
+        is_valid, diag = self.verify_policy(candidate_code, skills=cand_skills)
+        repair_turns = 0
+        while not is_valid and repair_turns < max_repair_turns:
+            repair_turns += 1
+            ui.warn(
+                f"Meta-Agent: Post-Critic revised policy failed verification; repairing ({repair_turns}/{max_repair_turns})...\nDiagnostic: {diag[:300]}"
+            )
+            rep_proposal = self.author.synthesize(
+                mode="SWARM_META",
+                generation=generation,
+                current_policy=candidate_code,
+                batch_digest=f"Self-Repair Required: Post-Critic revised policy failed verification:\n{diag}\n\n---\n{revision_prompt}",
+                skills=cand_skills,
+                pool=None,
+                baseline_runs=None,
+                max_tool_turns=3,
+            )
+            self._apply_proposal_skills(rep_proposal, cand_skills, skills_dir=None)
+            candidate_code = (
+                rep_proposal.full_policy_code
+                or rep_proposal.raw_code_patch
+                or candidate_code
+            )
+            is_valid, diag = self.verify_policy(candidate_code, skills=cand_skills)
+
+        if not is_valid:
+            ui.warn(
+                f"Meta-Agent: Post-Critic revision failed verification after {max_repair_turns} repair(s); keeping verified draft policy."
+            )
+            return draft_policy, updated_skills, False
+
+        if skills_dir is not None:
+            out_dir = Path(skills_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for k, v in cand_skills.items():
+                (out_dir / f"{k}.py").write_text(v, encoding="utf-8")
+
+        self.theories.save_document(
+            generation=generation,
+            agent_role="meta_agent",
+            doc_type="META_REVISION",
+            title=f"Meta-Agent Post-Critic Revision G{generation}",
+            content=f"### Revised Master Policy Code\n```python\n{candidate_code}\n```",
+            tags=["meta_agent", f"gen_{generation}", "post_critic_revision"],
+        )
+        ui.info(
+            f"Meta-Agent: Applied Post-Critic revision for Generation {generation} (Repairs: {repair_turns})."
+        )
+        return candidate_code, cand_skills, True

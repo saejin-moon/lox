@@ -162,6 +162,11 @@ def _safe_import(name: str, globals_dict=None, locals_dict=None, fromlist=(), le
     if root in allowed_map and root == name:
         return allowed_map[root]
     if root in allowed_map or root in ("skills", "lox"):
+        if root == "skills" and name != "skills" and name not in sys.modules:
+            avail_skills = sorted(k for k in sys.modules if k.startswith("skills."))
+            raise ImportError(
+                f"Skill module '{name}' not found. Available skills: {avail_skills or 'none'}"
+            )
         if not fromlist:
             if root in sys.modules:
                 return sys.modules[root]
@@ -493,6 +498,7 @@ class CompiledPolicy:
         for s_name, s_code_obj in self._skill_code_objs.items():
             s_mod = types.ModuleType(f"skills.{s_name}")
             s_mod.__dict__.update(ns)
+            s_mod.__name__ = f"skills.{s_name}"
             exec(s_code_obj, s_mod.__dict__)
             sys.modules[f"skills.{s_name}"] = s_mod
             setattr(skills_pkg, s_name, s_mod)
@@ -574,9 +580,15 @@ def compile_policy_package(
     )
 
 
-def compile_bt_subtree(code: str, filename: str = "subtree.py") -> Any:
+def compile_bt_subtree(
+    code: str,
+    filename: str = "subtree.py",
+    skills: dict[str, str] | None = None,
+) -> Any:
     """Validates and executes a standalone Behavior Tree subtree, returning the root node or instance."""
     tree = validate_python_code(code, filename=filename)
+    tree = PolicyInstrumentTransformer().visit(tree)
+    ast.fix_missing_locations(tree)
     tracer = ExecutionTracer()
     ns = _build_base_namespace(tracer)
     mod_obj = sys.modules.get("lox_policy")
@@ -585,32 +597,62 @@ def compile_bt_subtree(code: str, filename: str = "subtree.py") -> Any:
         sys.modules["lox_policy"] = mod_obj
     mod_obj.__dict__.update(ns)
 
+    if skills:
+        skills_pkg = sys.modules.get("skills")
+        if skills_pkg is None:
+            skills_pkg = types.ModuleType("skills")
+            sys.modules["skills"] = skills_pkg
+        ns["skills"] = skills_pkg
+        for s_name, s_code in skills.items():
+            if not s_code or not s_code.strip():
+                continue
+            s_tree = validate_python_code(s_code, filename=f"skills/{s_name}.py")
+            s_tree = PolicyInstrumentTransformer().visit(s_tree)
+            ast.fix_missing_locations(s_tree)
+            s_mod = types.ModuleType(f"skills.{s_name}")
+            s_mod.__dict__.update(ns)
+            s_mod.__name__ = f"skills.{s_name}"
+            exec(
+                compile(s_tree, filename=f"skills/{s_name}.py", mode="exec"),
+                s_mod.__dict__,
+            )
+            sys.modules[f"skills.{s_name}"] = s_mod
+            setattr(skills_pkg, s_name, s_mod)
+            ns[s_name] = s_mod
+
     exec(compile(tree, filename=filename, mode="exec"), ns)
     mod_obj.__dict__.update(ns)
+
+    def _attach_tracer(obj: Any) -> Any:
+        try:
+            setattr(obj, "_lox_tracer", tracer)
+        except Exception:
+            pass
+        return obj
 
     for preferred in ("subtree", "root", "tree", "node", "policy"):
         if preferred in ns:
             cand = ns[preferred]
             if isinstance(cand, (BehaviorTree, BehaviorNode)):
-                return cand
+                return _attach_tracer(cand)
             if not inspect.isclass(cand) and (
                 hasattr(cand, "tick") or hasattr(cand, "step")
             ):
-                return cand
+                return _attach_tracer(cand)
 
     bt_trees = [v for v in ns.values() if isinstance(v, BehaviorTree)]
     if bt_trees:
-        return bt_trees[-1]
+        return _attach_tracer(bt_trees[-1])
 
     composites = [
         v for v in ns.values() if isinstance(v, (PrioritySelector, Sequence, Inverter))
     ]
     if composites:
-        return composites[-1]
+        return _attach_tracer(composites[-1])
 
     leaves = [v for v in ns.values() if isinstance(v, BehaviorNode)]
     if leaves:
-        return leaves[-1]
+        return _attach_tracer(leaves[-1])
 
     user_classes = [
         v
@@ -621,7 +663,7 @@ def compile_bt_subtree(code: str, filename: str = "subtree.py") -> Any:
     ]
     for cls in reversed(user_classes):
         try:
-            return cls()
+            return _attach_tracer(cls())
         except Exception:
             pass
 
@@ -634,7 +676,7 @@ def compile_bt_subtree(code: str, filename: str = "subtree.py") -> Any:
         and getattr(v, "__module__", None) == "lox_policy"
     ]
     if user_fns:
-        return user_fns[-1]
+        return _attach_tracer(user_fns[-1])
 
     raise PolicyValidationError(
         "No BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, or Policy class found in subtree code."

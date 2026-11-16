@@ -56,19 +56,20 @@ Most game-playing agents depend on human-engineered domain scaffolding: hardcode
 
 ## 2. Hierarchical Multi-Agent Swarm Architecture
 
-`LOX` replaces monolithic single-agent prompting with an asynchronous, hierarchical multi-agent swarm governed by empirical bottleneck discovery:
+`LOX` replaces monolithic single-agent prompting with an asynchronous, hierarchical multi-agent swarm guided by a **Two-Pass Read-Only Critic (`SwarmCriticAgent`)** and governed by **Zero Hardcoded Rollbacks**:
 
 ```mermaid
 graph TD
-    subgraph "Meta-Agent Orchestration (Generation k)"
-        DB[(DuckDB Telemetry)] -->|Mortality, Stalls, Depth| MetaDisc[Meta-Agent: Dynamic Macro-Category Discovery]
+    subgraph "Pass 1: Pre-Gen Guide & Category Discovery (Generation k)"
+        DB[(DuckDB Telemetry)] -->|Cross-Gen Stats, Branch Turns, Ticks| Critic1[Critic Pass 1: Pre-Generation High-Level Guide]
+        Critic1 -->|CriticGuidance| MetaDisc[Meta-Agent: Dynamic Macro-Category Discovery]
         MetaDisc -->|Category Decomposition| LanceDB[(LanceDB Document DB)]
     end
 
-    subgraph "Concurrent Category Exploration (N Turns)"
-        MetaDisc -->|Brief 1: Combat| W1[Worker 1: Threat/Ant Defense]
-        MetaDisc -->|Brief 2: Health| W2[Worker 2: Intrinsic Farming]
-        MetaDisc -->|Brief 3: Navigation| W3[Worker 3: Sokoban/Stairs]
+    subgraph "Concurrent Category Exploration (N Hypotheses)"
+        MetaDisc -->|Brief 1| W1[Worker 1: Specialist Subtree]
+        MetaDisc -->|Brief 2| W2[Worker 2: Specialist Subtree]
+        MetaDisc -->|Brief 3| W3[Worker 3: Specialist Subtree]
         Frontier[(Frontier Archive)] -->|Replay ~15ms| W1
         Frontier -->|Replay ~15ms| W2
         Frontier -->|Replay ~15ms| W3
@@ -77,11 +78,13 @@ graph TD
         W3 -->|Theories & Reflection Reports| LanceDB
     end
 
-    subgraph "Policy Assembly & Evaluation"
-        LanceDB -->|Gather Reports| MetaAssembly[Meta-Agent: Behavior Tree Assembly]
-        MetaAssembly -->|Master Policy| PolicyFile[data/workspace/policy.py]
-        PolicyFile --> EvalPool[Persistent Multi-Core Eval Pool]
-        EvalPool -->|Runs, Ticks, Stats| DB
+    subgraph "Pass 2: Assembly, Comparative Critic Review & Meta Revision"
+        LanceDB -->|Gather Reports| MetaAssembly[Meta-Agent: Draft Behavior Tree Assembly]
+        MetaAssembly -->|Draft Policy & Skills| EvalPool[Persistent Multi-Core Eval Pool]
+        EvalPool -->|Runs, Ticks, FunctionStats| DB
+        DB -->|Draft vs Prev Generations| Critic2[Critic Pass 2: Post-Assembly Comparative Review]
+        Critic2 -->|PostAssemblyCritique| MetaRev[Meta-Agent: Post-Critic Revision Decision]
+        MetaRev -->|Final Policy & Skills| PolicyFile[data/workspace/policy.py + skills/]
         EvalPool -->|Milestone Runs >= D2| Frontier
         EvalPool -->|Niche Insertion| MAPElites[3D MAP-Elites Archive]
     end
@@ -89,23 +92,23 @@ graph TD
 
 ### Swarm Lifecycle
 
-1. **Dynamic Macro-Category Discovery**:
-   - At the beginning of generation $k$, the Meta-Agent queries DuckDB's latest mortality telemetry (`end_reason`, `death_message`), depth distribution, prompt dismissals (`auto_esc_count`), and blunders (`starved_with_food`, `died_unarmored`).
-   - Rather than static human roles, categories emerge dynamically matching the active frontier (e.g. early vermin kiting on Dlvl 1–2 vs. soldier ant poison defense & Sokoban boulder navigation on Dlvl 4–6).
+1. **Critic Pass 1 — Pre-Generation High-Level Guide (`guide_before_generation`)**:
+   - Executed as the very first agent at the start of generation $k$.
+   - The read-only `SwarmCriticAgent` audits cross-generation progression (`batches`), ordered `PrioritySelector` branch telemetry (`function_stats` turn share, stagnation, livelock, `0-TURN` starved branches, dropped capabilities), swallowed `Blackboard.leaf_errors`, policy diffs (`diff_policies`), and NetHack 3.6.6 Wiki mechanics (`query_wiki`).
+   - Produces a structured `CriticGuidance` report (`high_level_summary`, `root_causes`, `working_capabilities`, `high_level_priorities`) passed directly to the Meta-Agent.
+2. **Dynamic Macro-Category Discovery (`discover_macro_categories`)**:
+   - Informed by the Critic's Pass 1 guide and its own DuckDB/codebase queries, the Meta-Agent decomposes active bottlenecks into $M$ specialist categories.
    - The decomposition plan is persisted into LanceDB as a `CATEGORY_DECOMPOSITION` document.
-2. **Concurrent Category Worker Exploration**:
-   - $M$ specialized workers execute in parallel.
-   - For $N$ exploration turns, each worker queries C symbol tables (`query_monster`, `query_item`) and DuckDB, formulates qualitative theories, synthesizes candidate subtrees, and evaluates them directly on replayed frontier checkpoints in ~15ms.
-   - Captures rich multi-dimensional telemetry via `ObservationDigest` (`survived`, `steps_taken`, `hp_delta`, `depth_delta`, `unique_tiles`, `actions_taken`, `dialog_resolved`).
-   - Intermediate theories and empirical facts are saved into LanceDB (`doc_type="THEORY"`). At the end of $N$ turns, each worker writes a structured `REFLECTION_REPORT` reviewing all explored subtrees without relying on an artificial scalar score formula.
-3. **Behavior Tree Master Policy Assembly & Self-Repair**:
-   - The Meta-Agent retrieves worker reflection reports from LanceDB and assembles verified subtrees into a master Behavior Tree `PrioritySelector` with strict Blackboard communication.
-   - Runs compiler-in-the-loop validation and live 10-step `NetHackHarness` verification, with up to 3 automated self-repair turns if runtime errors are detected.
-   - Saves master synthesis reflection into LanceDB and writes the policy to `data/workspace/policy.py`.
-4. **Full Multi-Core Rollout & Dual-Store Logging**:
-   - The master policy is evaluated across seeds on the persistent worker pool.
-   - Runs, tail-sampled ticks, and Ochiai/Liblit fault attributions are logged to DuckDB.
-   - New milestone trajectories (depth $\ge 2$) are automatically added to the Go-Explore Frontier Archive.
+3. **Concurrent Category Worker Exploration (`SwarmWorker.run_cycle`)**:
+   - $M$ specialized workers execute in parallel in warm multi-hypothesis sessions (`H1..HK`).
+   - Each worker queries C symbol tables (`query_monster`, `query_item`), the offline Wiki, and DuckDB, formulates competing hypotheses, synthesizes candidate Behavior Tree subtrees, and evaluates them on replayed frontier checkpoints and failure fixtures in ~15ms.
+   - Captures multi-dimensional telemetry via `ObservationDigest` (`survived`, `triggered_steps`, `hp_delta`, `depth_delta`, `unique_tiles`, `actions_taken`, `fn_turns`, `rle_trace`) and honors the worker's comparative `<reflection>` winner without hardcoded trigger-count ranking formulas.
+4. **Draft Master Policy Assembly & Multi-Core Evaluation (`assemble_policy`)**:
+   - The Meta-Agent packages worker subtrees into modular `skills/<role>.py` files and synthesizes the draft master `class Policy` (`PrioritySelector` + `Blackboard`), verifying AST safety, 10-step live execution, and zero swallowed `Blackboard.leaf_errors`.
+   - The draft policy is evaluated across paired seeds on the persistent multi-core worker pool and logged to DuckDB.
+5. **Critic Pass 2 (`review_after_assembly`) & Meta-Agent Revision (`revise_policy_with_critic`) — Zero Hardcoded Rollbacks**:
+   - Once the Meta-Agent's draft has been evaluated, `SwarmCriticAgent.review_after_assembly` compares its empirical results, action distribution, and `PrioritySelector` branch turn shares against previous generations and sends a `PostAssemblyCritique` to the Meta-Agent.
+   - There are **no hardcoded orchestrator rollbacks or metric thresholds**: the Meta-Agent reviews the Critic's comparison and decides for itself whether to keep its draft as-is, fix a hijacking or broken branch, or inspect/restore code from an earlier policy snapshot (`read_policy`, `read_skill(skill_name, policy_id=...)`, `diff_policies`). If revised, the updated policy is re-evaluated and persisted to DuckDB.
 
 ---
 
@@ -334,10 +337,12 @@ lox/
 │   └── pool.py             # Persistent multi-core worker pool & conditional trigger filter
 ├── author/
 │   ├── agent.py            # Stateless ReAct AuthorAgent with compiler-in-the-loop self-repair
+│   ├── bt_eval.py          # Shared Behavior Tree subtree evaluator & condition fixture sampler
 │   ├── prompts.py          # Epistemic System Prompt, dynamic User Prompt & Contrastive Digest
-│   ├── swarm_meta.py       # Meta-Agent dynamic macro-category discoverer & Behavior Tree assembler
+│   ├── swarm_critic.py     # Two-pass read-only SwarmCriticAgent (Pre-Gen Guide & Post-Assembly Review)
+│   ├── swarm_meta.py       # Meta-Agent dynamic macro-category discoverer, BT assembler & post-critic reviser
 │   ├── swarm_worker.py     # Concurrent Category Worker agent with empirical checkpoint evaluation
-│   └── tools.py            # AuthorToolRegistry: query_db, query_wiki, query_policy_docs, dry_run_policy
+│   └── tools.py            # AuthorToolRegistry: query_db, query_wiki, read_policy, diff_policies, read_skill, dry_run_policy
 ├── engine/
 │   ├── frontier.py         # Go-Explore Frontier Checkpoint Archive & fast replay (~15ms)
 │   ├── hypothesis.py       # Empirical Bernstein Confidence Sequences, Wilcoxon Signed-Rank, Futility Early Stopping
@@ -350,7 +355,6 @@ lox/
     └── console.py          # Compact ANSI console UI with single-line progress & summary tables
 scripts/
 ├── build_core.sh           # Compiles and installs lox-core Rust extension into .venv
-├── build_strategy_wiki.py  # Indexes high-level NetHack strategy & mechanics articles into wiki_index.db
 ├── build_wiki_db.py        # Builds data/wiki_index.db from data/nethackwikidata.json
 ├── calibrate_pilot.py      # Calibrates pilot revision budget and evaluates transfer rates from DuckDB
 ├── download_experts.py     # Compiles 1,000+ human ascensions into expert_runs and expert_ticks
