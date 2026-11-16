@@ -63,7 +63,11 @@ class DeficitReport:
             f"### Deterministic Telemetry Partition (Gen {self.generation} | Regime: {self.regime})",
             f"- Incumbent Progression: avg_depth={self.incumbent_avg_depth:.2f}, max_depth=Dlvl {self.incumbent_max_depth}, rolling_delta={self.rolling_depth_delta:+.2f}",
             f"- Code Footprint: policy={self.policy_loc} LOC, skills={self.skill_count} module(s) ({self.skill_loc} LOC)"
-            + (" [CONSOLIDATE RECOMMENDED]" if self.bloat_warning else ""),
+            + (
+                " [DITCH MONOLITH: extract the subsystem you touch into `skills/<domain>.py` so `policy.py` stays <= 250 LOC]"
+                if self.bloat_warning
+                else ""
+            ),
         ]
         if self.protected_branches:
             prot_str = ", ".join(
@@ -114,7 +118,8 @@ class DeficitAnalyzer:
         skill_loc = sum(len(v.splitlines()) for v in skills_map.values() if v)
         skill_count = len(skills_map)
         bloat_warning = (
-            (policy_loc >= 400)
+            (policy_loc >= 300 and skill_count == 0)
+            or (policy_loc >= 400)
             or (skill_count >= 6)
             or ((policy_loc + skill_loc) >= 500)
         )

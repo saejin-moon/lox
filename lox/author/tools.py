@@ -117,6 +117,8 @@ class AuthorToolRegistry:
         self.last_cand_depths: list[float] = []
         self.last_base_depths: list[float] = []
         self.skills: dict[str, str] = {}
+        self.last_passed_skills: dict[str, str] = {}
+        self.last_dry_run_diag: str = ""
         self.theories_store: Any = None
         self.generation: int = 0
         self.mode: str = "WRITE"
@@ -207,7 +209,9 @@ class AuthorToolRegistry:
         self.last_pilot_summary = ""
         self.last_dry_run_mode = "none"
         self.last_dry_run_passed = False
+        self.last_dry_run_diag = ""
         self.last_passed_pkg = CandidatePackage()
+        self.last_passed_skills = {}
         self.best_pilot_pkg = CandidatePackage()
         self.last_cand_depths = []
         self.last_base_depths = []
@@ -992,9 +996,22 @@ class AuthorToolRegistry:
             f"PASSED ({hyp_label}: trig {total_triggered}/{total_eval})"
         )
 
+    @staticmethod
+    def _has_policy_class(src: str) -> bool:
+        if not src or not src.strip():
+            return False
+        try:
+            tree = ast.parse(src)
+            return any(
+                isinstance(n, ast.ClassDef) and n.name in ("Policy", "Agent")
+                for n in tree.body
+            )
+        except Exception:
+            return False
+
     def dry_run_policy(
         self,
-        code: str,
+        code: str = "",
         is_macro: bool = False,
         seed: int = 42,
         max_turns: int = 150,
@@ -1003,6 +1020,7 @@ class AuthorToolRegistry:
         smoke_only: bool = False,
         skill_name: str | None = None,
         skill_code: str | None = None,
+        skills: dict[str, str] | None = None,
         hypothesis: str = "",
     ) -> tuple[str, str]:
         """
@@ -1015,14 +1033,31 @@ class AuthorToolRegistry:
         policy_code = self.current_policy_code
         self.last_dry_run_mode = "check"
         self.last_dry_run_passed = False
+        self.last_dry_run_diag = ""
 
         cand_skills = dict(self.skills)
+        for prev_k, prev_v in self.last_passed_skills.items():
+            if prev_v:
+                cand_skills[prev_k] = prev_v
+        if isinstance(skills, dict):
+            for k, v in skills.items():
+                clean_k = str(k or "").strip().removesuffix(".py")
+                if clean_k and str(v or "").strip():
+                    cand_skills[clean_k] = str(v).strip()
         if skill_name and skill_code:
-            cand_skills[str(skill_name)] = skill_code
+            clean_sn = str(skill_name).strip().removesuffix(".py")
+            if clean_sn:
+                cand_skills[clean_sn] = skill_code
 
-        skill_matches = skill_code is None or (
-            self.last_passed_skill_code is not None
-            and skill_code.strip() == self.last_passed_skill_code.strip()
+        skill_matches = (
+            skill_code is None
+            and not isinstance(skills, dict)
+            or (
+                self.last_passed_skill_code is not None
+                and skill_code is not None
+                and skill_code.strip() == self.last_passed_skill_code.strip()
+                and not isinstance(skills, dict)
+            )
         )
 
         has_replay = bool(str(replay_run_id or "").strip())
@@ -1062,7 +1097,11 @@ class AuthorToolRegistry:
             )
 
         try:
-            if policy_code.strip() and self.mode not in ("SWARM_META", "SWARM_PEER"):
+            use_surgical_splice = bool(policy_code.strip()) and (
+                self.mode not in ("SWARM_META", "SWARM_PEER")
+                or (self.mode == "SWARM_PEER" and not self._has_policy_class(code))
+            )
+            if use_surgical_splice:
                 if code.strip():
                     spliced_policy, changed_fns = splice_functions_into_policy(
                         policy_code, code
@@ -1078,8 +1117,11 @@ class AuthorToolRegistry:
                         changed_fns = [
                             fn for fn in changed_fns if fn not in set(pruned_fns)
                         ]
-                # Mutation scope check for WRITE mode
-                if self.mode not in ("CREATE", "REFACTOR") and len(changed_fns) > 2:
+                # Mutation scope check for WRITE mode (SWARM_PEER allows cross-file decomposition)
+                if (
+                    self.mode not in ("CREATE", "REFACTOR", "SWARM_PEER")
+                    and len(changed_fns) > 2
+                ):
                     return (
                         f"Mutation Scope Error: You modified/added {len(changed_fns)} functions ({changed_fns}). "
                         "In WRITE mode, you must target at most 2 functions (e.g. 1 primary method + 1 caller/helper) "
@@ -1088,7 +1130,7 @@ class AuthorToolRegistry:
                         "MUTATION_SCOPE_ERROR",
                     )
                 # Static reachability check: ensure any non-root method in changed_fns is referenced in spliced_policy
-                if changed_fns:
+                if changed_fns and self.mode != "SWARM_PEER":
                     spliced_tree = ast.parse(spliced_policy)
                     called_attrs: set[str] = set()
                     for node in ast.walk(spliced_tree):
@@ -1128,6 +1170,7 @@ class AuthorToolRegistry:
                 spliced_policy, macros_code, skills=cand_skills
             )
         except Exception as exc:
+            self.last_dry_run_diag = f"{type(exc).__name__}: {exc}"
             return (
                 f"Compilation / Validation Error:\n{type(exc).__name__}: {exc}",
                 "COMPILE_ERROR",
@@ -1855,8 +1898,25 @@ class AuthorToolRegistry:
                 )
 
             if smoke_only:
+                self.last_passed_code = (
+                    spliced_policy
+                    if (
+                        self.mode == "SWARM_PEER"
+                        and self._has_policy_class(spliced_policy)
+                    )
+                    else code
+                )
                 self.last_dry_run_mode = "check"
                 self.last_dry_run_passed = True
+                self.last_passed_skills = dict(cand_skills)
+                if skill_name and skill_code is not None:
+                    self.last_passed_skill_name = str(skill_name)
+                    self.last_passed_skill_code = str(skill_code)
+                self.last_passed_pkg = CandidatePackage(
+                    code=self.last_passed_code,
+                    skill_name=str(skill_name or ""),
+                    skill_code=str(skill_code or ""),
+                )
                 return (
                     f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}",
                     "PASSED (smoke check)",
@@ -1990,14 +2050,21 @@ class AuthorToolRegistry:
                         + "\n".join(replay_summaries)
                     )
 
-            self.last_passed_code = code
+            self.last_passed_code = (
+                spliced_policy
+                if (
+                    self.mode == "SWARM_PEER" and self._has_policy_class(spliced_policy)
+                )
+                else code
+            )
             self.last_dry_run_mode = "check"
             self.last_dry_run_passed = True
+            self.last_passed_skills = dict(cand_skills)
             if skill_name and skill_code is not None:
                 self.last_passed_skill_name = str(skill_name)
                 self.last_passed_skill_code = str(skill_code)
             self.last_passed_pkg = CandidatePackage(
-                code=code,
+                code=self.last_passed_code,
                 skill_name=str(skill_name or ""),
                 skill_code=str(skill_code or ""),
             )
@@ -2014,6 +2081,7 @@ class AuthorToolRegistry:
             import traceback
 
             tb = traceback.format_exc(limit=4)
+            self.last_dry_run_diag = f"{type(exc).__name__}: {exc}"
             return (
                 f"Runtime Error during Dry-Run on seed {seed}:\n{type(exc).__name__}: {exc}\n{tb}",
                 "RUNTIME_ERROR",
@@ -2260,11 +2328,16 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     },
                     "skill_name": {
                         "type": "string",
-                        "description": "Optional name of a skill module (e.g., 'combat', 'nutrition', 'navigation') to test or update alongside the policy.",
+                        "description": "Optional name of a single skill module (e.g., 'combat', 'nutrition', 'navigation') to test or update alongside policy code.",
                     },
                     "skill_code": {
                         "type": "string",
                         "description": "Optional Python source code for the skill module identified by skill_name.",
+                    },
+                    "skills": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Optional mapping of multiple skill module names to their Python source (e.g. {'combat': '...', 'navigation': '...'}) to validate multi-file modularization cleanly in one call.",
                     },
                     "hypothesis": {
                         "type": "string",

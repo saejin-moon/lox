@@ -636,15 +636,18 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 1. **Focus on Your Claimed Empirical Deficit**:
    - Inspect your claimed failure cluster (`D_fail`) and protected high-Ochiai branches (`D_succ`) using `query_db`, `read_policy`, `diff_policies`, `read_skill`, `query_wiki`, `query_monster`, and `query_item`.
    - Preserve high-Ochiai `D_succ` branches unless you have verified a strict improvement across both failure replays and `D_succ` guard runs.
-2. **Surgical Edits & Gameplay Focus**:
-   - Focus strictly on fixing empirical failure deficits and improving survival, exploration, resource use, and progression. Modular code splitting is handled separately by a dedicated refactor agent—do **not** spend your turns reorganizing existing files when a surgical fix suffices.
-   - If the target logic already lives in an existing `skills/<module>.py` file, update that module cleanly with `<skill_code module="name"> ... </skill_code>`; otherwise keep your diff surgical in `policy.py` (or a new cohesive skill only when clearly warranted).
+2. **Surgical Edits & Modular Skill Decomposition (Ditch the Monolith)**:
+   - **NEVER re-type 1,000+ lines of unchanged boilerplate when editing one subsystem**, and **never** emit comment placeholders like `"# Same full class Policy..."`.
+   - You have three fast, clean ways to work:
+     1. **Targeted Function Patch (fastest):** If modifying 1–2 helpers/leaves inside `policy.py`, pass **only** the modified/new `def ...` functions in `dry_run_policy(code=...)` and `<policy_code>...</policy_code>` — LOX automatically splices them into the existing `policy.py`.
+     2. **Modular Skill Update / Extraction (preferred when `policy.py >= 300` LOC or `[DITCH MONOLITH]` is flagged):** Move the subsystem you are working on (e.g., `skills/prompts.py`, `skills/nutrition.py`, `skills/combat.py`, `skills/navigation.py`) into `<skill_code module="name"> ... </skill_code>` blocks, import them cleanly in a thin `policy.py` (`build_tree` + `class Policy`, ideally `<= 250 LOC`), and verify all modules together in one call via `dry_run_policy(code=..., skills={{"mod_a": ..., "mod_b": ...}})`.
+     3. **Clean Modular Architecture Advantage:** Keeping subsystems separated under `skills/*.py` eliminates syntax typos, cuts response latency dramatically, and allows `SwarmReferee` to automatically merge disjoint `skills/` wins from two different peers in the same generation!
    - Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin so native leaf attribution remains exact, and use `ActionLeaf(..., min_commit=N)` for multi-step commitment instead of ad-hoc post-step gates.
 3. **Verify in Sandbox Before Submission**:
-   - Call `dry_run_policy(code=...)` (and `skill_name`/`skill_code` if editing a skill) to verify AST compilation, zero swallowed leaf errors, and mid-game frontier/failure replays.
+   - Call `dry_run_policy(...)` (passing `skills={{...}}` if creating/updating multiple skills) to verify AST compilation, zero swallowed leaf errors, and mid-game frontier/failure replays.
    - Your candidate will be incubated on an isolated paired shard + frontier checkpoints against the incumbent and must pass CRN evaluation without collapsing score to be promoted.
 4. **Output Format**:
-   - Output your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by any added/updated skill modules inside `<skill_code module="name"> ... </skill_code>` blocks, and the complete `class Policy:` inside `<policy_code> ... </policy_code>` (or the final ```python ... ``` block).
+   - Output your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by any added/updated skill modules inside `<skill_code module="name"> ... </skill_code>` blocks, and either your surgical `def ...` patch or complete `class Policy:` inside `<policy_code> ... </policy_code>` (if you already passed `dry_run_policy` and only updated skills, you may also emit just `<skill_code>`).
 """
 
     if canon_mode == "SWARM_META":

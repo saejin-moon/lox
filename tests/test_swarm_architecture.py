@@ -1467,34 +1467,27 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
     assert ok_res.sandbox_passed is True
     assert "frontier_survived" in ok_res.sandbox_metrics
 
-    # Verify bloat_warning flags large policy_loc WITHOUT polluting main peer fail_clusters;
-    # modularization runs instead in the dedicated extraneous SwarmModularizerAgent.
+    # Verify bloat_warning flags large policy_loc WITHOUT polluting main peer fail_clusters
     large_pol = base_pol + "\n" + "\n".join(f"# pad {i}" for i in range(410))
     big_report = analyzer.analyze(
         generation=6, current_policy=large_pol, skills=base_skills
     )
     assert big_report.bloat_warning is True
     assert not any(c.cluster_id == "slice_modularize" for c in big_report.fail_clusters)
+    assert "DITCH MONOLITH" in big_report.format_brief()
 
 
-def test_extraneous_modularizer_and_non_regression_gate(tmp_path):
-    from lox.author.swarm_modularizer import (
-        SwarmModularizerAgent,
-        verify_modular_non_regression,
-    )
+def test_swarm_peer_multi_skill_surgical_splice_and_placeholder_guard(tmp_path):
+    from lox.author.agent import AuthorAgent
+    from lox.author.tools import AuthorToolRegistry
 
-    helper_src = "\n".join(
-        [f"def _helper_{i}(state, bb):\n    return Action.SEARCH\n" for i in range(25)]
-    )
-    bloated_monolith = (
+    base_policy = (
         "from lox.env.actions import Action\n"
         "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n\n"
-        + helper_src
-        + "\n"
-        + "\n".join(f"# spacer {i}" for i in range(260))
-        + "\n"
+        "def leaf_wait(state, bb):\n"
+        "    return Action.WAIT\n\n"
         "def build_tree(bb):\n"
-        "    return PrioritySelector([ActionLeaf(_helper_0, name='h0')], name='root')\n\n"
+        "    return PrioritySelector([ActionLeaf(leaf_wait, name='wait')], name='root')\n\n"
         "class Policy:\n"
         "    def __init__(self):\n"
         "        self.blackboard = Blackboard()\n"
@@ -1502,107 +1495,53 @@ def test_extraneous_modularizer_and_non_regression_gate(tmp_path):
         "    def step(self, state):\n"
         "        return self.tree.tick(state) or Action.WAIT\n"
     )
-    assert SwarmModularizerAgent.should_trigger(bloated_monolith, {}) is True
+    tools = AuthorToolRegistry(db_path=str(tmp_path / "t.duckdb"))
+    tools.configure_generation(mode="SWARM_PEER", generation=2)
+    tools.current_policy_code = base_policy
 
-    seeds = [1000 + i for i in range(8)]
-
-    def _make_eval(depths, scores, exc=0, stall_count=0):
-        runs = []
-        for idx, (sd, d, sc) in enumerate(zip(seeds, depths, scores, strict=True)):
-            runs.append(
-                {
-                    "run_id": f"r_{sd}",
-                    "seed": sd,
-                    "depth": d,
-                    "max_depth": d,
-                    "score": sc,
-                    "turns": 100,
-                    "steps": 100,
-                    "policy_exceptions": exc if idx == 0 else 0,
-                    "end_reason": "max_steps" if idx < stall_count else "killed",
-                }
-            )
-        return {
-            "avg_depth": sum(depths) / len(depths),
-            "avg_score": sum(scores) / len(scores),
-            "runs": runs,
-        }
-
-    base_eval = _make_eval([3, 3, 4, 2, 3, 3, 4, 2], [400] * 8)
-    parity_eval = _make_eval([3, 3, 4, 2, 3, 3, 4, 2], [400] * 8)
-    depth_reg_eval = _make_eval([2, 2, 3, 2, 2, 2, 3, 2], [400] * 8)
-    score_reg_eval = _make_eval([3, 3, 4, 2, 3, 3, 4, 2], [250] * 8)
-    exc_eval = _make_eval([3, 3, 4, 2, 3, 3, 4, 2], [400] * 8, exc=1)
-
-    ok, m_ok = verify_modular_non_regression(base_eval, parity_eval, seeds)
-    assert ok is True, m_ok
-
-    bad_d, m_d = verify_modular_non_regression(base_eval, depth_reg_eval, seeds)
-    assert bad_d is False
-    assert "depth" in m_d["reason"].lower()
-
-    bad_s, m_s = verify_modular_non_regression(base_eval, score_reg_eval, seeds)
-    assert bad_s is False
-    assert "score" in m_s["reason"].lower()
-
-    bad_e, m_e = verify_modular_non_regression(base_eval, exc_eval, seeds)
-    assert bad_e is False
-    assert "policy_exceptions" in m_e["reason"].lower()
-
-    class _ParityPool:
-        def evaluate_batch(
-            self,
-            batch_id,
-            policy_code,
-            macros_code,
-            skills,
-            target_episodes,
-            priority_seeds,
-            record_ticks=True,
-            max_steps=None,
-        ):
-            return parity_eval
-
-    class _RegressPool:
-        def evaluate_batch(
-            self,
-            batch_id,
-            policy_code,
-            macros_code,
-            skills,
-            target_episodes,
-            priority_seeds,
-            record_ticks=True,
-            max_steps=None,
-        ):
-            return depth_reg_eval
-
-    mod_agent = SwarmModularizerAgent(
-        provider="mock", db_path=str(tmp_path / "m.duckdb")
+    # 1. Surgical patch (omits class Policy) splices cleanly into current_policy_code
+    res_sp, sum_sp = tools.dry_run_policy(
+        code="def leaf_wait(state, bb):\n    return Action.SEARCH\n",
+        max_turns=20,
+        smoke_only=True,
     )
-    accepted = mod_agent.run_refactor(
-        generation=1,
-        policy_code=bloated_monolith,
-        skills={},
-        baseline_eval=base_eval,
-        eval_pool=_ParityPool(),
-        seeds=seeds,
-    )
-    assert accepted.accepted is True
-    assert "extracted_helpers" in accepted.skills
-    assert accepted.loc_after < accepted.loc_before
+    assert sum_sp.startswith("PASSED"), res_sp
+    assert "class Policy:" in tools.last_passed_code
+    assert "Action.SEARCH" in tools.last_passed_code
 
-    rejected = mod_agent.run_refactor(
-        generation=2,
-        policy_code=bloated_monolith,
-        skills={},
-        baseline_eval=base_eval,
-        eval_pool=_RegressPool(),
-        seeds=seeds,
+    # 2. Multi-skill validation (`skills={"mod_a": ..., "mod_b": ...}`) compiles and runs cleanly
+    thin_policy = (
+        "from lox.env.actions import Action\n"
+        "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n"
+        "from skills.mod_a import fn_a\n"
+        "from skills.mod_b import fn_b\n\n"
+        "def build_tree(bb):\n"
+        "    return PrioritySelector([ActionLeaf(fn_a, name='a'), ActionLeaf(fn_b, name='b')], name='root')\n\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.blackboard = Blackboard()\n"
+        "        self.tree = BehaviorTree(root=build_tree(self.blackboard), blackboard=self.blackboard)\n"
+        "    def step(self, state):\n"
+        "        return self.tree.tick(state) or Action.WAIT\n"
     )
-    assert rejected.accepted is False
-    assert rejected.policy_code == bloated_monolith
-    assert rejected.skills == {}
+    skills_bundle = {
+        "mod_a": "def fn_a(state, bb):\n    return None\n",
+        "mod_b": "from lox.env.actions import Action\ndef fn_b(state, bb):\n    return Action.SEARCH\n",
+    }
+    res_ms, sum_ms = tools.dry_run_policy(
+        code=thin_policy,
+        skills=skills_bundle,
+        max_turns=20,
+        smoke_only=True,
+    )
+    assert sum_ms.startswith("PASSED"), res_ms
+    assert set(tools.last_passed_skills.keys()) >= {"mod_a", "mod_b"}
+
+    # 3. Comment-only closing placeholders must NOT pass _inspect_python_fragment
+    has_stmts, has_cls = AuthorAgent._inspect_python_fragment(
+        "# The complete class Policy: source is already validated above"
+    )
+    assert has_stmts is False and has_cls is False
 
 
 def test_prune_empty_skills_unlinks_disk_and_deficit_pct_scale(tmp_path):

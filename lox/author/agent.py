@@ -6,6 +6,7 @@ Gemini, OpenAI-compatible endpoints, and deterministic Mock mode for testing.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -406,6 +407,28 @@ class AuthorAgent:
         return fallback_skill_code
 
     @staticmethod
+    def _inspect_python_fragment(src: str) -> tuple[bool, bool]:
+        """Returns `(has_executable_stmts, has_policy_class)` without false matches inside comments."""
+        if not src or not src.strip():
+            return False, False
+        try:
+            tree = ast.parse(src)
+        except Exception:
+            return False, False
+        has_stmts = len(tree.body) > 0
+        has_cls = any(
+            isinstance(n, ast.ClassDef) and n.name in ("Policy", "Agent")
+            for n in tree.body
+        )
+        return has_stmts, has_cls
+
+    @staticmethod
+    def _has_executable_skill_input(skills_arg: Any) -> bool:
+        return isinstance(skills_arg, dict) and any(
+            str(k or "").strip() and str(v or "").strip() for k, v in skills_arg.items()
+        )
+
+    @staticmethod
     def extract_all_skill_codes(
         content: str,
         hyp: dict[str, Any] | None = None,
@@ -531,10 +554,13 @@ class AuthorAgent:
             code = str(args.get("code", "")).strip()
             s_name = args.get("skill_name")
             s_code = args.get("skill_code")
-            if not code and not (s_name and s_code):
-                out = (
-                    "Error: `dry_run_policy` requires non-empty `code` or `skill_code`."
-                )
+            s_map = args.get("skills") if isinstance(args.get("skills"), dict) else None
+            if (
+                not code
+                and not (s_name and s_code)
+                and not self._has_executable_skill_input(s_map)
+            ):
+                out = "Error: `dry_run_policy` requires non-empty `code`, `(skill_name, skill_code)`, or `skills`."
                 summary = "MISSING_CODE"
                 arg_disp = "empty code"
             else:
@@ -553,13 +579,20 @@ class AuthorAgent:
                     replay_steps=replay_steps,
                     skill_name=str(s_name) if s_name else None,
                     skill_code=str(s_code) if s_code else None,
+                    skills=s_map,
                     hypothesis=hyp_label,
                 )
-                arg_disp = f"{len(code.splitlines())} lines, seed={seed}"
+                arg_disp = (
+                    f"{len(code.splitlines())} lines, seed={seed}"
+                    if code
+                    else f"patch/skills-only, seed={seed}"
+                )
                 if hyp_label:
                     arg_disp += f", {hyp_label[:28]}"
                 if s_name:
                     arg_disp += f", skill={s_name}"
+                elif s_map:
+                    arg_disp += f", skills={len(s_map)}"
                 if replay_id:
                     arg_disp += f", replay={replay_id[:10]}..."
         else:
@@ -976,15 +1009,19 @@ class AuthorAgent:
                     found_code
                     and canon_mode in ("SWARM_META", "SWARM_PEER")
                     and self.tools.last_passed_code
-                    and "class Policy" not in found_code
-                    and "class Agent" not in found_code
-                    and not re.search(
-                        r"<(?:policy_code|policy)>", msg_text or "", flags=re.IGNORECASE
-                    )
                 ):
-                    # Closing summary included a small illustrative snippet without <policy_code>;
-                    # keep the verified full policy instead of auto-piloting a fragment.
-                    found_code = ""
+                    has_stmts, has_cls = self._inspect_python_fragment(found_code)
+                    has_policy_tag = bool(
+                        re.search(
+                            r"<(?:policy_code|policy)>",
+                            msg_text or "",
+                            flags=re.IGNORECASE,
+                        )
+                    )
+                    if not has_stmts or (not has_cls and not has_policy_tag):
+                        # Closing summary had only comments/placeholders or an illustrative snippet
+                        # without <policy_code>; keep the already-verified full policy instead.
+                        found_code = ""
 
                 # Turn 1 Mandatory Investigation Enforcement:
                 # In WRITE and REFACTOR modes, Turn 1 is strictly reserved for Empirical Research.
@@ -1081,10 +1118,18 @@ class AuthorAgent:
                         ),
                         fallback_skill_name=auto_s_name,
                     )
+                    auto_skills_map = {
+                        **(getattr(self.tools, "last_passed_skills", {}) or {}),
+                        **(
+                            self.extract_all_skill_codes(clean_text, latest_hyp or {})
+                            or {}
+                        ),
+                    }
                     pilot_res, pilot_summary = self.tools.dry_run_policy(
                         code=found_code,
                         skill_name=auto_s_name if auto_s_name else None,
                         skill_code=auto_s_code if auto_s_code else None,
+                        skills=auto_skills_map or None,
                     )
                     elapsed_ms = (time.perf_counter() - t0) * 1000.0
                     arg_disp = f"auto-pilot ({len(found_code.splitlines())} lines)"
@@ -1355,7 +1400,10 @@ class AuthorAgent:
                     skill_code=self.extract_skill_code(clean_text, latest_hyp),
                     hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
                     status=t_stat,
-                    error_diagnostic=getattr(self.tools, "last_pilot_summary", ""),
+                    error_diagnostic=(
+                        getattr(self.tools, "last_dry_run_diag", "")
+                        or getattr(self.tools, "last_pilot_summary", "")
+                    ),
                     prompt_sent=str(messages[-len(tool_calls) - 2].get("content", ""))
                     if len(messages) >= len(tool_calls) + 2
                     else "",
@@ -1444,15 +1492,32 @@ class AuthorAgent:
             elif latest_hyp:
                 hyp = latest_hyp
 
-            # If the model passed a pilot, ensure we use that verified code (avoiding slight markdown re-formatting errors)
+            # Preserve verified candidate if closing response contained only comments/placeholders or snippet
+            extracted_skills_map = self.extract_all_skill_codes(
+                final_content, hyp or latest_hyp
+            )
+            merged_skills_map = {
+                **(getattr(self.tools, "last_passed_skills", {}) or {}),
+                **(extracted_skills_map or {}),
+            }
             if (
                 canon_mode in ("SWARM_META", "SWARM_PEER")
                 and self.tools.last_passed_code
-                and code_patch
-                and "class Policy" not in code_patch
-                and "class Agent" not in code_patch
             ):
-                code_patch = self.tools.last_passed_code
+                has_stmts, has_cls = self._inspect_python_fragment(code_patch)
+                has_policy_tag = bool(
+                    re.search(
+                        r"<(?:policy_code|policy)>",
+                        final_content or "",
+                        flags=re.IGNORECASE,
+                    )
+                )
+                if (
+                    not code_patch
+                    or not has_stmts
+                    or (not has_cls and not has_policy_tag)
+                ):
+                    code_patch = self.tools.last_passed_code
             elif self.tools.last_pilot_improved and self.tools.last_passed_code:
                 if not code_patch or is_ast_equivalent(
                     code_patch, self.tools.last_passed_code
@@ -1467,8 +1532,8 @@ class AuthorAgent:
             ):
                 code_patch = self.tools.best_pilot_code
 
-            if not code_patch:
-                diag = "No <policy_code> or ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
+            if not code_patch and not merged_skills_map:
+                diag = "No <policy_code>, <skill_code>, or ```python ... ``` code block found in your response. Please emit your YAML hypothesis and Python code block."
                 status = "MISSING_CODE"
             else:
                 s_name = (
@@ -1494,6 +1559,7 @@ class AuthorAgent:
                     smoke_only=True,
                     skill_name=s_name,
                     skill_code=s_code,
+                    skills=merged_skills_map or None,
                 )
 
             # Persist verification check to synthesis_logs
@@ -1569,7 +1635,20 @@ class AuthorAgent:
                                 self.tools, "best_pilot_delta", 0.0
                             ),
                         )
+                _, patch_has_cls = self._inspect_python_fragment(code_patch)
                 if (
+                    canon_mode == "SWARM_PEER"
+                    and current_policy.strip()
+                    and not patch_has_cls
+                ):
+                    if code_patch.strip():
+                        spliced_policy, changed_fns = splice_functions_into_policy(
+                            current_policy, code_patch
+                        )
+                    else:
+                        spliced_policy = current_policy
+                        changed_fns = hyp.get("target_functions") or ["step"]
+                elif (
                     canon_mode in ("CREATE", "SWARM_WORKER", "SWARM_META", "SWARM_PEER")
                     or not current_policy.strip()
                 ):
@@ -1630,7 +1709,7 @@ class AuthorAgent:
                     target_functions=list(changed_fns),
                     tool_calls_made=total_tool_calls,
                     skill_code=skill_code,
-                    skill_modules=self.extract_all_skill_codes(final_content, hyp),
+                    skill_modules=merged_skills_map,
                 )
 
             if repair_idx < self.max_repair_turns:

@@ -31,7 +31,6 @@ import numpy as np
 from lox.author.swarm_critic import SwarmCriticAgent
 from lox.author.swarm_deficits import DeficitAnalyzer
 from lox.author.swarm_meta import SwarmMetaAgent
-from lox.author.swarm_modularizer import SwarmModularizerAgent
 from lox.author.swarm_peer import PeerCandidate, SwarmPeerAgent
 from lox.author.swarm_worker import SwarmWorker
 from lox.core.contracts import BatchEvaluation
@@ -41,7 +40,7 @@ from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
 from lox.engine.map_elites import MAPElitesArchive
 from lox.engine.orchestrator import compute_adaptive_max_steps, write_status_report
-from lox.engine.swarm_referee import SwarmReferee, _package_fingerprint
+from lox.engine.swarm_referee import SwarmReferee
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
 
@@ -114,7 +113,6 @@ class SwarmCampaignOrchestrator:
         )
         self.campaign_start_time = time.time()
         self._plateau_streak: int = 0
-        self._attempted_modular_fps: set[str] = set()
 
         # Legacy Meta-Agent & Two-Pass Advisory Critic (only used when swarm_architecture='legacy')
         self.meta_agent = SwarmMetaAgent(
@@ -360,60 +358,7 @@ class SwarmCampaignOrchestrator:
             max_steps=active_max_steps,
         )
 
-        # 4b. Extraneous Single-Agent Modular Refactoring (gated by paired CRN non-regression)
-        active_pol = verdict.winner_policy_code
-        active_skills = verdict.winner_skills
-        active_eval = (
-            verdict.winner_batch_eval
-            if verdict.promoted
-            else verdict.incumbent_batch_eval
-        )
-        if active_pol.strip() and active_eval is not None:
-            active_fp = _package_fingerprint(active_pol, active_skills)
-            if (
-                SwarmModularizerAgent.should_trigger(active_pol, active_skills)
-                and active_fp not in self._attempted_modular_fps
-            ):
-                self._attempted_modular_fps.add(active_fp)
-                modularizer = SwarmModularizerAgent(
-                    provider=self.provider,
-                    model=self.model,
-                    db_path=self.db_path,
-                    theories_store=self.theories,
-                    max_tool_turns=max(4, int(self.turns_per_worker) * 2),
-                )
-                mod_res = modularizer.run_refactor(
-                    generation=generation,
-                    policy_code=active_pol,
-                    skills=active_skills,
-                    baseline_eval=active_eval,
-                    eval_pool=self.eval_pool,
-                    seeds=seeds,
-                    max_steps=active_max_steps,
-                    dormant_branches=deficit_report.dormant_branches,
-                    frontier=self.frontier,
-                )
-                if mod_res.accepted and mod_res.batch_eval is not None:
-                    verdict.promoted = True
-                    verdict.winner_policy_code = mod_res.policy_code
-                    verdict.winner_skills = dict(mod_res.skills)
-                    verdict.winner_batch_eval = mod_res.batch_eval
-                    verdict.winner_avg_depth = mod_res.refactored_avg_depth
-                    verdict.winner_avg_score = mod_res.refactored_avg_score
-                    verdict.reason = f"{verdict.reason} | Modularized: {mod_res.loc_before}->{mod_res.loc_after} LOC"
-                    self.referee.cache_incumbent(
-                        eval_pool=self.eval_pool,
-                        policy_code=mod_res.policy_code,
-                        skills=mod_res.skills,
-                        seeds=seeds,
-                        max_steps=active_max_steps,
-                        batch_eval=mod_res.batch_eval,
-                    )
-                    self._attempted_modular_fps.add(
-                        _package_fingerprint(mod_res.policy_code, mod_res.skills)
-                    )
-
-        # Sync workspace only if promoted (or bootstrapping / accepted modularization)
+        # Sync workspace only if promoted (or bootstrapping)
         if verdict.promoted:
             policy_path.write_text(verdict.winner_policy_code, encoding="utf-8")
             skills_dir.mkdir(parents=True, exist_ok=True)
