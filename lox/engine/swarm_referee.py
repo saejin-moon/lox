@@ -289,11 +289,23 @@ class SwarmReferee:
                 }
             )
 
+        def _passes_score_guard(cand_stats: dict[str, Any]) -> bool:
+            """Prevents marginal depth ticks (<=0.35) from overriding severe score collapses (>30%)."""
+            if not base_policy.strip():
+                return True
+            inc_s = float(inc_stats["avg_score"])
+            cand_s = float(cand_stats["avg_score"])
+            d_gain = float(cand_stats["avg_depth"]) - float(inc_stats["avg_depth"])
+            if inc_s >= 50.0 and cand_s < inc_s * 0.70 and d_gain < 0.50:
+                return False
+            return True
+
         def _rank_key(
             item: tuple[PeerCandidate, BatchEvaluation, dict[str, Any]],
-        ) -> tuple[float, float, int, int]:
+        ) -> tuple[int, float, float, int, int]:
             _c, _be, st = item
             return (
+                1 if _passes_score_guard(st) else 0,
                 round(float(st["avg_depth"]), 4),
                 round(float(st["avg_score"]), 2),
                 -int(st["stall_count"]),
@@ -302,12 +314,13 @@ class SwarmReferee:
 
         best_cand, best_eval, best_stats = max(evaluated_entries, key=_rank_key)
 
-        # Strict non-regression promotion check vs Incumbent
+        # Strict non-regression + score-collapse guard vs Incumbent
         if base_policy.strip():
             d_delta = best_stats["avg_depth"] - inc_stats["avg_depth"]
             s_delta = best_stats["avg_score"] - inc_stats["avg_score"]
             loc_improved = best_stats["loc_total"] <= inc_stats["loc_total"]
-            beats_incumbent = (
+            guard_ok = _passes_score_guard(best_stats)
+            beats_incumbent = guard_ok and (
                 (d_delta > 1e-4)
                 or (abs(d_delta) <= 1e-4 and s_delta > 1e-2)
                 or (abs(d_delta) <= 1e-4 and abs(s_delta) <= 1e-2 and loc_improved)
@@ -315,6 +328,7 @@ class SwarmReferee:
         else:
             d_delta = best_stats["avg_depth"] - 1.0
             s_delta = best_stats["avg_score"]
+            guard_ok = True
             beats_incumbent = True
 
         scoreboard_str = " | ".join(
@@ -337,9 +351,13 @@ class SwarmReferee:
         ]
 
         if not beats_incumbent and inc_batch_eval is not None:
+            reject_note = (
+                "score-collapse guard triggered (>30% score drop for <0.50 depth gain)"
+                if not guard_ok
+                else f"regressed vs Incumbent (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f})"
+            )
             ui.warn(
-                f"Gen {generation}: Best peer `{best_cand.peer_id}` regressed vs Incumbent "
-                f"(Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}). Retaining Incumbent."
+                f"Gen {generation}: Best peer `{best_cand.peer_id}` rejected ({reject_note}). Retaining Incumbent."
             )
             return TournamentVerdict(
                 promoted=False,

@@ -1072,13 +1072,49 @@ class AuthorAgent:
                         agent_role=self.agent_role,
                     )
                     try:
+                        auto_dry_mode = getattr(
+                            self.tools, "last_dry_run_mode", "check"
+                        )
+                        auto_dry_passed = getattr(
+                            self.tools, "last_dry_run_passed", False
+                        )
+                        if auto_dry_mode == "pilot":
+                            auto_t_type = "PILOT_EXECUTION"
+                            auto_status = (
+                                "PILOT_IMPROVED"
+                                if self.tools.last_pilot_improved
+                                else (
+                                    "COMPILE_ERROR"
+                                    if "COMPILE_ERROR" in pilot_res
+                                    else (
+                                        "RUNTIME_ERROR"
+                                        if "RUNTIME_ERROR" in pilot_res
+                                        else "PILOT_FAILED"
+                                    )
+                                )
+                            )
+                        else:
+                            auto_t_type = "DRY_RUN_CHECK"
+                            auto_status = (
+                                "DRY_RUN_PASSED"
+                                if auto_dry_passed
+                                else (
+                                    "COMPILE_ERROR"
+                                    if "COMPILE_ERROR" in pilot_res
+                                    else (
+                                        "RUNTIME_ERROR"
+                                        if "RUNTIME_ERROR" in pilot_res
+                                        else "DRY_RUN_FAILED"
+                                    )
+                                )
+                            )
                         self.db_logger.save_synthesis_log(
                             log_id=f"syn_{generation}_{turn_idx}_autopilot_{int(time.time() * 1000)}",
                             generation=generation,
                             batch_id=batch_id,
                             mode=mode,
                             turn_index=turn_idx,
-                            turn_type="PILOT_EXECUTION",
+                            turn_type=auto_t_type,
                             repair_idx=0,
                             model=self.model,
                             thinking_content=reasoning_text,
@@ -1091,17 +1127,7 @@ class AuthorAgent:
                             skill_name=str(auto_s_name or ""),
                             skill_code=str(auto_s_code or ""),
                             hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
-                            status="PILOT_IMPROVED"
-                            if self.tools.last_pilot_improved
-                            else (
-                                "COMPILE_ERROR"
-                                if "COMPILE_ERROR" in pilot_res
-                                else (
-                                    "RUNTIME_ERROR"
-                                    if "RUNTIME_ERROR" in pilot_res
-                                    else "PILOT_FAILED"
-                                )
-                            ),
+                            status=auto_status,
                             error_diagnostic=pilot_res[:4000],
                             prompt_sent="",
                             prompt_tokens=prompt_toks,

@@ -1315,3 +1315,54 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
     assert verdict.promoted is False
     assert verdict.winner_id == "incumbent"
     assert verdict.winner_policy_code == base_pol
+
+    # Verify score-collapse guard: +0.25 depth gain (2.75 -> 3.00) with >30% score loss (700 -> 400) is rejected
+    class _ScoreCollapsePool:
+        def evaluate_batch(
+            self,
+            batch_id,
+            policy_code,
+            macros_code,
+            skills,
+            target_episodes,
+            priority_seeds,
+            record_ticks=True,
+        ):
+            is_inc = "Action.SEARCH" in (skills or {}).get("skill_b", "")
+            avg_d = 2.75 if is_inc else 3.00
+            avg_s = 700.0 if is_inc else 400.0
+            return {
+                "batch_id": batch_id,
+                "avg_depth": avg_d,
+                "max_depth": 3,
+                "avg_score": avg_s,
+                "p90_depth": 3.0,
+                "max_score": int(avg_s),
+                "avg_turns": 100.0,
+                "runs": [
+                    {
+                        "run_id": f"{batch_id}_{sd}",
+                        "seed": sd,
+                        "depth": 3 if (not is_inc or idx < 3) else 2,
+                        "max_depth": 3 if (not is_inc or idx < 3) else 2,
+                        "score": int(avg_s),
+                        "turns": 100,
+                        "steps": 100,
+                        "end_reason": "max_steps",
+                        "fn_turns": {"leaf_b": 100},
+                        "summary_digest": "ok",
+                    }
+                    for idx, sd in enumerate(priority_seeds)
+                ],
+            }
+
+    collapse_verdict = referee.evaluate_tournament(
+        generation=3,
+        candidates=[cand_b],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=_ScoreCollapsePool(),
+        seeds=[1000, 1001, 1002, 1003],
+    )
+    assert collapse_verdict.promoted is False
+    assert collapse_verdict.winner_id == "incumbent"

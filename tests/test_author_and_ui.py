@@ -967,3 +967,29 @@ def test_dry_run_check_does_not_log_false_pilot_failed(tmp_path):
     assert rows
     assert ("DRY_RUN_CHECK", "DRY_RUN_PASSED") in rows
     assert all(st != "PILOT_FAILED" for _, st in rows)
+
+    # Also test auto-pilot verification (LLM returns code directly with no tool_calls)
+    agent2 = AuthorAgent(provider="mock", db_path=db_path, agent_role="peer_2")
+    agent2.provider = "openrouter"
+    agent2.tools.configure_generation(
+        pool=None, baseline_runs=[], generation=2, mode="SWARM_PEER"
+    )
+    agent2._call_llm_api = lambda messages, allow_tools=True: {
+        "content": f"```python\n{sample_policy}\n```",
+        "tool_calls": [],
+    }  # type: ignore[method-assign]
+    agent2.synthesize(
+        mode="SWARM_PEER",
+        generation=2,
+        current_policy="",
+        max_tool_turns=3,
+    )
+    con = connect_db(db_path, read_only=True)
+    try:
+        rows_g2 = con.execute(
+            "SELECT turn_type, status FROM synthesis_logs WHERE generation = 2"
+        ).fetchall()
+    finally:
+        con.close()
+    assert ("DRY_RUN_CHECK", "DRY_RUN_PASSED") in rows_g2
+    assert all(st != "PILOT_FAILED" for _, st in rows_g2)
