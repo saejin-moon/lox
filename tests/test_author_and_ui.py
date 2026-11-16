@@ -1001,3 +1001,21 @@ def test_dry_run_check_does_not_log_false_pilot_failed(tmp_path):
     assert bad_stat == "sql_error"
     assert "Valid schema columns: runs(" in bad_msg
     assert "created_at" in bad_msg
+
+    # Verify extract_all_skill_codes parses both XML <skill_code> and markdown ### skill: blocks
+    mixed_out = """
+<skill_code module="nav">
+```python
+def go(): return None
+```
+</skill_code>
+
+### skill: combat.py
+```python
+def hit(): return None
+```
+"""
+    parsed_skills = AuthorAgent.extract_all_skill_codes(mixed_out)
+    assert sorted(parsed_skills.keys()) == ["combat", "nav"]
+    assert "def go()" in parsed_skills["nav"]
+    assert "def hit()" in parsed_skills["combat"]

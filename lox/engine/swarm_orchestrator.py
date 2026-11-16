@@ -39,6 +39,7 @@ from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
 from lox.engine.map_elites import MAPElitesArchive
+from lox.engine.orchestrator import compute_adaptive_max_steps, write_status_report
 from lox.engine.swarm_referee import SwarmReferee
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
@@ -110,6 +111,8 @@ class SwarmCampaignOrchestrator:
         self.referee = SwarmReferee(
             max_tournament_peers=max(2, min(4, self.num_workers))
         )
+        self.campaign_start_time = time.time()
+        self._plateau_streak: int = 0
 
         # Legacy Meta-Agent & Two-Pass Advisory Critic (only used when swarm_architecture='legacy')
         self.meta_agent = SwarmMetaAgent(
@@ -244,12 +247,23 @@ class SwarmCampaignOrchestrator:
             else {}
         )
 
-        # 1. Deterministic Deficit Discovery (0 LLM calls)
+        # 1. Deterministic Deficit Discovery + Adaptive Horizon (0 LLM calls)
+        active_max_steps = self._compute_active_max_steps()
         deficit_report = self.deficit_analyzer.analyze(
             generation=generation,
             current_policy=current_policy,
             skills=initial_skills,
         )
+        if self._plateau_streak >= 3 and getattr(self.map_elites, "cells", None):
+            top_elites = sorted(
+                self.map_elites.cells.values(),
+                key=lambda e: float(e.fitness),
+                reverse=True,
+            )[:3]
+            deficit_report.plateau_hints = [
+                f"{el.cell_id} (batch={el.batch_id}, gen={el.generation}, D={el.metrics.get('avg_depth', 1.0):.2f}/S={el.metrics.get('avg_score', 0.0):.0f})"
+                for el in top_elites
+            ]
         if deficit_report.regime == "CLIMBING":
             active_peers = max(1, min(self.num_workers, max(2, self.num_workers // 2)))
         else:
@@ -258,7 +272,7 @@ class SwarmCampaignOrchestrator:
         ui.info(
             f"Gen {generation}: Regime={deficit_report.regime} "
             f"(Δ={deficit_report.rolling_depth_delta:+.2f}) | Clusters={len(deficit_report.fail_clusters)} | "
-            f"Peers={active_peers}"
+            f"Peers={active_peers} | MaxSteps={active_max_steps}"
         )
 
         # 2. Shared Incubation Micro-Shard Baseline (evaluated once for incumbent)
@@ -284,6 +298,7 @@ class SwarmCampaignOrchestrator:
                 skills=initial_skills,
                 target_episodes=len(shard_seeds),
                 priority_seeds=shard_seeds,
+                max_steps=active_max_steps,
                 record_ticks=False,
             )
             for r in inc_shard.get("runs", []) or []:
@@ -315,6 +330,7 @@ class SwarmCampaignOrchestrator:
                 eval_pool=self.eval_pool,
                 incumbent_shard_runs=incumbent_shard_runs,
                 shard_seeds=shard_seeds,
+                frontier=self.frontier,
             )
 
         with concurrent.futures.ThreadPoolExecutor(
@@ -339,6 +355,7 @@ class SwarmCampaignOrchestrator:
             base_skills=initial_skills,
             eval_pool=self.eval_pool,
             seeds=seeds,
+            max_steps=active_max_steps,
         )
 
         # Sync workspace only if promoted (or bootstrapping)
@@ -402,6 +419,23 @@ class SwarmCampaignOrchestrator:
             runner_ups=verdict.all_runner_up_batches,
         )
         self._sync_batch_cost(batch_id, generation)
+        self._plateau_streak = 0 if verdict.promoted else (self._plateau_streak + 1)
+
+        try:
+            write_status_report(
+                workspace_dir=str(self.workspace_dir),
+                db_path=self.db_path,
+                gen=generation,
+                start_time=self.campaign_start_time,
+                baseline_runs=runs,
+                active_max_steps=active_max_steps,
+                current_policy=verdict.winner_policy_code,
+                macro_code="",
+                skills_count=len(verdict.winner_skills),
+                niches=sorted(getattr(self.map_elites, "cells", {}).keys()) or ["peer"],
+            )
+        except Exception:
+            pass
 
         if generation % 5 == 0:
             try:
@@ -427,12 +461,38 @@ class SwarmCampaignOrchestrator:
             "avg_depth": avg_depth,
             "max_depth": max_d,
             "avg_score": avg_score,
+            "active_max_steps": active_max_steps,
             "new_frontier_checkpoints": new_cps,
             "elapsed_sec": elapsed,
             "peers_run": len(peer_candidates),
             "peers_incubated": sum(1 for c in peer_candidates if c.sandbox_passed),
             "scoreboard": verdict.scoreboard,
         }
+
+    def _compute_active_max_steps(self) -> int:
+        """Uses `compute_adaptive_max_steps` from recent promoted batches to lift the 5k horizon on deep runs."""
+        try:
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                row = con.execute(
+                    """
+                    SELECT p90_depth, max_depth
+                    FROM batches
+                    WHERE UPPER(mode) = 'SWARM' AND hypothesis_passed = TRUE
+                    ORDER BY generation DESC, created_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if row:
+                    p90_d = float(row[0] or row[1] or 1.0)
+                    return compute_adaptive_max_steps(
+                        p90_d, base_max_steps=self.max_steps
+                    )
+            finally:
+                con.close()
+        except Exception:
+            pass
+        return self.max_steps
 
     def _ingest_frontier_and_map_elites(
         self,

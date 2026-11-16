@@ -86,7 +86,8 @@ class SwarmReferee:
     def __init__(self, max_tournament_peers: int = 3) -> None:
         self.max_tournament_peers = max(1, int(max_tournament_peers))
         self._incumbent_cache: dict[
-            tuple[int, str, tuple[int, ...]], tuple[BatchEvaluation, dict[str, Any]]
+            tuple[int, str, tuple[int, ...], int],
+            tuple[BatchEvaluation, dict[str, Any]],
         ] = {}
 
     def select_finalists(
@@ -212,6 +213,7 @@ class SwarmReferee:
         base_skills: dict[str, str],
         eval_pool: Any,
         seeds: list[int],
+        max_steps: int | None = None,
     ) -> TournamentVerdict:
         """Runs paired CRN evaluation across Incumbent + Top Survivors (+ Orthogonal Pair)."""
         finalists = self.select_finalists(candidates, base_policy, base_skills)
@@ -233,17 +235,21 @@ class SwarmReferee:
             "loc_total": base_loc,
         }
         seeds_key = tuple(int(s) for s in seeds)
+        steps_key = int(max_steps or 0)
         inc_fp = (
             _package_fingerprint(base_policy, base_skills)
             if base_policy.strip()
             else ""
         )
-        inc_cache_key = (id(eval_pool), inc_fp, seeds_key)
+        inc_cache_key = (id(eval_pool), inc_fp, seeds_key, steps_key)
         if base_policy.strip():
             cached_inc = self._incumbent_cache.get(inc_cache_key)
             if cached_inc is not None:
                 inc_batch_eval, inc_stats = cached_inc
             else:
+                eval_kwargs: dict[str, Any] = (
+                    {"max_steps": int(max_steps)} if max_steps is not None else {}
+                )
                 inc_batch_eval = eval_pool.evaluate_batch(
                     batch_id=f"batch_swarm_g{generation}_inc_{int(time.time())}",
                     policy_code=base_policy,
@@ -252,6 +258,7 @@ class SwarmReferee:
                     target_episodes=len(seeds),
                     priority_seeds=list(seeds),
                     record_ticks=False,
+                    **eval_kwargs,
                 )
                 inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
                 if len(self._incumbent_cache) >= 4:
@@ -282,6 +289,9 @@ class SwarmReferee:
         evaluated_entries: list[
             tuple[PeerCandidate, BatchEvaluation, dict[str, Any]]
         ] = []
+        fin_eval_kwargs: dict[str, Any] = (
+            {"max_steps": int(max_steps)} if max_steps is not None else {}
+        )
         for cand in finalists:
             b_eval = eval_pool.evaluate_batch(
                 batch_id=f"batch_swarm_g{generation}_{cand.peer_id}_{int(time.time())}",
@@ -291,6 +301,7 @@ class SwarmReferee:
                 target_episodes=len(seeds),
                 priority_seeds=list(seeds),
                 record_ticks=True,
+                **fin_eval_kwargs,
             )
             stats = _extract_eval_stats(b_eval, loc_total=cand.loc_total)
             evaluated_entries.append((cand, b_eval, stats))
@@ -396,7 +407,7 @@ class SwarmReferee:
         win_fp = _package_fingerprint(best_cand.policy_code, best_cand.skills)
         if len(self._incumbent_cache) >= 4:
             self._incumbent_cache.clear()
-        self._incumbent_cache[(id(eval_pool), win_fp, seeds_key)] = (
+        self._incumbent_cache[(id(eval_pool), win_fp, seeds_key, steps_key)] = (
             best_eval,
             best_stats,
         )

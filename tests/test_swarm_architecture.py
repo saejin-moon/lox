@@ -507,7 +507,10 @@ def test_run_swarm_clean_resets_campaign_while_preserving_experts(tmp_path):
         timeout=120,
     )
     assert res.returncode == 0, res.stderr + "\n" + res.stdout
-    assert not (workspace / "STATUS.md").exists()
+    assert (workspace / "STATUS.md").exists()
+    status_txt = (workspace / "STATUS.md").read_text(encoding="utf-8")
+    assert "stale status" not in status_txt
+    assert "LOX Campaign Status Dashboard" in status_txt
     assert not (workspace / "skills" / "legacy.py").exists()
     assert not (frontier / "stale_cp.json").exists()
 
@@ -1275,6 +1278,7 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
             target_episodes,
             priority_seeds,
             record_ticks=True,
+            max_steps=None,
         ):
             is_inc = "Action.SEARCH" in (skills or {}).get("skill_b", "")
             depth = 2 if is_inc else 1
@@ -1327,6 +1331,7 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
             target_episodes,
             priority_seeds,
             record_ticks=True,
+            max_steps=None,
         ):
             is_inc = "Action.SEARCH" in (skills or {}).get("skill_b", "")
             avg_d = 2.75 if is_inc else 3.00
@@ -1380,6 +1385,7 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
             target_episodes,
             priority_seeds,
             record_ticks=True,
+            max_steps=None,
         ):
             eval_calls.append(batch_id)
             return {
@@ -1427,3 +1433,44 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
         seeds=[1000, 1001],
     )
     assert len(eval_calls) == 1  # Incumbent served from CRN cache!
+
+    # Increasing max_steps tier invalidates cached incumbent cleanly
+    eval_calls.clear()
+    referee.evaluate_tournament(
+        generation=6,
+        candidates=[cand_a],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=c_pool,
+        seeds=[1000, 1001],
+        max_steps=10000,
+    )
+    assert len(eval_calls) == 2
+
+    # Verify FrontierCheckpoint replay during incubate_candidate catches deep-state errors
+    from lox.engine.frontier import FrontierCheckpoint
+
+    deep_cp = FrontierCheckpoint(
+        checkpoint_id="fc_test_d3",
+        seed=1000,
+        depth=3,
+        milestone="dlvl_3",
+        turns=50,
+        action_bytes=bytes([ord("s")] * 20),
+    )
+    ok_res = incubate_candidate(
+        cand_a,
+        deficit_report=report,
+        claimed_deficit=DeficitCluster("c", "k", "l"),
+        frontier_checkpoints=[deep_cp],
+    )
+    assert ok_res.sandbox_passed is True
+    assert "frontier_survived" in ok_res.sandbox_metrics
+
+    # Verify bloat_warning triggers slice_modularize when policy_loc >= 400
+    large_pol = base_pol + "\n" + "\n".join(f"# pad {i}" for i in range(410))
+    big_report = analyzer.analyze(
+        generation=6, current_policy=large_pol, skills=base_skills
+    )
+    assert big_report.bloat_warning is True
+    assert any(c.cluster_id == "slice_modularize" for c in big_report.fail_clusters)

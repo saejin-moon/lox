@@ -636,14 +636,14 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 1. **Focus on Your Claimed Empirical Deficit**:
    - Inspect your claimed failure cluster (`D_fail`) and protected high-Ochiai branches (`D_succ`) using `query_db`, `read_policy`, `diff_policies`, `read_skill`, `query_wiki`, `query_monster`, and `query_item`.
    - Preserve high-Ochiai `D_succ` branches unless you have verified a strict improvement across both failure replays and `D_succ` guard runs.
-2. **Surgical Edits & Modular Consolidation**:
-   - Work cleanly on `class Policy:` (and update or prune `skills/*.py` only when consolidating or fixing a real bug—do NOT spawn duplicate overlapping skill files).
+2. **Surgical Edits & Modular Skill Extraction**:
+   - When `policy.py` grows large (`>= 400` lines), extract cohesive Behavior Tree subtrees/helpers into modular `skills/<module>.py` files (`from skills.<module> import ...` inside `policy.py`) rather than cramming everything into one giant file. Modular skills keep diffs surgical and allow disjoint peer edits to compose automatically.
    - Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin so native leaf attribution remains exact, and use `ActionLeaf(..., min_commit=N)` for multi-step commitment instead of ad-hoc post-step gates.
 3. **Verify in Sandbox Before Submission**:
-   - Call `dry_run_policy(code=...)` to verify AST compilation, zero swallowed leaf errors, and failure-replay behavior.
-   - Your candidate will be incubated on an isolated paired shard against the incumbent and must achieve `delta >= 0` in the full CRN tournament to be promoted.
+   - Call `dry_run_policy(code=...)` (and `skill_name`/`skill_code` if editing a skill) to verify AST compilation, zero swallowed leaf errors, and mid-game frontier/failure replays.
+   - Your candidate will be incubated on an isolated paired shard + frontier checkpoints against the incumbent and must pass CRN evaluation without collapsing score to be promoted.
 4. **Output Format**:
-   - Output your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by any updated skill modules inside `### skill: <name>` ```python ... ``` blocks, and the complete self-contained `class Policy:` inside `<policy_code> ... </policy_code>` (or the final ```python ... ``` block).
+   - Output your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by any added/updated skill modules inside `<skill_code module="name"> ... </skill_code>` blocks, and the complete `class Policy:` inside `<policy_code> ... </policy_code>` (or the final ```python ... ``` block).
 """
 
     if canon_mode == "SWARM_META":

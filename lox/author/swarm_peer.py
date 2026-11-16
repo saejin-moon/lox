@@ -153,6 +153,61 @@ def compute_candidate_footprint(
     return touched_skills, touched_branches, clobbers_protected
 
 
+def _run_replay_probe(
+    compiled: Any,
+    seed: int,
+    action_bytes: bytes,
+    stop_at_byte_idx: int | None = None,
+    live_steps: int = 80,
+) -> tuple[bool, int, int, str]:
+    """
+    Fast-forwards a candidate policy into a recorded mid/late-game trajectory byte stream
+    and runs `live_steps` turns, returning `(survived, start_depth, end_depth, error_msg)`.
+    """
+    buf = bytes(action_bytes or b"")
+    if not buf:
+        return True, 1, 1, ""
+    rh = NetHackHarness(max_steps=live_steps + 20)
+    try:
+        with _COMPILE_EXEC_LOCK:
+            r_runner = compiled.create_runner()
+        r_st = rh.replay_bytes(
+            seed=int(seed),
+            recorded_bytes=buf,
+            stop_at_byte_idx=stop_at_byte_idx,
+        )
+        if rh.done and stop_at_byte_idx is None and len(buf) > 1:
+            r_st = rh.replay_bytes(
+                seed=int(seed),
+                recorded_bytes=buf,
+                stop_at_byte_idx=max(1, len(buf) - 30),
+            )
+        start_depth = int(getattr(r_st, "depth", 1) or 1)
+        max_seen_depth = start_depth
+        rh.step_count = 0
+        for _ in range(live_steps):
+            ra, _ = r_runner.next_action(r_st)
+            r_st, r_done, _ = rh.step(ra)
+            cur_d = int(getattr(r_st, "depth", 1) or 1)
+            if cur_d > max_seen_depth:
+                max_seen_depth = cur_d
+            if r_done:
+                break
+        r_errs = extract_runner_leaf_errors(r_runner)
+        if r_errs:
+            return (
+                False,
+                start_depth,
+                max_seen_depth,
+                f"leaf error: {r_errs[0][0]} -> {r_errs[0][1]}",
+            )
+        return not rh.done, start_depth, max_seen_depth, ""
+    except Exception as exc:
+        return False, 1, 1, f"runtime error: {type(exc).__name__}: {exc}"
+    finally:
+        rh.close()
+
+
 def incubate_candidate(
     candidate: PeerCandidate,
     deficit_report: DeficitReport,
@@ -160,6 +215,7 @@ def incubate_candidate(
     eval_pool: Any = None,
     incumbent_shard_runs: dict[int, dict[str, Any]] | None = None,
     shard_seeds: list[int] | None = None,
+    frontier_checkpoints: list[Any] | None = None,
 ) -> PeerCandidate:
     """
     Isolated Sandbox Incubation (`tau_iso`):
@@ -231,34 +287,41 @@ def incubate_candidate(
         r_bytes = bytes(fix.get("action_bytes") or b"")
         if not r_bytes:
             continue
-        rh = NetHackHarness(max_steps=80)
-        try:
-            with _COMPILE_EXEC_LOCK:
-                r_runner = compiled.create_runner()
-            r_st = rh.replay_bytes(
-                seed=int(fix["seed"]),
-                recorded_bytes=r_bytes,
-                stop_at_byte_idx=int(
-                    fix.get("stop_at_byte_idx", max(1, len(r_bytes) - 25))
-                ),
-            )
-            rh.step_count = 0
-            for _ in range(80):
-                ra, _ = r_runner.next_action(r_st)
-                r_st, r_done, _ = rh.step(ra)
-                if r_done:
-                    break
-            r_errs = extract_runner_leaf_errors(r_runner)
-            if r_errs:
-                candidate.sandbox_passed = False
-                candidate.error = f"Failure-replay `{fix['run_id']}` leaf error: {r_errs[0][0]} -> {r_errs[0][1]}"
-                return candidate
-        except Exception as exc:
+        stop_idx = int(fix.get("stop_at_byte_idx", max(1, len(r_bytes) - 25)))
+        _, _, _, err_msg = _run_replay_probe(
+            compiled,
+            seed=int(fix["seed"]),
+            action_bytes=r_bytes,
+            stop_at_byte_idx=stop_idx,
+            live_steps=80,
+        )
+        if err_msg:
             candidate.sandbox_passed = False
-            candidate.error = f"Failure-replay `{fix['run_id']}` runtime error: {type(exc).__name__}: {exc}"
+            candidate.error = f"Failure-replay `{fix['run_id']}` {err_msg}"
             return candidate
-        finally:
-            rh.close()
+
+    # Check high-depth Go-Explore FrontierCheckpoints (~15ms fast-forward each)
+    frontier_survived = 0
+    frontier_depth_deltas: list[int] = []
+    for cp in (frontier_checkpoints or [])[:2]:
+        cp_bytes = bytes(getattr(cp, "action_bytes", b"") or b"")
+        if not cp_bytes:
+            continue
+        f_surv, start_d, max_d, f_err = _run_replay_probe(
+            compiled,
+            seed=int(getattr(cp, "seed", 0)),
+            action_bytes=cp_bytes,
+            stop_at_byte_idx=None,
+            live_steps=100,
+        )
+        if f_err:
+            cp_id = getattr(cp, "checkpoint_id", "frontier_cp")
+            candidate.sandbox_passed = False
+            candidate.error = f"Frontier `{cp_id}` {f_err}"
+            return candidate
+        if f_surv:
+            frontier_survived += 1
+        frontier_depth_deltas.append(max_d - start_d)
 
     metrics: dict[str, Any] = {
         "wrapper_ratio": round(wrapper_ratio, 4),
@@ -268,6 +331,12 @@ def incubate_candidate(
         "depth_delta": 0.0,
         "score_delta": 0.0,
         "guard_depth_delta": 0.0,
+        "frontier_survived": frontier_survived,
+        "frontier_depth_delta": (
+            round(sum(frontier_depth_deltas) / len(frontier_depth_deltas), 2)
+            if frontier_depth_deltas
+            else 0.0
+        ),
     }
 
     # Multi-core paired incubation shard if eval_pool is attached
@@ -388,8 +457,21 @@ class SwarmPeerAgent:
         eval_pool: Any = None,
         incumbent_shard_runs: dict[int, dict[str, Any]] | None = None,
         shard_seeds: list[int] | None = None,
+        frontier: Any = None,
     ) -> PeerCandidate:
         skills_copy = dict(current_skills or {})
+        sampled_frontier: list[Any] = []
+        if frontier is not None and getattr(frontier, "checkpoints", None):
+            min_f_d = max(2, int(deficit_report.incumbent_max_depth or 2) - 1)
+            seen_cp_ids: set[str] = set()
+            for target_d in (min_f_d, 2):
+                for _ in range(2):
+                    cp = frontier.sample_checkpoint(min_depth=target_d)
+                    if cp is not None and cp.checkpoint_id not in seen_cp_ids:
+                        seen_cp_ids.add(cp.checkpoint_id)
+                        sampled_frontier.append(cp)
+                if len(sampled_frontier) >= 2:
+                    break
         ui.info(
             f"Peer [{self.peer_id}]: Claimed `{claimed_deficit.cluster_id}` "
             f"({claimed_deficit.label[:60]}) for Gen {generation}..."
@@ -438,6 +520,7 @@ class SwarmPeerAgent:
                 eval_pool=eval_pool,
                 incumbent_shard_runs=incumbent_shard_runs,
                 shard_seeds=shard_seeds,
+                frontier_checkpoints=sampled_frontier,
             )
 
         # Configure isolated AuthorToolRegistry context (no live pool mutation, check-only dry_run_policy)
@@ -447,8 +530,25 @@ class SwarmPeerAgent:
             skills=skills_copy,
             generation=generation,
             mode="SWARM_PEER",
+            swarm_frontier=frontier,
+            swarm_checkpoint=sampled_frontier[0] if sampled_frontier else None,
         )
         self.author.tools.current_policy_code = str(current_policy or "")
+
+        frontier_block = ""
+        if sampled_frontier:
+            f_lines = []
+            for cp in sampled_frontier[:2]:
+                tail_log = " | ".join(
+                    (getattr(cp, "game_log", "") or "").splitlines()[-2:]
+                )[:200]
+                f_lines.append(
+                    f"  * `{cp.checkpoint_id}` (seed={cp.seed}, Dlvl {cp.depth}, turns={cp.turns}): {tail_log}"
+                )
+            frontier_block = (
+                "\n- High-Depth Frontier Checkpoints (auto-replayed in `dry_run_policy` & incubation):\n"
+                + "\n".join(f_lines)
+            )
 
         extra_context = (
             f"{deficit_report.format_brief()}\n\n"
@@ -457,7 +557,8 @@ class SwarmPeerAgent:
             f"- Description: {claimed_deficit.label}\n"
             f"- Evidence: {claimed_deficit.evidence}\n"
             f"- Target Sample Seeds: {claimed_deficit.sample_seeds}\n"
-            f"- Dominant Functions Observed: {claimed_deficit.dominant_fns}\n"
+            f"- Dominant Functions Observed: {claimed_deficit.dominant_fns}"
+            f"{frontier_block}\n"
         )
 
         proposal = self.author.synthesize(
@@ -535,6 +636,7 @@ class SwarmPeerAgent:
             eval_pool=eval_pool,
             incumbent_shard_runs=incumbent_shard_runs,
             shard_seeds=shard_seeds,
+            frontier_checkpoints=sampled_frontier,
         )
 
         status_lbl = (

@@ -1940,9 +1940,56 @@ class AuthorToolRegistry:
                             rh.close()
                 except Exception:
                     pass
+                # Also replay 1 deep FrontierArchive checkpoint if available
+                if self.swarm_frontier is not None and getattr(
+                    self.swarm_frontier, "checkpoints", None
+                ):
+                    try:
+                        f_cp = self.swarm_frontier.sample_checkpoint(min_depth=2)
+                        if f_cp is not None and getattr(f_cp, "action_bytes", b""):
+                            fh = NetHackHarness(max_steps=120)
+                            try:
+                                f_runner = compiled.create_runner()
+                                f_st = self.swarm_frontier.replay_into(fh, f_cp)
+                                f_acts: list[str] = []
+                                f_tiles: set[tuple[int, int]] = {(f_st.y, f_st.x)}
+                                for _ in range(120):
+                                    fa, _ = f_runner.next_action(f_st)
+                                    f_st, f_done, f_info = fh.step(fa)
+                                    f_acts.append(str(f_info.get("action_name", "")))
+                                    f_tiles.add((f_st.y, f_st.x))
+                                    if f_done:
+                                        break
+                                f_leaf_errs = extract_runner_leaf_errors(f_runner)
+                                if f_leaf_errs:
+                                    err_lines = "\n".join(
+                                        f"- Leaf `{n}` raised {e}"
+                                        for n, e in f_leaf_errs[:5]
+                                    )
+                                    return (
+                                        f"Runtime Error in BehaviorTree leaf during frontier-replay ({f_cp.checkpoint_id}):\n{err_lines}",
+                                        "RUNTIME_ERROR",
+                                    )
+                                top_f_acts = ", ".join(
+                                    f"{k}:{v}"
+                                    for k, v in Counter(f_acts).most_common(4)
+                                )
+                                f_status = (
+                                    f"ENDED({f_st.end_reason})"
+                                    if fh.done
+                                    else "SURVIVED(120 steps)"
+                                )
+                                replay_summaries.append(
+                                    f"  * Frontier `{f_cp.checkpoint_id}` (Dlvl {f_cp.depth}, seed={f_cp.seed}): {f_status} | "
+                                    f"EndDlvl={f_st.depth} | HP={f_st.hp}/{f_st.max_hp} | Tiles={len(f_tiles)} | Acts=[{top_f_acts}]"
+                                )
+                            finally:
+                                fh.close()
+                    except Exception:
+                        pass
                 if replay_summaries:
                     replay_checks_block = (
-                        "\n- Mid-Game Failure-Replay Checks:\n"
+                        "\n- Mid-Game Failure & Frontier-Replay Checks:\n"
                         + "\n".join(replay_summaries)
                     )
 

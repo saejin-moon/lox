@@ -52,6 +52,7 @@ class DeficitReport:
     fail_clusters: list[DeficitCluster] = field(default_factory=list)
     end_reason_histogram: list[tuple[str, int, float]] = field(default_factory=list)
     dormant_branches: list[str] = field(default_factory=list)
+    plateau_hints: list[str] = field(default_factory=list)
     policy_loc: int = 0
     skill_loc: int = 0
     skill_count: int = 0
@@ -82,6 +83,11 @@ class DeficitReport:
                 for er, cnt, ad in self.end_reason_histogram[:8]
             )
             lines.append(f"- Recent Outcome Distribution (diagnose freely): {hist_str}")
+        if self.plateau_hints:
+            lines.append(
+                "- MAP-Elites Diversity Stepping Stones (inspect via `read_policy` to escape plateau): "
+                + " | ".join(self.plateau_hints[:4])
+            )
         if self.fail_clusters:
             lines.append("- Domain-Agnostic Trajectory Slices (D_fail):")
             for c in self.fail_clusters:
@@ -107,7 +113,11 @@ class DeficitAnalyzer:
         policy_loc = len(current_policy.splitlines()) if current_policy.strip() else 0
         skill_loc = sum(len(v.splitlines()) for v in skills_map.values() if v)
         skill_count = len(skills_map)
-        bloat_warning = (skill_count >= 6) or ((policy_loc + skill_loc) >= 450)
+        bloat_warning = (
+            (policy_loc >= 400)
+            or (skill_count >= 6)
+            or ((policy_loc + skill_loc) >= 500)
+        )
 
         report = DeficitReport(
             generation=generation,
@@ -147,20 +157,20 @@ class DeficitAnalyzer:
         if not report.fail_clusters:
             report.fail_clusters = self._bootstrap_clusters()
 
-        if report.dormant_branches and (
-            report.bloat_warning or len(report.dormant_branches) >= 2
+        if report.bloat_warning or (
+            report.dormant_branches and len(report.dormant_branches) >= 2
         ):
             report.fail_clusters.append(
                 DeficitCluster(
-                    cluster_id="dormant_cleanup",
-                    kind="dormant_cleanup",
-                    label="Prune dormant BT leaves & consolidate overlapping skills",
-                    run_count=len(report.dormant_branches),
+                    cluster_id="slice_modularize",
+                    kind="modular_refactor",
+                    label="Extract cohesive subtrees into `skills/*.py` & prune dormant branches",
+                    run_count=max(len(report.dormant_branches), 1),
                     avg_depth=report.incumbent_avg_depth,
                     dominant_fns=list(report.dormant_branches[:5]),
                     evidence=(
-                        f"{len(report.dormant_branches)} dormant branch(es) registered 0 turns; "
-                        f"workspace has {skill_count} skill modules ({policy_loc + skill_loc} total LOC)."
+                        f"policy={policy_loc} LOC, skills={skill_count} ({skill_loc} LOC), "
+                        f"dormant={len(report.dormant_branches)}. Emit <skill_code module='...'> blocks to keep policy.py <=250 LOC."
                     ),
                 )
             )

@@ -91,14 +91,29 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
 
         total_batches = con.execute("SELECT COUNT(*) FROM batches").fetchone()[0] or 0
         total_runs = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0] or 0
+        cost_row = con.execute(
+            """
+            SELECT COALESCE(SUM(total_cost_usd), 0.0),
+                   COALESCE(SUM(total_llm_tokens), 0),
+                   COALESCE(AVG(avg_score), 0.0)
+            FROM batches
+            WHERE created_at >= ?
+            """,
+            (since_dt,),
+        ).fetchone()
+        win_cost, win_tokens, win_avg_score = cost_row or (0.0, 0, 0.0)
 
         print("\n📊 RECENT ACTIVITY & DEPTH VELOCITY:")
         print(
             f"  • Generations Run: {win_count} (Gen {min_gen or 0} -> {max_gen or 0}) | Total All-Time: {total_batches}"
         )
         print(f"  • Promoted Changes: {prom_count} in window")
-        print(f"  • Window Avg Depth: {win_avg_d:.2f} | Window Max Depth: {win_max_d}")
-        print(f"  • Total Recorded Episodes: {total_runs:,}")
+        print(
+            f"  • Window Avg Depth: {win_avg_d:.2f} | Max Depth: {win_max_d} | Avg Score: {float(win_avg_score or 0.0):.1f}"
+        )
+        print(
+            f"  • Window LLM Spend: ${float(win_cost or 0.0):.4f} ({int(win_tokens or 0):,} tokens) | Total Episodes: {total_runs:,}"
+        )
 
         # Recent discoveries
         try:

@@ -410,27 +410,41 @@ class AuthorAgent:
         content: str,
         hyp: dict[str, Any] | None = None,
     ) -> dict[str, str]:
-        """Extracts all `<skill_code module="name">...</skill_code>` blocks from an LLM response."""
+        """Extracts all `<skill_code module="name">...</skill_code>` and `### skill: <name>` blocks."""
         text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL)
         out: dict[str, str] = {}
+
+        def _store(raw_name: str, raw_src: str) -> None:
+            mod_name = re.sub(r"[^a-zA-Z0-9_]", "_", raw_name.strip().lower()).strip(
+                "_"
+            )
+            if not mod_name:
+                return
+            s_clean = AuthorAgent._sanitize_skill_code(raw_src.strip())
+            if s_clean:
+                out[mod_name] = smart_dedent(s_clean)
+
         for m in re.finditer(
             r"<(?:skill_code|skill)(?:\s+(?:module|name)=[\"'](?P<mod>[^\"']+)[\"'])?[^>]*>(?P<code>.*?)</(?:skill_code|skill)>",
             text,
             flags=re.DOTALL | re.IGNORECASE,
         ):
             mod_name = (m.group("mod") or (hyp or {}).get("skill_module") or "").strip()
-            mod_name = re.sub(r"[^a-zA-Z0-9_]", "_", mod_name.lower()).strip("_")
-            if not mod_name:
-                continue
             s_raw = m.group("code").strip()
             fence_m = re.search(
                 r"```(?:python)?\s*\n(.*?)```", s_raw, flags=re.DOTALL | re.IGNORECASE
             )
             if fence_m:
                 s_raw = fence_m.group(1).strip()
-            s_clean = AuthorAgent._sanitize_skill_code(s_raw)
-            if s_clean:
-                out[mod_name] = smart_dedent(s_clean)
+            _store(mod_name, s_raw)
+
+        for m in re.finditer(
+            r"###\s*skill:\s*([A-Za-z0-9_.-]+)\s*\n+```(?:python)?\s*\n(.*?)```",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        ):
+            _store(m.group(1).removesuffix(".py"), m.group(2))
+
         return out
 
     @staticmethod
