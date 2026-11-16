@@ -271,7 +271,7 @@ Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stat
 6. `diff_policies(policy_id_a, policy_id_b)`: View unified diffs of `policy.py` and `skills/*.py` between any two stored `policy_id` snapshots.
 7. `read_skill(skill_name, policy_id="")`: Read the full Python source code of a skill module from the current workspace (`policy_id=""`) or from a historical policy snapshot (`policy_id="policy_swarm_g..."`).
 8. `query_policy_docs(topic="all")`: View the policy language specification, current `policy.py`, and available `skills/` modules.
-9. `query_theories(query, doc_type="", limit=6)`: Search LanceDB for prior worker `THEORY` notes, `REFLECTION_REPORT`s, `CRITIC_PRE_GUIDE`, and `CRITIC_POST_REVIEW` documents.
+9. `query_theories(query, doc_type="", limit=6)`: Search LanceDB for prior peer `THEORY` notes (hypotheses & incubation outcomes), CRN tournament `META_SYNTHESIS` verdicts, `MODULAR_REFACTOR` summaries, and legacy `REFLECTION_REPORT`s / critic notes.
 10. `dry_run_policy(code, seed=42, max_turns=150, replay_run_id="", replay_steps=0, hypothesis="")`: Compile and empirically test candidate Behavior Tree subtrees or `class Policy` code in `NetHackHarness`.
 
 ### Scientific Investigation Protocol (Swarm Behavior Trees)

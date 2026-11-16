@@ -11,6 +11,7 @@ Replaces hierarchical `SwarmCriticAgent` / `SwarmMetaAgent` / thematic `SwarmWor
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections import Counter
@@ -477,19 +478,6 @@ class SwarmPeerAgent:
             f"({claimed_deficit.label[:60]}) for Gen {generation}..."
         )
 
-        # Record lightweight claim on shared board
-        if self.theories is not None:
-            try:
-                self.theories.add_document(
-                    doc_type="PEER_CLAIM",
-                    category=claimed_deficit.cluster_id,
-                    generation=generation,
-                    content=f"{self.peer_id} claimed `{claimed_deficit.cluster_id}`: {claimed_deficit.evidence}",
-                    metadata={"peer_id": self.peer_id, "kind": claimed_deficit.kind},
-                )
-            except Exception:
-                pass
-
         if self.provider == "mock":
             mock_code = self._build_mock_peer_policy(current_policy)
             touched_skills, touched_branches, clobbers = compute_candidate_footprint(
@@ -513,7 +501,7 @@ class SwarmPeerAgent:
                 touched_branches=touched_branches,
                 clobbers_protected=clobbers,
             )
-            return incubate_candidate(
+            cand = incubate_candidate(
                 cand,
                 deficit_report=deficit_report,
                 claimed_deficit=claimed_deficit,
@@ -522,6 +510,8 @@ class SwarmPeerAgent:
                 shard_seeds=shard_seeds,
                 frontier_checkpoints=sampled_frontier,
             )
+            self._record_peer_theory(generation, claimed_deficit, cand)
+            return cand
 
         # Configure isolated AuthorToolRegistry context (no live pool mutation, check-only dry_run_policy)
         self.author.tools.configure_generation(
@@ -571,7 +561,7 @@ class SwarmPeerAgent:
         )
 
         if getattr(proposal, "aborted", False):
-            return PeerCandidate(
+            aborted_cand = PeerCandidate(
                 peer_id=self.peer_id,
                 claimed_deficit_id=claimed_deficit.cluster_id,
                 claimed_label=claimed_deficit.label,
@@ -583,6 +573,8 @@ class SwarmPeerAgent:
                 sandbox_passed=False,
                 error=str(getattr(proposal, "abort_reason", "") or "Synthesis aborted"),
             )
+            self._record_peer_theory(generation, claimed_deficit, aborted_cand)
+            return aborted_cand
 
         hyp = dict(getattr(proposal, "hypothesis", {}) or {})
         pol_code = str(getattr(proposal, "full_policy_code", "") or "").strip()
@@ -645,7 +637,58 @@ class SwarmPeerAgent:
             else f"FAILED ({cand.error[:80]})"
         )
         ui.info(f"Peer [{self.peer_id}] Incubation: {status_lbl}")
+        self._record_peer_theory(generation, claimed_deficit, cand)
         return cand
+
+    def _record_peer_theory(
+        self,
+        generation: int,
+        claimed_deficit: DeficitCluster,
+        cand: PeerCandidate,
+    ) -> None:
+        """Persists peer hypothesis and empirical incubation outcome into LanceDB `theories`."""
+        if self.theories is None or not hasattr(self.theories, "save_document"):
+            return
+        hyp = dict(cand.hypothesis_yaml or {})
+        obs = str(
+            hyp.get("observation_from_db")
+            or hyp.get("binding_constraint")
+            or claimed_deficit.evidence
+            or ""
+        )
+        mech = str(hyp.get("mechanism") or cand.claimed_label or "")
+        c_rule = str(hyp.get("verified_c_rule") or "")
+        outcome = "PASSED" if cand.sandbox_passed else f"FAILED: {cand.error}"
+        tags = list(
+            dict.fromkeys(
+                [claimed_deficit.cluster_id, claimed_deficit.kind]
+                + sorted(cand.touched_branches)[:4]
+                + sorted(cand.touched_skills)[:4]
+            )
+        )
+        content = (
+            f"Peer {self.peer_id} | Gen {generation} | Target `{claimed_deficit.cluster_id}` "
+            f"({claimed_deficit.label})\n"
+            f"Observation: {obs}\n"
+            f"Mechanism: {mech}\n"
+            f"C/Wiki Rule: {c_rule}\n"
+            f"Touched Branches: {sorted(cand.touched_branches)} | Skills: {sorted(cand.touched_skills)}\n"
+            f"Incubation Outcome: {outcome}\n"
+            f"Sandbox Metrics: {json.dumps(cand.sandbox_metrics or {})}"
+        )
+        try:
+            self.theories.save_document(
+                generation=generation,
+                agent_role=self.peer_id,
+                doc_type="THEORY",
+                title=f"Gen {generation} {self.peer_id} ({claimed_deficit.cluster_id}): {outcome[:60]}",
+                content=content,
+                tags=tags,
+                verified_c_rule=c_rule,
+                metrics=dict(cand.sandbox_metrics or {}),
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _build_mock_peer_policy(current_policy: str) -> str:

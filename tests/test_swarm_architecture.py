@@ -1659,3 +1659,35 @@ def test_prune_empty_skills_unlinks_disk_and_deficit_pct_scale(tmp_path):
     assert "slice_frontier_failures" in cids or "slice_early_terminations" in cids
     stalled = next(c for c in rep.fail_clusters if c.cluster_id == "slice_stalled")
     assert stalled.run_count == 2
+
+
+def test_peer_swarm_records_theories_to_lancedb(tmp_path):
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import SwarmPeerAgent
+    from lox.db.theories import TheoryDocumentStore
+
+    store = TheoryDocumentStore(str(tmp_path / "theories.lance"))
+    peer = SwarmPeerAgent(
+        peer_id="peer_1",
+        provider="mock",
+        db_path=str(tmp_path / "lox.duckdb"),
+        theories_store=store,
+    )
+    rep = DeficitReport(generation=1, regime="BOOTSTRAP")
+    cluster = DeficitCluster(
+        cluster_id="slice_stalled_wait_fallback",
+        kind="stalled_trajectory",
+        label="Stall in wait_fallback",
+        evidence="wait_fallback starvation faint loop",
+    )
+    peer.run_cycle(
+        generation=1,
+        deficit_report=rep,
+        claimed_deficit=cluster,
+        current_policy="",
+        current_skills={},
+    )
+    hits = store.search_theories("wait_fallback starvation", doc_type="THEORY")
+    assert len(hits) >= 1
+    assert hits[0]["agent_role"] == "peer_1"
+    assert "slice_stalled_wait_fallback" in hits[0]["content"]

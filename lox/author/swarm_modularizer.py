@@ -414,6 +414,28 @@ class SwarmModularizerAgent:
         )
 
         passed, metrics = verify_modular_non_regression(baseline_eval, ref_eval, seeds)
+        if self.theories is not None and hasattr(self.theories, "save_document"):
+            try:
+                status_word = "ACCEPTED" if passed else "REJECTED"
+                self.theories.save_document(
+                    generation=generation,
+                    agent_role="modularizer",
+                    doc_type="MODULAR_REFACTOR",
+                    title=f"Gen {generation} Modularizer {status_word} ({base_loc}->{after_loc} LOC)",
+                    content=(
+                        f"Modular Refactoring {status_word}: policy.py {base_loc}->{after_loc} LOC, "
+                        f"skills={sorted(kept_skills.keys())}\n"
+                        f"Non-regression verdict: {metrics['reason']}\n"
+                        f"D={metrics['base_avg_depth']:.2f}->{metrics['ref_avg_depth']:.2f}, "
+                        f"S={metrics['base_avg_score']:.1f}->{metrics['ref_avg_score']:.1f}, "
+                        f"wilcoxon_p={metrics['wilcoxon_p']:.3f}"
+                    ),
+                    tags=["modularizer", status_word.lower()]
+                    + sorted(kept_skills.keys())[:5],
+                    metrics=metrics,
+                )
+            except Exception:
+                pass
         if not passed:
             ui.warn(
                 f"Gen {generation} Modularizer rejected ({metrics['reason']}); keeping un-refactored policy."

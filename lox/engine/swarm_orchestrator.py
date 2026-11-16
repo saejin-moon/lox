@@ -476,6 +476,42 @@ class SwarmCampaignOrchestrator:
         self._sync_batch_cost(batch_id, generation)
         self._plateau_streak = 0 if verdict.promoted else (self._plateau_streak + 1)
 
+        if self.theories is not None and hasattr(self.theories, "save_document"):
+            try:
+                sb_lines = [
+                    f"{row.get('peer_id')} ({row.get('deficit')}): D={row.get('avg_depth')}, maxD={row.get('max_depth')}, S={row.get('avg_score')}, stalls={row.get('stalls')}"
+                    for row in (verdict.scoreboard or [])
+                ]
+                status_word = "PROMOTED" if verdict.promoted else "KEPT_INCUMBENT"
+                self.theories.save_document(
+                    generation=generation,
+                    agent_role="referee",
+                    doc_type="META_SYNTHESIS",
+                    title=f"Gen {generation} Tournament {status_word}: winner={verdict.winner_id}",
+                    content=(
+                        f"Generation {generation} CRN Tournament ({status_word})\n"
+                        f"Reason: {verdict.reason}\n"
+                        f"Target Functions: {verdict.target_functions}\n"
+                        f"Incumbent Depth={verdict.incumbent_avg_depth:.2f}, Score={verdict.incumbent_avg_score:.1f} -> "
+                        f"Winner Depth={verdict.winner_avg_depth:.2f}, Score={verdict.winner_avg_score:.1f}\n"
+                        + (
+                            "Scoreboard:\n- " + "\n- ".join(sb_lines)
+                            if sb_lines
+                            else ""
+                        )
+                    ),
+                    tags=[verdict.winner_id, status_word.lower()]
+                    + [str(t) for t in (verdict.target_functions or [])[:5]],
+                    metrics={
+                        "promoted": bool(verdict.promoted),
+                        "incumbent_avg_depth": float(verdict.incumbent_avg_depth),
+                        "winner_avg_depth": float(verdict.winner_avg_depth),
+                        "winner_avg_score": float(verdict.winner_avg_score),
+                    },
+                )
+            except Exception:
+                pass
+
         try:
             write_status_report(
                 workspace_dir=str(self.workspace_dir),
