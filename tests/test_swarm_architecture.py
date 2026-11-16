@@ -1603,3 +1603,59 @@ def test_extraneous_modularizer_and_non_regression_gate(tmp_path):
     assert rejected.accepted is False
     assert rejected.policy_code == bloated_monolith
     assert rejected.skills == {}
+
+
+def test_prune_empty_skills_unlinks_disk_and_deficit_pct_scale(tmp_path):
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.author.swarm_meta import SwarmMetaAgent
+    from lox.db.schema import connect_db, init_db
+
+    # 1. prune_unused_skills must unlink orphaned disk files even when skills={}
+    sk_dir = tmp_path / "skills"
+    sk_dir.mkdir()
+    stale = sk_dir / "swarm_core.py"
+    stale.write_text("x = 1\n", encoding="utf-8")
+    kept = SwarmMetaAgent.prune_unused_skills(
+        "class Policy:\n    pass\n", {}, skills_dir=sk_dir
+    )
+    assert kept == {}
+    assert not stale.exists()
+
+    # 2. pct_wait=20.0 (20%) must NOT trip slice_stalled (0..100 scale, threshold >= 65.0)
+    db_p = str(tmp_path / "deficits.duckdb")
+    init_db(db_p)
+    con = connect_db(db_p, read_only=False)
+    try:
+        con.execute(
+            "INSERT INTO batches (batch_id, generation, mode, avg_depth, max_depth) VALUES ('b1', 1, 'SWARM', 3.0, 6)"
+        )
+        for idx in range(6):
+            er = "killed" if idx < 4 else "stalled_zero_turn"
+            pw = 20.0 if idx < 4 else 70.0
+            fn = "fight_adjacent" if idx < 2 else "explore_frontier"
+            con.execute(
+                """
+                INSERT INTO runs (run_id, batch_id, generation, seed, role, depth, max_depth, score, turns, steps,
+                                  end_reason, pct_wait, pct_search, last_active_function)
+                VALUES (?, 'b1', 1, ?, 'val', ?, ?, 200, ?, 300, ?, ?, 5.0, ?)
+                """,
+                [
+                    f"r{idx}",
+                    1000 + idx,
+                    4 if idx < 2 else 1,
+                    4 if idx < 2 else 1,
+                    500 if idx < 2 else 120,
+                    er,
+                    pw,
+                    fn,
+                ],
+            )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(db_p).analyze(2)
+    cids = {c.cluster_id for c in rep.fail_clusters}
+    assert "slice_stalled" in cids
+    assert "slice_frontier_failures" in cids or "slice_early_terminations" in cids
+    stalled = next(c for c in rep.fail_clusters if c.cluster_id == "slice_stalled")
+    assert stalled.run_count == 2

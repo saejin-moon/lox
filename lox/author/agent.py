@@ -972,6 +972,19 @@ class AuthorAgent:
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
                 _, found_code = self.extract_yaml_and_python(msg_text)
+                if (
+                    found_code
+                    and canon_mode in ("SWARM_META", "SWARM_PEER")
+                    and self.tools.last_passed_code
+                    and "class Policy" not in found_code
+                    and "class Agent" not in found_code
+                    and not re.search(
+                        r"<(?:policy_code|policy)>", msg_text or "", flags=re.IGNORECASE
+                    )
+                ):
+                    # Closing summary included a small illustrative snippet without <policy_code>;
+                    # keep the verified full policy instead of auto-piloting a fragment.
+                    found_code = ""
 
                 # Turn 1 Mandatory Investigation Enforcement:
                 # In WRITE and REFACTOR modes, Turn 1 is strictly reserved for Empirical Research.
@@ -1432,7 +1445,15 @@ class AuthorAgent:
                 hyp = latest_hyp
 
             # If the model passed a pilot, ensure we use that verified code (avoiding slight markdown re-formatting errors)
-            if self.tools.last_pilot_improved and self.tools.last_passed_code:
+            if (
+                canon_mode in ("SWARM_META", "SWARM_PEER")
+                and self.tools.last_passed_code
+                and code_patch
+                and "class Policy" not in code_patch
+                and "class Agent" not in code_patch
+            ):
+                code_patch = self.tools.last_passed_code
+            elif self.tools.last_pilot_improved and self.tools.last_passed_code:
                 if not code_patch or is_ast_equivalent(
                     code_patch, self.tools.last_passed_code
                 ):

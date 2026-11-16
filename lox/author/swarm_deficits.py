@@ -367,10 +367,11 @@ class DeficitAnalyzer:
 
             # Purely domain-agnostic trajectory-outcome slices (zero NetHack keywords)
             if (
-                stall_count > 0
+                stall_count >= 25
                 or "CONFINEMENT_STALL" in digest_s
                 or "stalled" in end_str.lower()
-                or (float(pct_wait or 0.0) + float(pct_search or 0.0) >= 0.65)
+                or "max_steps" in end_str.lower()
+                or (float(pct_wait or 0.0) + float(pct_search or 0.0) >= 65.0)
                 or (
                     int(turns or 0) >= 400
                     and int(max_depth or 1) <= 1
@@ -417,19 +418,16 @@ class DeficitAnalyzer:
                     f"end=`{end_str}`, turns={turns}, Dlvl={max_depth}",
                 )
 
-        built: list[DeficitCluster] = []
-        for cid, data in sorted(
-            clusters.items(), key=lambda kv: len(kv[1]["rows"]), reverse=True
-        ):
-            c_rows = data["rows"]
+        def _build_cluster(
+            cid: str,
+            kind: str,
+            label: str,
+            c_rows: list[tuple[Any, ...]],
+            dom_fns: list[str],
+            notes: list[str],
+        ) -> DeficitCluster:
             avg_d = sum(float(r[3] or 1.0) for r in c_rows) / len(c_rows)
             avg_t = sum(float(r[4] or 0.0) for r in c_rows) / len(c_rows)
-            dom_fns = [
-                fn
-                for fn, _ in sorted(
-                    data["fns"].items(), key=lambda kv: kv[1], reverse=True
-                )
-            ]
             fixtures: list[dict[str, Any]] = []
             for r in c_rows[:2]:
                 ab = bytes(r[15] or b"") if r[15] is not None else b""
@@ -447,22 +445,73 @@ class DeficitAnalyzer:
                             "stop_at_byte_idx": stop_idx,
                         }
                     )
+            return DeficitCluster(
+                cluster_id=cid,
+                kind=kind,
+                label=label,
+                run_count=len(c_rows),
+                avg_depth=avg_d,
+                avg_turns=avg_t,
+                sample_run_ids=[str(r[0]) for r in c_rows[:4]],
+                sample_seeds=list(
+                    dict.fromkeys(int(r[1]) for r in c_rows[:4] if r[1] is not None)
+                ),
+                dominant_fns=dom_fns[:5],
+                replay_fixtures=fixtures,
+                evidence="; ".join(notes[:2]),
+            )
 
+        built: list[DeficitCluster] = []
+        for cid, data in sorted(
+            clusters.items(), key=lambda kv: len(kv[1]["rows"]), reverse=True
+        ):
+            dom_fns = [
+                fn
+                for fn, _ in sorted(
+                    data["fns"].items(), key=lambda kv: kv[1], reverse=True
+                )
+            ]
             built.append(
-                DeficitCluster(
-                    cluster_id=cid,
-                    kind=data["kind"],
-                    label=data["label"],
-                    run_count=len(c_rows),
-                    avg_depth=avg_d,
-                    avg_turns=avg_t,
-                    sample_run_ids=[str(r[0]) for r in c_rows[:4]],
-                    sample_seeds=list(
-                        dict.fromkeys(int(r[1]) for r in c_rows[:4] if r[1] is not None)
-                    ),
-                    dominant_fns=dom_fns[:5],
-                    replay_fixtures=fixtures,
-                    evidence="; ".join(data["notes"][:2]),
+                _build_cluster(
+                    cid,
+                    data["kind"],
+                    data["label"],
+                    data["rows"],
+                    dom_fns,
+                    data["notes"],
                 )
             )
+        # If fewer than 4 distinct clusters exist while the top cluster bundles multiple
+        # distinct `last_active_function` cohorts, split out secondary cohorts (domain-agnostic)
+        # so concurrent peers claim genuinely distinct empirical slices instead of duplicating.
+        if len(built) < 4 and built:
+            top_cid = built[0].cluster_id
+            by_fn: dict[str, list[tuple[Any, ...]]] = {}
+            for r in clusters[top_cid]["rows"]:
+                fn_key = str(r[13] or "unknown").strip() or "unknown"
+                by_fn.setdefault(fn_key, []).append(r)
+            if len(by_fn) >= 2:
+                ordered_fns = sorted(
+                    by_fn.items(), key=lambda kv: len(kv[1]), reverse=True
+                )
+                for fn_key, sub_rows in ordered_fns[1:]:
+                    if len(built) >= 4 or len(sub_rows) < 2:
+                        break
+                    sub_notes = list(
+                        dict.fromkeys(
+                            f"end=`{str(r[5] or 'unknown').strip()}`, tiles={r[6]}"
+                            for r in sub_rows[:2]
+                        )
+                    )
+                    built.append(
+                        _build_cluster(
+                            f"{top_cid}_{fn_key}",
+                            clusters[top_cid]["kind"],
+                            f"{clusters[top_cid]['label']} [{fn_key}]",
+                            sub_rows,
+                            [fn_key],
+                            sub_notes,
+                        )
+                    )
+
         report.fail_clusters = built[:6]

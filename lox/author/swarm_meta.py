@@ -594,6 +594,23 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         and `skills` so workspace prompts and `sys.modules` stay lean across generations.
         """
         if not skills:
+            if skills_dir is not None:
+                s_dir = Path(skills_dir)
+                if s_dir.exists():
+                    removed_disk = []
+                    for p in sorted(s_dir.glob("*.py")):
+                        if p.stem != "__init__":
+                            try:
+                                p.unlink()
+                                removed_disk.append(p.stem)
+                            except Exception:
+                                pass
+                    if removed_disk:
+                        ui.info(
+                            f"Meta-Agent: Pruned {len(removed_disk)} unused skill module(s) from workspace "
+                            f"(kept 0 active): {removed_disk[:8]}"
+                            + ("..." if len(removed_disk) > 8 else "")
+                        )
             return {}
 
         def _extract_skill_imports(src: str) -> set[str]:
@@ -635,7 +652,7 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                             p.unlink()
                         except Exception:
                             pass
-        if removed:
+        if removed and skills_dir is not None:
             ui.info(
                 f"Meta-Agent: Pruned {len(removed)} unused skill module(s) from workspace "
                 f"(kept {len(pruned)} active): {removed[:8]}"
