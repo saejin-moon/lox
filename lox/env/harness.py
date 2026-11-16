@@ -153,6 +153,12 @@ class NetHackHarness:
     def _waiting_for_space(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
         return bool(obs_tuple[self._internal_idx][3] == 1)
 
+    def _in_yn(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
+        return bool(obs_tuple[self._internal_idx][1] == 1)
+
+    def _in_getlin(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
+        return bool(obs_tuple[self._internal_idx][2] == 1)
+
     def _settle_prompts(
         self,
         obs_tuple: tuple[np.ndarray, ...],
@@ -161,34 +167,36 @@ class NetHackHarness:
     ) -> tuple[tuple[np.ndarray, ...], bool]:
         """
         Matches standard NLE prompt completion when NetHack pauses on `--More--`
-        (xwaitforspace) or outside `in_moveloop` so a single policy turn completes cleanly.
+        (xwaitforspace), outside `in_moveloop`, or in lingering `yn_function`/`getlin` prompts.
         """
         if not self.auto_dismiss_more:
             return obs_tuple, done
         safety = 0
         while (
             not done
-            and (self._waiting_for_space(obs_tuple) or not self._in_moveloop(obs_tuple))
+            and (
+                self._waiting_for_space(obs_tuple)
+                or not self._in_moveloop(obs_tuple)
+                or self._in_yn(obs_tuple)
+                or self._in_getlin(obs_tuple)
+            )
             and safety < 64
         ):
             safety += 1
             if self._waiting_for_space(obs_tuple):
                 b = ASCII_SPACE
+            elif self._is_game_over(obs_tuple):
+                b = ASCII_SPACE
+            elif self._in_yn(obs_tuple) or self._in_getlin(obs_tuple):
+                # Allow interactive prompt to be returned to policy for resolution
+                if self.prompt_linger_steps < self.max_prompt_linger:
+                    self.prompt_linger_steps += 1
+                    break
+                b = ASCII_ESC if self._in_getlin(obs_tuple) else ASCII_N
+                self.prompt_aborts += 1
+                self.prompt_linger_steps = 0
             else:
-                prog = obs_tuple[self._prog_state_idx]
-                # prog[0]=game_over, prog[1]=in_yn_function, prog[2]=in_getlin, prog[3]=in_moveloop
-                if prog[0] == 1:
-                    b = ASCII_SPACE
-                elif prog[1] == 1 or prog[2] == 1:
-                    # Allow interactive prompt to be returned to policy for resolution
-                    if self.prompt_linger_steps < self.max_prompt_linger:
-                        self.prompt_linger_steps += 1
-                        break
-                    b = ASCII_ESC if prog[2] == 1 else ASCII_N
-                    self.prompt_aborts += 1
-                    self.prompt_linger_steps = 0
-                else:
-                    b = ASCII_SPACE
+                b = ASCII_SPACE
             self.action_bytes.append(b)
             try:
                 obs_tuple, done = self.nh.step(b)
@@ -286,14 +294,21 @@ class NetHackHarness:
                 break
 
         if not done and (
-            self._waiting_for_space(obs_tuple) or not self._in_moveloop(obs_tuple)
+            self._waiting_for_space(obs_tuple)
+            or not self._in_moveloop(obs_tuple)
+            or self._in_yn(obs_tuple)
+            or self._in_getlin(obs_tuple)
         ):
             obs_tuple, done = self._settle_prompts(obs_tuple, done, messages=messages)
             raw_m = self._extract_raw_message(obs_tuple)
             if raw_m and (not messages or messages[-1] != raw_m):
                 messages.append(raw_m)
 
-        if self._in_moveloop(obs_tuple):
+        if (
+            self._in_moveloop(obs_tuple)
+            and not self._in_yn(obs_tuple)
+            and not self._in_getlin(obs_tuple)
+        ):
             self.prompt_linger_steps = 0
 
         self.step_count += 1

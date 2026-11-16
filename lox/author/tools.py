@@ -1179,11 +1179,8 @@ class AuthorToolRegistry:
                 raw_act, active_fn = runner.next_action(state)
                 state, done, info = harness.step(raw_act)
                 msg_l = (state.message or "").lower()
-                is_prompt = (
-                    getattr(state, "in_yn_prompt", False)
-                    or getattr(state, "in_text_prompt", False)
-                    or "[yn]" in msg_l
-                    or "really attack" in msg_l
+                is_prompt = getattr(state, "in_yn_prompt", False) or getattr(
+                    state, "in_text_prompt", False
                 )
                 if is_prompt:
                     if msg_l == last_prompt_text:

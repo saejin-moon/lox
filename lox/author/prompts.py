@@ -636,8 +636,9 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 1. **Focus on Your Claimed Empirical Deficit**:
    - Inspect your claimed failure cluster (`D_fail`) and protected high-Ochiai branches (`D_succ`) using `query_db`, `read_policy`, `diff_policies`, `read_skill`, `query_wiki`, `query_monster`, and `query_item`.
    - Preserve high-Ochiai `D_succ` branches unless you have verified a strict improvement across both failure replays and `D_succ` guard runs.
-2. **Surgical Edits & Modular Skill Extraction**:
-   - When `policy.py` grows large (`>= 400` lines), extract cohesive Behavior Tree subtrees/helpers into modular `skills/<module>.py` files (`from skills.<module> import ...` inside `policy.py`) rather than cramming everything into one giant file. Modular skills keep diffs surgical and allow disjoint peer edits to compose automatically.
+2. **Surgical Edits & Gameplay Focus**:
+   - Focus strictly on fixing empirical failure deficits and improving survival, exploration, resource use, and progression. Modular code splitting is handled separately by a dedicated refactor agent—do **not** spend your turns reorganizing existing files when a surgical fix suffices.
+   - If the target logic already lives in an existing `skills/<module>.py` file, update that module cleanly with `<skill_code module="name"> ... </skill_code>`; otherwise keep your diff surgical in `policy.py` (or a new cohesive skill only when clearly warranted).
    - Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin so native leaf attribution remains exact, and use `ActionLeaf(..., min_commit=N)` for multi-step commitment instead of ad-hoc post-step gates.
 3. **Verify in Sandbox Before Submission**:
    - Call `dry_run_policy(code=...)` (and `skill_name`/`skill_code` if editing a skill) to verify AST compilation, zero swallowed leaf errors, and mid-game frontier/failure replays.

@@ -157,24 +157,6 @@ class DeficitAnalyzer:
         if not report.fail_clusters:
             report.fail_clusters = self._bootstrap_clusters()
 
-        if report.bloat_warning or (
-            report.dormant_branches and len(report.dormant_branches) >= 2
-        ):
-            report.fail_clusters.append(
-                DeficitCluster(
-                    cluster_id="slice_modularize",
-                    kind="modular_refactor",
-                    label="Extract cohesive subtrees into `skills/*.py` & prune dormant branches",
-                    run_count=max(len(report.dormant_branches), 1),
-                    avg_depth=report.incumbent_avg_depth,
-                    dominant_fns=list(report.dormant_branches[:5]),
-                    evidence=(
-                        f"policy={policy_loc} LOC, skills={skill_count} ({skill_loc} LOC), "
-                        f"dormant={len(report.dormant_branches)}. Emit <skill_code module='...'> blocks to keep policy.py <=250 LOC."
-                    ),
-                )
-            )
-
         return report
 
     @staticmethod

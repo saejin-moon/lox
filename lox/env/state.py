@@ -1593,27 +1593,40 @@ class GameState:
 
     @property
     def is_in_yn(self) -> bool:
+        # NLE exposes ttyDisplay in_yn_function on internal[1] (NOT program_state[1]).
+        if self.internal is not None and len(self.internal) > 1:
+            return bool(self.internal[1])
         if self.program_state is not None and len(self.program_state) > 1:
             return bool(self.program_state[1])
         return False
 
     @property
     def in_yn_prompt(self) -> bool:
+        if self.internal is not None and len(self.internal) > 1:
+            return bool(self.internal[1])
         if self.is_in_yn:
             return True
-        msg = self.message.lower()
+        msg = self.message.strip().lower()
+        # Reject already-answered prompt echoes (e.g. "Really attack the dwarf? [yn] (n) n")
+        if msg.endswith((") n", ") y", ") q", "] n", "] y", "] q")):
+            return False
         return (
             "[yn]" in msg or "[ynq]" in msg or "(yn)" in msg or "really attack" in msg
         )
 
     @property
     def is_in_getlin(self) -> bool:
+        # NLE exposes ttyDisplay in_getlin on internal[2] (NOT program_state[2]).
+        if self.internal is not None and len(self.internal) > 2:
+            return bool(self.internal[2])
         if self.program_state is not None and len(self.program_state) > 2:
             return bool(self.program_state[2])
         return False
 
     @property
     def in_text_prompt(self) -> bool:
+        if self.internal is not None and len(self.internal) > 2:
+            return bool(self.internal[2])
         if self.is_in_getlin:
             return True
         msg = self.message.lower()

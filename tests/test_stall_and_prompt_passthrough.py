@@ -81,3 +81,48 @@ def test_lean_observation_keys_compatibility():
         assert state.description_at(state.y, state.x) is not None
     finally:
         harness.close()
+
+
+def test_yn_prompt_clears_after_n_reply_no_se_loop():
+    import numpy as np
+
+    # 1. Real NLE verification: after answering 'n' to Pray? [yn] (n), internal[1] flips 0
+    # and in_yn_prompt must become False even though '(n) n' stays in state.message.
+    harness = NetHackHarness(max_steps=50)
+    try:
+        state = harness.reset(seed=42)
+        state, _, _ = harness.step(Action.PRAY)
+        assert state.internal[1] == 1
+        assert state.in_yn_prompt is True
+
+        state, _, _ = harness.step("n")
+        assert state.internal[1] == 0
+        assert "[yn]" in state.message.lower()
+        assert state.in_yn_prompt is False
+    finally:
+        harness.close()
+
+    # 2. Synthetic/mock GameState without internal array still rejects echoed ') n' replies.
+    blank = np.full((21, 79), ord("."), dtype=np.uint8)
+    obs_active = {
+        "chars": blank,
+        "glyphs": np.zeros((21, 79), dtype=np.int32),
+        "colors": np.zeros((21, 79), dtype=np.int8),
+        "specials": np.zeros((21, 79), dtype=np.int8),
+        "blstats": np.zeros(27, dtype=np.int32),
+        "inv_glyphs": np.zeros(55, dtype=np.int32),
+        "inv_strs": np.zeros((55, 80), dtype=np.uint8),
+        "inv_letters": np.zeros(55, dtype=np.uint8),
+        "inv_oclasses": np.zeros(55, dtype=np.uint8),
+        "message": np.frombuffer(
+            b"Really attack the dwarf? [yn] (n)\x00", dtype=np.uint8
+        ),
+    }
+    obs_echoed = {
+        **obs_active,
+        "message": np.frombuffer(
+            b"Really attack the dwarf? [yn] (n) n\x00", dtype=np.uint8
+        ),
+    }
+    assert GameState(obs_active).in_yn_prompt is True
+    assert GameState(obs_echoed).in_yn_prompt is False

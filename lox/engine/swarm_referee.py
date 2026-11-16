@@ -41,6 +41,7 @@ class TournamentVerdict:
     target_functions: list[str] = field(default_factory=list)
     scoreboard: list[dict[str, Any]] = field(default_factory=list)
     all_runner_up_batches: list[dict[str, Any]] = field(default_factory=list)
+    incumbent_batch_eval: BatchEvaluation | None = None
     reason: str = ""
 
 
@@ -278,6 +279,9 @@ class SwarmReferee:
                     incumbent_avg_score=inc_stats["avg_score"],
                     winner_avg_depth=inc_stats["avg_depth"],
                     winner_avg_score=inc_stats["avg_score"],
+                    scoreboard=[],
+                    all_runner_up_batches=[],
+                    incumbent_batch_eval=inc_batch_eval,
                     reason="No peer passed isolated sandbox incubation; retained incumbent.",
                 )
             # Gen 1 bootstrap safety: pick first raw candidate if any compiled
@@ -401,15 +405,18 @@ class SwarmReferee:
                 or [best_cand.claimed_deficit_id],
                 scoreboard=scoreboard,
                 all_runner_up_batches=runner_ups,
+                incumbent_batch_eval=inc_batch_eval,
                 reason=f"Rejected regression from `{best_cand.peer_id}` (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}); kept incumbent.",
             )
 
-        win_fp = _package_fingerprint(best_cand.policy_code, best_cand.skills)
-        if len(self._incumbent_cache) >= 4:
-            self._incumbent_cache.clear()
-        self._incumbent_cache[(id(eval_pool), win_fp, seeds_key, steps_key)] = (
-            best_eval,
-            best_stats,
+        self.cache_incumbent(
+            eval_pool=eval_pool,
+            policy_code=best_cand.policy_code,
+            skills=best_cand.skills,
+            seeds=seeds,
+            max_steps=max_steps,
+            batch_eval=best_eval,
+            stats=best_stats,
         )
 
         return TournamentVerdict(
@@ -426,5 +433,32 @@ class SwarmReferee:
             or [best_cand.claimed_deficit_id],
             scoreboard=scoreboard,
             all_runner_up_batches=runner_ups,
+            incumbent_batch_eval=inc_batch_eval,
             reason=f"Promoted `{best_cand.peer_id}` targeting `{best_cand.claimed_deficit_id}` (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}).",
+        )
+
+    def cache_incumbent(
+        self,
+        *,
+        eval_pool: Any,
+        policy_code: str,
+        skills: dict[str, str],
+        seeds: list[int],
+        max_steps: int | None,
+        batch_eval: BatchEvaluation,
+        stats: dict[str, Any] | None = None,
+    ) -> None:
+        """Stores a verified incumbent evaluation in the cross-generation CRN cache."""
+        seeds_key = tuple(int(s) for s in seeds)
+        steps_key = int(max_steps or 0)
+        fp = _package_fingerprint(policy_code, skills)
+        loc_total = len(policy_code.splitlines()) + sum(
+            len(v.splitlines()) for v in skills.values()
+        )
+        resolved_stats = stats or _extract_eval_stats(batch_eval, loc_total=loc_total)
+        if len(self._incumbent_cache) >= 4:
+            self._incumbent_cache.clear()
+        self._incumbent_cache[(id(eval_pool), fp, seeds_key, steps_key)] = (
+            batch_eval,
+            resolved_stats,
         )
