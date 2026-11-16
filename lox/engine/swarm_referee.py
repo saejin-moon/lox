@@ -85,6 +85,9 @@ class SwarmReferee:
 
     def __init__(self, max_tournament_peers: int = 3) -> None:
         self.max_tournament_peers = max(1, int(max_tournament_peers))
+        self._incumbent_cache: dict[
+            tuple[int, str, tuple[int, ...]], tuple[BatchEvaluation, dict[str, Any]]
+        ] = {}
 
     def select_finalists(
         self,
@@ -220,7 +223,7 @@ class SwarmReferee:
             len(v.splitlines()) for v in base_skills.values()
         )
 
-        # Evaluate Incumbent baseline on identical paired seeds (when non-empty)
+        # Evaluate Incumbent baseline on identical paired seeds (cached across gens when unchanged)
         inc_batch_eval: BatchEvaluation | None = None
         inc_stats = {
             "avg_depth": 1.0,
@@ -229,17 +232,31 @@ class SwarmReferee:
             "stall_count": 999,
             "loc_total": base_loc,
         }
+        seeds_key = tuple(int(s) for s in seeds)
+        inc_fp = (
+            _package_fingerprint(base_policy, base_skills)
+            if base_policy.strip()
+            else ""
+        )
+        inc_cache_key = (id(eval_pool), inc_fp, seeds_key)
         if base_policy.strip():
-            inc_batch_eval = eval_pool.evaluate_batch(
-                batch_id=f"batch_swarm_g{generation}_inc_{int(time.time())}",
-                policy_code=base_policy,
-                macros_code="",
-                skills=base_skills,
-                target_episodes=len(seeds),
-                priority_seeds=list(seeds),
-                record_ticks=False,
-            )
-            inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
+            cached_inc = self._incumbent_cache.get(inc_cache_key)
+            if cached_inc is not None:
+                inc_batch_eval, inc_stats = cached_inc
+            else:
+                inc_batch_eval = eval_pool.evaluate_batch(
+                    batch_id=f"batch_swarm_g{generation}_inc_{int(time.time())}",
+                    policy_code=base_policy,
+                    macros_code="",
+                    skills=base_skills,
+                    target_episodes=len(seeds),
+                    priority_seeds=list(seeds),
+                    record_ticks=False,
+                )
+                inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
+                if len(self._incumbent_cache) >= 4:
+                    self._incumbent_cache.clear()
+                self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
 
         # If no incubated survivor exists, fall back cleanly to incumbent (or fail clearly if Gen 1 empty)
         if not finalists:
@@ -375,6 +392,14 @@ class SwarmReferee:
                 all_runner_up_batches=runner_ups,
                 reason=f"Rejected regression from `{best_cand.peer_id}` (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}); kept incumbent.",
             )
+
+        win_fp = _package_fingerprint(best_cand.policy_code, best_cand.skills)
+        if len(self._incumbent_cache) >= 4:
+            self._incumbent_cache.clear()
+        self._incumbent_cache[(id(eval_pool), win_fp, seeds_key)] = (
+            best_eval,
+            best_stats,
+        )
 
         return TournamentVerdict(
             promoted=True,

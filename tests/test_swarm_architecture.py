@@ -1366,3 +1366,64 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
     )
     assert collapse_verdict.promoted is False
     assert collapse_verdict.winner_id == "incumbent"
+
+    # Verify incumbent CRN cache avoids re-evaluating identical (pool, policy, seeds) across gens
+    eval_calls: list[str] = []
+
+    class _CountingPool:
+        def evaluate_batch(
+            self,
+            batch_id,
+            policy_code,
+            macros_code,
+            skills,
+            target_episodes,
+            priority_seeds,
+            record_ticks=True,
+        ):
+            eval_calls.append(batch_id)
+            return {
+                "batch_id": batch_id,
+                "avg_depth": 2.0,
+                "max_depth": 2,
+                "avg_score": 100.0,
+                "p90_depth": 2.0,
+                "max_score": 100,
+                "avg_turns": 50.0,
+                "runs": [
+                    {
+                        "run_id": f"{batch_id}_{sd}",
+                        "seed": sd,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 100,
+                        "turns": 50,
+                        "steps": 50,
+                        "end_reason": "max_steps",
+                        "fn_turns": {"leaf_b": 50},
+                        "summary_digest": "ok",
+                    }
+                    for sd in priority_seeds
+                ],
+            }
+
+    c_pool = _CountingPool()
+    referee.evaluate_tournament(
+        generation=4,
+        candidates=[cand_a],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=c_pool,
+        seeds=[1000, 1001],
+    )
+    assert len(eval_calls) == 2  # Incumbent once + cand_a once
+    eval_calls.clear()
+    referee.evaluate_tournament(
+        generation=5,
+        candidates=[cand_a],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=c_pool,
+        seeds=[1000, 1001],
+    )
+    assert len(eval_calls) == 1  # Incumbent served from CRN cache!

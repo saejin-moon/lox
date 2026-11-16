@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS runs (
     starved_with_food BOOLEAN DEFAULT FALSE,
     died_unarmored BOOLEAN DEFAULT FALSE,
     is_shard BOOLEAN DEFAULT FALSE,
-    shard_id VARCHAR DEFAULT ''
+    shard_id VARCHAR DEFAULT '',
+    created_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS ticks (
@@ -432,6 +433,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                     ("pct_search", "DOUBLE DEFAULT 0.0"),
                     ("starved_with_food", "BOOLEAN DEFAULT FALSE"),
                     ("died_unarmored", "BOOLEAN DEFAULT FALSE"),
+                    ("created_at", "TIMESTAMP"),
                 ]:
                     if c_name not in cols_runs:
                         try:
@@ -551,7 +553,7 @@ def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:
   - `latest_pilot_runs`: All episodes from the most recent pilot batch.
   - `latest_pilot_ticks`: Tick-by-tick logs linked to `latest_pilot_runs`.
 - **`runs`** (Every evaluated episode):
-  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR), **`auto_esc_count` (INT: times harness forced auto-ESC for unhandled prompt)**, **`subgen_preemptions` (INT: generator subroutines aborted by emergency threat)**, **`policy_exceptions` (INT: non-fatal policy exceptions caught)**, **`unique_tiles` (INT: distinct floor tiles visited)**, **`pct_wait` (DOUBLE: % of steps spent waiting/resting)**, **`pct_search` (DOUBLE: % of steps spent searching 's')**, **`starved_with_food` (BOOLEAN: True if hero died of starvation while carrying food in pack)**, **`died_unarmored` (BOOLEAN: True if hero died with starting AC >= 10 despite carrying armor in pack)**, `is_shard` (BOOLEAN), `shard_id` (VARCHAR).
+  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR), **`auto_esc_count` (INT: times harness forced auto-ESC for unhandled prompt)**, **`subgen_preemptions` (INT: generator subroutines aborted by emergency threat)**, **`policy_exceptions` (INT: non-fatal policy exceptions caught)**, **`unique_tiles` (INT: distinct floor tiles visited)**, **`pct_wait` (DOUBLE: % of steps spent waiting/resting)**, **`pct_search` (DOUBLE: % of steps spent searching 's')**, **`starved_with_food` (BOOLEAN: True if hero died of starvation while carrying food in pack)**, **`died_unarmored` (BOOLEAN: True if hero died with starting AC >= 10 despite carrying armor in pack)**, `is_shard` (BOOLEAN), `shard_id` (VARCHAR), `created_at` (TIMESTAMP). *(Note: `hunger_state` is on `ticks`, not `runs`; `stall_count` is inside `milestones_json`; `seed` is on `runs`, not `ticks`.)*
 - **`ticks`** (Granular tick-by-tick log linked via `run_id` for outlier good runs, exemplars, and sampled runs):
   `run_id` (VARCHAR), `turn` (INT), `step_idx` (INT), `depth` (INT), `dungeon_num` (INT), `hp` (INT), `max_hp` (INT), `energy` (INT), `ac` (INT), `xp_level` (INT), `hunger_state` (INT), `condition_mask` (INT), `y` (INT), `x` (INT), `action_name` (VARCHAR), `raw_key` (INT), `byte_offset` (INT), `active_function` (VARCHAR), `message` (VARCHAR), `visible_monsters` (VARCHAR), `inventory_summary` (VARCHAR).
 - **`batches`** (Per-generation batch overview):

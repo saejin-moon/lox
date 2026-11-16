@@ -36,7 +36,13 @@ def main() -> None:
         "--workers",
         type=int,
         default=4,
-        help="Number of concurrent worker processes / category specialists (default: 4).",
+        help="Number of concurrent LLM peer agents / category specialists (default: 4).",
+    )
+    parser.add_argument(
+        "--eval-workers",
+        type=int,
+        default=None,
+        help="Number of NLE CPU rollout worker processes (default: auto up to 16 based on seeds & CPU cores).",
     )
     parser.add_argument(
         "--turns-per-worker",
@@ -142,6 +148,7 @@ def main() -> None:
         benchmark=args.benchmark,
         role=args.role,
         swarm_architecture=args.swarm_architecture,
+        eval_workers=args.eval_workers,
     )
 
     try:

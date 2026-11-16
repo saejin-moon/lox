@@ -993,3 +993,11 @@ def test_dry_run_check_does_not_log_false_pilot_failed(tmp_path):
         con.close()
     assert ("DRY_RUN_CHECK", "DRY_RUN_PASSED") in rows_g2
     assert all(st != "PILOT_FAILED" for _, st in rows_g2)
+
+    # Verify query_db Binder Error includes exact valid column list hint
+    bad_msg, bad_stat = agent2.tools.query_db(
+        "SELECT nonexistent_col FROM runs ORDER BY created_at DESC"
+    )
+    assert bad_stat == "sql_error"
+    assert "Valid schema columns: runs(" in bad_msg
+    assert "created_at" in bad_msg

@@ -209,6 +209,7 @@ class BatchDatabaseLogger:
                     ],
                     "is_shard": [bool(r.get("is_shard", False)) for r in runs],
                     "shard_id": [str(r.get("shard_id", "")) for r in runs],
+                    "created_at": [datetime.datetime.now()] * len(runs),
                 }
                 run_tbl = pa.Table.from_pydict(run_cols)
                 run_cols_str = ", ".join(run_cols.keys())

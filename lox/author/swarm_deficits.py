@@ -50,6 +50,7 @@ class DeficitReport:
     d_succ_run_ids: list[str] = field(default_factory=list)
     protected_branches: list[dict[str, Any]] = field(default_factory=list)
     fail_clusters: list[DeficitCluster] = field(default_factory=list)
+    end_reason_histogram: list[tuple[str, int, float]] = field(default_factory=list)
     dormant_branches: list[str] = field(default_factory=list)
     policy_loc: int = 0
     skill_loc: int = 0
@@ -75,8 +76,14 @@ class DeficitReport:
             lines.append(
                 f"- Dormant BT Branches (0 active turns recently — prune or consolidate): {', '.join(self.dormant_branches[:10])}"
             )
+        if self.end_reason_histogram:
+            hist_str = " | ".join(
+                f"`{er}` x{cnt} (D={ad:.1f})"
+                for er, cnt, ad in self.end_reason_histogram[:8]
+            )
+            lines.append(f"- Recent Outcome Distribution (diagnose freely): {hist_str}")
         if self.fail_clusters:
-            lines.append("- Empirical Failure Clusters (D_fail):")
+            lines.append("- Domain-Agnostic Trajectory Slices (D_fail):")
             for c in self.fail_clusters:
                 lines.append(
                     f"  * [{c.cluster_id}] {c.label} (runs={c.run_count}, avg_depth={c.avg_depth:.2f}, avg_turns={c.avg_turns:.0f}, fns={c.dominant_fns[:3]}): {c.evidence}"
@@ -291,6 +298,18 @@ class DeficitAnalyzer:
         if not rows:
             return
 
+        # Build raw end_reason histogram across recent runs so peers freely diagnose root causes
+        end_counts: dict[str, list[float]] = {}
+        for r in rows:
+            er = str(r[5] or "unknown").strip() or "unknown"
+            end_counts.setdefault(er, []).append(float(r[3] or 1.0))
+        report.end_reason_histogram = [
+            (er, len(ds), sum(ds) / len(ds))
+            for er, ds in sorted(
+                end_counts.items(), key=lambda kv: len(kv[1]), reverse=True
+            )
+        ][:10]
+
         clusters: dict[str, dict[str, Any]] = {}
 
         def _add_to_cluster(
@@ -317,6 +336,11 @@ class DeficitAnalyzer:
             if evidence_note and evidence_note not in c["notes"]:
                 c["notes"].append(evidence_note)
 
+        depths_all = sorted(float(r[3] or 1.0) for r in rows)
+        turns_all = sorted(int(r[4] or 0) for r in rows)
+        median_turn = turns_all[len(turns_all) // 2] if turns_all else 300
+        high_depth_cut = depths_all[int(len(depths_all) * 0.70)] if depths_all else 2.0
+
         for row in rows:
             (
                 run_id,
@@ -328,8 +352,8 @@ class DeficitAnalyzer:
                 unique_tiles,
                 pct_wait,
                 pct_search,
-                starved_with_food,
-                died_unarmored,
+                _starved,
+                _unarmored,
                 auto_esc,
                 policy_excs,
                 last_fn,
@@ -339,6 +363,8 @@ class DeficitAnalyzer:
             ) = row
 
             end_str = str(end_reason or "unknown").strip() or "unknown"
+            if end_str in ("ascended", "escaped"):
+                continue
             digest_s = str(digest or "")
             stall_count = 0
             if m_json:
@@ -347,10 +373,12 @@ class DeficitAnalyzer:
                 except Exception:
                     stall_count = 0
 
+            # Purely domain-agnostic trajectory-outcome slices (zero NetHack keywords)
             if (
                 stall_count > 0
                 or "CONFINEMENT_STALL" in digest_s
-                or (float(pct_wait or 0.0) + float(pct_search or 0.0) >= 0.70)
+                or "stalled" in end_str.lower()
+                or (float(pct_wait or 0.0) + float(pct_search or 0.0) >= 0.65)
                 or (
                     int(turns or 0) >= 400
                     and int(max_depth or 1) <= 1
@@ -358,42 +386,43 @@ class DeficitAnalyzer:
                 )
             ):
                 _add_to_cluster(
-                    "confinement_stall",
-                    "confinement_stall",
-                    f"Spatial confinement / stall on Dlvl {int(max_depth or 1)}",
+                    "slice_stalled",
+                    "stalled_trajectory",
+                    f"Stalled / low-progress trajectories (Dlvl {int(max_depth or 1)})",
                     row,
-                    f"tiles={unique_tiles}, turns={turns}, stall_count={stall_count}",
+                    f"end=`{end_str}`, tiles={unique_tiles}, pct_wait={float(pct_wait or 0):.1f}%",
                 )
-                continue
-
-            if int(policy_excs or 0) > 0 or int(auto_esc or 0) > 2:
+            elif int(policy_excs or 0) > 0 or int(auto_esc or 0) > 2:
                 _add_to_cluster(
-                    "safety_and_prompts",
-                    "safety_and_prompts",
-                    "Policy exceptions or prompt traps (auto_esc / runtime error)",
+                    "slice_safety_traps",
+                    "runtime_or_prompt_trap",
+                    "Runtime exceptions or unhandled prompt traps",
                     row,
                     f"policy_exceptions={policy_excs}, auto_esc={auto_esc}",
                 )
-                continue
-
-            if bool(starved_with_food) or "starvation" in end_str.lower():
+            elif float(max_depth or 1) >= max(2.0, high_depth_cut):
                 _add_to_cluster(
-                    f"mortality_{end_str.lower()[:24]}",
-                    "early_mortality",
-                    f"Resource/survival failure ({end_str})",
+                    "slice_frontier_failures",
+                    "frontier_trajectory",
+                    f"Deep-frontier terminations (Dlvl >= {int(max(2.0, high_depth_cut))})",
                     row,
-                    f"starved_with_food={bool(starved_with_food)}, depth={max_depth}",
+                    f"end=`{end_str}`, turns={turns}",
                 )
-                continue
-
-            if end_str not in ("ascended", "escaped"):
-                cid = f"end_{end_str.lower()[:28].replace(' ', '_')}"
+            elif int(turns or 0) <= max(250, int(median_turn)):
                 _add_to_cluster(
-                    cid,
-                    "mortality_cluster",
-                    f"Termination cluster: `{end_str}` (Dlvl {int(depth or 1)})",
+                    "slice_early_terminations",
+                    "early_trajectory",
+                    "Short-horizon terminations before mid-run progression",
                     row,
-                    f"end=`{end_str}`, died_unarmored={bool(died_unarmored)}",
+                    f"end=`{end_str}`, turns={turns}, Dlvl={max_depth}",
+                )
+            else:
+                _add_to_cluster(
+                    "slice_median_outcomes",
+                    "median_trajectory",
+                    "Mid-horizon terminations (diagnose latent bottlenecks)",
+                    row,
+                    f"end=`{end_str}`, turns={turns}, Dlvl={max_depth}",
                 )
 
         built: list[DeficitCluster] = []

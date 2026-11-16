@@ -299,7 +299,35 @@ class AuthorToolRegistry:
                 text += "\n# NOTE: Implicit LIMIT 30 applied; specify explicit LIMIT/OFFSET to paginate."
             return text, f"{count} rows"
         except Exception as exc:
-            return f"SQL Error: {exc}", "sql_error"
+            err_msg = f"SQL Error: {exc}"
+            try:
+                err_low = str(exc).lower()
+                if "binder error" in err_low or "not found" in err_low:
+                    tbl_matches = re.findall(
+                        r"\b(?:from|join)\s+([a-z_][a-z0-9_]*)", low_no_literals
+                    )
+                    col_hints: list[str] = []
+                    for tbl in list(dict.fromkeys(tbl_matches))[:3]:
+                        try:
+                            cols = [
+                                str(r[1])
+                                for r in con.execute(
+                                    f"PRAGMA table_info('{tbl}')"
+                                ).fetchall()
+                            ]
+                            if cols:
+                                col_hints.append(f"{tbl}({', '.join(cols)})")
+                        except Exception:
+                            pass
+                    if col_hints:
+                        err_msg += "\nValid schema columns: " + " | ".join(col_hints)
+                elif "catalog error" in err_low:
+                    tbls = [str(r[0]) for r in con.execute("SHOW TABLES").fetchall()]
+                    if tbls:
+                        err_msg += f"\nAvailable tables: {', '.join(tbls)}"
+            except Exception:
+                pass
+            return err_msg, "sql_error"
         finally:
             con.close()
 

@@ -65,6 +65,7 @@ class SwarmCampaignOrchestrator:
         max_steps: int = 5000,
         frontier_min_depth: int = 2,
         swarm_architecture: str = "peer",
+        eval_workers: int | None = None,
     ) -> None:
         self.db_path = db_path
         self.workspace_dir = Path(workspace_dir)
@@ -79,6 +80,13 @@ class SwarmCampaignOrchestrator:
         self.role = role
         self.max_steps = int(max_steps)
         self.frontier_min_depth = int(frontier_min_depth)
+        if eval_workers is not None and int(eval_workers) > 0:
+            self.eval_workers = max(1, min(int(eval_workers), 32))
+        else:
+            cpu_cap = max(4, (os.cpu_count() or 8) - 2)
+            self.eval_workers = min(
+                16, max(self.num_workers, min(int(self.seeds_per_batch), cpu_cap))
+            )
         self.swarm_architecture = (
             str(swarm_architecture or "peer").strip().lower()
             if str(swarm_architecture or "peer").strip().lower() in ("peer", "legacy")
@@ -122,7 +130,7 @@ class SwarmCampaignOrchestrator:
 
         # Initialize Multi-Core Persistent Eval Pool
         self.eval_pool = PersistentEvalPool(
-            workers=max(1, min(self.num_workers, 16)),
+            workers=max(1, self.eval_workers),
             role=self.role,
             max_steps=self.max_steps,
             benchmark=self.benchmark,
