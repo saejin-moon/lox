@@ -1630,3 +1630,127 @@ def test_peer_swarm_records_theories_to_lancedb(tmp_path):
     assert len(hits) >= 1
     assert hits[0]["agent_role"] == "peer_1"
     assert "slice_stalled_wait_fallback" in hits[0]["content"]
+
+
+def test_ast_modularizer_hysteresis_incremental_and_orchestrator(tmp_path):
+    import json
+
+    from lox.db.schema import connect_db
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+    from lox.engine.swarm_referee import _package_fingerprint
+    from lox.lang.modularize import (
+        maybe_auto_modularize,
+        modularize_policy_source,
+        verify_bit_identical,
+    )
+
+    monolith = (
+        "from lox.env.actions import Action\n"
+        "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n\n"
+        "SHARED_CONST = 1\n\n"
+        "def _shared_ok(state):\n"
+        "    return state.hp >= SHARED_CONST\n\n"
+        "def leaf_one(state, bb):\n"
+        "    if not _shared_ok(state):\n"
+        "        return Action.WAIT\n"
+        "    return None\n\n"
+        "def leaf_two(state, bb):\n"
+        "    if _shared_ok(state) and state.step_count % 2 == 0:\n"
+        "        return Action.SEARCH\n"
+        "    return None\n\n"
+        "def leaf_three(state, bb):\n"
+        "    return Action.WAIT if _shared_ok(state) else Action.SEARCH\n\n"
+        "def build_tree(bb):\n"
+        "    return PrioritySelector([\n"
+        "        ActionLeaf(leaf_one, name='l1'),\n"
+        "        ActionLeaf(leaf_two, name='l2'),\n"
+        "        ActionLeaf(leaf_three, name='l3'),\n"
+        "    ], name='root')\n\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.blackboard = Blackboard()\n"
+        "        self.tree = BehaviorTree(root=build_tree(self.blackboard), blackboard=self.blackboard)\n"
+        "    def step(self, state):\n"
+        "        return self.tree.tick(state) or Action.WAIT\n"
+    )
+    # 1. Fresh monolith split + bit-identical check
+    new_pol, new_skills = modularize_policy_source(monolith, num_modules=2)
+    assert len(new_pol.splitlines()) < len(monolith.splitlines())
+    assert "shared" in new_skills
+    assert len(new_skills) >= 2
+    verify_bit_identical(
+        monolith, {}, new_pol, new_skills, seeds=[1000, 1001], steps=50
+    )
+
+    # 2. Below threshold hysteresis check skips splitting
+    ch_skip, _, _, _ = maybe_auto_modularize(
+        monolith, {}, verify_seeds=[1000], verify_steps=50
+    )
+    assert ch_skip is False
+
+    # 3. Incremental split when existing `skills/` + imports are already present
+    augmented = new_pol.replace(
+        "def build_tree(bb):",
+        "EXTRA_CONST = 2\n\n"
+        "def _extra_helper(state):\n    return state.step_count >= EXTRA_CONST\n\n"
+        "def leaf_four(state, bb):\n    return Action.SEARCH if _extra_helper(state) else None\n\n"
+        "def leaf_five(state, bb):\n    return Action.WAIT if _extra_helper(state) else None\n\n"
+        "def build_tree(bb):",
+    ).replace(
+        "ActionLeaf(leaf_three, name='l3'),",
+        "ActionLeaf(leaf_three, name='l3'),\n        ActionLeaf(leaf_four, name='l4'),\n        ActionLeaf(leaf_five, name='l5'),",
+    )
+    inc_pol, inc_skills = modularize_policy_source(
+        augmented, num_modules=2, existing_skills=new_skills
+    )
+    assert set(new_skills.keys()).issubset(set(inc_skills.keys()))
+    assert inc_skills["shared"] == new_skills["shared"]
+    assert len(inc_skills) > len(new_skills)
+    verify_bit_identical(
+        augmented, new_skills, inc_pol, inc_skills, seeds=[1000, 1001], steps=50
+    )
+
+    # 4. SwarmCampaignOrchestrator auto-modularizes a bloated monolith in _run_generation_peer
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir(parents=True, exist_ok=True)
+    padded_helpers = "\n".join(
+        f"def _noop_helper_{i}(state):\n    return state.hp > {i}\n" for i in range(135)
+    )
+    bloated_monolith = monolith.replace(
+        "def build_tree(bb):", f"{padded_helpers}\n\ndef build_tree(bb):"
+    )
+    (ws_dir / "policy.py").write_text(bloated_monolith, encoding="utf-8")
+
+    db_path = str(tmp_path / "swarm_mod.duckdb")
+    orch = SwarmCampaignOrchestrator(
+        db_path=db_path,
+        workspace_dir=str(ws_dir),
+        frontier_dir=str(tmp_path / "frontier"),
+        provider="mock",
+        num_workers=2,
+        eval_workers=2,
+        seeds_per_batch=2,
+        swarm_architecture="peer",
+    )
+    try:
+        res = orch.run_generation(1)
+        assert res["promoted"] is True
+        written_pol = (ws_dir / "policy.py").read_text(encoding="utf-8")
+        assert len(written_pol.splitlines()) < 60
+        skill_files = {
+            p.stem: p.read_text(encoding="utf-8")
+            for p in (ws_dir / "skills").glob("*.py")
+        }
+        assert "shared" in skill_files and len(skill_files) >= 2
+        con = connect_db(db_path, read_only=True)
+        try:
+            row = con.execute(
+                "SELECT skills_json FROM policies WHERE generation=1"
+            ).fetchone()
+            assert row is not None and len(json.loads(row[0])) == len(skill_files)
+        finally:
+            con.close()
+        fp = _package_fingerprint(written_pol, skill_files)
+        assert fp in orch._attempted_ast_modular_fps
+    finally:
+        orch.close()
