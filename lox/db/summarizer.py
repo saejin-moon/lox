@@ -18,6 +18,96 @@ from typing import Any
 import numpy as np
 
 
+def _detect_confinement_stalls(
+    ticks: list[dict[str, Any]],
+    covered_spans: list[tuple[int, int]],
+    window_size: int = 120,
+    stride: int = 30,
+) -> list[dict[str, Any]]:
+    """
+    Detects multi-segment spatial confinement loops across adjacent function switches
+    (e.g., E/W movement alternating with periodic SEARCH inside a small room/corridor).
+    Returns merged confinement intervals with top functions, actions, and tile counts.
+    """
+    n = len(ticks)
+    if n < window_size:
+        return []
+
+    raw_intervals: list[tuple[int, int]] = []
+    depth_prefix_seen: list[set[tuple[int, int]]] = []
+    running_depth_sets: dict[tuple[int, int], set[tuple[int, int]]] = {}
+
+    for t in ticks:
+        d_key = (int(t.get("dungeon_num", 0) or 0), int(t.get("depth", 1) or 1))
+        pos = (int(t.get("y", 0) or 0), int(t.get("x", 0) or 0))
+        d_set = running_depth_sets.setdefault(d_key, set())
+        depth_prefix_seen.append(set(d_set))
+        d_set.add(pos)
+
+    for start_idx in range(0, n - window_size + 1, stride):
+        end_idx = start_idx + window_size
+        sub = ticks[start_idx:end_idx]
+        depths_in_win = {
+            (int(s.get("dungeon_num", 0) or 0), int(s.get("depth", 1) or 1))
+            for s in sub
+        }
+        if len(depths_in_win) != 1:
+            continue
+        win_positions = {
+            (int(s.get("y", 0) or 0), int(s.get("x", 0) or 0)) for s in sub
+        }
+        prior_seen = depth_prefix_seen[start_idx]
+        new_tiles = len(win_positions - prior_seen)
+        if len(win_positions) <= 28 or (
+            len(win_positions) <= 45 and new_tiles <= 4 and start_idx >= window_size
+        ):
+            raw_intervals.append((start_idx, end_idx))
+
+    if not raw_intervals:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    cur_s, cur_e = raw_intervals[0]
+    for s_idx, e_idx in raw_intervals[1:]:
+        if s_idx <= cur_e:
+            cur_e = max(cur_e, e_idx)
+        else:
+            merged.append((cur_s, cur_e))
+            cur_s, cur_e = s_idx, e_idx
+    merged.append((cur_s, cur_e))
+
+    results: list[dict[str, Any]] = []
+    for s_idx, e_idx in merged:
+        sub = ticks[s_idx:e_idx]
+        t_start = int(sub[0].get("turn", s_idx))
+        t_end = int(sub[-1].get("turn", e_idx - 1))
+        if any(cs <= t_start and t_end <= ce for cs, ce in covered_spans):
+            continue
+        pos_set = {(int(s.get("y", 0) or 0), int(s.get("x", 0) or 0)) for s in sub}
+        fn_counts: dict[str, int] = {}
+        act_counts: dict[str, int] = {}
+        for s in sub:
+            fn = str(s.get("active_function", "") or "root")
+            act = str(s.get("action_name", "") or "")
+            fn_counts[fn] = fn_counts.get(fn, 0) + 1
+            if act:
+                act_counts[act] = act_counts.get(act, 0) + 1
+        top_fns = sorted(fn_counts.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        top_acts = sorted(act_counts.items(), key=lambda kv: kv[1], reverse=True)[:2]
+        results.append(
+            {
+                "depth": int(sub[0].get("depth", 1) or 1),
+                "start_turn": t_start,
+                "end_turn": t_end,
+                "steps": len(sub),
+                "unique_tiles": len(pos_set),
+                "top_fns": top_fns,
+                "top_acts": top_acts,
+            }
+        )
+    return results
+
+
 def summarize_episode_ticks(
     ticks: list[dict[str, Any]],
     final_info: dict[str, Any] | None = None,
@@ -287,14 +377,18 @@ def summarize_episode_ticks(
         for s in tail
     )
 
-    # 4. Part C: Stagnation / Loop Detection (segments with >=40 steps and <=3 unique tiles)
+    # 4. Part C: Stagnation / Loop Detection (single-function stalls + multi-segment confinement loops)
     stalls: list[str] = []
     stall_fns: set[str] = set()
+    covered_spans: list[tuple[int, int]] = []
     for seg in segments:
         if seg["steps"] >= 40 and len(seg["positions"]) <= 3:
             fn_name = str(seg.get("fn", ""))
             if fn_name:
                 stall_fns.add(fn_name)
+            covered_spans.append(
+                (int(seg.get("start_turn", 0)), int(seg.get("end_turn", 0)))
+            )
             top_a = sorted(seg["actions"].items(), key=lambda kv: kv[1], reverse=True)[
                 :2
             ]
@@ -316,6 +410,18 @@ def summarize_episode_ticks(
                 f"fn={seg['fn']} on Dlvl {seg['depth']} [{cause}] (T{seg['start_turn']}..{seg['end_turn']}, "
                 f"{seg['steps']} steps: {top_a})"
             )
+
+    confinement_loops = _detect_confinement_stalls(ticks, covered_spans=covered_spans)
+    for loop in confinement_loops:
+        dom_fns = "/".join(fn for fn, _ in loop["top_fns"])
+        for fn, _ in loop["top_fns"]:
+            if fn and fn != "root":
+                stall_fns.add(fn)
+        stalls.append(
+            f"CONFINEMENT_STALL on Dlvl {loop['depth']} [{loop['unique_tiles']} tiles over "
+            f"{loop['steps']} steps, fns={dom_fns}] (T{loop['start_turn']}..{loop['end_turn']}: "
+            f"{loop['top_acts']})"
+        )
 
     t_last = ticks[-1]
     overview = (

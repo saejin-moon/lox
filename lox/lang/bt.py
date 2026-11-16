@@ -29,6 +29,8 @@ class Blackboard(dict[str, Any]):
         super().__init__(*args, **kwargs)
         self.strict_errors = strict_errors
         self.leaf_errors: list[tuple[str, str]] = []
+        self.last_active_leaf: str = ""
+        self._selector_commits: dict[int, tuple[int, int]] = {}
 
     def record_leaf_error(self, node_name: str, exc: Exception) -> None:
         if len(self.leaf_errors) < 50:
@@ -45,13 +47,16 @@ class Blackboard(dict[str, Any]):
 
     def clear_vars(self) -> None:
         self.clear()
+        self.last_active_leaf = ""
+        self._selector_commits.clear()
 
 
 class BehaviorNode:
     """Base class for all Behavior Tree nodes."""
 
-    def __init__(self, name: str = "") -> None:
+    def __init__(self, name: str = "", min_commit: int = 0) -> None:
         self.name = name or self.__class__.__name__
+        self.min_commit = max(0, int(min_commit))
 
     def tick(self, state: Any, blackboard: Blackboard) -> tuple[NodeStatus, Any]:
         """
@@ -74,8 +79,12 @@ class ActionLeaf(BehaviorNode):
         action_fn: Callable[..., Any],
         name: str = "",
         is_running: bool = False,
+        min_commit: int = 0,
     ) -> None:
-        super().__init__(name=name or getattr(action_fn, "__name__", "ActionLeaf"))
+        super().__init__(
+            name=name or getattr(action_fn, "__name__", "ActionLeaf"),
+            min_commit=min_commit,
+        )
         self.action_fn = action_fn
         self.is_running = is_running
 
@@ -96,6 +105,8 @@ class ActionLeaf(BehaviorNode):
             return NodeStatus.FAILURE, None
 
         if act is not None:
+            if hasattr(blackboard, "last_active_leaf"):
+                blackboard.last_active_leaf = self.name
             status = NodeStatus.RUNNING if self.is_running else NodeStatus.SUCCESS
             return status, act
         return NodeStatus.FAILURE, None
@@ -139,24 +150,51 @@ class PrioritySelector(BehaviorNode):
     """
     Composite Selector / Fallback node.
     Ticks children sequentially from left to right.
+    Supports native hysteresis commitment (`hysteresis` or child `min_commit`)
+    so committed subtrees avoid per-step thrashing until FAILURE or expiry.
     Returns SUCCESS or RUNNING on the first child that does not return FAILURE.
     Returns FAILURE if all children return FAILURE.
     """
 
     def __init__(
-        self, children: list[BehaviorNode] | None = None, name: str = ""
+        self,
+        children: list[BehaviorNode] | None = None,
+        name: str = "",
+        hysteresis: int = 0,
+        min_commit: int = 0,
     ) -> None:
-        super().__init__(name=name)
+        super().__init__(name=name, min_commit=min_commit)
         self.children: list[BehaviorNode] = children or []
+        self.hysteresis = max(0, int(hysteresis))
 
     def add_child(self, child: BehaviorNode) -> PrioritySelector:
         self.children.append(child)
         return self
 
     def tick(self, state: Any, blackboard: Blackboard) -> tuple[NodeStatus, Any]:
-        for child in self.children:
+        commits = getattr(blackboard, "_selector_commits", None)
+        sel_id = id(self)
+        if isinstance(commits, dict) and sel_id in commits:
+            committed_idx, rem = commits[sel_id]
+            if rem > 0 and 0 <= committed_idx < len(self.children):
+                status, act = self.children[committed_idx].tick(state, blackboard)
+                if status in (NodeStatus.SUCCESS, NodeStatus.RUNNING):
+                    if rem - 1 > 0:
+                        commits[sel_id] = (committed_idx, rem - 1)
+                    else:
+                        commits.pop(sel_id, None)
+                    return status, act
+            commits.pop(sel_id, None)
+
+        for idx, child in enumerate(self.children):
             status, act = child.tick(state, blackboard)
             if status in (NodeStatus.SUCCESS, NodeStatus.RUNNING):
+                commit_len = max(
+                    int(getattr(child, "min_commit", 0) or 0),
+                    self.hysteresis,
+                )
+                if commit_len > 1 and isinstance(commits, dict):
+                    commits[sel_id] = (idx, commit_len - 1)
                 return status, act
         return NodeStatus.FAILURE, None
 
@@ -171,9 +209,12 @@ class Sequence(BehaviorNode):
     """
 
     def __init__(
-        self, children: list[BehaviorNode] | None = None, name: str = ""
+        self,
+        children: list[BehaviorNode] | None = None,
+        name: str = "",
+        min_commit: int = 0,
     ) -> None:
-        super().__init__(name=name)
+        super().__init__(name=name, min_commit=min_commit)
         self.children: list[BehaviorNode] = children or []
 
     def add_child(self, child: BehaviorNode) -> Sequence:
@@ -227,6 +268,8 @@ class BehaviorTree:
 
     def tick(self, state: Any) -> Any:
         """Ticks the tree and returns the resulting action (or None if all failed)."""
+        if hasattr(self.blackboard, "last_active_leaf"):
+            self.blackboard.last_active_leaf = ""
         status, act = self.root.tick(state, self.blackboard)
         return act
 

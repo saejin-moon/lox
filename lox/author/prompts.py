@@ -278,7 +278,9 @@ Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stat
 1. **Never Guess from Intuition**: Verify NetHack C mechanics via `query_wiki`, `query_monster`, and `query_item`, and verify empirical bottlenecks via `query_db`, `read_policy`, `diff_policies`, and `read_skill`.
 2. **Behavior Tree & Blackboard Discipline**:
    - Subtrees (`SWARM_WORKER`) define `subtree = PrioritySelector([...])` / `ActionLeaf(...)` / `Sequence(...)` and coordinate state via `Blackboard` (`bb.get_var` / `bb.set_var`).
-   - Master Policies (`SWARM_META`) define `class Policy:` with `self.blackboard = Blackboard()`, `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`, and `def step(self, state): return self.tree.tick(state) or Action.WAIT`.
+   - Master Policies (`SWARM_META`, `SWARM_PEER`) define `class Policy:` with `self.blackboard = Blackboard()`, `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`, and `def step(self, state): return self.tree.tick(state) or Action.WAIT`.
+   - **Native Leaf Hysteresis & Clean Attribution**: NEVER wrap `self.tree.tick(state)` in post-step oscillation gates (`_osc_gate`) or generic `_attributed` wrappers—these mask per-leaf telemetry. Instead, use native `ActionLeaf(fn, name="...", min_commit=N)` or `PrioritySelector([...], hysteresis=N)` to eliminate step-to-step thrashing cleanly while keeping `ExecutionTracer` leaf attribution exact.
+   - **Dormancy & Consolidation**: Prefer refining existing `skills/*.py` modules and removing `0`-turn dormant branches over creating duplicate overlapping skill files.
    - Every `ActionLeaf` must return `None` when its specific condition does not apply so `PrioritySelector` falls through cleanly to lower-priority branches without starving them.
 3. **Passability & 8-Way Adjacency**:
    - Never mark `ord('-')`, `ord('|')`, or `ord(' ')` (solid wall/stone) as passable; prefer `state.mem.passable_mask`.
@@ -618,6 +620,30 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
      </reflection>
      ```
    - Finally, emit ONLY the winning, verified Python subtree inside `<policy_code> ... </policy_code>`.
+"""
+
+    if canon_mode == "SWARM_PEER":
+        existing_policy_block = (
+            f"\n{_format_context_scoped_policy(current_policy, batch_digest)}\n"
+            if current_policy.strip()
+            else ""
+        )
+        return f"""### Generation {generation} — Mode: `SWARM_PEER` (Symmetric Data-Driven Peer Synthesis)
+{digest_block}{existing_policy_block}{skills_block}
+{BEHAVIOR_TREE_DOCS}
+
+### Peer Author Protocol (Isolated Sandbox + CRN Tournament):
+1. **Focus on Your Claimed Empirical Deficit**:
+   - Inspect your claimed failure cluster (`D_fail`) and protected high-Ochiai branches (`D_succ`) using `query_db`, `read_policy`, `diff_policies`, `read_skill`, `query_wiki`, `query_monster`, and `query_item`.
+   - Preserve high-Ochiai `D_succ` branches unless you have verified a strict improvement across both failure replays and `D_succ` guard runs.
+2. **Surgical Edits & Modular Consolidation**:
+   - Work cleanly on `class Policy:` (and update or prune `skills/*.py` only when consolidating or fixing a real bug—do NOT spawn duplicate overlapping skill files).
+   - Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin so native leaf attribution remains exact, and use `ActionLeaf(..., min_commit=N)` for multi-step commitment instead of ad-hoc post-step gates.
+3. **Verify in Sandbox Before Submission**:
+   - Call `dry_run_policy(code=...)` to verify AST compilation, zero swallowed leaf errors, and failure-replay behavior.
+   - Your candidate will be incubated on an isolated paired shard against the incumbent and must achieve `delta >= 0` in the full CRN tournament to be promoted.
+4. **Output Format**:
+   - Output your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by any updated skill modules inside `### skill: <name>` ```python ... ``` blocks, and the complete self-contained `class Policy:` inside `<policy_code> ... </policy_code>` (or the final ```python ... ``` block).
 """
 
     if canon_mode == "SWARM_META":

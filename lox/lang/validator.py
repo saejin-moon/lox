@@ -27,6 +27,7 @@ MODE_ALIASES: dict[str, str] = {
     "STRUCTURAL_REWRITE": "REFACTOR",
     "SWARM_WORKER": "SWARM_WORKER",
     "SWARM_META": "SWARM_META",
+    "SWARM_PEER": "SWARM_PEER",
 }
 
 

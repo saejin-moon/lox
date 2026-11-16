@@ -295,12 +295,35 @@ class PolicyRunner:
                 "Policy class must define `def run(self, state):` (generator) or `def step(self, state):`."
             )
 
+    def _iter_instance_blackboards(self) -> list[Any]:
+        bbs: list[Any] = []
+        for obj in (
+            getattr(self.instance, "blackboard", None),
+            getattr(self.instance, "bb", None),
+            getattr(getattr(self.instance, "tree", None), "blackboard", None),
+        ):
+            if obj is not None and hasattr(obj, "last_active_leaf") and obj not in bbs:
+                bbs.append(obj)
+        return bbs
+
+    def _clear_bt_last_active_leaf(self) -> None:
+        for bb in self._iter_instance_blackboards():
+            bb.last_active_leaf = ""
+
+    def _get_bt_last_active_leaf(self) -> str:
+        for bb in self._iter_instance_blackboards():
+            leaf = str(getattr(bb, "last_active_leaf", "") or "").strip()
+            if leaf:
+                return leaf
+        return ""
+
     def next_action(self, state: GameState) -> tuple[Any, str]:
         """
         Advances the policy by one turn given `state`.
         Returns `(raw_yielded_action, active_function_name)`.
         """
         self.tracer.loop_ticks = 0
+        self._clear_bt_last_active_leaf()
         try:
             setattr(self.instance, "state", state)
         except Exception:
@@ -330,7 +353,9 @@ class PolicyRunner:
                 if inspect.isgenerator(act):
                     self._active_subgen = act
                     act = next(self._active_subgen)
-                active_fn = self.tracer.record_turn_yield()
+                active_fn = self.tracer.record_turn_yield(
+                    preferred_fn=self._get_bt_last_active_leaf()
+                )
                 return act, active_fn
             except StopIteration:
                 self._active_subgen = None
@@ -390,7 +415,9 @@ class PolicyRunner:
                 self._active_subgen = None
                 act = Action.WAIT
 
-        active_fn = self.tracer.record_turn_yield()
+        active_fn = self.tracer.record_turn_yield(
+            preferred_fn=self._get_bt_last_active_leaf()
+        )
         return act, active_fn
 
 

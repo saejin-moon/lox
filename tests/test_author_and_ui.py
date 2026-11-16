@@ -896,3 +896,74 @@ def test_summarizer_level_stall_vs_livelock():
     assert "State Recurrence Rate during Stagnation" in digest
     assert "handle_prompt" in digest
     assert "PRIMARY BOTTLENECK" not in digest
+
+
+def test_dry_run_check_does_not_log_false_pilot_failed(tmp_path):
+    from lox.author.agent import AuthorAgent
+    from lox.db.schema import connect_db, init_db
+
+    db_path = str(tmp_path / "dry_run_status.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    agent = AuthorAgent(provider="mock", db_path=db_path, agent_role="peer_1")
+    agent.provider = "openrouter"
+    agent.tools.configure_generation(
+        pool=None, baseline_runs=[], generation=1, mode="SWARM_PEER"
+    )
+
+    sample_policy = (
+        "from lox.env.actions import Action\n"
+        "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector\n"
+        "def act_fn(st, bb):\n"
+        "    return Action.SEARCH\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.blackboard = Blackboard()\n"
+        "        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(act_fn, name='act_fn')]), blackboard=self.blackboard)\n"
+        "    def step(self, state):\n"
+        "        return self.tree.tick(state) or Action.WAIT\n"
+    )
+
+    import json
+
+    turn_counter = {"n": 0}
+
+    def clean_fake_llm(messages, allow_tools=True):
+        if turn_counter["n"] == 0:
+            turn_counter["n"] += 1
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_dry_1",
+                        "function": {
+                            "name": "dry_run_policy",
+                            "arguments": json.dumps(
+                                {"code": sample_policy, "smoke_only": True}
+                            ),
+                        },
+                    }
+                ],
+            }
+        return {"content": f"```python\n{sample_policy}\n```", "tool_calls": []}
+
+    agent._call_llm_api = clean_fake_llm  # type: ignore[method-assign]
+    agent.synthesize(
+        mode="SWARM_PEER",
+        generation=1,
+        current_policy="",
+        max_tool_turns=3,
+    )
+
+    con = connect_db(db_path, read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT turn_type, status FROM synthesis_logs WHERE generation = 1"
+        ).fetchall()
+    finally:
+        con.close()
+
+    assert rows
+    assert ("DRY_RUN_CHECK", "DRY_RUN_PASSED") in rows
+    assert all(st != "PILOT_FAILED" for _, st in rows)

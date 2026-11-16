@@ -146,11 +146,17 @@ class ExecutionTracer:
             if not self._turn_fn_locked:
                 self.active_fn = caller_fn
 
-    def record_turn_yield(self) -> str:
+    def record_turn_yield(self, preferred_fn: str | None = None) -> str:
         """Called by the runner each time the policy yields an action to the harness."""
         self.loop_ticks = 0
         self.total_turns += 1
         fn = self.active_fn
+        if isinstance(preferred_fn, str):
+            pref = preferred_fn.strip()
+            if pref and pref != "root":
+                if pref != fn:
+                    self.fn_calls[pref] = self.fn_calls.get(pref, 0) + 1
+                fn = pref
         self.fn_turns[fn] = self.fn_turns.get(fn, 0) + 1
         self._turn_fn_locked = False
         if self.call_stack:

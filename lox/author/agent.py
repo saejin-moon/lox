@@ -130,16 +130,16 @@ class AuthorAgent:
                 "3. Do NOT wrap the subtree in monolithic `class Policy` with `def run(self, state): yield ...`.\n"
                 "4. Fix any syntax, indentation, or runtime errors and output the complete corrected subtree inside a single ```python ... ``` block."
             )
-        if canon_mode == "SWARM_META":
+        if canon_mode in ("SWARM_META", "SWARM_PEER"):
             return (
                 f"{hdr}\n\n"
                 f"```\n{diag.strip()}\n```\n\n"
-                "🚨 PROBLEM: MASTER BEHAVIOR TREE POLICY FAILED VERIFICATION\n"
+                "🚨 PROBLEM: BEHAVIOR TREE POLICY FAILED VERIFICATION\n"
                 "REQUIRED FIX:\n"
                 "1. Output a complete, self-contained `class Policy:` defining `def __init__(self):` "
                 "(with `self.blackboard = Blackboard()` and `self.tree = BehaviorTree(...)`) and "
                 "`def step(self, state): return self.tree.tick(state) or Action.SEARCH`.\n"
-                "2. Do NOT reference undeclared worker helper names or import `macros` / `skills_common`.\n"
+                "2. Do NOT reference undeclared helper names or import `macros` / `skills_common`.\n"
                 "3. Output the complete corrected `class Policy:` inside a single ```python ... ``` block."
             )
         if "UNREACHABLE" in status or "Unreachable Function" in diag:
@@ -883,7 +883,7 @@ class AuthorAgent:
 
         sys_prompt = build_system_prompt(
             self.db_path,
-            is_swarm=canon_mode in ("SWARM_WORKER", "SWARM_META"),
+            is_swarm=canon_mode in ("SWARM_WORKER", "SWARM_META", "SWARM_PEER"),
         )
         user_prompt = build_user_prompt(
             mode=mode,
@@ -1265,12 +1265,24 @@ class AuthorAgent:
                     (tc.get("function") or {}).get("name") == "dry_run_policy"
                     for tc in tool_calls
                 )
-                t_type = "PILOT_EXECUTION" if has_pilot else "RESEARCH_TOOL"
-                t_stat = (
-                    "PILOT_IMPROVED"
-                    if getattr(self.tools, "last_pilot_improved", False)
-                    else ("PILOT_FAILED" if has_pilot else "TOOL_CALLS")
-                )
+                dry_mode = getattr(self.tools, "last_dry_run_mode", "check")
+                if has_pilot and dry_mode == "pilot":
+                    t_type = "PILOT_EXECUTION"
+                    t_stat = (
+                        "PILOT_IMPROVED"
+                        if getattr(self.tools, "last_pilot_improved", False)
+                        else "PILOT_FAILED"
+                    )
+                elif has_pilot:
+                    t_type = "DRY_RUN_CHECK"
+                    t_stat = (
+                        "DRY_RUN_PASSED"
+                        if getattr(self.tools, "last_dry_run_passed", False)
+                        else "DRY_RUN_FAILED"
+                    )
+                else:
+                    t_type = "RESEARCH_TOOL"
+                    t_stat = "TOOL_CALLS"
                 _, cand_code_turn = self.extract_yaml_and_python(msg_text)
                 self.db_logger.save_synthesis_log(
                     log_id=f"syn_{generation}_{turn_idx}_0_{int(time.time() * 1000)}",
@@ -1307,7 +1319,7 @@ class AuthorAgent:
         if (
             self.tools.pilot_runs_used > 0
             and not self.tools.last_pilot_improved
-            and canon_mode not in ("CREATE", "SWARM_WORKER", "SWARM_META")
+            and canon_mode not in ("CREATE", "SWARM_WORKER", "SWARM_META", "SWARM_PEER")
         ):
             summary = self.tools.last_pilot_summary or "insufficient signal"
             best_delta = getattr(self.tools, "best_pilot_delta", -1.0)
@@ -1497,13 +1509,13 @@ class AuthorAgent:
                             ),
                         )
                 if (
-                    canon_mode in ("CREATE", "SWARM_WORKER", "SWARM_META")
+                    canon_mode in ("CREATE", "SWARM_WORKER", "SWARM_META", "SWARM_PEER")
                     or not current_policy.strip()
                 ):
                     spliced_policy = code_patch
                     default_target = (
                         ["step"]
-                        if canon_mode == "SWARM_META"
+                        if canon_mode in ("SWARM_META", "SWARM_PEER")
                         else (["subtree"] if canon_mode == "SWARM_WORKER" else ["run"])
                     )
                     changed_fns = hyp.get("target_functions") or default_target
@@ -1523,7 +1535,13 @@ class AuthorAgent:
                     changed_fns = [changed_fns]
                 if (
                     canon_mode
-                    not in ("CREATE", "REFACTOR", "SWARM_WORKER", "SWARM_META")
+                    not in (
+                        "CREATE",
+                        "REFACTOR",
+                        "SWARM_WORKER",
+                        "SWARM_META",
+                        "SWARM_PEER",
+                    )
                     and len(changed_fns) > 2
                 ):
                     ui.warn(
@@ -1688,13 +1706,13 @@ class AuthorAgent:
                 ),
             )
             if (
-                canon_mode in ("CREATE", "SWARM_WORKER", "SWARM_META")
+                canon_mode in ("CREATE", "SWARM_WORKER", "SWARM_META", "SWARM_PEER")
                 or not current_policy.strip()
             ):
                 spliced_policy = code_patch
                 default_target = (
                     ["step"]
-                    if canon_mode == "SWARM_META"
+                    if canon_mode in ("SWARM_META", "SWARM_PEER")
                     else (["subtree"] if canon_mode == "SWARM_WORKER" else ["run"])
                 )
                 changed_fns = latest_hyp.get("target_functions") or default_target
@@ -1718,7 +1736,14 @@ class AuthorAgent:
                 else 0.0
             )
             if (
-                canon_mode not in ("CREATE", "REFACTOR", "SWARM_WORKER", "SWARM_META")
+                canon_mode
+                not in (
+                    "CREATE",
+                    "REFACTOR",
+                    "SWARM_WORKER",
+                    "SWARM_META",
+                    "SWARM_PEER",
+                )
                 and len(changed_fns) > 2
             ):
                 ui.warn(

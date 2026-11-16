@@ -89,6 +89,12 @@ def main() -> None:
         help="Character role/race/alignment/gender (default: val-hum-law-fem).",
     )
     parser.add_argument(
+        "--swarm-architecture",
+        choices=["peer", "legacy"],
+        default="peer",
+        help="Swarm coordination topology: 'peer' (democratized data-assigned peers + CRN tournament) or 'legacy' (default: peer).",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help=(
@@ -113,10 +119,15 @@ def main() -> None:
             frontier_dir=args.frontier_dir,
         )
 
-    ui.header("LOX Hierarchical Swarm Synthesis Engine")
+    ui.header(
+        "LOX Peer Swarm Synthesis Engine"
+        if args.swarm_architecture == "peer"
+        else "LOX Hierarchical Swarm Synthesis Engine"
+    )
     ui.info(
         f"Config: {args.generations} generations | {args.workers} workers | "
-        f"{args.turns_per_worker} turns/worker | Provider: {args.provider} ({args.model})"
+        f"{args.turns_per_worker} turns/worker | Arch: {args.swarm_architecture} | "
+        f"Provider: {args.provider} ({args.model})"
     )
 
     orchestrator = SwarmCampaignOrchestrator(
@@ -130,6 +141,7 @@ def main() -> None:
         seeds_per_batch=args.seeds,
         benchmark=args.benchmark,
         role=args.role,
+        swarm_architecture=args.swarm_architecture,
     )
 
     try:

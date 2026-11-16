@@ -298,3 +298,96 @@ class Policy:
     assert "Locates downstairs coordinates." in saved_code
     assert "stateful_method" not in saved_code
     assert "run" not in saved_code
+
+
+def test_bt_leaf_attribution_ignores_step_wrappers_and_hysteresis_commits():
+    from lox.env.harness import NetHackHarness
+    from lox.lang.compiler import compile_policy_package
+
+    code = """
+from lox.env.actions import Action
+from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
+
+def _leaf_a(state, bb):
+    cnt = bb.get_var("cnt", 0) + 1
+    bb.set_var("cnt", cnt)
+    # Only returns None on turn 2 if ticked normally unless hysteresis holds it
+    return Action.EAST if cnt in (1, 2, 3) else None
+
+def _leaf_b(state, bb):
+    return Action.WEST
+
+def _osc_gate(state, bb, act):
+    # Post-step wrapper like Gen 10 used in policy.py
+    return act
+
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+        self.tree = BehaviorTree(
+            root=PrioritySelector([
+                ActionLeaf(_leaf_a, name="leaf_a", min_commit=2),
+                ActionLeaf(_leaf_b, name="leaf_b"),
+            ]),
+            blackboard=self.blackboard,
+        )
+
+    def step(self, state):
+        act = self.tree.tick(state)
+        return _osc_gate(state, self.blackboard, act) or Action.WAIT
+"""
+    compiled = compile_policy_package(code, "")
+    runner = compiled.create_runner()
+    h = NetHackHarness(max_steps=10)
+    try:
+        st = h.reset(seed=42)
+        seen_fns: list[str] = []
+        for _ in range(4):
+            act, fn_name = runner.next_action(st)
+            seen_fns.append(fn_name)
+            st, done, _ = h.step(act)
+            if done:
+                break
+        # Must attribute to winning ActionLeaf names, NOT `_osc_gate`!
+        assert "_osc_gate" not in runner.tracer.fn_turns
+        assert seen_fns[0] == "leaf_a"
+        assert "leaf_b" in seen_fns
+    finally:
+        h.close()
+
+    # Verify PrioritySelector min_commit holds commitment when higher-priority child flips
+    from lox.lang.bt import ActionLeaf, Blackboard, PrioritySelector
+
+    bb = Blackboard()
+    calls: list[str] = []
+
+    def high_fn(st, b):
+        calls.append("high")
+        # False on turn 0, True on turn 1!
+        return "HIGH_ACT" if b.get_var("turn", 0) >= 1 else None
+
+    def low_fn(st, b):
+        calls.append("low")
+        return "LOW_ACT"
+
+    sel = PrioritySelector(
+        [
+            ActionLeaf(high_fn, name="high_leaf"),
+            ActionLeaf(low_fn, name="low_leaf", min_commit=2),
+        ]
+    )
+    bb.set_var("turn", 0)
+    _, act0 = sel.tick(None, bb)
+    assert act0 == "LOW_ACT"
+    assert bb.last_active_leaf == "low_leaf"
+
+    # Turn 1: low_leaf commitment (min_commit=2) holds before high_leaf preempts on Turn 2
+    bb.set_var("turn", 1)
+    _, act1 = sel.tick(None, bb)
+    assert act1 == "LOW_ACT"
+    assert bb.last_active_leaf == "low_leaf"
+
+    bb.set_var("turn", 2)
+    _, act2 = sel.tick(None, bb)
+    assert act2 == "HIGH_ACT"
+    assert bb.last_active_leaf == "high_leaf"

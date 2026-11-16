@@ -1120,3 +1120,198 @@ class Policy:
     assert sorted(kept.keys()) == ["used_a", "used_helper"]
     assert not (prune_dir / "orphaned_old.py").exists()
     assert (prune_dir / "used_helper.py").exists()
+
+
+def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
+    from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster
+    from lox.author.swarm_peer import PeerCandidate, incubate_candidate
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.engine.swarm_referee import SwarmReferee
+
+    db_path = str(tmp_path / "peer_swarm.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector\n"
+        "from skills.skill_a import fn_a\n"
+        "from skills.skill_b import fn_b\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.blackboard = Blackboard()\n"
+        "        self.tree = BehaviorTree(\n"
+        "            PrioritySelector([\n"
+        "                ActionLeaf(fn_a, name='leaf_a'),\n"
+        "                ActionLeaf(fn_b, name='leaf_b'),\n"
+        "            ]),\n"
+        "            blackboard=self.blackboard,\n"
+        "        )\n"
+        "    def step(self, state):\n"
+        "        return self.tree.tick(state) or Action.WAIT\n"
+    )
+    base_skills = {
+        "skill_a": "from lox.env.actions import Action\ndef fn_a(st, bb):\n    return None\n",
+        "skill_b": "from lox.env.actions import Action\ndef fn_b(st, bb):\n    return Action.SEARCH\n",
+    }
+
+    # Log batch with 1 deep outlier run using leaf_b + 3 shallow stalled runs (leaf_a unused -> dormant)
+    logger = BatchDatabaseLogger(db_path)
+    logger.save_batch(
+        batch_id="b_g1",
+        generation=1,
+        mode="SWARM",
+        parent_policy_id="policy_swarm_g0",
+        candidate_policy_id="policy_swarm_g1",
+        target_functions=["leaf_b"],
+        runs=[
+            {
+                "run_id": "r_good",
+                "seed": 1000,
+                "depth": 3,
+                "max_depth": 3,
+                "score": 450,
+                "turns": 600,
+                "steps": 600,
+                "end_reason": "killed by grid bug",
+                "unique_tiles": 140,
+                "pct_search": 0.10,
+                "triggered_functions": {"leaf_b": 25},
+                "fn_turns": {"leaf_b": 600},
+                "summary_digest": "Overview: Depth=3",
+                "milestones": {"stall_count": 0, "max_depth": 3},
+            },
+            *[
+                {
+                    "run_id": f"r_stall_{i}",
+                    "seed": 1001 + i,
+                    "depth": 1,
+                    "max_depth": 1,
+                    "score": 15,
+                    "turns": 500,
+                    "steps": 500,
+                    "end_reason": "max_steps",
+                    "unique_tiles": 22,
+                    "pct_search": 0.85,
+                    "triggered_functions": {},
+                    "fn_turns": {},
+                    "summary_digest": "CONFINEMENT_STALL on Dlvl 1",
+                    "milestones": {"stall_count": 1, "max_depth": 1},
+                }
+                for i in range(3)
+            ],
+        ],
+        episodes_discarded=0,
+        batch_metrics={"avg_depth": 1.5, "max_depth": 3, "avg_score": 120.0},
+        verdict={"passed": True},
+    )
+
+    analyzer = DeficitAnalyzer(db_path)
+    report = analyzer.analyze(generation=2, current_policy=base_pol, skills=base_skills)
+    assert report.fail_clusters
+    assert "leaf_a" in report.dormant_branches
+    assert any(b["fn"] == "leaf_b" for b in report.protected_branches)
+
+    # Bad candidate with leaf exception is rejected in isolated sandbox incubation
+    bad_cand = PeerCandidate(
+        peer_id="peer_bad",
+        claimed_deficit_id="confinement_stall",
+        claimed_label="stall",
+        policy_code=base_pol,
+        skills={
+            "skill_a": "def fn_a(st, bb):\n    raise RuntimeError('boom')\n",
+            "skill_b": base_skills["skill_b"],
+        },
+    )
+    bad_res = incubate_candidate(
+        bad_cand, deficit_report=report, claimed_deficit=DeficitCluster("c", "k", "l")
+    )
+    assert bad_res.sandbox_passed is False
+    assert "Swallowed leaf error" in bad_res.error
+
+    # Disjoint skill updates merge cleanly via SwarmReferee.build_orthogonal_pair
+    cand_a = PeerCandidate(
+        peer_id="peer_1",
+        claimed_deficit_id="c1",
+        claimed_label="c1",
+        policy_code=base_pol,
+        skills={
+            "skill_a": "from lox.env.actions import Action\ndef fn_a(st, bb):\n    return Action.EAST\n",
+            "skill_b": base_skills["skill_b"],
+        },
+        touched_skills={"skill_a"},
+        touched_branches=set(),
+        sandbox_passed=True,
+        sandbox_metrics={"depth_delta": 0.2, "score_delta": 10.0, "wrapper_ratio": 0.0},
+    )
+    cand_b = PeerCandidate(
+        peer_id="peer_2",
+        claimed_deficit_id="c2",
+        claimed_label="c2",
+        policy_code=base_pol,
+        skills={
+            "skill_a": base_skills["skill_a"],
+            "skill_b": "from lox.env.actions import Action\ndef fn_b(st, bb):\n    return Action.WAIT\n",
+        },
+        touched_skills={"skill_b"},
+        touched_branches=set(),
+        sandbox_passed=True,
+        sandbox_metrics={"depth_delta": 0.1, "score_delta": 5.0, "wrapper_ratio": 0.0},
+    )
+    referee = SwarmReferee()
+    ortho = referee.build_orthogonal_pair([cand_a, cand_b], base_pol, base_skills)
+    assert ortho is not None
+    assert "Action.EAST" in ortho.skills["skill_a"]
+    assert "Action.WAIT" in ortho.skills["skill_b"]
+
+    # Fake pool verifying tournament rejects strictly regressive candidate and keeps incumbent
+    class _FakePool:
+        def evaluate_batch(
+            self,
+            batch_id,
+            policy_code,
+            macros_code,
+            skills,
+            target_episodes,
+            priority_seeds,
+            record_ticks=True,
+        ):
+            is_inc = "Action.SEARCH" in (skills or {}).get("skill_b", "")
+            depth = 2 if is_inc else 1
+            score = 50.0 if is_inc else 5.0
+            return {
+                "batch_id": batch_id,
+                "avg_depth": float(depth),
+                "max_depth": depth,
+                "avg_score": score,
+                "p90_depth": float(depth),
+                "max_score": int(score),
+                "avg_turns": 10.0,
+                "runs": [
+                    {
+                        "run_id": f"{batch_id}_{sd}",
+                        "seed": sd,
+                        "depth": depth,
+                        "max_depth": depth,
+                        "score": int(score),
+                        "turns": 10,
+                        "steps": 10,
+                        "end_reason": "max_steps",
+                        "fn_turns": {"leaf_b": 10},
+                        "summary_digest": "ok",
+                    }
+                    for sd in priority_seeds
+                ],
+            }
+
+    verdict = referee.evaluate_tournament(
+        generation=2,
+        candidates=[cand_b],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=_FakePool(),
+        seeds=[1000, 1001],
+    )
+    assert verdict.promoted is False
+    assert verdict.winner_id == "incumbent"
+    assert verdict.winner_policy_code == base_pol

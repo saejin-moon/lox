@@ -971,3 +971,46 @@ def run(self, state):
     formatted_pol = _format_context_scoped_policy(long_pol)
     assert "### Current `policy.py`:" in formatted_pol
     assert "def fn_399" in formatted_pol
+
+
+def test_confinement_stall_detects_multi_leaf_oscillation():
+    from lox.db.summarizer import summarize_episode_ticks
+
+    # Simulate 200 turns of E/W oscillation + periodic SEARCH on Dlvl 1 across <= 20 tiles
+    # Each consecutive single-function segment is <= 10 steps (so old single-seg check misses it)
+    ticks = []
+    for i in range(200):
+        cycle = i % 12
+        if cycle < 5:
+            fn, act = "explore_ew_leaf", "EAST"
+        elif cycle < 9:
+            fn, act = "explore_ew_leaf", "WEST"
+        else:
+            fn, act = "search_budget_leaf", "SEARCH"
+        y = 10 + (i % 4)
+        x = 20 + (i % 5)
+        ticks.append(
+            {
+                "turn": i + 1,
+                "step_idx": i,
+                "depth": 1,
+                "dungeon_num": 0,
+                "hp": 14,
+                "max_hp": 14,
+                "ac": 9,
+                "xp_level": 1,
+                "y": y,
+                "x": x,
+                "action_name": act,
+                "raw_key": ord("s") if act == "SEARCH" else ord("l"),
+                "active_function": fn,
+                "score": 10,
+                "message": "",
+            }
+        )
+
+    digest, _log, milestones = summarize_episode_ticks(ticks)
+    assert "CONFINEMENT_STALL" in digest
+    assert "Stalls: None" not in digest
+    assert milestones["stall_count"] >= 1
+    assert "explore_ew_leaf" in milestones["stall_functions"]

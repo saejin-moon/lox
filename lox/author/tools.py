@@ -112,6 +112,8 @@ class AuthorToolRegistry:
         self.pilot_episodes: int = 30
         self.last_pilot_improved: bool = False
         self.last_pilot_summary: str = ""
+        self.last_dry_run_mode: str = "none"
+        self.last_dry_run_passed: bool = False
         self.last_cand_depths: list[float] = []
         self.last_base_depths: list[float] = []
         self.skills: dict[str, str] = {}
@@ -203,6 +205,8 @@ class AuthorToolRegistry:
         self.pilot_episodes = pilot_episodes
         self.last_pilot_improved = False
         self.last_pilot_summary = ""
+        self.last_dry_run_mode = "none"
+        self.last_dry_run_passed = False
         self.last_passed_pkg = CandidatePackage()
         self.best_pilot_pkg = CandidatePackage()
         self.last_cand_depths = []
@@ -381,7 +385,7 @@ class AuthorToolRegistry:
         if "macro" in t:
             return self.macro_lib.format_docs() + macros_section, "macros docs"
         pol_src = self.current_policy_code or "(Empty policy)"
-        if self.mode in ("SWARM_WORKER", "SWARM_META"):
+        if self.mode in ("SWARM_WORKER", "SWARM_META", "SWARM_PEER"):
             return (
                 BEHAVIOR_TREE_DOCS
                 + "\n"
@@ -941,6 +945,8 @@ class AuthorToolRegistry:
         # so all H1..HK continue sequentially across the warm conversation.
         self.last_passed_code = code
         self.last_pilot_improved = True
+        self.last_dry_run_mode = "worker"
+        self.last_dry_run_passed = True
         self.last_pilot_summary = f"[{hyp_label}] Triggered {total_triggered}/{total_eval} across {len(observations)} context(s)"
 
         lines = [
@@ -979,6 +985,8 @@ class AuthorToolRegistry:
         """
         macros_code = self.macro_lib.load_code()
         policy_code = self.current_policy_code
+        self.last_dry_run_mode = "check"
+        self.last_dry_run_passed = False
 
         cand_skills = dict(self.skills)
         if skill_name and skill_code:
@@ -1003,6 +1011,8 @@ class AuthorToolRegistry:
             )
             and skill_matches
         ):
+            self.last_dry_run_mode = "pilot" if self.pilot_runs_used > 0 else "check"
+            self.last_dry_run_passed = True
             return (
                 f"Candidate code already verified in passing pilot batch ({self.last_pilot_summary}). "
                 "DO NOT run more pilots. Conclude your turn immediately and output your final hypothesis.",
@@ -1013,6 +1023,7 @@ class AuthorToolRegistry:
             return self._verify_macro_on_real_states(code)
 
         if self.mode == "SWARM_WORKER":
+            self.last_dry_run_mode = "worker"
             return self._dry_run_swarm_worker(
                 code=code,
                 seed=seed,
@@ -1023,7 +1034,7 @@ class AuthorToolRegistry:
             )
 
         try:
-            if policy_code.strip() and self.mode != "SWARM_META":
+            if policy_code.strip() and self.mode not in ("SWARM_META", "SWARM_PEER"):
                 if code.strip():
                     spliced_policy, changed_fns = splice_functions_into_policy(
                         policy_code, code
@@ -1082,7 +1093,9 @@ class AuthorToolRegistry:
                         )
             else:
                 spliced_policy = code
-                changed_fns = [] if self.mode == "SWARM_META" else ["run"]
+                changed_fns = (
+                    [] if self.mode in ("SWARM_META", "SWARM_PEER") else ["run"]
+                )
             compiled = compile_policy_package(
                 spliced_policy, macros_code, skills=cand_skills
             )
@@ -1777,6 +1790,8 @@ class AuthorToolRegistry:
                 if improved:
                     self.last_passed_code = code
                     self.last_pilot_improved = True
+                    self.last_dry_run_mode = "pilot"
+                    self.last_dry_run_passed = True
                     pass_msg = (
                         f"\n\n═══════════════════════════════════════════════════════════════════\n"
                         f"PILOT BATCH {rev_idx}/{max_rev} REPORT ({len(p_runs)} episodes across workers in {pilot_res.get('wall_sec', 0.0)}s):\n"
@@ -1794,6 +1809,8 @@ class AuthorToolRegistry:
                         f"PASSED (Pilot {rev_idx}/{max_rev}: {summary_short})",
                     )
                 else:
+                    self.last_dry_run_mode = "pilot"
+                    self.last_dry_run_passed = False
                     return (
                         f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}{pilot_diag}",
                         f"PILOT_FAILED ({summary_short})",
@@ -1804,6 +1821,8 @@ class AuthorToolRegistry:
                 and self.pilot_runs_used > 0
                 and not self.last_pilot_improved
             ):
+                self.last_dry_run_mode = "pilot"
+                self.last_dry_run_passed = False
                 return (
                     f"Pilot revisions exhausted ({self.pilot_runs_used}/{self.max_pilot_runs}). "
                     f"Candidate code never beat baseline ({self.last_pilot_summary}).",
@@ -1811,6 +1830,8 @@ class AuthorToolRegistry:
                 )
 
             if smoke_only:
+                self.last_dry_run_mode = "check"
+                self.last_dry_run_passed = True
                 return (
                     f"Dry-Run Smoke Check PASSED ({harness.step_count} steps on seed {seed}).{warn_block}",
                     "PASSED (smoke check)",
@@ -1818,7 +1839,7 @@ class AuthorToolRegistry:
 
             replay_checks_block = ""
             if (
-                self.mode == "SWARM_META"
+                self.mode in ("SWARM_META", "SWARM_PEER")
                 and not replay_run_id
                 and os.path.exists(self.db_path)
             ):
@@ -1898,6 +1919,8 @@ class AuthorToolRegistry:
                     )
 
             self.last_passed_code = code
+            self.last_dry_run_mode = "check"
+            self.last_dry_run_passed = True
             if skill_name and skill_code is not None:
                 self.last_passed_skill_name = str(skill_name)
                 self.last_passed_skill_code = str(skill_code)

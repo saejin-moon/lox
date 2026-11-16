@@ -29,7 +29,9 @@ from typing import Any
 import numpy as np
 
 from lox.author.swarm_critic import SwarmCriticAgent
+from lox.author.swarm_deficits import DeficitAnalyzer
 from lox.author.swarm_meta import SwarmMetaAgent
+from lox.author.swarm_peer import PeerCandidate, SwarmPeerAgent
 from lox.author.swarm_worker import SwarmWorker
 from lox.core.contracts import BatchEvaluation
 from lox.db.logger import BatchDatabaseLogger
@@ -37,6 +39,7 @@ from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
 from lox.engine.map_elites import MAPElitesArchive
+from lox.engine.swarm_referee import SwarmReferee
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
 
@@ -61,6 +64,7 @@ class SwarmCampaignOrchestrator:
         role: str = "val-hum-law-fem",
         max_steps: int = 5000,
         frontier_min_depth: int = 2,
+        swarm_architecture: str = "peer",
     ) -> None:
         self.db_path = db_path
         self.workspace_dir = Path(workspace_dir)
@@ -75,6 +79,11 @@ class SwarmCampaignOrchestrator:
         self.role = role
         self.max_steps = int(max_steps)
         self.frontier_min_depth = int(frontier_min_depth)
+        self.swarm_architecture = (
+            str(swarm_architecture or "peer").strip().lower()
+            if str(swarm_architecture or "peer").strip().lower() in ("peer", "legacy")
+            else "peer"
+        )
 
         # Initialize DuckDB tables and logger
         init_db(self.db_path)
@@ -88,7 +97,13 @@ class SwarmCampaignOrchestrator:
         # Initialize MAP-Elites Diversity Archive
         self.map_elites = MAPElitesArchive()
 
-        # Initialize Meta-Agent & Two-Pass Advisory Critic
+        # Initialize Deficit Analyzer & Deterministic Referee (for peer mode)
+        self.deficit_analyzer = DeficitAnalyzer(db_path=self.db_path)
+        self.referee = SwarmReferee(
+            max_tournament_peers=max(2, min(4, self.num_workers))
+        )
+
+        # Legacy Meta-Agent & Two-Pass Advisory Critic (only used when swarm_architecture='legacy')
         self.meta_agent = SwarmMetaAgent(
             provider=self.provider,
             model=self.model,
@@ -188,16 +203,299 @@ class SwarmCampaignOrchestrator:
         }
 
     def run_generation(self, generation: int) -> dict[str, Any]:
+        """Dispatches generation execution to the selected swarm architecture (`peer` or `legacy`)."""
+        if self.swarm_architecture == "peer":
+            return self._run_generation_peer(generation)
+        return self._run_generation_legacy(generation)
+
+    def _run_generation_peer(self, generation: int) -> dict[str, Any]:
         """
-        Executes a single generation of the Hierarchical Swarm loop:
-        1. Critic Pass 1 (`guide_before_generation`): First agent called; produces high-level guide.
-        2. Meta-Agent discovers dynamic macro-categories informed by Critic Pass 1.
-        3. Concurrent workers explore hypotheses on frontier checkpoints & failure fixtures.
-        4. Meta-Agent integrates worker reports into initial Behavior Tree policy.
-        5. PersistentEvalPool evaluates draft policy across paired seeds and logs to DuckDB.
-        6. Critic Pass 2 (`review_after_assembly`): Compares draft results & actions vs prior generations.
-        7. Meta-Agent Post-Critic Revision (`revise_policy_with_critic`): Meta-Agent decides whether
-           to revise `policy.py` / `skills/*.py` (zero hardcoded orchestrator rollbacks).
+        Democratized Peer Swarm loop:
+        1. Deterministic SQL `DeficitAnalyzer` partitions `D_succ` vs `D_fail`, plateau signal, and dormant branches.
+        2. Adaptive N symmetric `SwarmPeerAgent`s claim distinct empirical clusters in isolated sandboxes
+           and incubate candidates on a paired micro-shard (`tau_iso`).
+        3. Deterministic `SwarmReferee` builds optional AST-disjoint orthogonal pair and runs full-CRN
+           head-to-head tournament vs Incumbent (`delta >= 0` promotion gate).
+        4. Updates `workspace/`, DuckDB telemetry, `FrontierArchive`, and `MAPElitesArchive`.
+        """
+        t0 = time.time()
+        ui.header(f"LOX Democratized Peer Swarm - Generation {generation}")
+
+        policy_path = self.workspace_dir / "policy.py"
+        skills_dir = self.workspace_dir / "skills"
+        current_policy = (
+            policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
+        )
+        initial_skills = (
+            {
+                p.stem: p.read_text(encoding="utf-8")
+                for p in sorted(skills_dir.glob("*.py"))
+                if p.stem != "__init__"
+            }
+            if skills_dir.exists()
+            else {}
+        )
+
+        # 1. Deterministic Deficit Discovery (0 LLM calls)
+        deficit_report = self.deficit_analyzer.analyze(
+            generation=generation,
+            current_policy=current_policy,
+            skills=initial_skills,
+        )
+        if deficit_report.regime == "CLIMBING":
+            active_peers = max(1, min(self.num_workers, max(2, self.num_workers // 2)))
+        else:
+            active_peers = max(1, int(self.num_workers))
+
+        ui.info(
+            f"Gen {generation}: Regime={deficit_report.regime} "
+            f"(Δ={deficit_report.rolling_depth_delta:+.2f}) | Clusters={len(deficit_report.fail_clusters)} | "
+            f"Peers={active_peers}"
+        )
+
+        # 2. Shared Incubation Micro-Shard Baseline (evaluated once for incumbent)
+        raw_shard_seeds = list(
+            dict.fromkeys(
+                deficit_report.d_succ_seeds[:2]
+                + [
+                    sd
+                    for cl in deficit_report.fail_clusters
+                    for sd in cl.sample_seeds[:2]
+                ]
+                + [1000, 1001]
+            )
+        )
+        max_shard = min(6, max(2, int(self.seeds_per_batch)))
+        shard_seeds = raw_shard_seeds[:max_shard]
+        incumbent_shard_runs: dict[int, dict[str, Any]] = {}
+        if current_policy.strip() and shard_seeds:
+            inc_shard = self.eval_pool.evaluate_batch(
+                batch_id=f"incubate_inc_g{generation}_{int(time.time())}",
+                policy_code=current_policy,
+                macros_code="",
+                skills=initial_skills,
+                target_episodes=len(shard_seeds),
+                priority_seeds=shard_seeds,
+                record_ticks=False,
+            )
+            for r in inc_shard.get("runs", []) or []:
+                incumbent_shard_runs[int(r.get("seed", 0))] = dict(r)
+
+        # 3. Concurrent Symmetric Peer Agents + Isolated Sandbox Incubation
+        clusters = deficit_report.fail_clusters
+        peer_assignments = [
+            (f"peer_{i + 1}", clusters[i % len(clusters)]) for i in range(active_peers)
+        ]
+        peer_tool_turns = max(4, int(self.turns_per_worker) * 3)
+        peer_candidates: list[PeerCandidate] = []
+
+        def _run_peer(peer_id: str, cluster: Any) -> PeerCandidate:
+            peer = SwarmPeerAgent(
+                peer_id=peer_id,
+                provider=self.provider,
+                model=self.model,
+                db_path=self.db_path,
+                theories_store=self.theories,
+                max_tool_turns=peer_tool_turns,
+            )
+            return peer.run_cycle(
+                generation=generation,
+                deficit_report=deficit_report,
+                claimed_deficit=cluster,
+                current_policy=current_policy,
+                current_skills=initial_skills,
+                eval_pool=self.eval_pool,
+                incumbent_shard_runs=incumbent_shard_runs,
+                shard_seeds=shard_seeds,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(peer_assignments)
+        ) as executor:
+            fut_map = {
+                executor.submit(_run_peer, pid, cl): pid for pid, cl in peer_assignments
+            }
+            for fut in concurrent.futures.as_completed(fut_map):
+                pid = fut_map[fut]
+                try:
+                    peer_candidates.append(fut.result())
+                except Exception as exc:
+                    ui.warn(f"Peer [{pid}] failed: {exc}")
+
+        # 4. Deterministic CRN Tournament & Optional AST-Disjoint Orthogonal Merge
+        seeds = [1000 + i for i in range(self.seeds_per_batch)]
+        verdict = self.referee.evaluate_tournament(
+            generation=generation,
+            candidates=peer_candidates,
+            base_policy=current_policy,
+            base_skills=initial_skills,
+            eval_pool=self.eval_pool,
+            seeds=seeds,
+        )
+
+        # Sync workspace only if promoted (or bootstrapping)
+        if verdict.promoted:
+            policy_path.write_text(verdict.winner_policy_code, encoding="utf-8")
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            for s_name, s_src in verdict.winner_skills.items():
+                (skills_dir / f"{s_name}.py").write_text(s_src, encoding="utf-8")
+            # Prune removed skill files cleanly
+            SwarmMetaAgent.prune_unused_skills(
+                verdict.winner_policy_code,
+                verdict.winner_skills,
+                skills_dir=skills_dir,
+            )
+
+        batch_eval = verdict.winner_batch_eval
+        runs = batch_eval.get("runs", [])
+        batch_id = str(
+            batch_eval.get("batch_id", f"batch_swarm_g{generation}_{int(time.time())}")
+        )
+        batch_metrics = self._extract_batch_metrics(batch_eval, runs)
+        policy_id = f"policy_swarm_g{generation}"
+        parent_id = f"policy_swarm_g{max(0, generation - 1)}"
+
+        self.db_logger.save_policy(
+            policy_id=policy_id,
+            generation=generation,
+            mode="SWARM",
+            policy_code=verdict.winner_policy_code,
+            macros_code="",
+            params={},
+            avg_depth=float(batch_metrics["avg_depth"]),
+            max_depth=int(batch_metrics["max_depth"]),
+            is_promoted=verdict.promoted,
+            skills=verdict.winner_skills,
+        )
+        log_res = self.db_logger.save_batch(
+            batch_id=batch_id,
+            generation=generation,
+            mode="SWARM",
+            parent_policy_id=parent_id,
+            candidate_policy_id=policy_id,
+            target_functions=verdict.target_functions,
+            runs=runs,
+            episodes_discarded=int(batch_eval.get("episodes_discarded", 0)),
+            batch_metrics=batch_metrics,
+            verdict={
+                "passed": verdict.promoted,
+                "reason": verdict.reason,
+                "scoreboard": verdict.scoreboard,
+            },
+        )
+
+        # 5. Extract Frontier Checkpoints & Ingest into MAP-Elites Archive
+        new_cps = self._ingest_frontier_and_map_elites(
+            generation=generation,
+            runs=runs,
+            batch_eval=batch_eval,
+            policy_code=verdict.winner_policy_code,
+            batch_id=batch_id,
+            runner_ups=verdict.all_runner_up_batches,
+        )
+        self._sync_batch_cost(batch_id, generation)
+
+        if generation % 5 == 0:
+            try:
+                self.db_logger.prune_old_telemetry(
+                    current_generation=generation, keep_generations=20
+                )
+            except Exception:
+                pass
+
+        avg_depth = float(batch_eval.get("avg_depth", 1.0))
+        max_d = int(batch_eval.get("max_depth", 1))
+        avg_score = float(batch_eval.get("avg_score", 0.0))
+        elapsed = time.time() - t0
+        ui.info(
+            f"Gen {generation} Complete in {elapsed:.1f}s ({'PROMOTED' if verdict.promoted else 'KEPT INCUMBENT'}): "
+            f"Winner={verdict.winner_id} | Avg Depth={avg_depth:.2f} (Max={max_d}) | "
+            f"Avg Score={avg_score:.1f} | New Frontier CPs={new_cps} | FunctionStats={len(log_res)}"
+        )
+        return {
+            "generation": generation,
+            "promoted": verdict.promoted,
+            "winner_id": verdict.winner_id,
+            "avg_depth": avg_depth,
+            "max_depth": max_d,
+            "avg_score": avg_score,
+            "new_frontier_checkpoints": new_cps,
+            "elapsed_sec": elapsed,
+            "peers_run": len(peer_candidates),
+            "peers_incubated": sum(1 for c in peer_candidates if c.sandbox_passed),
+            "scoreboard": verdict.scoreboard,
+        }
+
+    def _ingest_frontier_and_map_elites(
+        self,
+        generation: int,
+        runs: list[Any],
+        batch_eval: BatchEvaluation,
+        policy_code: str,
+        batch_id: str,
+        runner_ups: list[dict[str, Any]] | None = None,
+    ) -> int:
+        new_cps = 0
+        for ep in runs:
+            ep_dict = dict(ep) if isinstance(ep, dict) else ep.__dict__
+            depth = max(int(ep_dict.get("depth", 1)), int(ep_dict.get("max_depth", 1)))
+            act_bytes = bytes(ep_dict.get("action_bytes") or b"")
+            if depth >= self.frontier_min_depth and len(act_bytes) > 0:
+                seed = int(ep_dict.get("seed", 0))
+                cp_id = f"fc_dlvl_{depth}_seed{seed}_g{generation}"
+                if cp_id not in self.frontier.checkpoints:
+                    prefix_bytes = (
+                        act_bytes[:-25]
+                        if len(act_bytes) > 35
+                        else (act_bytes[:-5] or act_bytes)
+                    )
+                    self.frontier.add_checkpoint(
+                        seed=seed,
+                        depth=depth,
+                        milestone=f"dlvl_{depth}",
+                        turns=int(ep_dict.get("turns", 0)),
+                        action_bytes=prefix_bytes,
+                        game_log=str(ep_dict.get("game_log", "")),
+                        checkpoint_id=cp_id,
+                    )
+                    new_cps += 1
+
+        metrics = {
+            "avg_depth": float(batch_eval.get("avg_depth", 1.0)),
+            "max_depth": int(batch_eval.get("max_depth", 1)),
+            "avg_score": float(batch_eval.get("avg_score", 0.0)),
+            "pct_wait": float(np.mean([r.get("pct_wait", 0.0) for r in runs]))
+            if runs
+            else 0.0,
+            "pct_search": float(np.mean([r.get("pct_search", 0.0) for r in runs]))
+            if runs
+            else 0.0,
+            "avg_turns": float(np.mean([r.get("turns", 0.0) for r in runs]))
+            if runs
+            else 100.0,
+        }
+        self.map_elites.add_candidate(
+            policy_code=policy_code,
+            metrics=metrics,
+            batch_id=batch_id,
+            generation=generation,
+        )
+        for ru in runner_ups or []:
+            ru_code = str(ru.get("policy_code", "") or "")
+            ru_metrics = ru.get("metrics") or {}
+            if ru_code.strip() and ru_metrics:
+                self.map_elites.add_candidate(
+                    policy_code=ru_code,
+                    metrics=ru_metrics,
+                    batch_id=str(ru.get("batch_id", batch_id)),
+                    generation=generation,
+                )
+        return new_cps
+
+    def _run_generation_legacy(self, generation: int) -> dict[str, Any]:
+        """
+        Executes a single generation of the Legacy Hierarchical Swarm loop
+        (`SwarmCriticAgent` + `SwarmMetaAgent` + thematic `SwarmWorker`s).
         """
         t0 = time.time()
         ui.header(f"LOX Swarm Campaign - Generation {generation}")
