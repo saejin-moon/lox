@@ -1946,3 +1946,164 @@ def test_gen41_prompt_grounding_and_xml_instructions():
     assert '<skill_code module="name">' in usr_prompt
     assert "<policy_code>" in usr_prompt
     assert "skills={{" not in usr_prompt
+
+
+def test_topological_skill_import_order_before_shared():
+    from lox.lang.compiler import compile_bt_subtree, compile_policy_package
+
+    skills = {
+        "aaa_guard": (
+            "from skills.equip import pick_action\n\n"
+            "def guard_fn(state, bb):\n"
+            "    return pick_action(state, bb)\n"
+        ),
+        "equip": (
+            "from lox.env.actions import Action\n"
+            "from skills.shared import _delta_of\n\n"
+            "def pick_action(state, bb):\n"
+            "    return Action.SEARCH if _delta_of(Action.N) == (0, -1) else Action.WAIT\n"
+        ),
+        "shared": (
+            "from lox.env.actions import DIR_DELTAS\n\n"
+            "def _delta_of(act):\n"
+            "    return DIR_DELTAS.get(act)\n"
+        ),
+    }
+    policy_src = (
+        "from lox.env.actions import Action\n"
+        "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n"
+        "from skills.aaa_guard import guard_fn\n\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.blackboard = Blackboard()\n"
+        "        self.tree = BehaviorTree(\n"
+        "            PrioritySelector([ActionLeaf(guard_fn, name='g')]),\n"
+        "            blackboard=self.blackboard,\n"
+        "        )\n"
+        "    def step(self, state):\n"
+        "        return self.tree.tick(state) or Action.WAIT\n"
+    )
+    compiled = compile_policy_package(policy_src, "", skills=skills)
+    assert compiled._skill_order == ["shared", "equip", "aaa_guard"]
+    runner = compiled.create_runner()
+    assert runner is not None
+
+    subtree = compile_bt_subtree(
+        "from lox.lang.bt import ActionLeaf\n"
+        "from skills.aaa_guard import guard_fn\n"
+        "subtree = ActionLeaf(guard_fn, name='g_sub')\n",
+        skills=skills,
+    )
+    assert subtree is not None
+
+
+def test_swarm_referee_blocks_hard_stall_regression_on_minor_depth_tick():
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.engine.swarm_referee import SwarmReferee
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n"
+    )
+
+    class _StubPool:
+        def __init__(self, responses):
+            self.responses = responses
+
+        def evaluate_batch(self, batch_id, policy_code, **kwargs):
+            for key, val in self.responses.items():
+                if key in batch_id:
+                    return val
+            return self.responses["inc"]
+
+    inc_runs = [
+        {
+            "run_id": f"inc_{i}",
+            "seed": 1000 + i,
+            "depth": 4 if i < 3 else 5,
+            "max_depth": 4 if i < 3 else 5,
+            "score": 600,
+            "turns": 1500,
+            "end_reason": "killed by grid bug",
+            "summary_digest": "Overview: Depth=4",
+        }
+        for i in range(4)
+    ]
+    stalled_minor_runs = [
+        {
+            "run_id": f"st_{i}",
+            "seed": 1000 + i,
+            "depth": 5 if i < 2 else (3 if i == 2 else 4),
+            "max_depth": 5 if i < 2 else (3 if i == 2 else 4),
+            "score": 560,
+            "turns": 400 if i == 0 else 1400,
+            "end_reason": "stalled_zero_turn" if i == 0 else "killed by gnome",
+            "summary_digest": "Overview: Stalled",
+        }
+        for i in range(4)
+    ]
+    clean_major_runs = [
+        {
+            "run_id": f"mj_{i}",
+            "seed": 1000 + i,
+            "depth": 5,
+            "max_depth": 5,
+            "score": 700,
+            "turns": 1600,
+            "end_reason": "killed by gnome",
+            "summary_digest": "Overview: Depth=5",
+        }
+        for i in range(4)
+    ]
+
+    cand_stalled = PeerCandidate(
+        peer_id="peer_stalled",
+        claimed_deficit_id="c1",
+        claimed_label="minor tick + stall",
+        policy_code=base_pol + "\n# peer_stalled\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    cand_clean = PeerCandidate(
+        peer_id="peer_clean",
+        claimed_deficit_id="c2",
+        claimed_label="clean breakthrough",
+        policy_code=base_pol + "\n# peer_clean\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+
+    referee = SwarmReferee()
+    v1 = referee.evaluate_tournament(
+        generation=52,
+        candidates=[cand_stalled],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_StubPool(
+            {"_inc_": {"runs": inc_runs}, "peer_stalled": {"runs": stalled_minor_runs}}
+        ),
+        seeds=[1000, 1001, 1002, 1003],
+    )
+    assert v1.promoted is False
+
+    v2 = SwarmReferee()
+    v2_res = v2.evaluate_tournament(
+        generation=52,
+        candidates=[cand_stalled, cand_clean],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_StubPool(
+            {
+                "_inc_": {"runs": inc_runs},
+                "peer_stalled": {"runs": stalled_minor_runs},
+                "peer_clean": {"runs": clean_major_runs},
+            }
+        ),
+        seeds=[1000, 1001, 1002, 1003],
+    )
+    assert v2_res.promoted is True
+    assert v2_res.winner_id == "peer_clean"

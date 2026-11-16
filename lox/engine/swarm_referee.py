@@ -62,6 +62,7 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
             "max_depth": int(batch_eval.get("max_depth", 1) or 1),
             "avg_score": float(batch_eval.get("avg_score", 0.0) or 0.0),
             "stall_count": 0,
+            "hard_stall_count": 0,
             "loc_total": loc_total,
         }
     depths = [
@@ -72,11 +73,15 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
     confinement_stalls = sum(
         1 for r in runs if "CONFINEMENT_STALL" in str(r.get("summary_digest", ""))
     )
+    hard_stalls = sum(
+        1 for r in runs if "stalled" in str(r.get("end_reason", "")).lower()
+    )
     return {
         "avg_depth": sum(depths) / len(depths),
         "max_depth": int(max(depths)),
         "avg_score": sum(scores) / len(scores),
         "stall_count": confinement_stalls,
+        "hard_stall_count": hard_stalls,
         "loc_total": loc_total,
     }
 
@@ -233,6 +238,7 @@ class SwarmReferee:
             "max_depth": 1,
             "avg_score": -1e9,
             "stall_count": 999,
+            "hard_stall_count": 999,
             "loc_total": base_loc,
         }
         seeds_key = tuple(int(s) for s in seeds)
@@ -322,7 +328,7 @@ class SwarmReferee:
             )
 
         def _passes_score_guard(cand_stats: dict[str, Any]) -> bool:
-            """Prevents marginal depth ticks (<=0.35) from overriding severe score collapses (>30%)."""
+            """Prevents marginal depth ticks from overriding score collapses or new hard stalls."""
             if not base_policy.strip():
                 return True
             inc_s = float(inc_stats["avg_score"])
@@ -330,15 +336,20 @@ class SwarmReferee:
             d_gain = float(cand_stats["avg_depth"]) - float(inc_stats["avg_depth"])
             if inc_s >= 50.0 and cand_s < inc_s * 0.70 and d_gain < 0.50:
                 return False
+            inc_hard = int(inc_stats.get("hard_stall_count", 0))
+            cand_hard = int(cand_stats.get("hard_stall_count", 0))
+            if cand_hard > inc_hard and d_gain < 0.25:
+                return False
             return True
 
         def _rank_key(
             item: tuple[PeerCandidate, BatchEvaluation, dict[str, Any]],
-        ) -> tuple[int, float, float, int, int]:
+        ) -> tuple[int, float, int, float, int, int]:
             _c, _be, st = item
             return (
                 1 if _passes_score_guard(st) else 0,
                 round(float(st["avg_depth"]), 4),
+                -int(st.get("hard_stall_count", 0)),
                 round(float(st["avg_score"]), 2),
                 -int(st["stall_count"]),
                 -int(st["loc_total"]),

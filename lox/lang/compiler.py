@@ -421,6 +421,78 @@ class PolicyRunner:
         return act, active_fn
 
 
+def _extract_skill_dependencies(tree: ast.AST, known_skills: set[str]) -> set[str]:
+    """Extracts intra-package `skills.<name>` module dependencies from an AST."""
+    deps: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = str(alias.name or "")
+                if name.startswith("skills."):
+                    dep = name.split(".", 1)[1].split(".", 1)[0]
+                    if dep in known_skills:
+                        deps.add(dep)
+        elif isinstance(node, ast.ImportFrom):
+            mod = str(node.module or "")
+            if mod == "skills":
+                for alias in node.names:
+                    dep = str(alias.name or "").split(".", 1)[0]
+                    if dep in known_skills:
+                        deps.add(dep)
+            elif mod.startswith("skills."):
+                dep = mod.split(".", 1)[1].split(".", 1)[0]
+                if dep in known_skills:
+                    deps.add(dep)
+    return deps
+
+
+def _topological_skill_order(skill_trees: dict[str, ast.AST]) -> list[str]:
+    """
+    Orders skill modules so dependencies (e.g. `skills.shared`) execute BEFORE
+    importers (e.g. `skills.equip`, `skills.combat`), regardless of alphabetical name.
+    """
+    if len(skill_trees) <= 1:
+        return list(skill_trees.keys())
+
+    known = set(skill_trees.keys())
+    deps_of: dict[str, set[str]] = {}
+    dependents: dict[str, list[str]] = {k: [] for k in known}
+    in_degree: dict[str, int] = {}
+
+    for name, tree in skill_trees.items():
+        deps = _extract_skill_dependencies(tree, known) - {name}
+        deps_of[name] = deps
+        in_degree[name] = len(deps)
+        for d in deps:
+            dependents[d].append(name)
+
+    def _sort_key(name: str) -> tuple[int, str]:
+        return (0 if name.startswith("shared") else 1, name)
+
+    ready: list[tuple[tuple[int, str], str]] = [
+        (_sort_key(k), k) for k, deg in in_degree.items() if deg == 0
+    ]
+    heapq.heapify(ready)
+
+    order: list[str] = []
+    seen: set[str] = set()
+    while ready:
+        _, cur = heapq.heappop(ready)
+        if cur in seen:
+            continue
+        seen.add(cur)
+        order.append(cur)
+        for child in dependents[cur]:
+            in_degree[child] -= 1
+            if in_degree[child] == 0 and child not in seen:
+                heapq.heappush(ready, (_sort_key(child), child))
+
+    if len(order) < len(skill_trees):
+        remaining = sorted((k for k in known if k not in seen), key=_sort_key)
+        order.extend(remaining)
+    return order
+
+
 class CompiledPolicy:
     """Compiled bytecode bundle for `macros.py` + `policy.py` + optional `skills/` package."""
 
@@ -439,7 +511,9 @@ class CompiledPolicy:
         self.skill_function_names: dict[str, list[str]] = {}
         self.macro_function_names: list[str] = []
 
-        # Parse, validate, and instrument skills package
+        # Parse, validate, and instrument skills package in dependency order
+        parsed_skill_trees: dict[str, ast.AST] = {}
+        raw_skill_code_objs: dict[str, Any] = {}
         for skill_name, skill_code in self.skills.items():
             if not skill_code or not skill_code.strip():
                 continue
@@ -450,7 +524,8 @@ class CompiledPolicy:
                 skill_tree
             )
             ast.fix_missing_locations(skill_tree)
-            self._skill_code_objs[skill_name] = compile(
+            parsed_skill_trees[skill_name] = skill_tree
+            raw_skill_code_objs[skill_name] = compile(
                 skill_tree, filename=f"skills/{skill_name}.py", mode="exec"
             )
             self.skill_function_names[skill_name] = [
@@ -458,6 +533,9 @@ class CompiledPolicy:
                 for n in ast.walk(skill_tree)
                 if isinstance(n, ast.FunctionDef) and n.name != "__init__"
             ]
+        self._skill_order: list[str] = _topological_skill_order(parsed_skill_trees)
+        for skill_name in self._skill_order:
+            self._skill_code_objs[skill_name] = raw_skill_code_objs[skill_name]
 
         # Legacy macros support (compiled if provided for backwards compatibility)
         if macros_code and macros_code.strip():
@@ -635,12 +713,16 @@ def compile_bt_subtree(
                 skills_pkg = types.ModuleType("skills")
                 sys.modules["skills"] = skills_pkg
             ns["skills"] = skills_pkg
+            bt_skill_trees: dict[str, ast.AST] = {}
             for s_name, s_code in skills.items():
                 if not s_code or not s_code.strip():
                     continue
                 s_tree = validate_python_code(s_code, filename=f"skills/{s_name}.py")
                 s_tree = PolicyInstrumentTransformer().visit(s_tree)
                 ast.fix_missing_locations(s_tree)
+                bt_skill_trees[s_name] = s_tree
+            for s_name in _topological_skill_order(bt_skill_trees):
+                s_tree = bt_skill_trees[s_name]
                 s_mod = types.ModuleType(f"skills.{s_name}")
                 s_mod.__dict__.update(ns)
                 s_mod.__name__ = f"skills.{s_name}"
