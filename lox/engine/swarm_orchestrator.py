@@ -19,8 +19,10 @@ and ZERO hardcoded rollbacks:
 from __future__ import annotations
 
 import concurrent.futures
+import datetime
 import os
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +135,40 @@ class SwarmCampaignOrchestrator:
                 con.close()
         except Exception:
             pass
+
+    def _sync_batch_cost(self, batch_id: str, generation: int) -> None:
+        """Updates `batches.total_cost_usd` and `total_llm_tokens` after Pass 2 and Meta-Agent revision."""
+        try:
+            con = connect_db(self.db_path, read_only=False)
+            try:
+                row_c = con.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0), COALESCE(SUM(prompt_tokens + completion_tokens), 0) "
+                    "FROM synthesis_logs WHERE generation = ? OR batch_id = ?",
+                    [generation, batch_id],
+                ).fetchone()
+                if row_c:
+                    con.execute(
+                        "UPDATE batches SET total_cost_usd = ?, total_llm_tokens = ? WHERE batch_id = ?",
+                        [float(row_c[0] or 0.0), int(row_c[1] or 0), batch_id],
+                    )
+            finally:
+                con.close()
+        except Exception:
+            pass
+
+    def _get_start_generation(self) -> int:
+        """Returns `MAX(generation) + 1` from DuckDB `batches` so restarted overnight runs resume cleanly."""
+        try:
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                row = con.execute(
+                    "SELECT COALESCE(MAX(generation), 0) FROM batches"
+                ).fetchone()
+                return int(row[0] or 0) + 1
+            finally:
+                con.close()
+        except Exception:
+            return 1
 
     @staticmethod
     def _extract_batch_metrics(
@@ -426,6 +462,15 @@ class SwarmCampaignOrchestrator:
             batch_id=batch_id,
             generation=generation,
         )
+        self._sync_batch_cost(batch_id, generation)
+
+        if generation % 5 == 0:
+            try:
+                self.db_logger.prune_old_telemetry(
+                    current_generation=generation, keep_generations=20
+                )
+            except Exception:
+                pass
 
         elapsed = time.time() - t0
         ui.info(
@@ -446,16 +491,33 @@ class SwarmCampaignOrchestrator:
         }
 
     def run(self, generations: int = 5) -> list[dict[str, Any]]:
-        """Runs the full multi-generation swarm campaign."""
+        """Runs the multi-generation swarm campaign, resuming from the latest DB generation if present."""
+        start_gen = self._get_start_generation()
+        end_gen = start_gen + max(1, int(generations)) - 1
         ui.info(
-            f"Starting LOX Swarm Campaign: {generations} generations, {self.num_workers} workers, "
-            f"provider={self.provider}, model={self.model}"
+            f"Starting LOX Swarm Campaign: generations {start_gen}..{end_gen} ({generations} total), "
+            f"{self.num_workers} workers, provider={self.provider}, model={self.model}"
         )
         history: list[dict[str, Any]] = []
+        err_log_path = self.workspace_dir / "campaign_errors.log"
         try:
-            for g in range(1, generations + 1):
-                res = self.run_generation(generation=g)
-                history.append(res)
+            for g in range(start_gen, end_gen + 1):
+                try:
+                    res = self.run_generation(generation=g)
+                    history.append(res)
+                except (KeyboardInterrupt, PermissionError):
+                    raise
+                except Exception as exc:
+                    tb = traceback.format_exc()
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    ui.warn(
+                        f"Generation {g} encountered an error ({type(exc).__name__}: {exc}); logged to `{err_log_path}` and continuing..."
+                    )
+                    try:
+                        with err_log_path.open("a", encoding="utf-8") as ef:
+                            ef.write(f"\n[{ts}] Generation {g} Error:\n{tb}\n")
+                    except Exception:
+                        pass
         finally:
             self.close()
 

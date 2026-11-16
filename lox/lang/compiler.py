@@ -21,6 +21,7 @@ import operator
 import random
 import re
 import sys
+import threading
 import types
 import typing
 from typing import Any
@@ -71,6 +72,8 @@ from lox.lang.validator import (
     PolicyValidationError,
     validate_python_code,
 )
+
+_COMPILE_EXEC_LOCK = threading.RLock()
 
 SAFE_BUILTINS: dict[str, Any] = {
     "abs": abs,
@@ -468,83 +471,84 @@ class CompiledPolicy:
         self,
         param_overrides: dict[str, float] | None = None,
     ) -> PolicyRunner:
-        tracer = ExecutionTracer(
-            max_loop_ticks=self.max_loop_ticks,
-            param_overrides=param_overrides,
-        )
-        ns = _build_base_namespace(tracer)
-        # Register `lox_policy` in sys.modules so `@dataclass` with type annotations works inside policy code
-        mod_obj = sys.modules.get("lox_policy")
-        if mod_obj is None:
-            mod_obj = types.ModuleType("lox_policy")
-            sys.modules["lox_policy"] = mod_obj
-        mod_obj.__dict__.update(ns)
-
-        if self._macro_code_obj is not None:
-            exec(self._macro_code_obj, ns)
+        with _COMPILE_EXEC_LOCK:
+            tracer = ExecutionTracer(
+                max_loop_ticks=self.max_loop_ticks,
+                param_overrides=param_overrides,
+            )
+            ns = _build_base_namespace(tracer)
+            # Register `lox_policy` in sys.modules so `@dataclass` with type annotations works inside policy code
+            mod_obj = sys.modules.get("lox_policy")
+            if mod_obj is None:
+                mod_obj = types.ModuleType("lox_policy")
+                sys.modules["lox_policy"] = mod_obj
             mod_obj.__dict__.update(ns)
 
-        # Purge any stale `skills.*` entries from sys.modules so worker processes
-        # never retain an old skill module bound to a previous episode's ExecutionTracer.
-        for mod_key in list(sys.modules.keys()):
-            if mod_key == "skills" or mod_key.startswith("skills."):
-                sys.modules.pop(mod_key, None)
+            if self._macro_code_obj is not None:
+                exec(self._macro_code_obj, ns)
+                mod_obj.__dict__.update(ns)
 
-        # Register and execute skills modules
-        skills_pkg = types.ModuleType("skills")
-        sys.modules["skills"] = skills_pkg
-        ns["skills"] = skills_pkg
+            # Purge any stale `skills.*` entries from sys.modules so worker processes
+            # never retain an old skill module bound to a previous episode's ExecutionTracer.
+            for mod_key in list(sys.modules.keys()):
+                if mod_key == "skills" or mod_key.startswith("skills."):
+                    sys.modules.pop(mod_key, None)
 
-        for s_name, s_code_obj in self._skill_code_objs.items():
-            s_mod = types.ModuleType(f"skills.{s_name}")
-            s_mod.__dict__.update(ns)
-            s_mod.__name__ = f"skills.{s_name}"
-            exec(s_code_obj, s_mod.__dict__)
-            sys.modules[f"skills.{s_name}"] = s_mod
-            setattr(skills_pkg, s_name, s_mod)
-            ns[s_name] = s_mod
+            # Register and execute skills modules
+            skills_pkg = types.ModuleType("skills")
+            sys.modules["skills"] = skills_pkg
+            ns["skills"] = skills_pkg
 
-        exec(self._policy_code_obj, ns)
-        mod_obj.__dict__.update(ns)
+            for s_name, s_code_obj in self._skill_code_objs.items():
+                s_mod = types.ModuleType(f"skills.{s_name}")
+                s_mod.__dict__.update(ns)
+                s_mod.__name__ = f"skills.{s_name}"
+                exec(s_code_obj, s_mod.__dict__)
+                sys.modules[f"skills.{s_name}"] = s_mod
+                setattr(skills_pkg, s_name, s_mod)
+                ns[s_name] = s_mod
 
-        # Find policy class (`Policy` or `Agent` or any user class defining `run`/`step`)
-        policy_cls = ns.get("Policy") or ns.get("Agent")
-        if policy_cls is None:
-            for val in ns.values():
-                if (
-                    isinstance(val, type)
-                    and val.__module__ == "lox_policy"
-                    and (
-                        hasattr(val, "run")
-                        or hasattr(val, "step")
-                        or hasattr(val, "act")
-                    )
-                ):
-                    policy_cls = val
-                    break
+            exec(self._policy_code_obj, ns)
+            mod_obj.__dict__.update(ns)
 
-        if policy_cls is not None:
-            # Attach `self.param(...)` onto `policy_cls` BEFORE calling `__init__()`
-            if not hasattr(policy_cls, "param"):
-                try:
-                    setattr(
-                        policy_cls,
-                        "param",
-                        lambda self, *a, **kw: tracer.get_param(*a, **kw),
-                    )
-                except Exception:
-                    pass
-            instance = policy_cls()
-        elif "policy" in ns and callable(ns["policy"]):
-            instance = ns["policy"]
-        elif "run" in ns and callable(ns["run"]):
-            instance = ns["run"]
-        else:
-            raise PolicyValidationError(
-                "Policy code must define `class Policy:` (or `class Agent:`) with `run(self, state)` or `step(self, state)`."
-            )
+            # Find policy class (`Policy` or `Agent` or any user class defining `run`/`step`)
+            policy_cls = ns.get("Policy") or ns.get("Agent")
+            if policy_cls is None:
+                for val in ns.values():
+                    if (
+                        isinstance(val, type)
+                        and val.__module__ == "lox_policy"
+                        and (
+                            hasattr(val, "run")
+                            or hasattr(val, "step")
+                            or hasattr(val, "act")
+                        )
+                    ):
+                        policy_cls = val
+                        break
 
-        return PolicyRunner(instance, tracer)
+            if policy_cls is not None:
+                # Attach `self.param(...)` onto `policy_cls` BEFORE calling `__init__()`
+                if not hasattr(policy_cls, "param"):
+                    try:
+                        setattr(
+                            policy_cls,
+                            "param",
+                            lambda self, *a, **kw: tracer.get_param(*a, **kw),
+                        )
+                    except Exception:
+                        pass
+                instance = policy_cls()
+            elif "policy" in ns and callable(ns["policy"]):
+                instance = ns["policy"]
+            elif "run" in ns and callable(ns["run"]):
+                instance = ns["run"]
+            else:
+                raise PolicyValidationError(
+                    "Policy code must define `class Policy:` (or `class Agent:`) with `run(self, state)` or `step(self, state)`."
+                )
+
+            return PolicyRunner(instance, tracer)
 
 
 @functools.lru_cache(maxsize=64)
@@ -586,98 +590,101 @@ def compile_bt_subtree(
     skills: dict[str, str] | None = None,
 ) -> Any:
     """Validates and executes a standalone Behavior Tree subtree, returning the root node or instance."""
-    tree = validate_python_code(code, filename=filename)
-    tree = PolicyInstrumentTransformer().visit(tree)
-    ast.fix_missing_locations(tree)
-    tracer = ExecutionTracer()
-    ns = _build_base_namespace(tracer)
-    mod_obj = sys.modules.get("lox_policy")
-    if mod_obj is None:
-        mod_obj = types.ModuleType("lox_policy")
-        sys.modules["lox_policy"] = mod_obj
-    mod_obj.__dict__.update(ns)
+    with _COMPILE_EXEC_LOCK:
+        tree = validate_python_code(code, filename=filename)
+        tree = PolicyInstrumentTransformer().visit(tree)
+        ast.fix_missing_locations(tree)
+        tracer = ExecutionTracer()
+        ns = _build_base_namespace(tracer)
+        mod_obj = sys.modules.get("lox_policy")
+        if mod_obj is None:
+            mod_obj = types.ModuleType("lox_policy")
+            sys.modules["lox_policy"] = mod_obj
+        mod_obj.__dict__.update(ns)
 
-    if skills:
-        skills_pkg = sys.modules.get("skills")
-        if skills_pkg is None:
-            skills_pkg = types.ModuleType("skills")
-            sys.modules["skills"] = skills_pkg
-        ns["skills"] = skills_pkg
-        for s_name, s_code in skills.items():
-            if not s_code or not s_code.strip():
-                continue
-            s_tree = validate_python_code(s_code, filename=f"skills/{s_name}.py")
-            s_tree = PolicyInstrumentTransformer().visit(s_tree)
-            ast.fix_missing_locations(s_tree)
-            s_mod = types.ModuleType(f"skills.{s_name}")
-            s_mod.__dict__.update(ns)
-            s_mod.__name__ = f"skills.{s_name}"
-            exec(
-                compile(s_tree, filename=f"skills/{s_name}.py", mode="exec"),
-                s_mod.__dict__,
-            )
-            sys.modules[f"skills.{s_name}"] = s_mod
-            setattr(skills_pkg, s_name, s_mod)
-            ns[s_name] = s_mod
+        if skills:
+            skills_pkg = sys.modules.get("skills")
+            if skills_pkg is None:
+                skills_pkg = types.ModuleType("skills")
+                sys.modules["skills"] = skills_pkg
+            ns["skills"] = skills_pkg
+            for s_name, s_code in skills.items():
+                if not s_code or not s_code.strip():
+                    continue
+                s_tree = validate_python_code(s_code, filename=f"skills/{s_name}.py")
+                s_tree = PolicyInstrumentTransformer().visit(s_tree)
+                ast.fix_missing_locations(s_tree)
+                s_mod = types.ModuleType(f"skills.{s_name}")
+                s_mod.__dict__.update(ns)
+                s_mod.__name__ = f"skills.{s_name}"
+                exec(
+                    compile(s_tree, filename=f"skills/{s_name}.py", mode="exec"),
+                    s_mod.__dict__,
+                )
+                sys.modules[f"skills.{s_name}"] = s_mod
+                setattr(skills_pkg, s_name, s_mod)
+                ns[s_name] = s_mod
 
-    exec(compile(tree, filename=filename, mode="exec"), ns)
-    mod_obj.__dict__.update(ns)
+        exec(compile(tree, filename=filename, mode="exec"), ns)
+        mod_obj.__dict__.update(ns)
 
-    def _attach_tracer(obj: Any) -> Any:
-        try:
-            setattr(obj, "_lox_tracer", tracer)
-        except Exception:
-            pass
-        return obj
+        def _attach_tracer(obj: Any) -> Any:
+            try:
+                setattr(obj, "_lox_tracer", tracer)
+            except Exception:
+                pass
+            return obj
 
-    for preferred in ("subtree", "root", "tree", "node", "policy"):
-        if preferred in ns:
-            cand = ns[preferred]
-            if isinstance(cand, (BehaviorTree, BehaviorNode)):
-                return _attach_tracer(cand)
-            if not inspect.isclass(cand) and (
-                hasattr(cand, "tick") or hasattr(cand, "step")
-            ):
-                return _attach_tracer(cand)
+        for preferred in ("subtree", "root", "tree", "node", "policy"):
+            if preferred in ns:
+                cand = ns[preferred]
+                if isinstance(cand, (BehaviorTree, BehaviorNode)):
+                    return _attach_tracer(cand)
+                if not inspect.isclass(cand) and (
+                    hasattr(cand, "tick") or hasattr(cand, "step")
+                ):
+                    return _attach_tracer(cand)
 
-    bt_trees = [v for v in ns.values() if isinstance(v, BehaviorTree)]
-    if bt_trees:
-        return _attach_tracer(bt_trees[-1])
+        bt_trees = [v for v in ns.values() if isinstance(v, BehaviorTree)]
+        if bt_trees:
+            return _attach_tracer(bt_trees[-1])
 
-    composites = [
-        v for v in ns.values() if isinstance(v, (PrioritySelector, Sequence, Inverter))
-    ]
-    if composites:
-        return _attach_tracer(composites[-1])
+        composites = [
+            v
+            for v in ns.values()
+            if isinstance(v, (PrioritySelector, Sequence, Inverter))
+        ]
+        if composites:
+            return _attach_tracer(composites[-1])
 
-    leaves = [v for v in ns.values() if isinstance(v, BehaviorNode)]
-    if leaves:
-        return _attach_tracer(leaves[-1])
+        leaves = [v for v in ns.values() if isinstance(v, BehaviorNode)]
+        if leaves:
+            return _attach_tracer(leaves[-1])
 
-    user_classes = [
-        v
-        for v in ns.values()
-        if inspect.isclass(v)
-        and getattr(v, "__module__", None) == "lox_policy"
-        and (hasattr(v, "tick") or hasattr(v, "step") or hasattr(v, "run"))
-    ]
-    for cls in reversed(user_classes):
-        try:
-            return _attach_tracer(cls())
-        except Exception:
-            pass
+        user_classes = [
+            v
+            for v in ns.values()
+            if inspect.isclass(v)
+            and getattr(v, "__module__", None) == "lox_policy"
+            and (hasattr(v, "tick") or hasattr(v, "step") or hasattr(v, "run"))
+        ]
+        for cls in reversed(user_classes):
+            try:
+                return _attach_tracer(cls())
+            except Exception:
+                pass
 
-    user_fns = [
-        v
-        for k, v in ns.items()
-        if not k.startswith("_")
-        and callable(v)
-        and not inspect.isclass(v)
-        and getattr(v, "__module__", None) == "lox_policy"
-    ]
-    if user_fns:
-        return _attach_tracer(user_fns[-1])
+        user_fns = [
+            v
+            for k, v in ns.items()
+            if not k.startswith("_")
+            and callable(v)
+            and not inspect.isclass(v)
+            and getattr(v, "__module__", None) == "lox_policy"
+        ]
+        if user_fns:
+            return _attach_tracer(user_fns[-1])
 
-    raise PolicyValidationError(
-        "No BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, or Policy class found in subtree code."
-    )
+        raise PolicyValidationError(
+            "No BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, or Policy class found in subtree code."
+        )

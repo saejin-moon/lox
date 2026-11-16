@@ -19,26 +19,38 @@ import time
 import duckdb
 
 DEFAULT_DB_PATH = "data/lox.duckdb"
+_DB_CONN_LOCK = threading.RLock()
 
 
 def connect_db(
     db_path: str = DEFAULT_DB_PATH,
     read_only: bool = False,
-    retries: int = 5,
+    retries: int = 8,
 ) -> duckdb.DuckDBPyConnection:
-    """Connects to DuckDB with exponential backoff for transient lock contention."""
+    """
+    Connects to DuckDB with exponential backoff and in-process configuration alignment.
+    In DuckDB, opening `read_only=True` and `read_only=False` handles to the same file
+    concurrently within the same OS process raises a configuration conflict error;
+    attempting `read_only=False` first when the file exists keeps in-process connections uniform.
+    """
     if not read_only:
         os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
-    delay = 0.1
+    delay = 0.05
     last_err: Exception | None = None
     for attempt in range(retries):
-        try:
-            return duckdb.connect(db_path, read_only=read_only)
-        except Exception as exc:
-            last_err = exc
-            if attempt < retries - 1:
-                time.sleep(delay)
-                delay *= 2.0
+        with _DB_CONN_LOCK:
+            try:
+                if read_only and os.path.exists(db_path):
+                    try:
+                        return duckdb.connect(db_path, read_only=False)
+                    except Exception:
+                        return duckdb.connect(db_path, read_only=True)
+                return duckdb.connect(db_path, read_only=read_only)
+            except Exception as exc:
+                last_err = exc
+        if attempt < retries - 1:
+            time.sleep(delay)
+            delay = min(1.0, delay * 2.0)
     raise RuntimeError(f"Failed to connect to DuckDB at {db_path}: {last_err}")
 
 

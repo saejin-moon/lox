@@ -74,10 +74,16 @@ class BatchDatabaseLogger:
         total_cost_usd = 0.0
         total_tokens = 0
         try:
-            row_c = con.execute(
-                "SELECT SUM(cost_usd), SUM(prompt_tokens + completion_tokens) FROM synthesis_logs WHERE batch_id = ?",
-                [batch_id],
-            ).fetchone()
+            if str(mode).upper() == "SWARM":
+                row_c = con.execute(
+                    "SELECT SUM(cost_usd), SUM(prompt_tokens + completion_tokens) FROM synthesis_logs WHERE generation = ? OR batch_id = ?",
+                    [generation, batch_id],
+                ).fetchone()
+            else:
+                row_c = con.execute(
+                    "SELECT SUM(cost_usd), SUM(prompt_tokens + completion_tokens) FROM synthesis_logs WHERE batch_id = ?",
+                    [batch_id],
+                ).fetchone()
             if row_c:
                 total_cost_usd = float(row_c[0] or 0.0)
                 total_tokens = int(row_c[1] or 0)
