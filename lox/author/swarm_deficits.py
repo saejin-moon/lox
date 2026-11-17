@@ -152,13 +152,20 @@ class DeficitAnalyzer:
     ) -> DeficitReport:
         skills_map = dict(skills or {})
         policy_loc = len(current_policy.splitlines()) if current_policy.strip() else 0
-        skill_loc = sum(len(v.splitlines()) for v in skills_map.values() if v)
+        skill_lens = [len(v.splitlines()) for v in skills_map.values() if v]
+        skill_loc = sum(skill_lens)
+        max_skill_loc = max(skill_lens) if skill_lens else 0
         skill_count = len(skills_map)
-        bloat_warning = (policy_loc >= 300 and skill_count == 0) or (policy_loc >= 350)
+        bloat_warning = (
+            (policy_loc >= 220 and skill_count == 0)
+            or (policy_loc >= 250)
+            or (max_skill_loc >= 300)
+            or (policy_loc + skill_loc >= 800)
+        )
         skill_bloat_notes = [
             f"{k} ({len(v.splitlines())} LOC)"
             for k, v in sorted(skills_map.items())
-            if v and len(v.splitlines()) >= 320
+            if v and len(v.splitlines()) >= 250
         ]
 
         report = DeficitReport(

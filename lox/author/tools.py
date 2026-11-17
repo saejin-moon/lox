@@ -113,6 +113,25 @@ def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
         len(ex_assigns) > 0 and len(ca_assigns) == 0 and len(ca_defs) <= len(ex_defs)
     )
 
+    def _imported_skill_modules(tr: ast.AST) -> set[str]:
+        mods: set[str] = set()
+        for nd in getattr(tr, "body", []):
+            if isinstance(nd, ast.ImportFrom) and str(nd.module or "").startswith(
+                "skills."
+            ):
+                mods.add(str(nd.module))
+            elif isinstance(nd, ast.Import):
+                for alias in nd.names:
+                    if str(alias.name).startswith("skills."):
+                        mods.add(str(alias.name))
+        return mods
+
+    new_skill_imports = _imported_skill_modules(ca_tree) - _imported_skill_modules(
+        ex_tree
+    )
+    if new_skill_imports:
+        return cand
+
     if (
         looks_patch_comment
         or dropped_most_defs

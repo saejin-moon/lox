@@ -767,12 +767,16 @@ class CampaignOrchestrator:
                     pol_lines = (
                         len(current_policy.splitlines()) if current_policy else 0
                     )
+                    skill_map = self.load_workspace_skills()
+                    skill_lens = [len(v.splitlines()) for v in skill_map.values() if v]
                     mode = self.scheduler.select_mode(
                         generation=gen,
                         has_policy=bool(current_policy),
                         forced_mode=forced_mode,
                         consecutive_failures=consecutive_failures,
                         policy_line_count=pol_lines,
+                        max_skill_lines=max(skill_lens) if skill_lens else 0,
+                        total_lines=pol_lines + sum(skill_lens),
                     )
 
                     # --- STATELESS AUTHOR AGENT SYNTHESIS ---

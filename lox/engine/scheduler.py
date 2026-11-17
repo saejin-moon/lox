@@ -36,8 +36,8 @@ class ModeScheduler:
     def __init__(
         self,
         use_bandit_after_gen: int = 50,
-        refactor_line_threshold: int = 450,
-        refactor_min_interval: int = 4,
+        refactor_line_threshold: int = 320,
+        refactor_min_interval: int = 3,
         **kwargs: Any,
     ):
         self.use_bandit_after_gen = int(use_bandit_after_gen)
@@ -61,6 +61,8 @@ class ModeScheduler:
         forced_mode: str | None = None,
         consecutive_failures: int = 0,
         policy_line_count: int = 0,
+        max_skill_lines: int = 0,
+        total_lines: int = 0,
     ) -> str:
         if forced_mode:
             return normalize_mode(forced_mode)
@@ -71,10 +73,12 @@ class ModeScheduler:
 
         self.gens_since_refactor += 1
 
-        if (
+        needs_refactor = (
             policy_line_count >= self.refactor_line_threshold
-            and self.gens_since_refactor >= self.refactor_min_interval
-        ):
+            or max_skill_lines >= self.refactor_line_threshold
+            or total_lines >= self.refactor_line_threshold * 3
+        )
+        if needs_refactor and self.gens_since_refactor >= self.refactor_min_interval:
             self.gens_since_refactor = 0
             self.counts["REFACTOR"] += 1
             return "REFACTOR"

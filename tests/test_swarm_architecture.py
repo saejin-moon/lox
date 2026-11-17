@@ -3547,3 +3547,110 @@ def test_g9_eligible_winner_outranks_tie_noise_stage1_attempts_and_monster_resea
     reg.query_monster("floating eye")
     _msg, st = reg.dry_run_policy(base_pol, seed=42, max_turns=15)
     assert st != "RESEARCH_REQUIRED"
+
+
+def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp_path):
+    from unittest.mock import patch
+
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.author.tools import merge_skill_module_update
+    from lox.db.schema import init_db
+    from lox.engine.scheduler import ModeScheduler
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+
+    # 1. ModeScheduler enters REFACTOR on bloated skills even when policy.py is small
+    sched = ModeScheduler()
+    sched.gens_since_refactor = 3
+    assert (
+        sched.select_mode(
+            generation=4,
+            has_policy=True,
+            policy_line_count=34,
+            max_skill_lines=320,
+            total_lines=354,
+        )
+        == "REFACTOR"
+    )
+    assert (
+        sched.select_mode(
+            generation=5,
+            has_policy=True,
+            policy_line_count=34,
+            max_skill_lines=320,
+            total_lines=354,
+        )
+        == "WRITE"
+    )
+
+    # 2. DeficitAnalyzer flags skill bloat at >=250 / >=300 LOC
+    dbp = str(tmp_path / "refactor_thresh.duckdb")
+    init_db(dbp)
+    thin_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.E\n"
+    )
+    bloated_skill = "\n".join([f"def h_{i}():\n    return {i}" for i in range(160)])
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=16, current_policy=thin_pol, skills={"exploration": bloated_skill}
+    )
+    assert rep.bloat_warning is True
+    assert any("exploration" in note for note in rep.skill_bloat_notes)
+
+    # 3. merge_skill_module_update preserves intentional split introducing a new skills.* import
+    split_parent = "from skills.exploration_nav import h_0\ndef h_1():\n    return 1\n"
+    merged = merge_skill_module_update(bloated_skill, split_parent)
+    assert "from skills.exploration_nav import h_0" in merged
+    assert "def h_150" not in merged
+
+    # 4. SwarmCampaignOrchestrator assigns peer_1 to `structural_refactor` when bloated
+    ws = tmp_path / "ws_ref"
+    (ws / "skills").mkdir(parents=True, exist_ok=True)
+    (ws / "policy.py").write_text(
+        "import skills.exploration as exploration\n"
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return exploration.h_1() or Action.E\n",
+        encoding="utf-8",
+    )
+    (ws / "skills" / "exploration.py").write_text(bloated_skill, encoding="utf-8")
+
+    claimed_ids: list[tuple[str, str]] = []
+
+    def _fake_run_cycle(self, *, claimed_deficit, current_policy, current_skills, **kw):
+        claimed_ids.append((self.peer_id, claimed_deficit.cluster_id))
+        return PeerCandidate(
+            peer_id=self.peer_id,
+            claimed_deficit_id=claimed_deficit.cluster_id,
+            claimed_label=claimed_deficit.label,
+            policy_code=current_policy,
+            skills=dict(current_skills),
+            sandbox_passed=False,
+            error="mock stop",
+        )
+
+    orch = SwarmCampaignOrchestrator(
+        db_path=dbp,
+        workspace_dir=str(ws),
+        frontier_dir=str(tmp_path / "fr_ref"),
+        provider="mock",
+        num_workers=2,
+        eval_workers=2,
+        seeds_per_batch=2,
+        swarm_architecture="peer",
+    )
+    try:
+        with patch("lox.author.swarm_peer.SwarmPeerAgent.run_cycle", _fake_run_cycle):
+            try:
+                orch.run_generation(16)
+            except Exception:
+                pass
+    finally:
+        orch.close()
+    assert ("peer_1", "structural_refactor") in claimed_ids
+    assert any(
+        pid == "peer_2" and cid != "structural_refactor" for pid, cid in claimed_ids
+    )
