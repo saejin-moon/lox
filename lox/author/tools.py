@@ -567,6 +567,7 @@ class AuthorToolRegistry:
         """Queries C-level permonst ground truth struct for a monster."""
         import yaml
 
+        self.wiki_queries_run += 1
         data = SYMBOL_REGISTRY.query_monster(name)
         if data:
             return "```yaml\n" + yaml.dump(
@@ -589,6 +590,7 @@ class AuthorToolRegistry:
         """Queries C-level objclass ground truth struct for an item."""
         import yaml
 
+        self.wiki_queries_run += 1
         data = SYMBOL_REGISTRY.query_item(name)
         if data:
             return "```yaml\n" + yaml.dump(
@@ -1625,8 +1627,8 @@ class AuthorToolRegistry:
             if missing_tools:
                 return (
                     "RESEARCH_REQUIRED: Before calling `dry_run_policy`, call BOTH `query_theories(...)` "
-                    "and at least 1 targeted `query_wiki(query=...)` search to verify prior outcomes and "
-                    f"exact NetHack rules (missing: {', '.join(missing_tools)}).",
+                    "and at least 1 NetHack rule lookup (`query_wiki(...)`, `query_monster(...)`, or `query_item(...)`) "
+                    f"to verify prior outcomes and exact rules (missing: {', '.join(missing_tools)}).",
                     "RESEARCH_REQUIRED",
                 )
 

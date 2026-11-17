@@ -659,6 +659,7 @@ class SwarmReferee:
         evaluated_entries: list[
             tuple[PeerCandidate, BatchEvaluation, dict[str, Any]]
         ] = []
+        stage1_stats_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
 
         use_two_stage = (
             race_seeds is not None
@@ -692,15 +693,23 @@ class SwarmReferee:
                     list(s1_inc_batch.get("runs", []) or []) if s1_inc_batch else []
                 )
 
-            def _s1_score(cand: PeerCandidate) -> tuple[int, float, float]:
+            for cand in finalists:
                 cb = s1_batches.get(cand.peer_id)
                 st = _extract_eval_stats(cb, loc_total=cand.loc_total) if cb else {}
-                exc = 1 if int(st.get("policy_exceptions", 0) or 0) == 0 else 0
                 pr = (
                     evaluate_tournament_pair(cb.get("runs", []) or [], s1_inc_runs)
                     if (cb and s1_inc_runs)
                     else {"iqm_delta": float(st.get("iqm_prog", 1.0))}
                 )
+                if cb is not None:
+                    stage1_stats_by_id[cand.peer_id] = (st, pr)
+
+            def _s1_score(cand: PeerCandidate) -> tuple[int, float, float]:
+                if cand.peer_id in stage1_stats_by_id:
+                    st, pr = stage1_stats_by_id[cand.peer_id]
+                else:
+                    st, pr = {}, {"iqm_delta": 0.0}
+                exc = 1 if int(st.get("policy_exceptions", 0) or 0) == 0 else 0
                 return (
                     exc,
                     float(pr.get("iqm_delta", 0.0)),
@@ -856,78 +865,65 @@ class SwarmReferee:
             )
             paired_by_idx.append(p_res)
 
-        def _rank_key(
-            idx_item: tuple[int, tuple[PeerCandidate, BatchEvaluation, dict[str, Any]]],
-        ) -> tuple[int, int, float, float, float, int, float, int]:
-            idx_e, (_c, _be, st) = idx_item
-            pr = paired_by_idx[idx_e]
-            return (
-                1 if int(st.get("policy_exceptions", 0) or 0) == 0 else 0,
-                1 if _passes_score_guard(st) else 0,
-                round(float(pr.get("iqm_delta", 0.0)), 4),
-                round(float(st["avg_depth"]), 4),
-                round(-float(st.get("avg_ac", 10.0)), 2),
-                -int(st.get("hard_stall_count", 0)),
-                round(float(st["avg_score"]), 2),
-                -int(st["loc_total"]),
-            )
-
-        best_idx, (best_cand, best_eval, best_stats) = max(
-            enumerate(evaluated_entries), key=_rank_key
-        )
-        best_pair = paired_by_idx[best_idx]
-
-        # Strict Pareto/IQM + exception + non-regression promotion gate vs Incumbent
-        if base_policy.strip():
-            d_delta = float(best_stats["avg_depth"]) - float(inc_stats["avg_depth"])
-            s_delta = float(best_stats["avg_score"]) - float(inc_stats["avg_score"])
-            iqm_delta = float(best_pair.get("iqm_delta", 0.0))
-            mean_p_delta = float(best_pair.get("mean_delta", 0.0))
-            wins = int(best_pair.get("wins", 0))
-            losses = int(best_pair.get("losses", 0))
-            n_pairs = int(best_pair.get("paired_count", 0))
-            p_val = float(best_pair.get("wilcoxon_p", 1.0))
-            ci_low = float(best_pair.get("ci_lower", 0.0))
+        def _evaluate_promotion_eligibility(
+            cand_stats: dict[str, Any],
+            pair_stats: dict[str, Any],
+        ) -> tuple[bool, float, float, bool]:
+            """Returns `(beats_incumbent, d_delta, s_delta, guard_ok)` against incumbent."""
+            guard_ok = _passes_score_guard(cand_stats)
+            if not base_policy.strip():
+                return (
+                    guard_ok,
+                    float(cand_stats["avg_depth"]) - 1.0,
+                    float(cand_stats["avg_score"]),
+                    guard_ok,
+                )
+            d_delta = float(cand_stats["avg_depth"]) - float(inc_stats["avg_depth"])
+            s_delta = float(cand_stats["avg_score"]) - float(inc_stats["avg_score"])
+            iqm_delta = float(pair_stats.get("iqm_delta", 0.0))
+            mean_p_delta = float(pair_stats.get("mean_delta", 0.0))
+            wins = int(pair_stats.get("wins", 0))
+            losses = int(pair_stats.get("losses", 0))
+            n_pairs = int(pair_stats.get("paired_count", 0))
+            p_val = float(pair_stats.get("wilcoxon_p", 1.0))
+            ci_low = float(pair_stats.get("ci_lower", 0.0))
             ac_improved = (
-                float(best_stats.get("avg_ac", 10.0))
+                float(cand_stats.get("avg_ac", 10.0))
                 < float(inc_stats.get("avg_ac", 10.0)) - 0.1
             )
             ac_non_worse = (
-                float(best_stats.get("avg_ac", 10.0))
+                float(cand_stats.get("avg_ac", 10.0))
                 <= float(inc_stats.get("avg_ac", 10.0)) + 0.5
             )
-            loc_improved = int(best_stats["loc_total"]) <= int(inc_stats["loc_total"])
-            guard_ok = _passes_score_guard(best_stats)
-
+            loc_improved = int(cand_stats["loc_total"]) <= int(inc_stats["loc_total"])
             pareto_non_regressing = (
                 d_delta >= -0.05
                 and iqm_delta >= -0.02
                 and ac_non_worse
-                and float(best_stats.get("stall_rate", 0.0))
+                and float(cand_stats.get("stall_rate", 0.0))
                 <= float(inc_stats.get("stall_rate", 0.0)) + 0.04
-                and float(best_stats.get("early_blunder_rate", 0.0))
+                and float(cand_stats.get("early_blunder_rate", 0.0))
                 <= float(inc_stats.get("early_blunder_rate", 0.0)) + 0.04
             )
             pareto_axis_gain = (
-                float(best_stats.get("p75_depth", 1.0))
+                float(cand_stats.get("p75_depth", 1.0))
                 > float(inc_stats.get("p75_depth", 1.0)) + 0.25
-                or float(best_stats.get("avg_oprop", 0.0))
+                or float(cand_stats.get("avg_oprop", 0.0))
                 > float(inc_stats.get("avg_oprop", 0.0)) + 0.15
-                or float(best_stats.get("avg_branches", 1.0))
+                or float(cand_stats.get("avg_branches", 1.0))
                 > float(inc_stats.get("avg_branches", 1.0)) + 0.08
                 or (ac_improved and iqm_delta >= 0.0)
             )
             pareto_beats = (
                 pareto_non_regressing and pareto_axis_gain and (wins >= losses)
             )
-
             stat_sig_ok = (
                 (n_pairs < 8)
                 or (p_val < 0.05)
                 or (ci_low > 0.0)
                 or (wins > losses and iqm_delta >= 0.08)
             )
-            beats_incumbent = guard_ok and (
+            beats = guard_ok and (
                 pareto_beats
                 or (d_delta > 0.05 and iqm_delta >= -0.05 and ac_non_worse)
                 or (d_delta > 1e-4 and s_delta >= -1e-2)
@@ -947,11 +943,41 @@ class SwarmReferee:
                     )
                 )
             )
-        else:
-            d_delta = float(best_stats["avg_depth"]) - 1.0
-            s_delta = float(best_stats["avg_score"])
-            guard_ok = _passes_score_guard(best_stats)
-            beats_incumbent = guard_ok
+            return (beats, d_delta, s_delta, guard_ok)
+
+        eligibility_by_idx = [
+            _evaluate_promotion_eligibility(st, paired_by_idx[idx_e])
+            for idx_e, (_c, _be, st) in enumerate(evaluated_entries)
+        ]
+
+        def _rank_key(
+            idx_item: tuple[int, tuple[PeerCandidate, BatchEvaluation, dict[str, Any]]],
+        ) -> tuple[int, int, int, float, float, float, int, float, int]:
+            idx_e, (_c, _be, st) = idx_item
+            pr = paired_by_idx[idx_e]
+            cand_beats, _dd, _sd, cand_guard_ok = eligibility_by_idx[idx_e]
+            return (
+                1 if int(st.get("policy_exceptions", 0) or 0) == 0 else 0,
+                1 if cand_guard_ok else 0,
+                1 if cand_beats else 0,
+                round(float(pr.get("iqm_delta", 0.0)), 4),
+                round(float(st["avg_depth"]), 4),
+                round(-float(st.get("avg_ac", 10.0)), 2),
+                -int(st.get("hard_stall_count", 0)),
+                round(float(st["avg_score"]), 2),
+                -int(st["loc_total"]),
+            )
+
+        ranked_indices = [
+            idx_e
+            for idx_e, _item in sorted(
+                enumerate(evaluated_entries), key=_rank_key, reverse=True
+            )
+        ]
+        best_idx = ranked_indices[0]
+        best_cand, best_eval, best_stats = evaluated_entries[best_idx]
+        best_pair = paired_by_idx[best_idx]
+        beats_incumbent, d_delta, s_delta, guard_ok = eligibility_by_idx[best_idx]
 
         # N-Way Sequential Greedy Stacking across non-conflicting winning peers
         if beats_incumbent and base_policy.strip():
@@ -1033,85 +1059,116 @@ class SwarmReferee:
                         inc_stats["avg_score"]
                     )
 
-        # Optional MiniHack Scenario & Prompt-Torture Suite Gate
-        if beats_incumbent and str(scenario_gate or "off").lower() in (
-            "advisory",
-            "strict",
-        ):
-            try:
-                from lox.env.benchmarks.nethack_scenarios import run_scenario_gate
+        def _run_post_crn_gates(
+            cand_obj: PeerCandidate,
+        ) -> tuple[bool, float | None, float | None, bool]:
+            """Runs Scenario Gate + hidden Holdout Gate; returns `(ok, holdout_d, holdout_iqm, holdout_rej)`."""
+            if str(scenario_gate or "off").lower() in ("advisory", "strict"):
+                try:
+                    from lox.env.benchmarks.nethack_scenarios import run_scenario_gate
 
-                sg = run_scenario_gate(
-                    best_cand.policy_code,
-                    best_cand.skills,
-                    seed=int(seeds[0]) if seeds else 42,
-                    max_steps=40,
-                )
-                ui.info(
-                    f"Gen {generation} Scenario Gate ({scenario_gate}): "
-                    f"{sg['passed_count']}/{sg['total_count']} passed "
-                    f"(exc={sg['exceptions']}, livelocks={sg['prompt_livelocks']})."
-                )
-                if str(scenario_gate).lower() == "strict" and (
-                    sg.get("exceptions", 0) > 0 or sg.get("prompt_livelocks", 0) > 0
-                ):
-                    beats_incumbent = False
-            except Exception:
-                pass
+                    sg = run_scenario_gate(
+                        cand_obj.policy_code,
+                        cand_obj.skills,
+                        seed=int(seeds[0]) if seeds else 42,
+                        max_steps=40,
+                    )
+                    ui.info(
+                        f"Gen {generation} Scenario Gate ({scenario_gate}): "
+                        f"{sg['passed_count']}/{sg['total_count']} passed "
+                        f"(exc={sg['exceptions']}, livelocks={sg['prompt_livelocks']})."
+                    )
+                    if str(scenario_gate).lower() == "strict" and (
+                        sg.get("exceptions", 0) > 0 or sg.get("prompt_livelocks", 0) > 0
+                    ):
+                        return False, None, None, False
+                except Exception:
+                    pass
 
-        # Hidden Holdout Audit on candidate winner (never exposed to Peer prompts or DuckDB deficits)
-        holdout_avg_depth: float | None = None
-        holdout_iqm_delta: float | None = None
-        holdout_rejected = False
-        if beats_incumbent and holdout_seeds and base_policy.strip():
-            try:
-                h_seeds = [int(s) for s in holdout_seeds]
-                h_inc_key = (id(eval_pool), inc_fp, tuple(h_seeds), steps_key)
-                cached_h_inc = self._incumbent_cache.get(h_inc_key)
-                if cached_h_inc is not None:
-                    h_inc_eval = cached_h_inc[0]
-                else:
-                    h_inc_eval = eval_pool.evaluate_batch(
-                        batch_id=f"holdout_g{generation}_inc_{int(time.time())}",
-                        policy_code=base_policy,
+            if holdout_seeds and base_policy.strip():
+                try:
+                    h_seeds = [int(s) for s in holdout_seeds]
+                    h_inc_key = (id(eval_pool), inc_fp, tuple(h_seeds), steps_key)
+                    cached_h_inc = self._incumbent_cache.get(h_inc_key)
+                    if cached_h_inc is not None:
+                        h_inc_eval = cached_h_inc[0]
+                    else:
+                        h_inc_eval = eval_pool.evaluate_batch(
+                            batch_id=f"holdout_g{generation}_inc_{int(time.time())}",
+                            policy_code=base_policy,
+                            macros_code="",
+                            skills=base_skills,
+                            target_episodes=len(h_seeds),
+                            priority_seeds=h_seeds,
+                            record_ticks=False,
+                            **fin_eval_kwargs,
+                        )
+                        h_inc_stats = _extract_eval_stats(
+                            h_inc_eval, loc_total=base_loc
+                        )
+                        self._incumbent_cache[h_inc_key] = (h_inc_eval, h_inc_stats)
+                    h_cand_eval = eval_pool.evaluate_batch(
+                        batch_id=f"holdout_g{generation}_{cand_obj.peer_id}_{int(time.time())}",
+                        policy_code=cand_obj.policy_code,
                         macros_code="",
-                        skills=base_skills,
+                        skills=cand_obj.skills,
                         target_episodes=len(h_seeds),
                         priority_seeds=h_seeds,
                         record_ticks=False,
                         **fin_eval_kwargs,
                     )
-                    h_inc_stats = _extract_eval_stats(h_inc_eval, loc_total=base_loc)
-                    self._incumbent_cache[h_inc_key] = (h_inc_eval, h_inc_stats)
-                h_cand_eval = eval_pool.evaluate_batch(
-                    batch_id=f"holdout_g{generation}_{best_cand.peer_id}_{int(time.time())}",
-                    policy_code=best_cand.policy_code,
-                    macros_code="",
-                    skills=best_cand.skills,
-                    target_episodes=len(h_seeds),
-                    priority_seeds=h_seeds,
-                    record_ticks=False,
-                    **fin_eval_kwargs,
-                )
-                h_cand_stats = _extract_eval_stats(
-                    h_cand_eval, loc_total=best_cand.loc_total
-                )
-                h_pair = evaluate_tournament_pair(
-                    h_cand_eval.get("runs", []) or [],
-                    h_inc_eval.get("runs", []) or [],
-                )
-                holdout_avg_depth = float(h_cand_stats.get("avg_depth", 1.0))
-                holdout_iqm_delta = float(h_pair.get("iqm_delta", 0.0))
-                h_exc = int(h_cand_stats.get("policy_exceptions", 0) or 0)
-                if h_exc > 0 or holdout_iqm_delta < -0.35:
-                    beats_incumbent = False
-                    holdout_rejected = True
-                    ui.warn(
-                        f"Gen {generation}: Holdout gate cancelled promotion of `{best_cand.peer_id}` "
-                        f"(holdout_iqm_delta={holdout_iqm_delta:+.3f}, exc={h_exc})."
+                    h_cand_stats = _extract_eval_stats(
+                        h_cand_eval, loc_total=cand_obj.loc_total
                     )
-            except Exception:
-                pass
+                    h_pair = evaluate_tournament_pair(
+                        h_cand_eval.get("runs", []) or [],
+                        h_inc_eval.get("runs", []) or [],
+                    )
+                    h_avg_d = float(h_cand_stats.get("avg_depth", 1.0))
+                    h_iqm_d = float(h_pair.get("iqm_delta", 0.0))
+                    h_exc = int(h_cand_stats.get("policy_exceptions", 0) or 0)
+                    if h_exc > 0 or h_iqm_d < -0.35:
+                        ui.warn(
+                            f"Gen {generation}: Holdout gate cancelled promotion of `{cand_obj.peer_id}` "
+                            f"(holdout_iqm_delta={h_iqm_d:+.3f}, exc={h_exc})."
+                        )
+                        return False, h_avg_d, h_iqm_d, True
+                    return True, h_avg_d, h_iqm_d, False
+                except Exception:
+                    pass
+            return True, None, None, False
+
+        # Optional Scenario + Hidden Holdout Gate (with fallback to next eligible finalist on rejection)
+        holdout_avg_depth: float | None = None
+        holdout_iqm_delta: float | None = None
+        holdout_rejected = False
+        if beats_incumbent:
+            gate_ok, holdout_avg_depth, holdout_iqm_delta, holdout_rejected = (
+                _run_post_crn_gates(best_cand)
+            )
+            if not gate_ok:
+                beats_incumbent = False
+                for fb_idx in ranked_indices:
+                    fb_beats, fb_dd, fb_sd, fb_guard = eligibility_by_idx[fb_idx]
+                    if not fb_beats:
+                        continue
+                    fb_cand, fb_eval, fb_stats = evaluated_entries[fb_idx]
+                    if fb_cand.peer_id == best_cand.peer_id:
+                        continue
+                    fb_ok, fb_hd, fb_hiqm, fb_hrej = _run_post_crn_gates(fb_cand)
+                    if fb_ok:
+                        best_cand = fb_cand
+                        best_eval = fb_eval
+                        best_stats = fb_stats
+                        best_pair = paired_by_idx[fb_idx]
+                        d_delta, s_delta, guard_ok = fb_dd, fb_sd, fb_guard
+                        holdout_avg_depth, holdout_iqm_delta, holdout_rejected = (
+                            fb_hd,
+                            fb_hiqm,
+                            fb_hrej,
+                        )
+                        beats_incumbent = True
+                        break
 
         # Build complete attempts_summary for DuckDB `tournament_attempts`
         evaluated_ids = {c.peer_id for c, _be, _st in evaluated_entries}
@@ -1145,6 +1202,32 @@ class SwarmReferee:
             )
         for c in candidates:
             if c.peer_id in evaluated_ids:
+                continue
+            if c.peer_id in stage1_stats_by_id:
+                s1_st, s1_pr = stage1_stats_by_id[c.peer_id]
+                attempts_summary.append(
+                    {
+                        "attempt_id": f"att_g{generation}_{c.peer_id}_{int(time.time() * 1000)}",
+                        "generation": generation,
+                        "peer_id": c.peer_id,
+                        "deficit_id": c.claimed_deficit_id,
+                        "candidate_fp": _package_fingerprint(c.policy_code, c.skills)
+                        if c.policy_code
+                        else "",
+                        "promoted": False,
+                        "sandbox_passed": bool(c.sandbox_passed),
+                        "sandbox_error": str(c.error or ""),
+                        "avg_depth": float(s1_st.get("avg_depth", 1.0)),
+                        "max_depth": int(s1_st.get("max_depth", 1)),
+                        "avg_score": float(s1_st.get("avg_score", 0.0)),
+                        "avg_ac": float(s1_st.get("avg_ac", 10.0)),
+                        "avg_xp_level": float(s1_st.get("avg_xp_level", 1.0)),
+                        "policy_exceptions": int(s1_st.get("policy_exceptions", 0)),
+                        "seeds_gained": list(s1_pr.get("seeds_gained", [])),
+                        "seeds_lost": list(s1_pr.get("seeds_lost", [])),
+                        "top_tracebacks": list(s1_st.get("top_tracebacks", [])),
+                    }
+                )
                 continue
             attempts_summary.append(
                 {

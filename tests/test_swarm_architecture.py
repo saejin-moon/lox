@@ -3394,3 +3394,156 @@ def test_swarm_referee_promotes_explorer_over_wait_zombie_incumbent_and_preserve
     assert "class Policy:" in p_text
     s_text, _ = reg.read_skill("exploration", policy_id="cell_v2_d0_v1_t0")
     assert "def go():" in s_text
+
+
+def test_g9_eligible_winner_outranks_tie_noise_stage1_attempts_and_monster_research_gate(
+    tmp_path,
+):
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import init_db
+    from lox.engine.swarm_referee import SwarmReferee
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.N\n"
+    )
+
+    class _G9Pool:
+        def evaluate_batch(self, batch_id, policy_code, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                runs = [
+                    {
+                        "run_id": f"{batch_id}_r{i}",
+                        "seed": s,
+                        "depth": 2 if i < 14 else 1,
+                        "max_depth": 4 if i < 4 else (2 if i < 14 else 1),
+                        "score": 305,
+                        "turns": 1200,
+                        "final_ac": 5,
+                        "xp_level": 2,
+                        "end_reason": "killed by newt",
+                    }
+                    for i, s in enumerate(s_list)
+                ]
+                return {"batch_id": batch_id, "runs": runs}
+            if "peer_tie" in batch_id:
+                # Middle-seed tile micro-bump -> slightly higher IQM_prog, but 0 depth gain & -1 score
+                runs = [
+                    {
+                        "run_id": f"{batch_id}_r{i}",
+                        "seed": s,
+                        "depth": 2 if i < 14 else 1,
+                        "max_depth": 4 if i < 4 else (2 if i < 14 else 1),
+                        "score": 304,
+                        "unique_tiles": 90 if 8 <= i < 24 else 40,
+                        "turns": 1200,
+                        "final_ac": 5,
+                        "xp_level": 2,
+                        "end_reason": "killed by newt",
+                    }
+                    for i, s in enumerate(s_list)
+                ]
+                return {"batch_id": batch_id, "runs": runs}
+            if "peer_s1_cut" in batch_id:
+                # Stage-1 eliminated candidate with real AC=7 and XP=2 (not shard 10.0 / 1.0)
+                runs = [
+                    {
+                        "run_id": f"{batch_id}_r{i}",
+                        "seed": s,
+                        "depth": 1,
+                        "max_depth": 2 if i == 0 else 1,
+                        "score": 110,
+                        "turns": 600,
+                        "final_ac": 7,
+                        "xp_level": 2,
+                        "end_reason": "killed by grid bug",
+                    }
+                    for i, s in enumerate(s_list)
+                ]
+                return {"batch_id": batch_id, "runs": runs}
+            # ortho_winner: gains max_depth=6 and +score on tail while tying middle IQR
+            runs = [
+                {
+                    "run_id": f"{batch_id}_r{i}",
+                    "seed": s,
+                    "depth": 2 if i < 14 else 1,
+                    "max_depth": 6 if i < 2 else (4 if i < 4 else (2 if i < 14 else 1)),
+                    "score": 325 if i < 4 else 305,
+                    "unique_tiles": 40,
+                    "turns": 1200,
+                    "final_ac": 4,
+                    "xp_level": 3,
+                    "end_reason": "killed by gnome",
+                }
+                for i, s in enumerate(s_list)
+            ]
+            return {"batch_id": batch_id, "runs": runs}
+
+    seeds = [10800 + i for i in range(32)]
+    cands = [
+        PeerCandidate(
+            peer_id="peer_tie",
+            claimed_deficit_id="eat",
+            claimed_label="tie noise",
+            policy_code=base_pol + "\ndef _t():\n    return 1\n",
+            skills={},
+            sandbox_passed=True,
+            loc_total=5,
+        ),
+        PeerCandidate(
+            peer_id="peer_s1_cut",
+            claimed_deficit_id="cut",
+            claimed_label="cut in s1",
+            policy_code=base_pol + "\ndef _c():\n    return 2\n",
+            skills={},
+            sandbox_passed=True,
+            sandbox_metrics={"avg_depth": 3.57, "avg_score": 592.0},
+            loc_total=5,
+        ),
+        PeerCandidate(
+            peer_id="ortho_winner",
+            claimed_deficit_id="melee+eat",
+            claimed_label="real depth win",
+            policy_code=base_pol + "\ndef _w():\n    return 3\n",
+            skills={},
+            sandbox_passed=True,
+            loc_total=5,
+        ),
+    ]
+    verdict = SwarmReferee().evaluate_tournament(
+        generation=9,
+        candidates=cands,
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_G9Pool(),
+        seeds=seeds,
+        race_seeds=16,
+    )
+    assert verdict.promoted is True
+    assert verdict.winner_id == "ortho_winner"
+
+    cut_row = next(a for a in verdict.attempts_summary if a["peer_id"] == "peer_s1_cut")
+    assert cut_row["avg_depth"] < 2.0
+    assert cut_row["max_depth"] == 2
+    assert cut_row["avg_ac"] == 7.0
+    assert cut_row["avg_xp_level"] == 2.0
+
+    # query_monster satisfies RESEARCH_REQUIRED alongside query_theories
+    class _StubTheories:
+        def search_theories(self, query, limit=6, doc_type=None):
+            return []
+
+    dbp = str(tmp_path / "research_gate.duckdb")
+    init_db(dbp)
+    reg = AuthorToolRegistry(db_path=dbp)
+    reg.theories_store = _StubTheories()
+    reg.configure_generation(generation=10, mode="SWARM_PEER")
+    reg.enforce_peer_research_gate = True
+    reg.query_theories("floating eye")
+    reg.query_monster("floating eye")
+    _msg, st = reg.dry_run_policy(base_pol, seed=42, max_turns=15)
+    assert st != "RESEARCH_REQUIRED"
