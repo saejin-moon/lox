@@ -115,7 +115,7 @@ class DeficitReport:
             lines.append(f"- Recent Outcome Distribution (diagnose freely): {hist_str}")
         if self.plateau_hints:
             lines.append(
-                "- MAP-Elites Diversity Stepping Stones (inspect via `read_policy` to escape plateau): "
+                "- MAP-Elites Diversity Stepping Stones (inspect code via `read_policy('<cell_id>')`; archived snapshots are NOT in `runs`/`batches` tables): "
                 + " | ".join(self.plateau_hints[:4])
             )
         if self.recent_attempts:

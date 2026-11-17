@@ -90,14 +90,32 @@ def _clone_incumbent_eval(
     cloned_runs: list[dict[str, Any]] = []
     for idx, r in enumerate(inc_batch_eval.get("runs", []) or []):
         rc = dict(r)
+        new_rid = f"{new_bid}_r{idx:05d}"
         rc["batch_id"] = new_bid
-        rc["run_id"] = f"{new_bid}_r{idx:05d}"
+        rc["run_id"] = new_rid
+        orig_ticks = rc.get("ticks")
+        if isinstance(orig_ticks, list) and orig_ticks:
+            rc["ticks"] = [
+                {**t, "run_id": new_rid} if isinstance(t, dict) else t
+                for t in orig_ticks
+            ]
         cloned_runs.append(rc)
     cloned["runs"] = cloned_runs
     full_runs, shard_runs = split_full_and_shard_runs(cloned_runs)
     cloned["full_runs"] = full_runs
     cloned["shard_runs"] = shard_runs
     return BatchEvaluation(cloned)
+
+
+def _is_wait_zombie_run(run: dict[str, Any]) -> bool:
+    """Returns True when an episode spent >=50 turns paralyzed pressing WAIT or stuck on <=1 tile."""
+    turns = int(run.get("turns", 0) or 0)
+    if turns < 50:
+        return False
+    if float(run.get("pct_wait", 0.0) or 0.0) >= 90.0:
+        return True
+    raw_tiles = run.get("unique_tiles")
+    return raw_tiles is not None and int(raw_tiles) <= 1 and turns >= 100
 
 
 def _assemble_batch_eval(
@@ -181,7 +199,9 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
         1 for r in runs if "CONFINEMENT_STALL" in str(r.get("summary_digest", ""))
     )
     hard_stalls = sum(
-        1 for r in runs if "stalled" in str(r.get("end_reason", "")).lower()
+        1
+        for r in runs
+        if "stalled" in str(r.get("end_reason", "")).lower() or _is_wait_zombie_run(r)
     )
     early_blunders = sum(
         1
@@ -531,7 +551,7 @@ class SwarmReferee:
                     skills=base_skills,
                     target_episodes=len(seeds),
                     priority_seeds=list(seeds),
-                    record_ticks=False,
+                    record_ticks=True,
                     **eval_kwargs,
                 )
                 inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
@@ -653,7 +673,7 @@ class SwarmReferee:
                 tuple[str, str, dict[str, str], PeerCandidate | None, bool]
             ] = []
             if base_policy.strip() and not inc_cached_hit:
-                s1_pkgs.append(("inc", base_policy, base_skills, None, False))
+                s1_pkgs.append(("inc", base_policy, base_skills, None, True))
             for cand in finalists:
                 s1_pkgs.append(
                     (cand.peer_id, cand.policy_code, cand.skills, cand, True)
@@ -702,7 +722,7 @@ class SwarmReferee:
                 tuple[str, str, dict[str, str], PeerCandidate | None, bool]
             ] = []
             if base_policy.strip() and not inc_cached_hit:
-                s2_pkgs.append(("inc", base_policy, base_skills, None, False))
+                s2_pkgs.append(("inc", base_policy, base_skills, None, True))
             for cand in survivors:
                 s2_pkgs.append(
                     (cand.peer_id, cand.policy_code, cand.skills, cand, True)
@@ -751,7 +771,7 @@ class SwarmReferee:
                 tuple[str, str, dict[str, str], PeerCandidate | None, bool]
             ] = []
             if base_policy.strip() and not inc_cached_hit:
-                all_pkgs.append(("inc", base_policy, base_skills, None, False))
+                all_pkgs.append(("inc", base_policy, base_skills, None, True))
             for cand in finalists:
                 all_pkgs.append(
                     (cand.peer_id, cand.policy_code, cand.skills, cand, True)
@@ -798,7 +818,11 @@ class SwarmReferee:
             cand_hard = int(cand_stats.get("hard_stall_count", 0))
             cand_n = max(1, int(cand_stats.get("run_count", 0) or 0))
             stall_tol = cand_n // 16
-            if cand_hard > inc_hard:
+            inc_zombie = float(inc_stats.get("pct_wait", 0.0) or 0.0) >= 85.0
+            cand_active = float(cand_stats.get("pct_wait", 0.0) or 0.0) <= 75.0
+            if cand_hard > inc_hard and not (
+                inc_zombie and cand_active and d_gain > 0.0
+            ):
                 if d_gain < 0.05 and cand_s <= inc_s:
                     return False
                 if cand_hard > inc_hard + stall_tol and d_gain < 0.25:

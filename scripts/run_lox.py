@@ -44,9 +44,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--reasoning-effort",
-        default="max",
+        default="medium",
         choices=["low", "medium", "high", "max", "none"],
-        help="OpenRouter reasoning effort level (default: max)",
+        help="OpenRouter reasoning effort level (default: medium)",
     )
     parser.add_argument(
         "--routing",

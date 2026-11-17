@@ -73,7 +73,7 @@ class SwarmCampaignOrchestrator:
         frontier_min_depth: int = 2,
         swarm_architecture: str = "peer",
         eval_workers: int | None = None,
-        reasoning_effort: str = "max",
+        reasoning_effort: str = "medium",
         routing: str = "nitro",
         refactor_model: str | None = None,
         race_seeds: int | None = None,
@@ -85,7 +85,7 @@ class SwarmCampaignOrchestrator:
         self.frontier_dir = frontier_dir
         self.provider = provider
         self.model = model
-        self.reasoning_effort = str(reasoning_effort or "max")
+        self.reasoning_effort = str(reasoning_effort or "medium")
         self.routing = str(routing or "nitro")
         self.refactor_model = (
             str(refactor_model).strip() if refactor_model else str(model)
@@ -305,7 +305,7 @@ class SwarmCampaignOrchestrator:
                 reverse=True,
             )[:3]
             deficit_report.plateau_hints = [
-                f"{el.cell_id} (batch={el.batch_id}, gen={el.generation}, D={el.metrics.get('avg_depth', 1.0):.2f}/AC={el.metrics.get('avg_ac', 10.0):.1f}/S={el.metrics.get('avg_score', 0.0):.0f})"
+                f"{el.cell_id} (gen={el.generation}, D={el.metrics.get('avg_depth', 1.0):.2f}/AC={el.metrics.get('avg_ac', 10.0):.1f}/S={el.metrics.get('avg_score', 0.0):.0f}; call read_policy('{el.cell_id}'))"
                 for el in top_elites
             ]
         if deficit_report.regime == "CLIMBING":

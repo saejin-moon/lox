@@ -538,7 +538,7 @@ class SwarmPeerAgent:
         db_path: str = "data/lox.duckdb",
         theories_store: Any = None,
         max_tool_turns: int = 8,
-        reasoning_effort: str = "max",
+        reasoning_effort: str = "medium",
         routing: str = "nitro",
         scenario_gate: str = "off",
     ) -> None:

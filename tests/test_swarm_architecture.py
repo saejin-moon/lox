@@ -3278,3 +3278,119 @@ def test_map_elites_v2_calibration_deficits_confinement_and_private_symbols(tmp_
     )
     assert "_private_helper" in prompt
     assert "_STALL_CAP" in prompt
+
+
+def test_swarm_referee_promotes_explorer_over_wait_zombie_incumbent_and_preserves_ticks(
+    tmp_path,
+):
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.swarm_referee import SwarmReferee, _clone_incumbent_eval
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n"
+    )
+    cand_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.E\n"
+    )
+
+    recorded_tick_flags: list[tuple[str, bool]] = []
+
+    class _ZombiePool:
+        def evaluate_batch(self, batch_id, policy_code, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            recorded_tick_flags.append((batch_id, bool(kwargs.get("record_ticks"))))
+            if "_inc_" in batch_id:
+                runs = [
+                    {
+                        "run_id": f"{batch_id}_r{i:05d}",
+                        "seed": s,
+                        "depth": 1,
+                        "max_depth": 1,
+                        "score": 153,
+                        "turns": 4742,
+                        "unique_tiles": 1,
+                        "pct_wait": 99.2,
+                        "end_reason": "max_steps",
+                        "ticks": [{"run_id": f"{batch_id}_r{i:05d}", "step_idx": 0}],
+                    }
+                    for i, s in enumerate(s_list)
+                ]
+                return {"batch_id": batch_id, "runs": runs}
+            runs = [
+                {
+                    "run_id": f"{batch_id}_r{i:05d}",
+                    "seed": s,
+                    "depth": 4 if i < 2 else (2 if i < 12 else 1),
+                    "max_depth": 4 if i < 2 else (2 if i < 12 else 1),
+                    "score": 158,
+                    "turns": 4500,
+                    "unique_tiles": 120,
+                    "pct_wait": 15.0,
+                    "end_reason": "stalled_zero_turn" if i < 6 else "killed by newt",
+                    "ticks": [{"run_id": f"{batch_id}_r{i:05d}", "step_idx": 0}],
+                }
+                for i, s in enumerate(s_list)
+            ]
+            return {"batch_id": batch_id, "runs": runs}
+
+    cand = PeerCandidate(
+        peer_id="peer_explorer",
+        claimed_deficit_id="slice_max_steps_confinement",
+        claimed_label="explore",
+        policy_code=cand_pol,
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    seeds = [10300 + i for i in range(64)]
+    verdict = SwarmReferee().evaluate_tournament(
+        generation=3,
+        candidates=[cand],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_ZombiePool(),
+        seeds=seeds,
+    )
+    assert verdict.promoted is True
+    assert verdict.winner_id == "peer_explorer"
+    assert any("_inc_" in bid and rec for bid, rec in recorded_tick_flags)
+
+    # _clone_incumbent_eval preserves ticks and rewrites their run_ids
+    cloned = _clone_incumbent_eval(verdict.incumbent_batch_eval, generation=3)
+    assert len(cloned["runs"]) == 64
+    assert cloned["runs"][0]["ticks"][0]["run_id"] == cloned["runs"][0]["run_id"]
+
+    # AuthorToolRegistry.read_policy / read_skill resolves MAP-Elites cells from archive_policies
+    db_p = str(tmp_path / "map_elites.duckdb")
+    init_db(db_p)
+    con = connect_db(db_p, read_only=False)
+    try:
+        con.execute(
+            """
+            INSERT INTO archive_policies (
+                cell_id, depth_bin, caution_bin, resource_bin, fitness,
+                policy_code, skills_json, batch_id, generation, metrics_json
+            ) VALUES (
+                'cell_v2_d0_v1_t0', 0, 1, 0, 1.5,
+                'class Policy:\n    pass\n', '{"exploration": "def go(): pass"}',
+                'batch_swarm_g3_peer_1_1794946810', 3, '{"avg_depth": 1.2, "max_depth": 4}'
+            )
+            """
+        )
+    finally:
+        con.close()
+
+    reg = AuthorToolRegistry(db_path=db_p, macros_path=str(tmp_path / "macros.py"))
+    p_text, _ = reg.read_policy("cell_v2_d0_v1_t0")
+    assert "MAP_ELITES" in p_text
+    assert "class Policy:" in p_text
+    s_text, _ = reg.read_skill("exploration", policy_id="cell_v2_d0_v1_t0")
+    assert "def go():" in s_text

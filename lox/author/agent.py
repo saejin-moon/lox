@@ -77,7 +77,7 @@ class AuthorAgent:
         db_path: str = DEFAULT_DB_PATH,
         macros_path: str = DEFAULT_MACROS_PATH,
         max_tokens: int = 65536,
-        reasoning_effort: str = "max",
+        reasoning_effort: str = "medium",
         routing: str = "nitro",
         max_repair_turns: int = 5,
         benchmark: str = "nethack",

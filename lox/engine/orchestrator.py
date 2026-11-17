@@ -304,7 +304,7 @@ class CampaignOrchestrator:
         pilot_fallback: str = "best",
         workspace_dir: str | None = None,
         refactor_model: str | None = None,
-        reasoning_effort: str = "max",
+        reasoning_effort: str = "medium",
         **kwargs: Any,
     ):
         self.provider = provider
@@ -312,7 +312,7 @@ class CampaignOrchestrator:
         self.refactor_model = (
             str(refactor_model).strip() if refactor_model else str(model)
         )
-        self.reasoning_effort = str(reasoning_effort or "max")
+        self.reasoning_effort = str(reasoning_effort or "medium")
         self.routing = routing
         self.db_path = db_path
         self.policy_path = policy_path

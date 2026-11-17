@@ -120,7 +120,7 @@ def test_phase1_cli_args_wiki_and_prompts():
 
     args_def = parse_args(["--provider", "openrouter", "--model", "z-ai/glm-5.3-flash"])
     assert args_def.refactor_model == "z-ai/glm-5.3-flash"
-    assert args_def.reasoning_effort == "max"
+    assert args_def.reasoning_effort == "medium"
     assert args_def.seeds == 64
     assert args_def.race_seeds == 32
     assert args_def.scenario_gate == "advisory"

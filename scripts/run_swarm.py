@@ -83,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reasoning-effort",
         choices=["low", "medium", "high", "max", "none"],
-        default="max",
-        help="OpenRouter reasoning effort parameter (default: max).",
+        default="medium",
+        help="OpenRouter reasoning effort parameter (default: medium).",
     )
     parser.add_argument(
         "--routing",

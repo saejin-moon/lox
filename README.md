@@ -174,7 +174,7 @@ uv run python scripts/run_swarm.py \
   --provider openrouter \
   --model z-ai/glm-5.3-flash:nitro \
   --refactor-model <optional-stronger-model> \
-  --reasoning-effort max \
+  --reasoning-effort medium \
   --workers 4 \
   --turns-per-worker 3 \
   --seeds 64 \

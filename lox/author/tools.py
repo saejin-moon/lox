@@ -682,6 +682,57 @@ class AuthorToolRegistry:
         except Exception as exc:
             return f"Theories query error: {exc}", "error"
 
+    @staticmethod
+    def _lookup_policy_snapshot(
+        con: Any, pid: str
+    ) -> tuple[int, str, float, int, bool, str, str] | None:
+        """Looks up a policy snapshot by `policy_id` in `policies`, falling back to MAP-Elites `archive_policies`."""
+        try:
+            row = con.execute(
+                "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code, skills_json FROM policies WHERE policy_id = ?",
+                [pid],
+            ).fetchone()
+        except Exception:
+            try:
+                row_legacy = con.execute(
+                    "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code FROM policies WHERE policy_id = ?",
+                    [pid],
+                ).fetchone()
+                row = (*row_legacy, "{}") if row_legacy else None
+            except Exception:
+                row = None
+        if row is not None:
+            return row
+        try:
+            arow = con.execute(
+                """
+                SELECT generation, policy_code, skills_json, metrics_json
+                FROM archive_policies
+                WHERE cell_id = ? OR batch_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                [pid, pid],
+            ).fetchone()
+        except Exception:
+            arow = None
+        if not arow:
+            return None
+        gen, p_code, s_json, m_json = arow
+        try:
+            metrics = json.loads(m_json or "{}") if isinstance(m_json, str) else {}
+        except Exception:
+            metrics = {}
+        return (
+            int(gen or 0),
+            "MAP_ELITES",
+            float(metrics.get("avg_depth", 1.0) or 1.0),
+            int(metrics.get("max_depth", 1) or 1),
+            False,
+            str(p_code or ""),
+            str(s_json or "{}"),
+        )
+
     def read_skill(self, skill_name: str, policy_id: str = "") -> tuple[str, str]:
         """Reads the full Python source code of an individual skill module from the skill library or a historical policy snapshot."""
         clean_name = skill_name.strip().removeprefix("skills/").removesuffix(".py")
@@ -691,17 +742,11 @@ class AuthorToolRegistry:
                 return "Database not found.", "not_found"
             con = connect_db(self.db_path, read_only=True)
             try:
-                try:
-                    row = con.execute(
-                        "SELECT skills_json FROM policies WHERE policy_id = ?",
-                        [pid],
-                    ).fetchone()
-                except Exception:
-                    row = None
-                if not row:
+                snap = self._lookup_policy_snapshot(con, pid)
+                if not snap:
                     return f"Error: Policy '{pid}' not found.", "not_found"
                 try:
-                    skills_map = json.loads(row[0] or "{}") or {}
+                    skills_map = json.loads(snap[6] or "{}") or {}
                 except Exception:
                     skills_map = {}
                 if clean_name in skills_map:
@@ -748,17 +793,7 @@ class AuthorToolRegistry:
             return "Database not found.", "not_found"
         con = connect_db(self.db_path, read_only=True)
         try:
-            try:
-                row = con.execute(
-                    "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code, skills_json FROM policies WHERE policy_id = ?",
-                    [pid],
-                ).fetchone()
-            except Exception:
-                row_legacy = con.execute(
-                    "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code FROM policies WHERE policy_id = ?",
-                    [pid],
-                ).fetchone()
-                row = (*row_legacy, "{}") if row_legacy else None
+            row = self._lookup_policy_snapshot(con, pid)
             if not row:
                 return f"Error: Policy '{policy_id}' not found.", "not_found"
             gen, mode, avg_d, max_d, prom, p_code, s_json = row
@@ -794,26 +829,10 @@ class AuthorToolRegistry:
             return "Database not found.", "not_found"
         con = connect_db(self.db_path, read_only=True)
         try:
-            try:
-                row_a = con.execute(
-                    "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
-                    [policy_id_a.strip()],
-                ).fetchone()
-                row_b = con.execute(
-                    "SELECT policy_code, skills_json FROM policies WHERE policy_id = ?",
-                    [policy_id_b.strip()],
-                ).fetchone()
-            except Exception:
-                ra = con.execute(
-                    "SELECT policy_code FROM policies WHERE policy_id = ?",
-                    [policy_id_a.strip()],
-                ).fetchone()
-                rb = con.execute(
-                    "SELECT policy_code FROM policies WHERE policy_id = ?",
-                    [policy_id_b.strip()],
-                ).fetchone()
-                row_a = (ra[0], "{}") if ra else None
-                row_b = (rb[0], "{}") if rb else None
+            snap_a = self._lookup_policy_snapshot(con, policy_id_a.strip())
+            snap_b = self._lookup_policy_snapshot(con, policy_id_b.strip())
+            row_a = (snap_a[5], snap_a[6]) if snap_a else None
+            row_b = (snap_b[5], snap_b[6]) if snap_b else None
             if not row_a:
                 return f"Error: Policy '{policy_id_a}' not found.", "not_found"
             if not row_b:
