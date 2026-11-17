@@ -660,16 +660,6 @@ class SwarmPeerAgent:
                 + "\n".join(f_lines)
             )
 
-        refactor_block = ""
-        if claimed_deficit.cluster_id == "structural_refactor":
-            refactor_block = (
-                "\n- STRUCTURAL REFACTOR OBJECTIVE: Split bloated modules listed in "
-                "`Large Skill Modules` (or bloated `policy.py`) into focused <=250 LOC submodules under "
-                "`skills/<domain>_<part>.py` and prune any `Dormant BT Branches`. Re-export split "
-                "public symbols in the parent skill (`from skills.<submod> import ...`) or update imports "
-                "across `policy.py`/`skills/`. Preserve behavioral parity — do NOT invent blind game heuristics.\n"
-            )
-
         extra_context = (
             f"{deficit_report.format_brief()}\n\n"
             f"### Your Claimed Target Deficit (`{self.peer_id}`):\n"
@@ -678,7 +668,6 @@ class SwarmPeerAgent:
             f"- Evidence: {claimed_deficit.evidence}\n"
             f"- Target Sample Seeds: {claimed_deficit.sample_seeds}\n"
             f"- Dominant Functions Observed: {claimed_deficit.dominant_fns}"
-            f"{refactor_block}"
             f"{frontier_block}\n"
         )
 

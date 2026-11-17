@@ -29,7 +29,7 @@ from typing import Any
 import numpy as np
 
 from lox.author.swarm_critic import SwarmCriticAgent
-from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster
+from lox.author.swarm_deficits import DeficitAnalyzer
 from lox.author.swarm_meta import SwarmMetaAgent
 from lox.author.swarm_peer import PeerCandidate, SwarmPeerAgent
 from lox.author.swarm_worker import SwarmWorker
@@ -144,7 +144,6 @@ class SwarmCampaignOrchestrator:
         )
         self.campaign_start_time = time.time()
         self._plateau_streak: int = self._compute_depth_plateau_streak()
-        self._gens_since_refactor: int = 999
         self._attempted_ast_modular_fps: set[str] = set()
 
         # Legacy Meta-Agent & Two-Pass Advisory Critic (only used when swarm_architecture='legacy')
@@ -383,20 +382,7 @@ class SwarmCampaignOrchestrator:
                 for r in inc_shard.get("runs", []) or []:
                     incumbent_shard_runs[int(r.get("seed", 0))] = dict(r)
 
-        # 3. Concurrent Symmetric Peer Agents + Plateau MAP-Elites UCB Branching + Refactor Slot
-        if not current_policy.strip():
-            self._gens_since_refactor = 0
-        else:
-            self._gens_since_refactor += 1
-        trigger_refactor_slot = bool(
-            current_policy.strip()
-            and self._gens_since_refactor >= 3
-            and (
-                deficit_report.bloat_warning
-                or bool(deficit_report.skill_bloat_notes)
-                or self._plateau_streak >= 2
-            )
-        )
+        # 3. Concurrent Symmetric Peer Agents + Plateau MAP-Elites UCB Branching
         peer_assignments: list[tuple[str, Any, str, dict[str, str], str | None]] = []
         sampled_elite_ids: list[str] = []
         use_elite_reseed = (
@@ -410,27 +396,7 @@ class SwarmCampaignOrchestrator:
             start_pol = current_policy
             start_sk = initial_skills
             elite_cid: str | None = None
-            if i == 0 and trigger_refactor_slot:
-                bloat_desc = (
-                    ", ".join(deficit_report.skill_bloat_notes)
-                    or f"policy={deficit_report.policy_loc} LOC / total={deficit_report.skill_loc} LOC"
-                )
-                cl = DeficitCluster(
-                    cluster_id="structural_refactor",
-                    kind="architecture",
-                    label=f"Refactor & modularize bloated code ({bloat_desc})",
-                    run_count=len(seeds),
-                    avg_depth=deficit_report.incumbent_avg_depth,
-                    sample_seeds=list(cl.sample_seeds[:3]),
-                    dominant_fns=list(deficit_report.dormant_branches[:4])
-                    or list(cl.dominant_fns[:3]),
-                    evidence=(
-                        f"Code footprint: policy={deficit_report.policy_loc} LOC, "
-                        f"skills={deficit_report.skill_loc} LOC; large modules: {bloat_desc}; "
-                        f"dormant branches: {deficit_report.dormant_branches[:6]}"
-                    ),
-                )
-            elif i < reseed_slots:
+            if i < reseed_slots:
                 pick_strat = (
                     "caution"
                     if (reseed_slots >= 2 and i == reseed_slots - 1)
@@ -448,12 +414,6 @@ class SwarmCampaignOrchestrator:
             peer_assignments.append(
                 (f"peer_{i + 1}", cl, start_pol, start_sk, elite_cid)
             )
-        if trigger_refactor_slot:
-            self._gens_since_refactor = 0
-            ui.info(
-                f"Gen {generation}: Scheduling `peer_1` in REFACTOR mode "
-                f"(bloat={deficit_report.bloat_warning}, large_skills={deficit_report.skill_bloat_notes}, plateau={self._plateau_streak})."
-            )
 
         peer_tool_turns = max(6, int(self.turns_per_worker) * 3)
         peer_candidates: list[PeerCandidate] = []
@@ -461,8 +421,7 @@ class SwarmCampaignOrchestrator:
         use_refactor_model_for_p1 = bool(
             self.refactor_model != self.model
             and (
-                trigger_refactor_slot
-                or self._plateau_streak >= 3
+                self._plateau_streak >= 3
                 or deficit_report.bloat_warning
                 or bool(deficit_report.skill_bloat_notes)
             )
@@ -596,7 +555,6 @@ class SwarmCampaignOrchestrator:
                 verify_steps=300,
             )
             if changed:
-                self._gens_since_refactor = 0
                 ui.info(f"Gen {generation} AST Auto-Modularizer: {mod_msg}")
                 verdict.winner_policy_code = mod_pol
                 verdict.winner_skills = mod_skills

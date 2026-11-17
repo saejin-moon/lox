@@ -381,6 +381,310 @@ def modularize_policy_source(
     return new_policy, merged_skills
 
 
+def _modularize_skill_module(
+    skill_name: str,
+    skill_src: str,
+    reserved_names: set[str],
+    num_modules: int = 3,
+) -> tuple[str, dict[str, str]] | None:
+    """
+    Deterministically decomposes a bloated `skills/<skill_name>.py` module into:
+      - `<skill_name>_shared` (constants, classes, and shared helpers called by >=2 chunks)
+      - `<skill_name>_<slug>` cohesive leaf submodules
+      - thin `<skill_name>` facade re-exporting all original symbols in order
+    Returns `(facade_src, new_submodules)` or `None` if no meaningful split exists.
+    """
+    lines = skill_src.splitlines()
+    tree = ast.parse(skill_src)
+
+    def _slice_stmt(stmt: ast.stmt) -> str:
+        start = getattr(stmt, "lineno", 1) - 1
+        end = getattr(stmt, "end_lineno", start + 1)
+        return "\n".join(lines[start:end])
+
+    import_stmts: list[tuple[ast.Import | ast.ImportFrom, str]] = []
+    const_defs: dict[str, tuple[str, set[str]]] = {}
+    fn_defs: dict[
+        str, tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, set[str]]
+    ] = {}
+    helper_classes: dict[str, tuple[str, set[str]]] = {}
+    extra_stmts: list[str] = []
+    self_mod_full = f"skills.{skill_name}"
+
+    def _collect_refs_and_self_imports(node: ast.AST) -> tuple[set[str], set[str]]:
+        refs = _extract_names_used(node)
+        self_syms: set[str] = set()
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.ImportFrom)
+                and str(sub.module or "") == self_mod_full
+            ):
+                for alias in sub.names:
+                    self_syms.add(str(alias.name or "").strip())
+        return refs | self_syms, self_syms
+
+    self_imported_syms: set[str] = set()
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            import_stmts.append((stmt, _slice_stmt(stmt)))
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            src = _slice_stmt(stmt)
+            refs, s_syms = _collect_refs_and_self_imports(stmt)
+            self_imported_syms |= s_syms
+            if isinstance(stmt, ast.Assign):
+                for tgt in stmt.targets:
+                    if isinstance(tgt, ast.Name):
+                        const_defs[tgt.id] = (src, refs - {tgt.id})
+            elif isinstance(stmt.target, ast.Name):
+                const_defs[stmt.target.id] = (src, refs - {stmt.target.id})
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            refs, s_syms = _collect_refs_and_self_imports(stmt)
+            self_imported_syms |= s_syms
+            fn_defs[stmt.name] = (_slice_stmt(stmt), stmt, refs - {stmt.name})
+        elif isinstance(stmt, ast.ClassDef):
+            refs, s_syms = _collect_refs_and_self_imports(stmt)
+            self_imported_syms |= s_syms
+            helper_classes[stmt.name] = (_slice_stmt(stmt), refs - {stmt.name})
+        elif not (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            # Side-effect top-level statements cannot be safely split across submodules
+            extra_stmts.append(_slice_stmt(stmt))
+
+    if extra_stmts or len(fn_defs) < 3:
+        return None
+
+    all_defined = set(const_defs) | set(fn_defs) | set(helper_classes)
+    decl_order = [
+        name
+        for stmt in tree.body
+        for name in (
+            (
+                [stmt.name]
+                if isinstance(
+                    stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                )
+                else []
+            )
+            + (
+                [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+                if isinstance(stmt, ast.Assign)
+                else (
+                    [stmt.target.id]
+                    if isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    else []
+                )
+            )
+        )
+        if name in all_defined
+    ]
+
+    def _deps_of(sym: str) -> set[str]:
+        if sym in const_defs:
+            return const_defs[sym][1] & all_defined
+        if sym in fn_defs:
+            return fn_defs[sym][2] & all_defined
+        if sym in helper_classes:
+            return helper_classes[sym][1] & all_defined
+        return set()
+
+    def _line_count(sym: str) -> int:
+        if sym in const_defs:
+            return len(const_defs[sym][0].splitlines())
+        if sym in fn_defs:
+            return len(fn_defs[sym][0].splitlines())
+        if sym in helper_classes:
+            return len(helper_classes[sym][0].splitlines())
+        return 1
+
+    root_fns = [n for n in decl_order if n in fn_defs and not n.startswith("_")]
+    if len(root_fns) < 2:
+        root_fns = [n for n in decl_order if n in fn_defs]
+
+    k = max(2, min(int(num_modules), len(root_fns)))
+    leaf_weights: list[int] = []
+    for lf in root_fns:
+        seen_w: set[str] = set()
+        stack_w = [lf]
+        w = 0
+        while stack_w:
+            cur = stack_w.pop()
+            if cur in seen_w:
+                continue
+            seen_w.add(cur)
+            w += _line_count(cur)
+            stack_w.extend(_deps_of(cur))
+        leaf_weights.append(max(1, w))
+
+    target_w = max(1.0, sum(leaf_weights) / k)
+    chunks: list[list[str]] = []
+    cur_chunk: list[str] = []
+    cur_w = 0
+    for idx, (lf, lw) in enumerate(zip(root_fns, leaf_weights, strict=True)):
+        cur_chunk.append(lf)
+        cur_w += lw
+        remaining = len(root_fns) - idx - 1
+        rem_slots = k - len(chunks) - 1
+        if rem_slots > 0 and (cur_w >= target_w or remaining <= rem_slots):
+            chunks.append(cur_chunk)
+            cur_chunk = []
+            cur_w = 0
+    if cur_chunk:
+        chunks.append(cur_chunk)
+
+    chunk_closures: list[set[str]] = []
+    ref_counts: defaultdict[str, int] = defaultdict(int)
+    for ch in chunks:
+        closure: set[str] = set()
+        stack = list(ch)
+        while stack:
+            cur = stack.pop()
+            if cur in closure or cur not in all_defined:
+                continue
+            closure.add(cur)
+            stack.extend(_deps_of(cur))
+        chunk_closures.append(closure)
+        for sym in closure:
+            ref_counts[sym] += 1
+
+    # Any symbol referenced by >=2 chunks or lazily self-imported moves to `<skill>_shared`
+    shared_syms: set[str] = {sym for sym, cnt in ref_counts.items() if cnt >= 2} | (
+        self_imported_syms & all_defined
+    )
+    stack_sh = list(shared_syms)
+    shared_closed: set[str] = set()
+    while stack_sh:
+        cur = stack_sh.pop()
+        if cur in shared_closed or cur not in all_defined:
+            continue
+        shared_closed.add(cur)
+        stack_sh.extend(_deps_of(cur))
+    shared_syms = shared_closed
+
+    covered = set(shared_syms)
+    for cl in chunk_closures:
+        covered |= cl
+    shared_syms |= all_defined - covered
+
+    def _emit_used_imports(syms: set[str]) -> list[str]:
+        used_tokens: set[str] = set()
+        for sym in syms:
+            if sym in const_defs:
+                used_tokens |= const_defs[sym][1]
+            elif sym in fn_defs:
+                used_tokens |= _extract_names_used(fn_defs[sym][1])
+            elif sym in helper_classes:
+                used_tokens |= helper_classes[sym][1]
+        return [
+            src for stmt, src in import_stmts if _import_bound_names(stmt) & used_tokens
+        ]
+
+    def _rewrite_self_imports(code_src: str, target_mod: str) -> str:
+        """Redirects `from skills.<skill> import ...` inside split modules to `target_mod` to prevent cycles."""
+        return re.sub(
+            rf"\bfrom\s+skills\.{re.escape(skill_name)}\s+import\b",
+            f"from skills.{target_mod} import",
+            code_src,
+        )
+
+    def _render_defs(syms: set[str], target_mod: str) -> list[str]:
+        blocks: list[str] = []
+        seen_const_srcs: set[str] = set()
+        for sym in decl_order:
+            if sym not in syms:
+                continue
+            if sym in const_defs:
+                src = _rewrite_self_imports(const_defs[sym][0], target_mod)
+                if src not in seen_const_srcs:
+                    seen_const_srcs.add(src)
+                    blocks.append(src)
+            elif sym in helper_classes:
+                blocks.append(
+                    "\n\n" + _rewrite_self_imports(helper_classes[sym][0], target_mod)
+                )
+            elif sym in fn_defs:
+                blocks.append(
+                    "\n\n" + _rewrite_self_imports(fn_defs[sym][0], target_mod)
+                )
+        return blocks
+
+    local_reserved = set(reserved_names)
+    submodules: dict[str, str] = {}
+    reexport_lines: list[str] = []
+    exported_order = list(dict.fromkeys(decl_order))
+
+    shared_mod = _pick_unused_name(f"{skill_name}_shared", local_reserved)
+    if shared_syms:
+        local_reserved.add(shared_mod)
+        sh_imports = _emit_used_imports(shared_syms)
+        sh_body = _render_defs(shared_syms, shared_mod)
+        submodules[shared_mod] = (
+            f'"""Shared constants and helpers split from `{skill_name}`."""\n\n'
+            + "\n".join(sh_imports)
+            + ("\n\n" if sh_imports else "")
+            + "\n".join(sh_body).lstrip()
+            + "\n"
+        )
+        sh_exports = [s for s in exported_order if s in shared_syms]
+        if sh_exports:
+            reexport_lines.append(
+                f"from skills.{shared_mod} import {', '.join(sh_exports)}"
+            )
+
+    for idx_ch, (ch_leaves, cl) in enumerate(
+        zip(chunks, chunk_closures, strict=True), start=1
+    ):
+        mod_syms = cl - shared_syms
+        if not mod_syms:
+            continue
+        slug = re.sub(r"[^a-z0-9_]", "_", ch_leaves[0].lower()).strip("_")[:18]
+        raw_sub = f"{skill_name}_{slug}" if slug else f"{skill_name}_part_{idx_ch}"
+        sub_name = _pick_unused_name(raw_sub, local_reserved)
+        local_reserved.add(sub_name)
+
+        needed_shared = sorted(
+            {dep for sym in mod_syms for dep in _deps_of(sym) if dep in shared_syms}
+        )
+        m_imports = _emit_used_imports(mod_syms)
+        if needed_shared:
+            m_imports.append(
+                f"from skills.{shared_mod} import {', '.join(needed_shared)}"
+            )
+        m_body = _render_defs(mod_syms, shared_mod)
+        submodules[sub_name] = (
+            f'"""Submodule `{sub_name}` split from `{skill_name}`."""\n\n'
+            + "\n".join(m_imports)
+            + ("\n\n" if m_imports else "")
+            + "\n".join(m_body).lstrip()
+            + "\n"
+        )
+        sub_exports = [s for s in exported_order if s in mod_syms]
+        if sub_exports:
+            reexport_lines.append(
+                f"from skills.{sub_name} import {', '.join(sub_exports)}"
+            )
+
+    if len(submodules) < 2 or not reexport_lines:
+        return None
+
+    facade_src = (
+        f'"""Modular facade for `{skill_name}` (re-exports split submodules)."""\n\n'
+        + "\n".join(reexport_lines)
+        + "\n"
+    )
+    max_after = max(
+        len(facade_src.splitlines()),
+        *(len(v.splitlines()) for v in submodules.values()),
+    )
+    if max_after > len(lines) - 30:
+        return None
+    reserved_names.update(submodules.keys())
+    return facade_src, submodules
+
+
 def verify_bit_identical(
     orig_policy: str,
     orig_skills: dict[str, str],
@@ -424,23 +728,29 @@ def maybe_auto_modularize(
     *,
     loc_threshold: int = 250,
     monolith_threshold: int = 200,
+    skill_loc_threshold: int = 320,
     num_modules: int = 4,
     verify_seeds: list[int] | None = None,
     verify_steps: int = 300,
 ) -> tuple[bool, str, dict[str, str], str]:
     """
-    Hysteresis-gated circuit breaker: splits bloated `policy.py` deterministically
-    only when LOC exceeds threshold, verifies bit-identical NetHack trajectories,
-    and returns `(changed, policy_code, skills, summary)`.
+    Hysteresis-gated circuit breaker: splits bloated `policy.py` and/or bloated
+    `skills/*.py` modules deterministically when LOC exceeds threshold, verifies
+    bit-identical NetHack trajectories, and returns `(changed, policy_code, skills, summary)`.
     """
     orig_skills = dict(skills or {})
     if not policy_code.strip():
         return False, policy_code, orig_skills, "Skipped: empty policy."
     loc_before = len(policy_code.splitlines())
-    needs_split = loc_before >= loc_threshold or (
+    needs_pol_split = loc_before >= loc_threshold or (
         not orig_skills and loc_before >= monolith_threshold
     )
-    if not needs_split:
+    bloated_skills = [
+        sk
+        for sk, src in sorted(orig_skills.items())
+        if src and len(src.splitlines()) >= skill_loc_threshold
+    ]
+    if not needs_pol_split and not bloated_skills:
         return (
             False,
             policy_code,
@@ -448,25 +758,51 @@ def maybe_auto_modularize(
             f"Skipped: below threshold ({loc_before} LOC).",
         )
 
-    try:
-        new_pol, new_skills = modularize_policy_source(
-            policy_code, num_modules=num_modules, existing_skills=orig_skills
-        )
-    except Exception as exc:
-        return (
-            False,
-            policy_code,
-            orig_skills,
-            f"AST split error: {exc}",
+    new_pol = policy_code
+    new_skills = dict(orig_skills)
+    notes: list[str] = []
+
+    if needs_pol_split:
+        try:
+            split_pol, split_skills = modularize_policy_source(
+                new_pol, num_modules=num_modules, existing_skills=new_skills
+            )
+            loc_after = len(split_pol.splitlines())
+            if loc_after <= loc_before - 30 and len(split_skills) > len(new_skills):
+                new_pol = split_pol
+                new_skills = split_skills
+                notes.append(f"policy.py {loc_before}->{loc_after} LOC")
+        except Exception as exc:
+            if not bloated_skills:
+                return False, policy_code, orig_skills, f"AST split error: {exc}"
+
+    reserved_names = set(new_skills.keys())
+    for sk in bloated_skills:
+        sk_src = new_skills.get(sk, "")
+        sk_before = len(sk_src.splitlines())
+        if sk_before < skill_loc_threshold:
+            continue
+        try:
+            split_res = _modularize_skill_module(
+                sk, sk_src, reserved_names, num_modules=min(4, max(2, sk_before // 200))
+            )
+        except Exception:
+            split_res = None
+        if split_res is None:
+            continue
+        facade_src, submods = split_res
+        new_skills[sk] = facade_src
+        new_skills.update(submods)
+        notes.append(
+            f"skill/{sk} {sk_before}->{len(facade_src.splitlines())} LOC (+{len(submods)} submodules)"
         )
 
-    loc_after = len(new_pol.splitlines())
-    if loc_after > loc_before - 30 or len(new_skills) <= len(orig_skills):
+    if not notes:
         return (
             False,
             policy_code,
             orig_skills,
-            f"Skipped: insufficient reduction ({loc_before}->{loc_after} LOC).",
+            f"Skipped: insufficient reduction ({loc_before} LOC).",
         )
 
     seeds = list(verify_seeds) if verify_seeds else [1000 + i for i in range(6)]
@@ -491,5 +827,5 @@ def maybe_auto_modularize(
         True,
         new_pol,
         new_skills,
-        f"AST-Modularized: policy.py {loc_before}->{loc_after} LOC ({len(new_skills)} skills, {len(seeds)}-seed bit-identical)",
+        f"AST-Modularized: {', '.join(notes)} ({len(new_skills)} skills, {len(seeds)}-seed bit-identical)",
     )

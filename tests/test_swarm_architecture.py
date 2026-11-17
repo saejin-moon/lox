@@ -3550,14 +3550,14 @@ def test_g9_eligible_winner_outranks_tie_noise_stage1_attempts_and_monster_resea
 
 
 def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp_path):
-    from unittest.mock import patch
+    import json
 
     from lox.author.swarm_deficits import DeficitAnalyzer
-    from lox.author.swarm_peer import PeerCandidate
     from lox.author.tools import merge_skill_module_update
-    from lox.db.schema import init_db
+    from lox.db.schema import connect_db, init_db
     from lox.engine.scheduler import ModeScheduler
     from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+    from lox.lang.modularize import maybe_auto_modularize
 
     # 1. ModeScheduler enters REFACTOR on bloated skills even when policy.py is small
     sched = ModeScheduler()
@@ -3605,33 +3605,52 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
     assert "from skills.exploration_nav import h_0" in merged
     assert "def h_150" not in merged
 
-    # 4. SwarmCampaignOrchestrator assigns peer_1 to `structural_refactor` when bloated
+    # 4. Option A: maybe_auto_modularize deterministically splits a bloated skill >= 320 LOC
     ws = tmp_path / "ws_ref"
     (ws / "skills").mkdir(parents=True, exist_ok=True)
-    (ws / "policy.py").write_text(
+    skill_pol = (
         "import skills.exploration as exploration\n"
         "from lox.env.actions import Action\n"
         "class Policy:\n"
         "    def step(self, state):\n"
-        "        return exploration.h_1() or Action.E\n",
-        encoding="utf-8",
+        "        return exploration.search_step(state) or exploration.explore_step(state) or Action.E\n"
     )
-    (ws / "skills" / "exploration.py").write_text(bloated_skill, encoding="utf-8")
-
-    claimed_ids: list[tuple[str, str]] = []
-
-    def _fake_run_cycle(self, *, claimed_deficit, current_policy, current_skills, **kw):
-        claimed_ids.append((self.peer_id, claimed_deficit.cluster_id))
-        return PeerCandidate(
-            peer_id=self.peer_id,
-            claimed_deficit_id=claimed_deficit.cluster_id,
-            claimed_label=claimed_deficit.label,
-            policy_code=current_policy,
-            skills=dict(current_skills),
-            sandbox_passed=False,
-            error="mock stop",
+    bloated_real_skill = (
+        "from lox.env.actions import Action\n"
+        "STEP_CONST = 1\n\n"
+        "def _shared_ok(state):\n"
+        "    return state.hp >= STEP_CONST\n\n"
+        + "\n".join(
+            f"def _pad_a_{i}():\n    return {i if i == 0 else f'_pad_a_{i - 1}()'}\n"
+            for i in range(85)
         )
+        + "\n".join(
+            f"def _pad_b_{i}():\n    return {i if i == 0 else f'_pad_b_{i - 1}()'}\n"
+            for i in range(85)
+        )
+        + "def search_step(state):\n"
+        "    if _shared_ok(state) and _pad_a_84() >= 0 and state.step_count % 2 == 0:\n"
+        "        return Action.SEARCH\n"
+        "    return None\n\n"
+        "def explore_step(state):\n"
+        "    if _shared_ok(state) and _pad_b_84() >= 0:\n"
+        "        return Action.E\n"
+        "    return None\n"
+    )
+    changed, _new_pol, new_skills, mod_msg = maybe_auto_modularize(
+        skill_pol,
+        {"exploration": bloated_real_skill},
+        verify_seeds=[1000, 1001],
+        verify_steps=40,
+    )
+    assert changed is True, mod_msg
+    assert len(new_skills["exploration"].splitlines()) < 30
+    assert len(new_skills) >= 3
+    assert "skill/exploration" in mod_msg
 
+    # 5. SwarmCampaignOrchestrator applies Option A bit-identical skill split on disk & DuckDB
+    (ws / "policy.py").write_text(skill_pol, encoding="utf-8")
+    (ws / "skills" / "exploration.py").write_text(bloated_real_skill, encoding="utf-8")
     orch = SwarmCampaignOrchestrator(
         db_path=dbp,
         workspace_dir=str(ws),
@@ -3643,14 +3662,20 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
         swarm_architecture="peer",
     )
     try:
-        with patch("lox.author.swarm_peer.SwarmPeerAgent.run_cycle", _fake_run_cycle):
-            try:
-                orch.run_generation(16)
-            except Exception:
-                pass
+        res = orch.run_generation(16)
+        assert res["promoted"] is True
+        disk_skills = {
+            p.stem: p.read_text(encoding="utf-8") for p in (ws / "skills").glob("*.py")
+        }
+        assert len(disk_skills) >= 3
+        assert len(disk_skills["exploration"].splitlines()) < 30
+        con = connect_db(dbp, read_only=True)
+        try:
+            row = con.execute(
+                "SELECT skills_json FROM policies WHERE generation=16"
+            ).fetchone()
+            assert row is not None and len(json.loads(row[0])) == len(disk_skills)
+        finally:
+            con.close()
     finally:
         orch.close()
-    assert ("peer_1", "structural_refactor") in claimed_ids
-    assert any(
-        pid == "peer_2" and cid != "structural_refactor" for pid, cid in claimed_ids
-    )
