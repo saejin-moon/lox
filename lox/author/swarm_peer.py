@@ -328,11 +328,11 @@ def incubate_candidate(
                 return candidate
 
             non_wait = [a for a in acts if a != "WAIT"]
-            if len(acts) >= 20 and not non_wait:
+            if len(acts) >= 20 and (
+                not non_wait or len(non_wait) <= max(1, len(acts) // 10)
+            ):
                 candidate.sandbox_passed = False
-                candidate.error = (
-                    "WAIT-only deadlock on smoke check (0 non-WAIT actions)."
-                )
+                candidate.error = f"WAIT-dominant deadlock on smoke check ({len(non_wait)}/{len(acts)} non-WAIT actions)."
                 return candidate
 
             total_t = sum(fn_turns.values())

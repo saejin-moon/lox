@@ -272,3 +272,35 @@ def test_pool_unique_tiles_floor_aware():
     assert res["triggered"] is True
     assert res["unique_tiles"] >= 1
     assert res["dungeons_visited"] >= 1
+
+
+def test_agent_64k_max_tokens_and_wait_dominant_rejection():
+    from lox.author.swarm_deficits import DeficitReport
+    from lox.author.swarm_peer import PeerCandidate, incubate_candidate
+
+    agent = AuthorAgent(provider="mock")
+    assert agent.max_tokens == 65536
+
+    pol_zombie = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.did = False\n"
+        "    def step(self, state):\n"
+        "        if not self.did:\n"
+        "            self.did = True\n"
+        "            return Action.SEARCH\n"
+        "        return Action.WAIT\n"
+    )
+    cand = incubate_candidate(
+        PeerCandidate(
+            peer_id="p_zombie",
+            claimed_deficit_id="c1",
+            claimed_label="zombie wait",
+            policy_code=pol_zombie,
+        ),
+        deficit_report=DeficitReport(generation=1, regime="BOOTSTRAP"),
+        claimed_deficit=DeficitCluster(cluster_id="c1", kind="test", label="test"),
+    )
+    assert cand.sandbox_passed is False
+    assert "WAIT-dominant deadlock" in cand.error

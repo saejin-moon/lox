@@ -76,7 +76,7 @@ class AuthorAgent:
         base_url: str | None = None,
         db_path: str = DEFAULT_DB_PATH,
         macros_path: str = DEFAULT_MACROS_PATH,
-        max_tokens: int = 16384,
+        max_tokens: int = 65536,
         reasoning_effort: str = "max",
         routing: str = "nitro",
         max_repair_turns: int = 5,
@@ -820,11 +820,12 @@ class AuthorAgent:
 
                     if not content and not msg_obj.get("tool_calls"):
                         if reasoning:
-                            msg_obj["content"] = reasoning
-                        else:
                             raise ValueError(
-                                "LLM returned empty message content and empty tool_calls"
+                                "LLM exhausted max_tokens inside reasoning without emitting content or tool_calls"
                             )
+                        raise ValueError(
+                            "LLM returned empty message content and empty tool_calls"
+                        )
                     return msg_obj
             except PermissionError:
                 raise
