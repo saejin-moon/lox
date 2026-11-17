@@ -2381,6 +2381,11 @@ def test_gamestate_cursed_bug_traps_menu_and_guarded_range():
     h = NetHackHarness(max_steps=30)
     try:
         st0 = h.reset(42)
+        assert st0.mem.remembered_trap_glyphs.shape == (21, 79)
+        assert st0.mem.remembered_obj_glyphs.shape == (21, 79)
+        assert st0.trap_mask.shape == (21, 79)
+        assert st0.is_trap(0, 0) is False
+        assert st0.trap_at(0, 0) is None
         st1, done1, _ = h.step(Action.INVENTORY)
         assert not done1
         assert st1.in_menu is True

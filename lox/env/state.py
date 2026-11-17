@@ -761,6 +761,7 @@ class WorldMemory:
                 searched_counts=np.zeros(shape, dtype=np.int16),
                 door_mask=np.zeros(shape, dtype=np.bool_),
                 remembered_obj_glyphs=np.zeros(shape, dtype=np.int32),
+                remembered_trap_glyphs=np.zeros(shape, dtype=np.int32),
             )
         return self.floors[key]
 
@@ -795,6 +796,14 @@ class WorldMemory:
     @property
     def searched_counts(self) -> np.ndarray:
         return self.current_floor.searched_counts
+
+    @property
+    def remembered_obj_glyphs(self) -> np.ndarray:
+        return self.current_floor.remembered_obj_glyphs
+
+    @property
+    def remembered_trap_glyphs(self) -> np.ndarray:
+        return self.current_floor.remembered_trap_glyphs
 
     @property
     def is_oscillating(self) -> bool:
