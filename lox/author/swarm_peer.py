@@ -42,6 +42,7 @@ class PeerCandidate:
     pruned_skills: list[str] = field(default_factory=list)
     touched_skills: set[str] = field(default_factory=set)
     touched_branches: set[str] = field(default_factory=set)
+    touched_skill_symbols: dict[str, set[str]] = field(default_factory=dict)
     sandbox_passed: bool = False
     sandbox_metrics: dict[str, Any] = field(default_factory=dict)
     error: str = ""
@@ -153,6 +154,56 @@ def compute_candidate_footprint(
                 break
 
     return touched_skills, touched_branches, clobbers_protected
+
+
+def compute_candidate_skill_symbols(
+    skills: dict[str, str],
+    base_skills: dict[str, str],
+) -> dict[str, set[str]]:
+    """
+    Computes per-skill symbol-level diff (`{skill_name: {modified_fn_or_const_names}}`)
+    relative to `base_skills` so `SwarmReferee` can compose disjoint edits inside the
+    same skill module via 3-way AST merge.
+    """
+    import ast
+
+    def _index_syms(src: str) -> dict[str, str]:
+        if not src or not src.strip():
+            return {}
+        try:
+            tr = ast.parse(src)
+        except Exception:
+            return {"__raw__": src.strip()}
+        mp: dict[str, str] = {}
+        for nd in tr.body:
+            if isinstance(nd, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                mp[nd.name] = ast.dump(nd, include_attributes=False)
+            elif (
+                isinstance(nd, ast.Assign)
+                and len(nd.targets) == 1
+                and isinstance(nd.targets[0], ast.Name)
+            ):
+                mp[nd.targets[0].id] = ast.dump(nd, include_attributes=False)
+            elif isinstance(nd, ast.AnnAssign) and isinstance(nd.target, ast.Name):
+                mp[nd.target.id] = ast.dump(nd, include_attributes=False)
+        return mp
+
+    changed: dict[str, set[str]] = {}
+    for sk in set(skills.keys()) | set(base_skills.keys()):
+        s_new = skills.get(sk, "").strip()
+        s_old = base_skills.get(sk, "").strip()
+        if s_new == s_old:
+            continue
+        m_new = _index_syms(s_new)
+        m_old = _index_syms(s_old)
+        diff_syms: set[str] = set()
+        for nm in set(m_new.keys()) | set(m_old.keys()):
+            if m_new.get(nm) != m_old.get(nm):
+                diff_syms.add(nm)
+        if not diff_syms:
+            diff_syms.add("__module__")
+        changed[sk] = diff_syms
+    return changed
 
 
 def _run_replay_probe(
@@ -353,19 +404,48 @@ def incubate_candidate(
         ),
     }
 
-    # Multi-core paired incubation shard if eval_pool is attached
-    if eval_pool is not None and shard_seeds:
+    # Multi-core paired incubation shard + organic mined scenario stress tests
+    organic_shards = list(deficit_report.__dict__.get("organic_shards", []) or [])
+    if eval_pool is not None and (shard_seeds or organic_shards):
         try:
+            target_ep_cnt = len(shard_seeds or []) + len(organic_shards)
             cand_eval = eval_pool.evaluate_batch(
                 batch_id=f"incubate_{candidate.peer_id}_g{deficit_report.generation}_{int(time.time())}",
                 policy_code=code,
                 macros_code="",
                 skills=skills,
-                target_episodes=len(shard_seeds),
-                priority_seeds=list(shard_seeds),
+                target_episodes=max(1, target_ep_cnt),
+                priority_seeds=list(shard_seeds) if shard_seeds else None,
+                shards=organic_shards if organic_shards else None,
                 record_ticks=False,
             )
             c_runs = cand_eval.get("runs", [])
+            # Hard exception gate across incubation episodes & organic scenarios
+            exc_total = sum(int(r.get("policy_exceptions", 0) or 0) for r in c_runs)
+            if exc_total > 0:
+                exc_tbs: list[str] = []
+                for r in c_runs:
+                    if int(r.get("policy_exceptions", 0) or 0) > 0:
+                        mj = r.get("milestones_json")
+                        if isinstance(mj, str) and mj:
+                            try:
+                                mo = json.loads(mj)
+                                exc_tbs.extend(
+                                    mo.get("exception_tracebacks")
+                                    or mo.get("leaf_errors")
+                                    or []
+                                )
+                            except Exception:
+                                pass
+                        er = str(r.get("end_reason", ""))
+                        dm = str(r.get("death_message", ""))
+                        if er or dm:
+                            exc_tbs.append(f"{er}: {dm}"[:140])
+                candidate.sandbox_passed = False
+                candidate.error = f"Incubation runtime exceptions ({exc_total}x): " + (
+                    "; ".join(list(dict.fromkeys(exc_tbs))[:2]) or "policy exception"
+                )
+                return candidate
             if c_runs:
                 c_depths = [
                     float(max(int(r.get("depth", 1)), int(r.get("max_depth", 1))))
@@ -512,6 +592,9 @@ class SwarmPeerAgent:
                 skills=SwarmMetaAgent.prune_unused_skills(mock_code, skills_copy),
                 touched_skills=touched_skills,
                 touched_branches=touched_branches,
+                touched_skill_symbols=compute_candidate_skill_symbols(
+                    skills_copy, skills_copy
+                ),
                 clobbers_protected=clobbers,
             )
             cand = incubate_candidate(
@@ -634,6 +717,9 @@ class SwarmPeerAgent:
             pruned_skills=pruned,
             touched_skills=touched_skills,
             touched_branches=touched_branches,
+            touched_skill_symbols=compute_candidate_skill_symbols(
+                kept_skills, skills_copy
+            ),
             clobbers_protected=clobbers,
         )
 

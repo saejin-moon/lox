@@ -308,7 +308,43 @@ CREATE TABLE IF NOT EXISTS archive_policies (
     batch_id VARCHAR,
     generation INTEGER,
     metrics_json VARCHAR,
+    selections INTEGER DEFAULT 0,
+    promotions INTEGER DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS theories (
+    doc_id VARCHAR PRIMARY KEY,
+    generation INTEGER,
+    agent_role VARCHAR,
+    doc_type VARCHAR,
+    title VARCHAR,
+    content TEXT,
+    tags VARCHAR,
+    verified_c_rule VARCHAR,
+    metrics_json TEXT,
+    created_at DOUBLE
+);
+
+CREATE TABLE IF NOT EXISTS tournament_attempts (
+    attempt_id VARCHAR PRIMARY KEY,
+    generation INTEGER,
+    peer_id VARCHAR,
+    deficit_id VARCHAR,
+    candidate_fp VARCHAR,
+    promoted BOOLEAN,
+    sandbox_passed BOOLEAN,
+    sandbox_error TEXT,
+    avg_depth DOUBLE,
+    max_depth INTEGER,
+    avg_score DOUBLE,
+    avg_ac DOUBLE,
+    avg_xp_level DOUBLE,
+    policy_exceptions INTEGER,
+    seeds_gained_json TEXT,
+    seeds_lost_json TEXT,
+    top_tracebacks_json TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE OR REPLACE VIEW champion_runs AS
@@ -533,13 +569,18 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                         "PRAGMA table_info('archive_policies')"
                     ).fetchall()
                 ]
-                if "skills_json" not in cols_ap:
-                    try:
-                        con.execute(
-                            "ALTER TABLE archive_policies ADD COLUMN skills_json TEXT DEFAULT '{}'"
-                        )
-                    except Exception:
-                        pass
+                for c_name, c_typ in [
+                    ("skills_json", "TEXT DEFAULT '{}'"),
+                    ("selections", "INTEGER DEFAULT 0"),
+                    ("promotions", "INTEGER DEFAULT 0"),
+                ]:
+                    if c_name not in cols_ap:
+                        try:
+                            con.execute(
+                                f"ALTER TABLE archive_policies ADD COLUMN {c_name} {c_typ}"
+                            )
+                        except Exception:
+                            pass
         except Exception:
             pass
         con.execute(SCHEMA_SQL)
@@ -578,6 +619,9 @@ def get_schema_markdown(
   `policy_id` (VARCHAR), `generation` (INT), `mode` (VARCHAR), `policy_code` (TEXT), `skills_json` (TEXT: JSON map of `skills/*.py` modules), `avg_depth` (DOUBLE), `max_depth` (INT), `is_promoted` (BOOLEAN), `created_at` (TIMESTAMP).
 - **`function_stats`** (Per-function execution & statistical debugging metrics per batch):
   `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, **`ochiai_good_run_score`**, **`liblit_failure_score`**, **`stagnation_turns`**, **`stagnation_share`**, **`livelock_score`**.
+- **`archive_policies`** (`cell_id`, `depth_bin`, `caution_bin`, `resource_bin`, `fitness`, `selections`, `promotions`, `generation`, `metrics_json`)
+- **`theories`** (`doc_id`, `generation`, `agent_role`, `doc_type`, `title`, `content`, `tags`, `verified_c_rule`, `metrics_json`, `created_at`)
+- **`tournament_attempts`** (`attempt_id`, `generation`, `peer_id`, `deficit_id`, `promoted`, `sandbox_passed`, `avg_depth`, `avg_ac`, `avg_xp_level`, `policy_exceptions`, `seeds_gained_json`, `seeds_lost_json`, `top_tracebacks_json`)
 - **`expert_runs`** (`run_id`, `source`, `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason`, `summary_digest`, `game_log`, `milestones_json`) & **`expert_ticks`** (`run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `message`, `screen_ascii`)."""
     if is_swarm:
         return core_schema
@@ -588,7 +632,6 @@ def get_schema_markdown(
   - `latest_pilot_runs`, `latest_pilot_ticks`
   - `discoveries` (`discovery_id`, `generation`, `batch_id`, `mode`, `target_functions`, `binding_constraint`, `verified_c_rule`, `mechanism`, `mean_delta`, `avg_depth`, `p90_depth`, `max_depth`, `created_at`)
   - `experiments` (`experiment_id`, `generation`, `mode`, `target_functions`, `observation_from_db`, `mechanism`, `passed`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`, `wins`, `losses`, `ties`, `seeds_evaluated`, `is_early_stopped`, `pilot_best_delta`, `verdict_reason`)
-  - `archive_policies` (`cell_id`, `depth_bin`, `caution_bin`, `resource_bin`, `fitness`, `policy_code`, `skills_json`, `batch_id`, `generation`, `metrics_json`)
   - `synthesis_logs`, `llm_cost_rates`
 """
     )

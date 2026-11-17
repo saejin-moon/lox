@@ -62,6 +62,8 @@ class DeficitReport:
     skill_bloat_notes: list[str] = field(default_factory=list)
     vital_summary: str = ""
     recent_attempts: list[str] = field(default_factory=list)
+    recent_theories: list[str] = field(default_factory=list)
+    organic_shards: list[Any] = field(default_factory=list)
 
     def format_brief(self) -> str:
         lines = [
@@ -121,6 +123,10 @@ class DeficitReport:
             )
             for ra in self.recent_attempts[:6]:
                 lines.append(f"  * {ra}")
+        if self.recent_theories:
+            lines.append("### Relevant DuckDB Theory Notes:")
+            for rt in self.recent_theories[:3]:
+                lines.append(f"  * {rt}")
         if self.fail_clusters:
             lines.append("- Domain-Agnostic Trajectory Slices (D_fail):")
             for c in self.fail_clusters:
@@ -183,6 +189,22 @@ class DeficitAnalyzer:
             self._populate_recent_attempts(con, report)
             self._populate_d_succ_and_branches(con, report, raw_branches)
             self._populate_d_fail_clusters(con, report)
+            try:
+                th_rows = con.execute(
+                    """
+                    SELECT generation, agent_role, title, verified_c_rule
+                    FROM theories
+                    WHERE doc_type != 'META_SYNTHESIS' OR generation > 0
+                    ORDER BY generation DESC, created_at DESC
+                    LIMIT 3
+                    """
+                ).fetchall()
+                report.recent_theories = [
+                    f"[Gen {tg} | {tr}] {tt}" + (f" ({trule})" if trule else "")
+                    for tg, tr, tt, trule in th_rows
+                ]
+            except Exception:
+                pass
         except Exception:
             if not report.fail_clusters:
                 report.fail_clusters = self._bootstrap_clusters()
@@ -297,8 +319,70 @@ class DeficitAnalyzer:
 
     @staticmethod
     def _populate_recent_attempts(con: Any, report: DeficitReport) -> None:
+        attempts: list[str] = []
+        min_g = max(1, int(report.generation) - 4)
+        # 1. Query exact challenger records from `tournament_attempts` (including rejected peers & tracebacks)
         try:
-            min_g = max(1, int(report.generation) - 4)
+            ta_rows = con.execute(
+                """
+                SELECT generation, peer_id, deficit_id, promoted, sandbox_passed,
+                       ROUND(avg_depth, 2), max_depth, ROUND(avg_ac, 1),
+                       policy_exceptions, seeds_gained_json, seeds_lost_json,
+                       top_tracebacks_json, sandbox_error
+                FROM tournament_attempts
+                WHERE generation >= ? AND generation < ?
+                ORDER BY generation DESC, promoted DESC, avg_depth DESC
+                LIMIT 8
+                """,
+                [min_g, int(report.generation)],
+            ).fetchall()
+            for (
+                gen_i,
+                pid,
+                did,
+                promoted,
+                sb_ok,
+                ad,
+                md,
+                aac,
+                excs,
+                sg_json,
+                sl_json,
+                tb_json,
+                sb_err,
+            ) in ta_rows:
+                tag = (
+                    "PROMOTED"
+                    if promoted
+                    else ("REJECTED" if sb_ok else "SANDBOX_FAIL")
+                )
+                gained = json.loads(sg_json) if sg_json else []
+                lost = json.loads(sl_json) if sl_json else []
+                tbs = json.loads(tb_json) if tb_json else []
+                extra = []
+                if gained:
+                    extra.append(f"+seeds={gained[:3]}")
+                if lost:
+                    extra.append(f"-seeds={lost[:3]}")
+                if int(excs or 0) > 0:
+                    extra.append(f"exc={excs}")
+                if tbs:
+                    extra.append(f"tb={str(tbs[0])[:80]}")
+                elif sb_err and not sb_ok:
+                    extra.append(f"err={str(sb_err)[:80]}")
+                ext_s = f" | {'; '.join(extra)}" if extra else ""
+                attempts.append(
+                    f"Gen {gen_i} [{tag} | {pid}@{did} | D={ad} (Max={md}), AC={aac}]{ext_s}"
+                )
+        except Exception:
+            pass
+
+        if attempts:
+            report.recent_attempts = attempts
+            return
+
+        # 2. Fallback to `batches` + `synthesis_logs` when `tournament_attempts` is not yet populated
+        try:
             b_rows = con.execute(
                 """
                 SELECT generation, candidate_policy_id, hypothesis_passed,
@@ -423,16 +507,40 @@ class DeficitAnalyzer:
             dict.fromkeys(int(r[1]) for r in succ_rows if r[1] is not None)
         )
 
-        fn_rows = con.execute(
-            """
-            SELECT function_name,
-                   MAX(COALESCE(ochiai_good_run_score, 0.0)) AS max_ochiai,
-                   SUM(COALESCE(total_turns_active, 0)) AS sum_turns
-            FROM function_stats
-            GROUP BY function_name
-            ORDER BY max_ochiai DESC, sum_turns DESC
-            """
-        ).fetchall()
+        fn_rows = []
+        # Scope Ochiai/turns to latest 1-3 promoted SWARM champion batches & exclude chronically stagnating functions
+        try:
+            fn_rows = con.execute(
+                """
+                WITH recent_champs AS (
+                    SELECT batch_id FROM batches
+                    WHERE UPPER(mode) = 'SWARM' AND hypothesis_passed = TRUE
+                    ORDER BY generation DESC, created_at DESC
+                    LIMIT 3
+                )
+                SELECT fs.function_name,
+                       MAX(COALESCE(fs.ochiai_good_run_score, 0.0) * (1.0 - LEAST(0.85, COALESCE(fs.stagnation_share, 0.0)))) AS net_ochiai,
+                       SUM(COALESCE(fs.total_turns_active, 0)) AS sum_turns
+                FROM function_stats fs
+                JOIN recent_champs rc ON fs.batch_id = rc.batch_id
+                GROUP BY fs.function_name
+                HAVING AVG(COALESCE(fs.stagnation_share, 0.0)) < 0.35
+                ORDER BY net_ochiai DESC, sum_turns DESC
+                """
+            ).fetchall()
+        except Exception:
+            fn_rows = []
+        if not fn_rows:
+            fn_rows = con.execute(
+                """
+                SELECT function_name,
+                       MAX(COALESCE(ochiai_good_run_score, 0.0) * (1.0 - LEAST(0.85, COALESCE(stagnation_share, 0.0)))) AS max_ochiai,
+                       SUM(COALESCE(total_turns_active, 0)) AS sum_turns
+                FROM function_stats
+                GROUP BY function_name
+                ORDER BY max_ochiai DESC, sum_turns DESC
+                """
+            ).fetchall()
         active_turns_by_fn = {str(r[0]): int(r[2] or 0) for r in fn_rows}
         protected: list[dict[str, Any]] = []
         for fn_name, max_och, sum_turns in fn_rows:
@@ -692,37 +800,49 @@ class DeficitAnalyzer:
                     data["notes"],
                 )
             )
-        # If fewer than 4 distinct clusters exist while the top cluster bundles multiple
-        # distinct `last_active_function` cohorts, split out secondary cohorts (domain-agnostic)
-        # so concurrent peers claim genuinely distinct empirical slices instead of duplicating.
-        if len(built) < 4 and built:
-            top_cid = built[0].cluster_id
-            by_fn: dict[str, list[tuple[Any, ...]]] = {}
-            for r in clusters[top_cid]["rows"]:
-                fn_key = str(r[13] or "unknown").strip() or "unknown"
-                by_fn.setdefault(fn_key, []).append(r)
-            if len(by_fn) >= 2:
-                ordered_fns = sorted(
-                    by_fn.items(), key=lambda kv: len(kv[1]), reverse=True
-                )
-                for fn_key, sub_rows in ordered_fns[1:]:
-                    if len(built) >= 4 or len(sub_rows) < 2:
-                        break
-                    sub_notes = list(
-                        dict.fromkeys(
-                            f"end=`{str(r[5] or 'unknown').strip()}`, tiles={r[6]}"
-                            for r in sub_rows[:2]
-                        )
+        # Sub-split oversized failure clusters (> 8 runs) or narrow cluster pools by `last_active_function`
+        # so concurrent peers always claim genuinely orthogonal cohorts.
+        if built:
+            expanded: list[DeficitCluster] = list(built)
+            split_targets = [c for c in built if c.run_count > 8] or (
+                [built[0]] if len(built) < 4 else []
+            )
+            for target_c in split_targets:
+                if len(expanded) >= 6:
+                    break
+                cid_src = target_c.cluster_id
+                if cid_src not in clusters:
+                    continue
+                by_fn: dict[str, list[tuple[Any, ...]]] = {}
+                for r in clusters[cid_src]["rows"]:
+                    fn_key = str(r[13] or "unknown").strip() or "unknown"
+                    by_fn.setdefault(fn_key, []).append(r)
+                if len(by_fn) >= 2:
+                    ordered_fns = sorted(
+                        by_fn.items(), key=lambda kv: len(kv[1]), reverse=True
                     )
-                    built.append(
-                        _build_cluster(
-                            f"{top_cid}_{fn_key}",
-                            clusters[top_cid]["kind"],
-                            f"{clusters[top_cid]['label']} [{fn_key}]",
-                            sub_rows,
-                            [fn_key],
-                            sub_notes,
+                    for fn_key, sub_rows in ordered_fns[1:]:
+                        if len(expanded) >= 6 or len(sub_rows) < 2:
+                            break
+                        sub_cid = f"{cid_src}_{fn_key}"
+                        if any(ec.cluster_id == sub_cid for ec in expanded):
+                            continue
+                        sub_notes = list(
+                            dict.fromkeys(
+                                f"end=`{str(r[5] or 'unknown').strip()}`, tiles={r[6]}"
+                                for r in sub_rows[:2]
+                            )
                         )
-                    )
+                        expanded.append(
+                            _build_cluster(
+                                sub_cid,
+                                clusters[cid_src]["kind"],
+                                f"{clusters[cid_src]['label']} [{fn_key}]",
+                                sub_rows,
+                                [fn_key],
+                                sub_notes,
+                            )
+                        )
+            built = expanded
 
         report.fail_clusters = built[:6]

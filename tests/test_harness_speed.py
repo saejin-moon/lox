@@ -293,3 +293,58 @@ def test_c_symbol_table_bitflags_and_replay_full_memory():
             harness2.close()
     finally:
         harness.close()
+
+
+def test_phase1_lossless_memory_traps_prompts_and_seq_abort() -> None:
+    """Phase 1: trap labels, safe_passable_mask, exits, oprop, noautopickup, getobj/getdir, seq_aborted."""
+    from lox.env.harness import DEFAULT_NETHACKOPTIONS, NetHackHarness
+    from lox.env.state import _IS_TRAP_LUT, _TRAP_NAME_BY_GLYPH
+
+    assert "noautopickup" in DEFAULT_NETHACKOPTIONS
+    assert "autopickup" not in DEFAULT_NETHACKOPTIONS
+    trap_glyphs = [int(g) for g in np.nonzero(_IS_TRAP_LUT)[0]]
+    assert len(trap_glyphs) >= 10
+    trap_names = [_TRAP_NAME_BY_GLYPH[g] for g in trap_glyphs]
+    assert any(
+        "trap" in v.lower() or "pit" in v.lower() or "web" in v.lower()
+        for v in trap_names
+    )
+    assert all(
+        "wall" not in v.lower() and "doorway" not in v.lower() for v in trap_names
+    )
+
+    harness = NetHackHarness(max_steps=50)
+    try:
+        st = harness.reset(seed=42)
+        tg = trap_glyphs[0]
+        ty, tx = st.y, st.x
+        st.glyphs[ty, tx] = tg
+        st.chars[ty, tx] = ord("^")
+        st.mem.update(st)
+        assert bool(st.passable_mask[ty, tx]) is True
+        assert bool(st.safe_passable_mask[ty, tx]) is False
+        assert int(st.mem.remembered_glyphs[ty, tx]) == tg
+        assert isinstance(st.worn_oprop_mask, int)
+        assert isinstance(st.mem.level_exits, dict)
+
+        st._message_cache = "What do you want to wear? [a-z or ?*]"
+        orig_internal = st.internal.copy()
+        st.internal[1] = 1
+        st.internal[2] = 0
+        assert st.in_getobj_prompt is True
+        assert st.in_getdir_prompt is False
+        assert st.in_yn_prompt is False
+
+        st._message_cache = "In what direction?"
+        assert st.in_getdir_prompt is True
+        assert st.in_getobj_prompt is False
+        assert st.in_yn_prompt is False
+        st.internal[:] = orig_internal
+
+        # Mid-sequence safety abort: ZAP when pack has no wand aborts before second byte 'z'
+        bytes_before = len(harness.action_bytes)
+        _, _, info = harness.step(seq(Action.ZAP, key("z")))
+        assert info.get("seq_aborted") is True
+        assert len(harness.action_bytes) == bytes_before + 1
+    finally:
+        harness.close()

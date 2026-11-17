@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import os
 import signal
 import threading
 import time
@@ -229,6 +230,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             return [], ""
 
     last_inv_items, last_inv_summary = _summarize_inv(state)
+    exception_tracebacks: list[str] = []
 
     for step_idx in range(1, max_steps + 1):
         try:
@@ -241,11 +243,23 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             runner.policy_exceptions += 1
             break
         except Exception as exc:
+            import traceback
+
             raw_act = Action.WAIT
             active_fn = runner.tracer.active_fn
             end_reason = f"policy_error:{type(exc).__name__}"
             death_msg = str(exc)[:120]
             runner.policy_exceptions += 1
+            try:
+                frames = traceback.extract_tb(exc.__traceback__)
+                loc = (
+                    f"{os.path.basename(frames[-1].filename)}:{frames[-1].lineno} in {frames[-1].name}: "
+                    if frames
+                    else ""
+                )
+            except Exception:
+                loc = ""
+            exception_tracebacks.append(f"{loc}{type(exc).__name__}: {str(exc)[:160]}")
             break
 
         is_wait = (
@@ -490,6 +504,9 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         milestones["unworn_armor_in_pack"] = bool(locals().get("unworn_armor", False))
         if dedup_leaf_errs:
             milestones["leaf_errors"] = dedup_leaf_errs
+        all_tbs = list(dict.fromkeys([*exception_tracebacks, *dedup_leaf_errs]))[:8]
+        if all_tbs:
+            milestones["exception_tracebacks"] = all_tbs
     if dedup_leaf_errs and "LeafErrors:" not in summary_digest:
         summary_digest = (
             f"{summary_digest}\nLeafErrors: {'; '.join(dedup_leaf_errs[:4])}"

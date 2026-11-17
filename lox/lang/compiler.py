@@ -59,9 +59,11 @@ from lox.lang.bt import (
     Blackboard,
     ConditionLeaf,
     Inverter,
+    MemorySequence,
     NodeStatus,
     PrioritySelector,
     Sequence,
+    bt_leaf,
 )
 from lox.lang.instrument import (
     ExecutionTracer,
@@ -70,6 +72,7 @@ from lox.lang.instrument import (
 )
 from lox.lang.validator import (
     PolicyValidationError,
+    check_undefined_symbols,
     validate_python_code,
 )
 
@@ -240,11 +243,13 @@ def _build_base_namespace(tracer: ExecutionTracer) -> dict[str, Any]:
         "BehaviorTree": BehaviorTree,
         "PrioritySelector": PrioritySelector,
         "Sequence": Sequence,
+        "MemorySequence": MemorySequence,
         "ActionLeaf": ActionLeaf,
         "ConditionLeaf": ConditionLeaf,
         "Inverter": Inverter,
         "Blackboard": Blackboard,
         "NodeStatus": NodeStatus,
+        "bt_leaf": bt_leaf,
         # Decorator no-op for `@macro`
         "macro": lambda fn: fn,
         # Global parameter helper `param("name", default, min_val, max_val)`
@@ -598,6 +603,16 @@ class CompiledPolicy:
         else:
             self._macro_code_obj = None
 
+        # Fast (<2ms) CPython symtable undefined-symbol and cross-skill export gate
+        allowed_globals = frozenset(
+            _build_base_namespace(ExecutionTracer()).keys()
+        ) | frozenset(self.macro_function_names)
+        check_undefined_symbols(
+            policy_code=policy_code,
+            skills=self.skills,
+            allowed_globals=allowed_globals,
+        )
+
         policy_tree = validate_python_code(policy_code, filename="policy.py")
         policy_tree = PolicyInstrumentTransformer(is_macro_module=False).visit(
             policy_tree
@@ -815,7 +830,7 @@ def compile_bt_subtree(
         composites = [
             v
             for v in ns.values()
-            if isinstance(v, (PrioritySelector, Sequence, Inverter))
+            if isinstance(v, (PrioritySelector, Sequence, MemorySequence, Inverter))
         ]
         if composites:
             return _attach_tracer(composites[-1])

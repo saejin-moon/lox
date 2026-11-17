@@ -1,72 +1,84 @@
 """
-Embedded Document DB for LOX using LanceDB.
-Stores qualitative hypotheses, mechanistic theories, evaluation summaries, and reflection reports
-with native Tantivy BM25 full-text keyword search and vector embedding support.
+Unified DuckDB Theory & Reflection Store for LOX.
+Replaces the external LanceDB store so theories, peer hypotheses, and tournament verdicts
+live inside the single canonical DuckDB file (`theories` table) and are queryable both via
+`query_theories` (tokenized parameterized SQL ranking) and `query_db`.
 """
 
 from __future__ import annotations
 
 import itertools
 import json
+import os
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-import lancedb
-from lancedb.index import FTS
+from lox.db.schema import _INITIALIZED_DBS, DEFAULT_DB_PATH, connect_db, init_db
 
-DEFAULT_THEORIES_PATH = "data/workspace/theories.lance"
-_LANCE_LOCK = threading.RLock()
+DEFAULT_THEORIES_PATH = DEFAULT_DB_PATH
+_THEORY_LOCK = threading.RLock()
 _DOC_SEQ = itertools.count(1)
+
+
+def _resolve_theory_db_path(db_path: str) -> str:
+    raw_p = str(db_path or DEFAULT_DB_PATH).strip() or DEFAULT_DB_PATH
+    if raw_p.endswith(".lance"):
+        return f"{raw_p[:-6]}.duckdb"
+    if not raw_p.endswith((".duckdb", ".db")):
+        Path(raw_p).mkdir(parents=True, exist_ok=True)
+        return str(Path(raw_p) / "theories.duckdb")
+    return raw_p
 
 
 class TheoryDocumentStore:
     """
-    Embedded document database for qualitative theories, failure post-mortems,
-    and agent reflection reports.
+    DuckDB-backed document database (`theories` table) for qualitative hypotheses,
+    failure post-mortems, and agent reflection reports.
     """
 
     TABLE_NAME = "theories"
 
     def __init__(self, db_path: str = DEFAULT_THEORIES_PATH) -> None:
-        self.db_path = str(db_path)
-        with _LANCE_LOCK:
-            Path(self.db_path).mkdir(parents=True, exist_ok=True)
-            self.db = lancedb.connect(self.db_path)
-            self._table = None
-            self._fts_dirty = False
-            self._init_table()
+        self.raw_db_path = str(db_path)
+        self.db_path = _resolve_theory_db_path(self.raw_db_path)
+        self._fts_dirty = False
+        self._init_table()
 
     def _init_table(self) -> None:
-        tables = (
-            list(self.db.list_tables())
-            if hasattr(self.db, "list_tables")
-            else self.db.table_names()
-        )
-        if self.TABLE_NAME in tables:
-            self._table = self.db.open_table(self.TABLE_NAME)
-        else:
-            # Initialize with seed schema record
-            seed_data = [
-                {
-                    "doc_id": "seed_000",
-                    "generation": 0,
-                    "agent_role": "system",
-                    "doc_type": "META_SYNTHESIS",
-                    "title": "System Initialization",
-                    "content": "Theory document store initialized for LOX multi-agent swarm.",
-                    "tags": "init,system",
-                    "verified_c_rule": "",
-                    "metrics_json": "{}",
-                    "created_at": time.time(),
-                }
-            ]
-            self._table = self.db.create_table(self.TABLE_NAME, data=seed_data)
+        with _THEORY_LOCK:
+            abs_p = os.path.abspath(self.db_path)
+            if abs_p not in _INITIALIZED_DBS or not os.path.exists(self.db_path):
+                init_db(self.db_path).close()
+            con = connect_db(self.db_path, read_only=False)
             try:
-                self._table.create_index("content", config=FTS())
-            except Exception:
-                pass
+                cnt_row = con.execute("SELECT COUNT(*) FROM theories").fetchone()
+                cnt = int(cnt_row[0]) if cnt_row else 0
+                if cnt == 0:
+                    con.execute(
+                        """
+                        INSERT OR IGNORE INTO theories (
+                            doc_id, generation, agent_role, doc_type, title,
+                            content, tags, verified_c_rule, metrics_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            "seed_000",
+                            0,
+                            "system",
+                            "META_SYNTHESIS",
+                            "System Initialization",
+                            "Theory document store initialized for LOX multi-agent swarm.",
+                            "init,system",
+                            "",
+                            "{}",
+                            float(time.time()),
+                        ],
+                    )
+            finally:
+                con.close()
 
     def save_document(
         self,
@@ -81,8 +93,7 @@ class TheoryDocumentStore:
         doc_id: str | None = None,
     ) -> str:
         """
-        Saves a qualitative theory, failure report, or synthesis document.
-        Automatically indexes content for BM25 full-text search.
+        Saves a qualitative theory, failure report, or synthesis document into DuckDB `theories`.
         """
         if not doc_id:
             doc_id = f"doc_{agent_role}_{int(time.time() * 1000)}_{next(_DOC_SEQ)}"
@@ -90,25 +101,31 @@ class TheoryDocumentStore:
         tags_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
         metrics_str = json.dumps(metrics) if metrics else "{}"
 
-        record = {
-            "doc_id": str(doc_id),
-            "generation": int(generation),
-            "agent_role": str(agent_role),
-            "doc_type": str(doc_type),
-            "title": str(title),
-            "content": str(content),
-            "tags": tags_str,
-            "verified_c_rule": str(verified_c_rule),
-            "metrics_json": metrics_str,
-            "created_at": float(time.time()),
-        }
-
-        with _LANCE_LOCK:
-            if self._table is None:
-                self._init_table()
-            assert self._table is not None
-            self._table.add([record])
-            self._fts_dirty = True
+        with _THEORY_LOCK:
+            con = connect_db(self.db_path, read_only=False)
+            try:
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO theories (
+                        doc_id, generation, agent_role, doc_type, title,
+                        content, tags, verified_c_rule, metrics_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        str(doc_id),
+                        int(generation),
+                        str(agent_role),
+                        str(doc_type),
+                        str(title),
+                        str(content),
+                        tags_str,
+                        str(verified_c_rule),
+                        metrics_str,
+                        float(time.time()),
+                    ],
+                )
+            finally:
+                con.close()
         return doc_id
 
     def search_theories(
@@ -119,61 +136,92 @@ class TheoryDocumentStore:
         doc_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Performs BM25 full-text search over document contents using Tantivy FTS.
-        Filters by agent_role and/or doc_type if provided.
+        Searches DuckDB `theories` using parameterized multi-term keyword scoring
+        across `title`, `tags`, `verified_c_rule`, and `content`, weighted by generation recency.
         """
-        with _LANCE_LOCK:
-            if self._table is None:
-                return []
+        clean_q = str(query or "").strip()
+        lim = max(1, int(limit))
+        tokens = [
+            t
+            for t in re.findall(r"[a-zA-Z0-9_]{2,}", clean_q.lower())
+            if t not in {"the", "and", "for", "with", "from", "into", "that", "this"}
+        ][:8]
 
-            clean_q = str(query).strip()
-            if not clean_q:
-                return []
+        where_parts: list[str] = []
+        where_params: list[Any] = []
+        if agent_role:
+            where_parts.append("agent_role = ?")
+            where_params.append(str(agent_role))
+        if doc_type:
+            where_parts.append("doc_type = ?")
+            where_params.append(str(doc_type))
 
-            if getattr(self, "_fts_dirty", False):
-                try:
-                    self._table.create_index("content", config=FTS(), replace=True)
-                except Exception:
-                    pass
-                self._fts_dirty = False
+        if tokens:
+            token_clauses: list[str] = []
+            score_exprs: list[str] = []
+            score_params: list[Any] = []
+            for tok in tokens:
+                pat = f"%{tok}%"
+                token_clauses.append(
+                    "(title ILIKE ? OR content ILIKE ? OR tags ILIKE ? OR verified_c_rule ILIKE ?)"
+                )
+                where_params.extend([pat, pat, pat, pat])
+                score_exprs.append(
+                    "(CASE WHEN title ILIKE ? THEN 3 ELSE 0 END"
+                    " + CASE WHEN tags ILIKE ? THEN 2 ELSE 0 END"
+                    " + CASE WHEN verified_c_rule ILIKE ? THEN 2 ELSE 0 END"
+                    " + CASE WHEN content ILIKE ? THEN 1 ELSE 0 END)"
+                )
+                score_params.extend([pat, pat, pat, pat])
+            where_parts.append(f"({' OR '.join(token_clauses)})")
+            score_sql = " + ".join(score_exprs)
+        else:
+            score_sql = "0"
+            score_params = []
 
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        sql = f"""
+            SELECT doc_id, generation, agent_role, doc_type, title, content,
+                   tags, verified_c_rule, metrics_json, created_at
+            FROM theories
+            {where_sql}
+            ORDER BY ({score_sql}) DESC, generation DESC, created_at DESC
+            LIMIT ?
+        """
+        params = [*where_params, *score_params, lim]
+
+        with _THEORY_LOCK:
+            con = connect_db(self.db_path, read_only=True)
             try:
-                builder = self._table.search(clean_q, query_type="fts")
-                filter_clauses = []
-                if agent_role:
-                    filter_clauses.append(f"agent_role = '{agent_role}'")
-                if doc_type:
-                    filter_clauses.append(f"doc_type = '{doc_type}'")
-
-                if filter_clauses:
-                    builder = builder.where(" AND ".join(filter_clauses))
-
-                raw_hits = builder.limit(limit).to_list()
-                # Clean up internal scoring fields
-                hits = []
-                for h in raw_hits:
-                    d = dict(h)
-                    d.pop("_score", None)
-                    hits.append(d)
-                return hits
+                cur = con.execute(sql, params)
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
             except Exception:
-                # Fallback to in-memory substring filtering if FTS index needs sync
-                try:
-                    all_docs = self._table.to_arrow().to_pylist()
-                    filtered = []
-                    for d in all_docs:
-                        if agent_role and d.get("agent_role") != agent_role:
-                            continue
-                        if doc_type and d.get("doc_type") != doc_type:
-                            continue
-                        if any(
-                            term.lower() in str(d.get("content", "")).lower()
-                            for term in clean_q.split()
-                        ):
-                            filtered.append(d)
-                    return filtered[:limit]
-                except Exception:
-                    return []
+                return []
+            finally:
+                con.close()
+
+    def list_documents(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Returns recent documents stored in the `theories` table."""
+        with _THEORY_LOCK:
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                cur = con.execute(
+                    """
+                    SELECT doc_id, generation, agent_role, doc_type, title, content,
+                           tags, verified_c_rule, metrics_json, created_at
+                    FROM theories
+                    ORDER BY generation DESC, created_at DESC
+                    LIMIT ?
+                    """,
+                    [max(1, int(limit))],
+                )
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+            except Exception:
+                return []
+            finally:
+                con.close()
 
     def get_latest_reports(
         self,
@@ -181,49 +229,57 @@ class TheoryDocumentStore:
     ) -> dict[str, dict[str, Any]]:
         """
         Retrieves the latest REFLECTION_REPORT for each agent_role.
-        Returns a mapping of {agent_role: doc_dict}.
+        Returns a mapping of `{agent_role: doc_dict}`.
         """
-        with _LANCE_LOCK:
-            if self._table is None:
-                return {}
-
+        with _THEORY_LOCK:
+            con = connect_db(self.db_path, read_only=True)
             try:
-                records = self._table.to_arrow().to_pylist()
-                if not records:
-                    return {}
-
-                reports = [
-                    r for r in records if r.get("doc_type") == "REFLECTION_REPORT"
-                ]
+                rows: list[tuple[Any, ...]] = []
+                cols: list[str] = []
                 if generation is not None:
-                    gen_reports = [
-                        r for r in reports if r.get("generation") == generation
-                    ]
-                    if gen_reports:
-                        reports = gen_reports
-
-                if not reports:
-                    return {}
-
-                # Sort descending by created_at
-                reports.sort(
-                    key=lambda r: float(r.get("created_at", 0.0)), reverse=True
-                )
+                    cur = con.execute(
+                        """
+                        SELECT doc_id, generation, agent_role, doc_type, title, content,
+                               tags, verified_c_rule, metrics_json, created_at
+                        FROM theories
+                        WHERE doc_type = 'REFLECTION_REPORT' AND generation = ?
+                        ORDER BY created_at DESC
+                        """,
+                        [int(generation)],
+                    )
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                if not rows:
+                    cur = con.execute(
+                        """
+                        SELECT doc_id, generation, agent_role, doc_type, title, content,
+                               tags, verified_c_rule, metrics_json, created_at
+                        FROM theories
+                        WHERE doc_type = 'REFLECTION_REPORT'
+                        ORDER BY created_at DESC
+                        """
+                    )
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
                 latest_by_role: dict[str, dict[str, Any]] = {}
-                for r in reports:
+                for row in rows:
+                    r = dict(zip(cols, row))
                     role = str(r.get("agent_role", ""))
                     if role and role not in latest_by_role:
                         latest_by_role[role] = r
-
                 return latest_by_role
             except Exception:
                 return {}
+            finally:
+                con.close()
 
     def count(self) -> int:
-        with _LANCE_LOCK:
-            if self._table is None:
-                return 0
+        with _THEORY_LOCK:
+            con = connect_db(self.db_path, read_only=True)
             try:
-                return len(self._table)
+                row = con.execute("SELECT COUNT(*) FROM theories").fetchone()
+                return int(row[0]) if row else 0
             except Exception:
                 return 0
+            finally:
+                con.close()

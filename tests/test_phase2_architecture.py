@@ -156,14 +156,15 @@ def test_map_elites_archive(tmp_path):
     archive = MAPElitesArchive()
     assert archive.coverage() == 0.0
 
-    # Policy A: Dlvl 1, low caution (rush), low resource
+    # Policy A: Dlvl 1, unarmored (AC=10), slow tempo
     metrics_a = {
         "avg_depth": 1.0,
         "max_depth": 1,
-        "pct_wait": 0.01,
-        "pct_search": 0.01,
-        "avg_score": 10.0,
+        "avg_ac": 10.0,
+        "avg_xp_level": 1.0,
+        "avg_unique_tiles": 20.0,
         "avg_turns": 100.0,
+        "avg_score": 10.0,
     }
     added_a, cell_a, elite_a = archive.add_candidate(
         policy_code="class Policy: pass # A",
@@ -173,17 +174,18 @@ def test_map_elites_archive(tmp_path):
         con=con,
     )
     assert added_a is True
-    assert cell_a == "cell_d0_c0_r0"
+    assert cell_a == "cell_v2_d0_v0_t0"
     assert archive.coverage() > 0.0
 
-    # Policy B: Dlvl 2, high caution (searching), medium resource
+    # Policy B: Dlvl 2, armor/XL stepping stone (AC=5.0, XL=3), brisk tempo
     metrics_b = {
         "avg_depth": 2.0,
         "max_depth": 2,
-        "pct_wait": 0.20,
-        "pct_search": 0.20,
-        "avg_score": 150.0,
+        "avg_ac": 5.0,
+        "avg_xp_level": 3.0,
+        "avg_unique_tiles": 160.0,
         "avg_turns": 200.0,
+        "avg_score": 150.0,
     }
     added_b, cell_b, elite_b = archive.add_candidate(
         policy_code="class Policy: pass # B",
@@ -193,16 +195,17 @@ def test_map_elites_archive(tmp_path):
         con=con,
     )
     assert added_b is True
-    assert cell_b == "cell_d1_c2_r2"
+    assert cell_b == "cell_v2_d1_v2_t2"
 
     # Policy A_worse: same cell as A, lower fitness -> rejected
     metrics_a_worse = {
         "avg_depth": 1.0,
         "max_depth": 1,
-        "pct_wait": 0.01,
-        "pct_search": 0.01,
-        "avg_score": 0.0,
+        "avg_ac": 10.0,
+        "avg_xp_level": 1.0,
+        "avg_unique_tiles": 2.0,
         "avg_turns": 20.0,
+        "avg_score": 0.0,
     }
     added_aw, cell_aw, _ = archive.add_candidate(
         policy_code="class Policy: pass # Aw",
@@ -212,22 +215,24 @@ def test_map_elites_archive(tmp_path):
         con=con,
     )
     assert added_aw is False
-    assert cell_aw == "cell_d0_c0_r0"
+    assert cell_aw == "cell_v2_d0_v0_t0"
 
-    # Sampling
+    # Sampling (including UCB1 curiosity)
     best_sample = archive.sample_elite(strategy="best")
     assert best_sample is not None
-    assert best_sample.cell_id == cell_b  # Policy B reached Dlvl 2, higher fitness
+    assert best_sample.cell_id == cell_b
 
-    curiosity_sample = archive.sample_elite(strategy="curiosity")
+    curiosity_sample = archive.sample_elite(strategy="ucb_curiosity")
     assert curiosity_sample is not None
+    archive.record_outcome(cell_b, promoted=True, con=con)
 
     # Load from DB
     new_archive = MAPElitesArchive()
     loaded_count = new_archive.load_from_db(con)
     assert loaded_count == 2
-    assert "cell_d0_c0_r0" in new_archive.cells
-    assert "cell_d1_c2_r2" in new_archive.cells
+    assert "cell_v2_d0_v0_t0" in new_archive.cells
+    assert "cell_v2_d1_v2_t2" in new_archive.cells
+    assert new_archive.cells["cell_v2_d1_v2_t2"].promotions == 1
 
     con.close()
 

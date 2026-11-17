@@ -989,3 +989,51 @@ class BatchDatabaseLogger:
             return {"ticks_pruned": 0, "runs_pruned": 0}
         finally:
             con.close()
+
+    def save_tournament_attempts(self, attempts: list[dict[str, Any]]) -> None:
+        """Persists peer challenger / tournament outcomes into DuckDB `tournament_attempts`."""
+        if not attempts:
+            return
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            now = datetime.datetime.now()
+            con.execute("BEGIN TRANSACTION")
+            for a in attempts:
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO tournament_attempts (
+                        attempt_id, generation, peer_id, deficit_id, candidate_fp,
+                        promoted, sandbox_passed, sandbox_error, avg_depth, max_depth,
+                        avg_score, avg_ac, avg_xp_level, policy_exceptions,
+                        seeds_gained_json, seeds_lost_json, top_tracebacks_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        str(a.get("attempt_id", "")),
+                        int(a.get("generation", 0) or 0),
+                        str(a.get("peer_id", "")),
+                        str(a.get("deficit_id", "")),
+                        str(a.get("candidate_fp", "")),
+                        bool(a.get("promoted", False)),
+                        bool(a.get("sandbox_passed", False)),
+                        str(a.get("sandbox_error", ""))[:2000],
+                        float(a.get("avg_depth", 0.0) or 0.0),
+                        int(a.get("max_depth", 0) or 0),
+                        float(a.get("avg_score", 0.0) or 0.0),
+                        float(a.get("avg_ac", 10.0) or 10.0),
+                        float(a.get("avg_xp_level", 1.0) or 1.0),
+                        int(a.get("policy_exceptions", 0) or 0),
+                        json.dumps(a.get("seeds_gained", [])),
+                        json.dumps(a.get("seeds_lost", [])),
+                        json.dumps(a.get("top_tracebacks", [])),
+                        now,
+                    ],
+                )
+            con.execute("COMMIT")
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+        finally:
+            con.close()

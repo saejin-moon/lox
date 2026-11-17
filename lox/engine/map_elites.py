@@ -1,16 +1,17 @@
 """
-3D Quality-Diversity MAP-Elites Behavioral Archive.
-Maintains diverse behavioral stepping stones across 3 phenotypic dimensions:
-1. Depth: Max/mean depth reached (5 bins: D1, D2, D3, D4, D5+)
-2. Caution: Search and wait proportion (4 bins: [0, 0.10), [0.10, 0.25), [0.25, 0.50), [0.50, 1.0])
-3. Resource Mastery: Efficiency and score density (4 bins: [0, 0.2), [0.2, 0.5), [0.5, 1.0), [1.0, inf))
+3D Quality-Diversity MAP-Elites Behavioral Archive (v2 Vitals & Spatial Tempo Grid).
+Maintains diverse behavioral stepping stones across 3 orthogonal phenotypic dimensions:
+1. Depth (`avg_depth` non-aliasing): 5 bins via thresholds `(1.5, 2.5, 4.0, 6.5)`
+2. Vitals Progression (`vital_bin`): 4 bins via `max(0.0, 10.0 - avg_ac) + 1.5*max(0.0, avg_xp_level - 1.0) + 2.0*max(0.0, avg_branches - 1.0)` at `(3.0, 7.0, 12.0)`
+3. Spatial Tempo (`tempo_bin`): 4 bins via `avg_unique_tiles / max(10.0, avg_turns)` at `(0.3, 0.7, 1.2)`
 
-Total Niches: 5 * 4 * 4 = 80 cells.
+Total Niches: 5 * 4 * 4 = 80 cells (`cell_v2_d{d}_v{v}_t{t}`).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 from dataclasses import dataclass, field
@@ -30,20 +31,22 @@ class Elite:
     metrics: dict[str, Any]
     updated_at: float = 0.0
     skills: dict[str, str] = field(default_factory=dict)
+    selections: int = 0
+    promotions: int = 0
 
 
 class MAPElitesArchive:
     """
     Quality-Diversity MAP-Elites Archive storing the highest-fitness policy
-    in each behavioral niche.
+    in each non-aliasing behavioral niche, with UCB1 + neighbor-curiosity sampling.
     """
 
     DEPTH_BINS = 5
     CAUTION_BINS = 4
     RESOURCE_BINS = 4
-    DEFAULT_DEPTH_THRESHOLDS = (1.5, 3.5, 7.0, 12.0)
-    DEFAULT_CAUTION_THRESHOLDS = (0.10, 0.25, 0.50)
-    DEFAULT_DENSITY_THRESHOLDS = (0.20, 0.50, 1.00)
+    DEFAULT_DEPTH_THRESHOLDS = (1.5, 2.5, 4.0, 6.5)
+    DEFAULT_CAUTION_THRESHOLDS = (3.0, 7.0, 12.0)  # Vitals progression axis
+    DEFAULT_DENSITY_THRESHOLDS = (0.30, 0.70, 1.20)  # Spatial tempo axis
     DEFAULT_FITNESS_WEIGHTS = (1000.0, 250.0, 0.1, 0.05)
 
     def __init__(
@@ -69,48 +72,69 @@ class MAPElitesArchive:
     @classmethod
     def compute_cell_id(cls, metrics: dict[str, Any]) -> tuple[str, int, int, int]:
         """
-        Maps episode metrics to 3D discrete niche coordinates:
-        (depth_bin, caution_bin, resource_bin).
+        Maps episode metrics to non-aliasing 3D niche coordinates (`cell_v2_d{d}_v{v}_t{t}`):
+        (depth_bin, vital_bin, tempo_bin).
         """
-        # 1. Depth Dimension (0 to 4, scaled across mid/late dungeon tiers)
+        # 1. Avg Depth Dimension (0 to 4, non-aliasing: avg_depth rather than single outlier max_depth)
         avg_depth = float(metrics.get("avg_depth", metrics.get("mean_depth", 1.0)))
-        max_depth = int(metrics.get("max_depth", 1))
-        d_val = max(avg_depth, float(max_depth))
-        d_bin = cls._bin_value(d_val, cls.DEFAULT_DEPTH_THRESHOLDS)
+        d_bin = cls._bin_value(avg_depth, cls.DEFAULT_DEPTH_THRESHOLDS)
 
-        # 2. Caution Dimension (0 to 3); normalize 0..100 percentages to 0..1 fraction
-        pct_wait = float(metrics.get("pct_wait", 0.0))
-        pct_search = float(metrics.get("pct_search", 0.0))
-        caution_val = pct_wait + pct_search
-        if caution_val > 1.0:
-            caution_val /= 100.0
-        c_bin = cls._bin_value(caution_val, cls.DEFAULT_CAUTION_THRESHOLDS)
-
-        # 3. Resource Mastery Dimension (0 to 3)
-        score = float(metrics.get("avg_score", metrics.get("mean_score", 0.0)))
-        turns = max(
-            10.0, float(metrics.get("avg_turns", metrics.get("mean_turns", 100.0)))
+        # 2. Vitals Progression Dimension (0 to 3): rewards armor upgrades (low AC), XL, branches
+        avg_ac = float(metrics.get("avg_ac", 10.0) or 10.0)
+        avg_xl = float(metrics.get("avg_xp_level", metrics.get("avg_xl", 1.0)) or 1.0)
+        avg_branches = float(metrics.get("avg_branches", 1.0) or 1.0)
+        vitals_val = (
+            max(0.0, 10.0 - avg_ac)
+            + 1.5 * max(0.0, avg_xl - 1.0)
+            + 2.0 * max(0.0, avg_branches - 1.0)
         )
-        density = score / turns
-        r_bin = cls._bin_value(density, cls.DEFAULT_DENSITY_THRESHOLDS)
+        v_bin = cls._bin_value(vitals_val, cls.DEFAULT_CAUTION_THRESHOLDS)
 
-        cell_id = f"cell_d{d_bin}_c{c_bin}_r{r_bin}"
-        return cell_id, d_bin, c_bin, r_bin
+        # 3. Spatial Tempo Dimension (0 to 3): unique_tiles explored per turn
+        avg_turns = max(
+            10.0,
+            float(metrics.get("avg_turns", metrics.get("mean_turns", 100.0)) or 100.0),
+        )
+        avg_tiles = float(metrics.get("avg_unique_tiles", 0.0) or 0.0)
+        if (
+            avg_tiles <= 0.0
+            and float(metrics.get("avg_score", metrics.get("mean_score", 0.0)) or 0.0)
+            > 0.0
+        ):
+            # Fallback if spatial telemetry omitted in minimal synthetic tests
+            tempo_val = (
+                float(metrics.get("avg_score", metrics.get("mean_score", 0.0)) or 0.0)
+                / avg_turns
+            )
+        else:
+            tempo_val = avg_tiles / avg_turns
+        t_bin = cls._bin_value(tempo_val, cls.DEFAULT_DENSITY_THRESHOLDS)
+
+        cell_id = f"cell_v2_d{d_bin}_v{v_bin}_t{t_bin}"
+        return cell_id, d_bin, v_bin, t_bin
 
     @staticmethod
     def compute_fitness(metrics: dict[str, Any]) -> float:
         """
         Computes scalar fitness for comparing policies within the same niche.
-        Prefers depth progression, survival duration, and score density.
+        Incorporates avg_depth, vitals (AC, XL, branches), max_depth, and score.
         """
         avg_depth = float(metrics.get("avg_depth", metrics.get("mean_depth", 1.0)))
         max_depth = float(metrics.get("max_depth", 1.0))
         avg_score = float(metrics.get("avg_score", metrics.get("mean_score", 0.0)))
         avg_turns = float(metrics.get("avg_turns", metrics.get("mean_turns", 0.0)))
-        # Depth dominates, followed by score and safe turns
+        avg_ac = float(metrics.get("avg_ac", 10.0) or 10.0)
+        avg_xl = float(metrics.get("avg_xp_level", metrics.get("avg_xl", 1.0)) or 1.0)
+        avg_branches = float(metrics.get("avg_branches", 1.0) or 1.0)
+        vitals_bonus = (
+            max(0.0, 10.0 - avg_ac) * 120.0
+            + max(0.0, avg_xl - 1.0) * 150.0
+            + max(0.0, avg_branches - 1.0) * 200.0
+        )
         return (
             (avg_depth * 1000.0)
-            + (max_depth * 250.0)
+            + (max_depth * 150.0)
+            + vitals_bonus
             + (avg_score * 0.1)
             + (avg_turns * 0.05)
         )
@@ -148,6 +172,8 @@ class MAPElitesArchive:
             metrics=metrics,
             updated_at=time.time(),
             skills=dict(skills or {}),
+            selections=existing.selections if existing is not None else 0,
+            promotions=existing.promotions if existing is not None else 0,
         )
         self.cells[cell_id] = elite
 
@@ -155,6 +181,17 @@ class MAPElitesArchive:
             self._persist_elite(con, elite)
 
         return True, cell_id, elite
+
+    def record_outcome(self, cell_id: str, promoted: bool, con: Any = None) -> None:
+        """Records whether branching from `cell_id` yielded a tournament promotion for UCB1."""
+        e = self.cells.get(cell_id)
+        if e is None:
+            return
+        e.selections += 1
+        if promoted:
+            e.promotions += 1
+        if con is not None:
+            self._persist_elite(con, e)
 
     def _persist_elite(self, con: Any, elite: Elite) -> None:
         try:
@@ -164,8 +201,9 @@ class MAPElitesArchive:
                 """
                 INSERT OR REPLACE INTO archive_policies (
                     cell_id, depth_bin, caution_bin, resource_bin, fitness,
-                    policy_code, skills_json, batch_id, generation, metrics_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    policy_code, skills_json, batch_id, generation, metrics_json,
+                    selections, promotions, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 [
                     elite.cell_id,
@@ -178,17 +216,20 @@ class MAPElitesArchive:
                     elite.batch_id,
                     elite.generation,
                     m_json,
+                    int(elite.selections),
+                    int(elite.promotions),
                 ],
             )
         except Exception:
             pass
 
-    def sample_elite(self, strategy: str = "curiosity") -> Elite | None:
+    def sample_elite(self, strategy: str = "ucb_curiosity") -> Elite | None:
         """
         Samples an elite policy from the archive.
         - 'best': Highest fitness policy across all niches.
         - 'random': Uniform random selection across occupied niches.
-        - 'curiosity': Prioritizes niches with few occupied neighbors (frontier of behavioral space).
+        - 'curiosity': Prioritizes niches with few occupied neighbors.
+        - 'ucb_curiosity': UCB1 selection combining promotion yield + exploration + neighbor scarcity.
         """
         if not self.cells:
             return None
@@ -199,23 +240,47 @@ class MAPElitesArchive:
         if strategy == "random" or len(elites) == 1:
             return random.choice(elites)
 
-        # Curiosity: count occupied neighbors in 3D grid
-        weights = []
-        for e in elites:
-            neighbors = 0
-            for dy in (-1, 0, 1):
-                for dc in (-1, 0, 1):
-                    for dr in (-1, 0, 1):
-                        if dy == 0 and dc == 0 and dr == 0:
-                            continue
-                        nid = f"cell_d{e.depth_bin + dy}_c{e.caution_bin + dc}_r{e.resource_bin + dr}"
-                        if nid in self.cells:
-                            neighbors += 1
-            # Fewer neighbors = higher curiosity weight
-            w = 1.0 / (1.0 + neighbors)
-            weights.append(w)
+        total_sel = sum(max(0, int(e.selections)) for e in elites) + len(elites)
+        if strategy == "ucb_curiosity":
+            scored: list[tuple[float, Elite]] = []
+            max_fit = max(max(1.0, float(e.fitness)) for e in elites)
+            for e in elites:
+                sel = max(0, int(e.selections))
+                prom = max(0, int(e.promotions))
+                mean_r = prom / float(sel + 1) + 0.15 * (float(e.fitness) / max_fit)
+                ucb_bonus = math.sqrt(
+                    2.0 * math.log(max(2, total_sel)) / float(sel + 1)
+                )
+                neighbors = sum(
+                    1
+                    for dy in (-1, 0, 1)
+                    for dv in (-1, 0, 1)
+                    for dt in (-1, 0, 1)
+                    if not (dy == 0 and dv == 0 and dt == 0)
+                    and f"cell_v2_d{e.depth_bin + dy}_v{e.caution_bin + dv}_t{e.resource_bin + dt}"
+                    in self.cells
+                )
+                scarcity = 0.25 / (1.0 + neighbors)
+                scored.append((mean_r + ucb_bonus + scarcity, e))
+            scored.sort(key=lambda pair: pair[0], reverse=True)
+            top_elites = [pair[1] for pair in scored[: max(1, min(3, len(scored)))]]
+            weights = [max(0.05, s[0]) for s in scored[: len(top_elites)]]
+            return random.choices(top_elites, weights=weights, k=1)[0]
 
-        return random.choices(elites, weights=weights, k=1)[0]
+        # Curiosity fallback
+        weights_c = []
+        for e in elites:
+            neighbors = sum(
+                1
+                for dy in (-1, 0, 1)
+                for dv in (-1, 0, 1)
+                for dt in (-1, 0, 1)
+                if not (dy == 0 and dv == 0 and dt == 0)
+                and f"cell_v2_d{e.depth_bin + dy}_v{e.caution_bin + dv}_t{e.resource_bin + dt}"
+                in self.cells
+            )
+            weights_c.append(1.0 / (1.0 + neighbors))
+        return random.choices(elites, weights=weights_c, k=1)[0]
 
     def coverage(self) -> float:
         """Returns the fraction of behavioral niches filled (0.0 to 1.0)."""
@@ -223,18 +288,26 @@ class MAPElitesArchive:
         return len(self.cells) / float(total)
 
     def load_from_db(self, con: Any) -> int:
-        """Loads all elites from the archive_policies table in DuckDB."""
+        """Loads v2 elites from `archive_policies`, purging legacy v1 `cell_d*` cells cleanly."""
         try:
+            try:
+                con.execute(
+                    "DELETE FROM archive_policies WHERE cell_id NOT LIKE 'cell_v2_%'"
+                )
+            except Exception:
+                pass
             rows = con.execute(
                 """
                 SELECT cell_id, depth_bin, caution_bin, resource_bin, fitness,
-                       policy_code, COALESCE(skills_json, '{}'), batch_id, generation, metrics_json
+                       policy_code, COALESCE(skills_json, '{}'), batch_id, generation, metrics_json,
+                       COALESCE(selections, 0), COALESCE(promotions, 0)
                 FROM archive_policies
+                WHERE cell_id LIKE 'cell_v2_%'
                 """
             ).fetchall()
             loaded = 0
             for r in rows:
-                cid, db, cb, rb, fit, pcode, sjson, bid, gen, mjson = r
+                cid, db, cb, rb, fit, pcode, sjson, bid, gen, mjson, sels, proms = r
                 m_dict = json.loads(mjson) if mjson else {}
                 s_dict = json.loads(sjson) if sjson else {}
                 self.cells[cid] = Elite(
@@ -248,6 +321,8 @@ class MAPElitesArchive:
                     generation=int(gen),
                     metrics=m_dict,
                     skills=dict(s_dict) if isinstance(s_dict, dict) else {},
+                    selections=int(sels or 0),
+                    promotions=int(proms or 0),
                 )
                 loaded += 1
             return loaded

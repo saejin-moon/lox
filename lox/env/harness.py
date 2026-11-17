@@ -19,17 +19,24 @@ from lox.env.state import (
     _HAS_RUST_FLOOR_MEM,
     _IS_CMAP_LUT,
     _IS_DOORWAY_GLYPH_LUT,
-    _IS_ICE_GLYPH_LUT,
-    _IS_IRON_BARS_OR_TREE_LUT,
-    _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT,
     _IS_OBJECT_LUT,
-    _IS_OPEN_DOOR_GLYPH_LUT,
     _IS_TRAP_LUT,
     GameState,
     WorldMemory,
     astar_next_step,
     bfs_distance_grid,
     lox_core,
+)
+
+DEFAULT_NETHACKOPTIONS: tuple[str, ...] = tuple(
+    ["noautopickup"]
+    + [
+        o
+        for o in nh.NETHACKOPTIONS
+        if o != "autopickup"
+        and o != "noautopickup"
+        and not str(o).startswith(("pickup_types:", "pickup_burden:"))
+    ]
 )
 
 # Pre-warm Numba JIT kernels once at module import
@@ -114,7 +121,7 @@ class NetHackHarness:
         self.allow_menu_linger = allow_menu_linger
         self.lean_obs = lean_obs
         self.max_zero_turn_stalls = max_zero_turn_stalls
-        self.options = options if options is not None else nh.NETHACKOPTIONS
+        self.options = options if options is not None else DEFAULT_NETHACKOPTIONS
         self._obs_keys = list(
             LEAN_OBSERVATION_KEYS if lean_obs else ALL_OBSERVATION_KEYS
         )
@@ -249,9 +256,18 @@ class NetHackHarness:
                 if self.prompt_linger_steps < self.max_prompt_linger:
                     self.prompt_linger_steps += 1
                     break
+                raw_m_l = self._extract_raw_message(obs_tuple).lower()
+                is_getobj_or_dir = self._in_yn(obs_tuple) and (
+                    "[?*" in raw_m_l
+                    or "?*]" in raw_m_l
+                    or "what do you want to " in raw_m_l
+                    or "for what" in raw_m_l
+                    or "in what direction" in raw_m_l
+                    or "direction?" in raw_m_l
+                )
                 b = (
                     ASCII_ESC
-                    if (self._in_getlin(obs_tuple) or menu_linger)
+                    if (self._in_getlin(obs_tuple) or menu_linger or is_getobj_or_dir)
                     else ASCII_N
                 )
                 self.prompt_aborts += 1
@@ -323,6 +339,16 @@ class NetHackHarness:
         self.mem.update(state)
         return state
 
+    def _extract_turn(self, obs_tuple: tuple[np.ndarray, ...]) -> int:
+        blstats_arr = (
+            obs_tuple[self._idx_map["blstats"]]
+            if "blstats" in self._idx_map
+            else (obs_tuple[4] if len(obs_tuple) > 4 else None)
+        )
+        if blstats_arr is not None and len(blstats_arr) > nh.NLE_BL_TIME:
+            return int(blstats_arr[nh.NLE_BL_TIME])
+        return -1
+
     def step(self, policy_action: Any) -> tuple[GameState, bool, dict[str, Any]]:
         """
         Executes a 1-to-1 policy action (or multi-keystroke sequence) on the C NetHack instance.
@@ -344,8 +370,23 @@ class NetHackHarness:
         obs_tuple = self._last_raw_tuple
         done = False
         messages: list[str] = []
+        seq_aborted = False
+        is_extcmd = bool(bytes_seq and bytes_seq[0] == ord("#"))
+        extcmd_cr_idx = (
+            bytes_seq.index(ASCII_CR)
+            if is_extcmd and ASCII_CR in bytes_seq
+            else (
+                bytes_seq.index(ord("\n"))
+                if is_extcmd and ord("\n") in bytes_seq
+                else -1
+            )
+        )
+        is_digit_repeat = bool(
+            bytes_seq and len(bytes_seq) > 1 and ord("0") <= bytes_seq[0] <= ord("9")
+        )
 
         for idx, b in enumerate(bytes_seq):
+            turn_before = self._extract_turn(obs_tuple)
             self.action_bytes.append(b)
             try:
                 obs_tuple, done = self.nh.step(b)
@@ -360,6 +401,45 @@ class NetHackHarness:
                 messages.append(raw_m)
             if done:
                 break
+            if idx < len(bytes_seq) - 1:
+                # Auto-dismiss transient `--More--` between sequence bytes
+                more_guard = 0
+                while (
+                    not done
+                    and self._waiting_for_space(obs_tuple)
+                    and self._has_more_banner(obs_tuple)
+                    and more_guard < 8
+                ):
+                    more_guard += 1
+                    self.action_bytes.append(ASCII_SPACE)
+                    obs_tuple, done = self.nh.step(ASCII_SPACE)
+                    raw_m2 = self._extract_raw_message(obs_tuple)
+                    if raw_m2 and (not messages or messages[-1] != raw_m2):
+                        messages.append(raw_m2)
+                if done:
+                    break
+                if self.allow_menu_linger and self._in_menu(obs_tuple):
+                    seq_aborted = True
+                    break
+                # Stop remaining keys of a multi-byte command only when the preceding byte
+                # returned cleanly to idle moveloop in 0 elapsed turns (rejected command/prompt).
+                in_extcmd_header = is_extcmd and (
+                    extcmd_cr_idx < 0 or idx < extcmd_cr_idx
+                )
+                in_repeat_header = is_digit_repeat and ord("0") <= b <= ord("9")
+                turn_after = self._extract_turn(obs_tuple)
+                if (
+                    not in_extcmd_header
+                    and not in_repeat_header
+                    and turn_before >= 0
+                    and turn_after == turn_before
+                    and self._in_moveloop(obs_tuple)
+                    and not self._in_yn(obs_tuple)
+                    and not self._in_getlin(obs_tuple)
+                    and not self._waiting_for_space(obs_tuple)
+                ):
+                    seq_aborted = True
+                    break
 
         if not done and (
             self._waiting_for_space(obs_tuple)
@@ -421,7 +501,7 @@ class NetHackHarness:
             obs_idx_map=self._idx_map,
         )
         state._message_cache = " | ".join(messages) if messages else ""
-        self.mem.update(state, action_name=action_name)
+        self.mem.update(state, action_name=action_name, messages=messages)
 
         is_ascended = False
         if self.done:
@@ -438,6 +518,7 @@ class NetHackHarness:
                 "truncated": truncated,
                 "is_ascended": is_ascended,
                 "stalled_zero_turn": stalled_zero_turn,
+                "seq_aborted": seq_aborted,
             },
         )
 
@@ -473,6 +554,7 @@ class NetHackHarness:
         bl_idx = self._idx_map["blstats"]
         glyphs_idx = self._idx_map["glyphs"]
         chars_idx = self._idx_map["chars"]
+        colors_idx = self._idx_map.get("colors")
         step_ctr = 0
         for i in range(limit):
             b = int(buf[i])
@@ -512,28 +594,44 @@ class NetHackHarness:
             if in_moveloop or floor_changed:
                 glyphs = obs_tuple[glyphs_idx]
                 chars = obs_tuple[chars_idx]
+                colors = (
+                    obs_tuple[colors_idx]
+                    if colors_idx is not None and colors_idx < len(obs_tuple)
+                    else np.zeros_like(chars, dtype=np.uint8)
+                )
                 if (
                     _HAS_RUST_FLOOR_MEM
                     and isinstance(glyphs, np.ndarray)
                     and isinstance(chars, np.ndarray)
+                    and isinstance(colors, np.ndarray)
                     and glyphs.dtype == np.int16
                     and chars.dtype == np.uint8
+                    and colors.dtype == np.uint8
                     and glyphs.flags.c_contiguous
                     and chars.flags.c_contiguous
+                    and colors.flags.c_contiguous
                 ):
                     if fl._passable_mask.shape != fl.remembered_chars.shape:
                         fl._passable_mask = np.zeros_like(
                             fl.remembered_chars, dtype=np.bool_
                         )
+                    if fl._safe_passable_mask.shape != fl.remembered_chars.shape:
+                        fl._safe_passable_mask = np.zeros_like(
+                            fl.remembered_chars, dtype=np.bool_
+                        )
                     lox_core.fast_update_floor_memory(
                         glyphs,
                         chars,
+                        colors,
                         _FLOOR_GLYPH_FLAGS_LUT,
                         fl.remembered_chars,
+                        fl.remembered_glyphs,
+                        fl.remembered_colors,
                         fl.door_mask,
                         fl.remembered_obj_glyphs,
                         fl.remembered_trap_glyphs,
                         fl._passable_mask,
+                        fl._safe_passable_mask,
                         int(by),
                         int(bx),
                         False,
@@ -543,15 +641,8 @@ class NetHackHarness:
                     is_cmap = _IS_CMAP_LUT[glyphs]
                     cmap_mask = is_cmap & (chars != 0) & (chars != ord(" "))
                     fl.remembered_chars[cmap_mask] = chars[cmap_mask]
-                    open_door_mask = is_cmap & _IS_OPEN_DOOR_GLYPH_LUT[glyphs]
-                    fl.remembered_chars[open_door_mask] = ord(".")
-                    impassable_cmap = is_cmap & _IS_IRON_BARS_OR_TREE_LUT[glyphs]
-                    fl.remembered_chars[impassable_cmap] = ord("|")
-                    walkable_special = is_cmap & (
-                        _IS_ICE_GLYPH_LUT[glyphs]
-                        | _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT[glyphs]
-                    )
-                    fl.remembered_chars[walkable_special] = ord(".")
+                    fl.remembered_glyphs[is_cmap] = glyphs[is_cmap]
+                    fl.remembered_colors[is_cmap] = colors[is_cmap]
                     doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
                     fl.door_mask[doorway_mask] = True
                     fl.door_mask[is_cmap & (~_IS_DOORWAY_GLYPH_LUT[glyphs])] = False

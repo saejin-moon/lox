@@ -318,3 +318,166 @@ def extract_shards_from_db(
         )
     finally:
         con.close()
+
+
+def mine_organic_scenarios(
+    db_path: str,
+    frontier_dir: str = "",
+    max_total: int = 12,
+) -> list[PrefixShard]:
+    """
+    Mines deterministic real NLE `(seed, cut_byte_idx, action_bytes, post_replay_max_steps)`
+    scenarios directly from DuckDB `runs` and `FrontierArchive` checkpoints across 5 structural
+    outcome buckets (zero hardcoded monster/item names or game heuristics).
+    """
+    import os
+
+    cap = max(1, int(max_total))
+    mined: list[PrefixShard] = []
+    seen_keys: set[tuple[int, str]] = set()
+
+    if frontier_dir and os.path.isdir(frontier_dir):
+        try:
+            from lox.engine.frontier import FrontierArchive
+
+            fa = FrontierArchive(frontier_dir=frontier_dir)
+            cps = sorted(
+                fa.checkpoints.values(),
+                key=lambda c: (int(c.depth), -int(getattr(c, "visit_count", 0))),
+                reverse=True,
+            )
+            for cp in cps[: max(2, cap // 4)]:
+                buf = bytes(getattr(cp, "action_bytes", b"") or b"")
+                if len(buf) < 8:
+                    continue
+                ms = str(getattr(cp, "milestone", "") or "").lower()
+                cut = (
+                    max(1, len(buf) - 35)
+                    if any(k in ms for k in ("died", "killed", "starv", "faint"))
+                    else len(buf)
+                )
+                k = (int(cp.seed), "frontier_deep")
+                if k in seen_keys:
+                    continue
+                seen_keys.add(k)
+                mined.append(
+                    PrefixShard(
+                        shard_id=f"org_frontier_{cp.checkpoint_id}",
+                        run_id=str(cp.checkpoint_id),
+                        seed=int(cp.seed),
+                        cut_step_idx=int(cp.turns or 1),
+                        action_bytes=buf[:cut],
+                        depth_at_cut=int(cp.depth or 1),
+                        trigger_context="frontier_deep",
+                        post_replay_max_steps=600,
+                    )
+                )
+        except Exception:
+            pass
+
+    if not db_path or not os.path.exists(db_path):
+        return mined[:cap]
+
+    bucket_specs = [
+        (
+            "frontier_deep",
+            "max_depth >= 4",
+            "max_depth DESC, turns DESC",
+            600,
+            15,
+        ),
+        (
+            "stall_or_prompt",
+            "COALESCE(auto_esc_count, 0) > 0 OR LOWER(COALESCE(end_reason, '')) LIKE '%stall%'",
+            "generation DESC, turns DESC",
+            200,
+            40,
+        ),
+        (
+            "unequipped_crisis",
+            "COALESCE(died_unarmored, FALSE) = TRUE OR LOWER(COALESCE(milestones_json, '')) LIKE '%\"unworn_armor_in_pack\": true%'",
+            "max_depth DESC, generation DESC",
+            350,
+            80,
+        ),
+        (
+            "resource_or_mortality",
+            "COALESCE(starved_with_food, FALSE) = TRUE OR LOWER(COALESCE(end_reason, '')) LIKE '%faint%' OR LOWER(COALESCE(end_reason, '')) LIKE '%illness%' OR LOWER(COALESCE(end_reason, '')) LIKE '%food poisoning%'",
+            "generation DESC, max_depth DESC",
+            300,
+            80,
+        ),
+        (
+            "early_combat_death",
+            "turns < 600 AND LOWER(COALESCE(end_reason, '')) NOT IN ('ascended', 'escaped', 'max_steps', 'ended')",
+            "generation DESC, turns ASC",
+            200,
+            35,
+        ),
+    ]
+
+    con = connect_db(db_path, read_only=True)
+    try:
+        for (
+            bucket_name,
+            where_sql,
+            order_sql,
+            horizon_steps,
+            rewind_bytes,
+        ) in bucket_specs:
+            if len(mined) >= cap:
+                break
+            try:
+                rows = con.execute(
+                    f"""
+                    SELECT run_id, seed, depth, max_depth, turns, action_bytes, milestones_json
+                    FROM runs
+                    WHERE action_bytes IS NOT NULL
+                      AND OCTET_LENGTH(action_bytes) > 12
+                      AND COALESCE(is_shard, FALSE) = FALSE
+                      AND ({where_sql})
+                    ORDER BY {order_sql}
+                    LIMIT 6
+                    """
+                ).fetchall()
+            except Exception:
+                continue
+
+            added_in_bucket = 0
+            for run_id, seed, depth, max_depth, turns, ab_raw, m_json in rows:
+                if len(mined) >= cap or added_in_bucket >= 3:
+                    break
+                buf = bytes(ab_raw or b"")
+                if len(buf) < 12:
+                    continue
+                sd = int(seed or 0)
+                if (sd, bucket_name) in seen_keys:
+                    continue
+                cut_idx = max(1, len(buf) - rewind_bytes)
+                if bucket_name == "unequipped_crisis" and m_json:
+                    try:
+                        m_obj = json.loads(m_json)
+                        first_d = m_obj.get("depth_first_turn") or {}
+                        if "2" in first_d and int(turns or 0) > 10:
+                            ratio = int(first_d["2"]) / float(max(1, int(turns)))
+                            cut_idx = max(1, min(len(buf) - 10, int(len(buf) * ratio)))
+                    except Exception:
+                        pass
+                seen_keys.add((sd, bucket_name))
+                added_in_bucket += 1
+                mined.append(
+                    PrefixShard(
+                        shard_id=f"org_{bucket_name}_{run_id}",
+                        run_id=str(run_id),
+                        seed=sd,
+                        cut_step_idx=max(1, int(turns or 1)),
+                        action_bytes=buf[:cut_idx],
+                        depth_at_cut=max(1, int(max_depth or depth or 1)),
+                        trigger_context=bucket_name,
+                        post_replay_max_steps=horizon_steps,
+                    )
+                )
+    finally:
+        con.close()
+
+    return mined[:cap]

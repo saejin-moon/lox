@@ -181,7 +181,7 @@ Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stat
 2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact game rules (armor/slots/curses, food/tins/illness, monsters, shop rules, prompts, altars, items).
 3. `query_monster(name)` / `query_item(name)`: Query exact C-level `permonst` / `objclass` structs.
 4. `read_policy(policy_id)` / `diff_policies(policy_id_a, policy_id_b)` / `read_skill(skill_name, policy_id="")`: Inspect current or historical `policies` and `skills/*.py` snapshots.
-5. `query_theories(query, doc_type="", limit=6)`: Search LanceDB for prior peer `THEORY` notes and CRN tournament `META_SYNTHESIS` verdicts.
+5. `query_theories(query, doc_type="", limit=6)`: Search DuckDB `theories` for prior peer `THEORY` notes and CRN tournament `META_SYNTHESIS` verdicts.
 6. `dry_run_policy(code, seed=42, max_turns=150, replay_run_id="", replay_steps=0, hypothesis="")`: Compile and empirically test candidate updates in `NetHackHarness`.
 
 ### Scientific Investigation Protocol (Swarm Behavior Trees)
@@ -406,17 +406,44 @@ def build_user_prompt(
     """Constructs the stateless Turn-0 prompt tailored to the active Modification Mode."""
     from lox.lang.validator import extract_module_outline
 
+    canon_mode = normalize_mode(mode)
     skills_block = ""
     if skills:
-        outlines = [
-            extract_module_outline(code, module_name=name)
-            for name, code in sorted(skills.items())
-        ]
-        skills_block = (
-            "\n### Hierarchical Skill Registry:\n```python\n"
-            + "\n\n".join(outlines)
-            + "\n```\n(Use `read_skill(skill_name)` tool to inspect full source of any skill module)\n"
-        )
+        if canon_mode == "SWARM_PEER":
+            manifest_lines: list[str] = []
+            for s_name, s_src in sorted(skills.items()):
+                loc_cnt = len(s_src.splitlines())
+                exports: list[str] = []
+                try:
+                    st_tree = ast.parse(s_src)
+                    for nd in st_tree.body:
+                        if isinstance(
+                            nd, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                        ):
+                            exports.append(nd.name)
+                except Exception:
+                    pass
+                exp_str = ", ".join(exports[:12]) + (
+                    f" (+{len(exports) - 12})" if len(exports) > 12 else ""
+                )
+                manifest_lines.append(
+                    f"- `skills/{s_name}.py` ({loc_cnt} LOC) | exports: {exp_str or '(constants/script)'}"
+                )
+            skills_block = (
+                "\n### Hierarchical Skill Manifest (Lazy Read):\n"
+                + "\n".join(manifest_lines)
+                + "\n*(Call `read_skill(skill_name)` to inspect any module source before editing.)*\n"
+            )
+        else:
+            outlines = [
+                extract_module_outline(code, module_name=name)
+                for name, code in sorted(skills.items())
+            ]
+            skills_block = (
+                "\n### Hierarchical Skill Registry:\n```python\n"
+                + "\n\n".join(outlines)
+                + "\n```\n(Use `read_skill(skill_name)` tool to inspect full source of any skill module)\n"
+            )
 
     discoveries_block = ""
     if recent_discoveries:
@@ -471,7 +498,6 @@ def build_user_prompt(
         else ""
     )
     digest_block = f"\n{batch_digest}\n" if batch_digest else ""
-    canon_mode = normalize_mode(mode)
 
     if canon_mode == "SWARM_WORKER":
         k_hyp = max(1, int(num_hypotheses))
@@ -482,7 +508,6 @@ def build_user_prompt(
         )
         return f"""### Generation {generation} — Mode: `SWARM_WORKER` (Warm Multi-Hypothesis Behavior Tree Synthesis)
 {digest_block}{prev_subtree_block}{skills_block}
-{BEHAVIOR_TREE_DOCS}
 
 ### Warm Scientific Method Protocol ({k_hyp} Competing Hypotheses, Hard Code Nothing):
 Follow these stages inside THIS conversation (your context, DB queries, and experiment results stay warm across all turns, and all tools remain available whenever you need to investigate further):
@@ -532,14 +557,26 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 """
 
     if canon_mode == "SWARM_PEER":
-        existing_policy_block = (
-            f"\n{_format_context_scoped_policy(current_policy, batch_digest)}\n"
-            if current_policy.strip()
-            else ""
-        )
+        existing_policy_block = ""
+        if current_policy.strip():
+            pol_lines = current_policy.splitlines()
+            if len(pol_lines) > 40:
+                from lox.author.swarm_critic import extract_priority_selector_branches
+
+                brs = extract_priority_selector_branches(current_policy)
+                br_str = ", ".join(
+                    f"#{b['priority']}:{b['leaf_name']}({b['fn_name']})"
+                    for b in brs[:20]
+                )
+                existing_policy_block = (
+                    f"\n### Current `policy.py` Manifest ({len(pol_lines)} LOC):\n"
+                    + (f"- PrioritySelector branches: {br_str}\n" if br_str else "")
+                    + "*(Call `read_policy()` to inspect full `policy.py` source if modifying coordinator.)*\n"
+                )
+            else:
+                existing_policy_block = f"\n### Current `policy.py` ({len(pol_lines)} LOC):\n```python\n{current_policy}\n```\n"
         return f"""### Generation {generation} — Mode: `SWARM_PEER` (Symmetric Data-Driven Peer Synthesis)
 {digest_block}{existing_policy_block}{skills_block}
-{BEHAVIOR_TREE_DOCS}
 
 ### Peer Author Protocol (Isolated Sandbox + CRN Tournament):
 1. **Required Grounding Before Editing (`query_theories` + `query_wiki` + `query_db` — Anti-Recycling)**:
@@ -569,7 +606,6 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
         )
         return f"""### Generation {generation} — Mode: `SWARM_META` (Unified Behavior Tree Master Assembly)
 {digest_block}{existing_policy_block}{skills_block}
-{BEHAVIOR_TREE_DOCS}
 
 ### Meta-Agent Diagnosis & Assembly Protocol:
 1. **Investigate the Full Trajectory & Root Causes Yourself**:

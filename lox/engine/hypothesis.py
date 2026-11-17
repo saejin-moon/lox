@@ -385,3 +385,104 @@ def evaluate_paired_hypothesis(
         "paired_count": len(deltas),
         "reason": reason_str,
     }
+
+
+def interquartile_mean(values: list[float] | np.ndarray) -> float:
+    """25%-trimmed Interquartile Mean (IQM) — robust against single-seed outliers."""
+    arr = np.sort(np.asarray(values, dtype=np.float64))
+    n = len(arr)
+    if n == 0:
+        return 0.0
+    if n < 4:
+        return float(np.mean(arr))
+    trim = n // 4
+    core = arr[trim : n - trim]
+    return float(np.mean(core)) if len(core) > 0 else float(np.mean(arr))
+
+
+def evaluate_tournament_pair(
+    candidate_runs: list[dict[str, Any]],
+    incumbent_runs: list[dict[str, Any]],
+    benchmark: str = "nethack",
+    alpha: float = 0.05,
+) -> dict[str, Any]:
+    """
+    Pairs candidate vs incumbent runs on identical `(shard_id or seed)` keys and returns
+    `iqm_cand`, `iqm_inc`, `iqm_delta`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`,
+    `wins`, `losses`, `ties`, `seeds_gained`, `seeds_lost`, `paired_count`.
+    """
+    inc_by_key: dict[Any, dict[str, Any]] = {}
+    for r in incumbent_runs or []:
+        key = (str(r.get("shard_id") or "") if r.get("is_shard") else None) or int(
+            r.get("seed", 0) or 0
+        )
+        inc_by_key[key] = r
+
+    cand_progs: list[float] = []
+    inc_progs: list[float] = []
+    deltas: list[float] = []
+    seeds_gained: list[int] = []
+    seeds_lost: list[int] = []
+
+    for r in candidate_runs or []:
+        sd = int(r.get("seed", 0) or 0)
+        key = (str(r.get("shard_id") or "") if r.get("is_shard") else None) or sd
+        base_r = inc_by_key.get(key)
+        if base_r is None:
+            continue
+        cp = progression_metric(r, benchmark=benchmark)
+        ip = progression_metric(base_r, benchmark=benchmark)
+        cand_progs.append(cp)
+        inc_progs.append(ip)
+        diff = cp - ip
+        deltas.append(diff)
+        cd = float(max(int(r.get("depth", 1) or 1), int(r.get("max_depth", 1) or 1)))
+        bd = float(
+            max(int(base_r.get("depth", 1) or 1), int(base_r.get("max_depth", 1) or 1))
+        )
+        ca = float(r.get("final_ac", 10) if r.get("final_ac") is not None else 10)
+        ba = float(
+            base_r.get("final_ac", 10) if base_r.get("final_ac") is not None else 10
+        )
+        if cd - bd >= 1.0 or (cd == bd and ba - ca >= 2.0):
+            seeds_gained.append(sd)
+        elif bd - cd >= 1.0 or (cd == bd and ca - ba >= 2.0):
+            seeds_lost.append(sd)
+
+    if not deltas:
+        return {
+            "iqm_cand": 0.0,
+            "iqm_inc": 0.0,
+            "iqm_delta": 0.0,
+            "mean_delta": 0.0,
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "wilcoxon_p": 1.0,
+            "wins": 0,
+            "losses": 0,
+            "ties": 0,
+            "paired_count": 0,
+            "seeds_gained": [],
+            "seeds_lost": [],
+        }
+
+    arr = np.asarray(deltas, dtype=np.float64)
+    mean_d, ci_low, ci_high = compute_confidence_sequence(arr, alpha=alpha)
+    p_val, wins, losses, ties = wilcoxon_signed_rank_p(arr)
+    iqm_c = interquartile_mean(cand_progs)
+    iqm_i = interquartile_mean(inc_progs)
+    return {
+        "iqm_cand": round(iqm_c, 4),
+        "iqm_inc": round(iqm_i, 4),
+        "iqm_delta": round(iqm_c - iqm_i, 4),
+        "mean_delta": round(mean_d, 4),
+        "ci_lower": round(ci_low, 4),
+        "ci_upper": round(ci_high, 4),
+        "wilcoxon_p": round(p_val, 5),
+        "wins": wins,
+        "losses": losses,
+        "ties": ties,
+        "paired_count": len(deltas),
+        "seeds_gained": seeds_gained,
+        "seeds_lost": seeds_lost,
+    }

@@ -656,17 +656,41 @@ class AuthorAgent:
             if self.routing in ("nitro", "floor"):
                 model_id = f"{model_id}:{self.routing}"
 
+        api_messages = messages
+        if self.provider in ("openrouter", "anthropic") and messages:
+            api_messages = []
+            for idx_m, m_item in enumerate(messages):
+                if (
+                    idx_m == 0
+                    and m_item.get("role") == "system"
+                    and isinstance(m_item.get("content"), str)
+                ):
+                    api_messages.append(
+                        {
+                            "role": "system",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": m_item["content"],
+                                    "cache_control": {"type": "ephemeral"},
+                                }
+                            ],
+                        }
+                    )
+                else:
+                    api_messages.append(m_item)
+
         payload: dict[str, Any] = {
             "model": model_id,
-            "messages": messages,
+            "messages": api_messages,
             "max_tokens": self.max_tokens,
             "temperature": 0.4,
         }
-        if allow_tools:
-            payload["tools"] = (
-                tool_specs if tool_specs is not None else OPENAI_TOOL_SPECS
-            )
-            payload["tool_choice"] = "auto"
+        active_tools = tool_specs if tool_specs is not None else OPENAI_TOOL_SPECS
+        if active_tools:
+            # Keep tool definitions static across turns so provider prefix caches match on wrap-up turns.
+            payload["tools"] = active_tools
+            payload["tool_choice"] = "auto" if allow_tools else "none"
         if self.provider == "openrouter" and self.reasoning_effort:
             payload["reasoning"] = {"effort": self.reasoning_effort}
 
@@ -978,27 +1002,17 @@ class AuthorAgent:
         research_tools_called: set[str] = set()
         called_expert_query = False
         gen1_research_nudges = 0
+        bonus_research_turns = 0
+        turn_idx = 0
         final_content = ""
         latest_hyp: dict[str, Any] = {}
         last_attempted_code = ""
         batch_id = f"gen_{generation:03d}_{mode.lower()}"
 
-        for turn_idx in range(1, max_tool_turns + 2):
-            if turn_idx > 1 and len(messages) > 3:
-                for prev_msg in messages[2:-2]:
-                    tcs = prev_msg.get("tool_calls")
-                    if isinstance(tcs, list):
-                        for ptc in tcs:
-                            fn_p = ptc.get("function") or {}
-                            if fn_p.get("name") == "dry_run_policy":
-                                raw_a = fn_p.get("arguments")
-                                if isinstance(raw_a, str) and len(raw_a) > 4096:
-                                    fn_p["arguments"] = json.dumps(
-                                        {
-                                            "code": f"<previously tested {len(raw_a)} chars bundle; see tool output>"
-                                        }
-                                    )
-            allow_tools = turn_idx <= max_tool_turns and not getattr(
+        while turn_idx < max_tool_turns + bonus_research_turns + 1:
+            turn_idx += 1
+            effective_max_turns = max_tool_turns + bonus_research_turns
+            allow_tools = turn_idx <= effective_max_turns and not getattr(
                 self.tools, "last_pilot_improved", False
             )
             if not allow_tools and messages and messages[-1].get("role") == "tool":
@@ -1070,6 +1084,8 @@ class AuthorAgent:
                     and found_code
                     and not ({"query_db", "query_wiki"} & research_tools_called)
                 ):
+                    if bonus_research_turns < 3:
+                        bonus_research_turns += 1
                     messages.append(
                         {
                             "role": "user",
@@ -1371,6 +1387,13 @@ class AuthorAgent:
                     sql_low = str((t_args or {}).get("sql", "")).lower()
                     if "expert_runs" in sql_low or "expert_ticks" in sql_low:
                         called_expert_query = True
+                if (
+                    t_name == "dry_run_policy"
+                    and isinstance(tool_out, str)
+                    and tool_out.startswith("RESEARCH_REQUIRED:")
+                    and bonus_research_turns < 3
+                ):
+                    bonus_research_turns += 1
                 tool_results_list.append(
                     {"name": t_name, "args": t_args, "output": str(tool_out)[:2000]}
                 )
@@ -1608,7 +1631,7 @@ class AuthorAgent:
                     code=code_patch,
                     is_macro=False,
                     seed=42,
-                    max_turns=50,
+                    max_turns=100,
                     smoke_only=True,
                     skill_name=s_name,
                     skill_code=s_code,

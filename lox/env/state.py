@@ -550,14 +550,7 @@ for _g in range(_MAX_GLYPH):
 
     if nh.glyph_is_trap(_g):
         _IS_TRAP_LUT[_g] = True
-        try:
-            _tid = nh.glyph_to_trap(_g)
-            if 0 <= _tid < len(_SYMDEF_EXPLANATIONS):
-                _TRAP_NAME_BY_GLYPH[_g] = _SYMDEF_EXPLANATIONS[_tid]
-            else:
-                _TRAP_NAME_BY_GLYPH[_g] = "trap"
-        except Exception:
-            _TRAP_NAME_BY_GLYPH[_g] = "trap"
+        _TRAP_NAME_BY_GLYPH[_g] = _CMAP_NAME_BY_GLYPH[_g] or "trap"
 
 _IS_WALL_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_OPEN_DOOR_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
@@ -570,6 +563,39 @@ _IS_DRAWBRIDGE_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_BOULDER_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
 _IS_PORTAL_GLYPH_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_PASSABLE_CMAP_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_HAZARD_CMAP_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+_IS_EXIT_CMAP_LUT = np.zeros(_MAX_GLYPH, dtype=bool)
+
+_WALKABLE_CMAP_NAMES = frozenset(
+    {
+        "doorway",
+        "open door",
+        "floor of a room",
+        "dark part of a room",
+        "corridor",
+        "lit corridor",
+        "staircase up",
+        "staircase down",
+        "ladder up",
+        "ladder down",
+        "altar",
+        "grave",
+        "opulent throne",
+        "sink",
+        "fountain",
+        "ice",
+        "lowered drawbridge",
+        "air",
+        "cloud",
+        "poison cloud",
+        "magic portal",
+        "vibrating square",
+    }
+)
+_EXIT_CMAP_NAMES = frozenset(
+    {"staircase up", "staircase down", "ladder up", "ladder down", "magic portal"}
+)
 
 for _g in range(_MAX_GLYPH):
     _cn = _CMAP_NAME_BY_GLYPH[_g]
@@ -594,6 +620,19 @@ for _g in range(_MAX_GLYPH):
         _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT[_g] = True
     if _cn is not None and "magic portal" in _cn:
         _IS_PORTAL_GLYPH_LUT[_g] = True
+    if _IS_CMAP_LUT[_g]:
+        _cid_g = nh.glyph_to_cmap(_g)
+        if _cid_g > 0 and ((_cn in _WALKABLE_CMAP_NAMES) or _IS_TRAP_LUT[_g]):
+            _IS_PASSABLE_CMAP_LUT[_g] = True
+        if _cn in _EXIT_CMAP_NAMES:
+            _IS_EXIT_CMAP_LUT[_g] = True
+        if (
+            _IS_TRAP_LUT[_g]
+            or _IS_WATER_GLYPH_LUT[_g]
+            or _IS_LAVA_GLYPH_LUT[_g]
+            or _cn in ("raised drawbridge", "poison cloud")
+        ):
+            _IS_HAZARD_CMAP_LUT[_g] = True
     if _OBJ_INFO_BY_GLYPH[_g] is not None and _OBJ_INFO_BY_GLYPH[_g].name == "boulder":
         _IS_BOULDER_GLYPH_LUT[_g] = True
 
@@ -607,6 +646,8 @@ _FLOOR_GLYPH_FLAGS_LUT = (
     | (_IS_OBJECT_LUT.astype(np.uint16) << 5)
     | (_IS_MONSTER_LUT.astype(np.uint16) << 6)
     | (_IS_TRAP_LUT.astype(np.uint16) << 7)
+    | (_IS_PASSABLE_CMAP_LUT.astype(np.uint16) << 8)
+    | (_IS_HAZARD_CMAP_LUT.astype(np.uint16) << 9)
 )
 
 
@@ -621,6 +662,12 @@ class FloorMemory:
         default_factory=lambda: np.zeros((21, 79), dtype=np.int32)
     )
     remembered_chars: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.uint8)
+    )
+    remembered_glyphs: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.int16)
+    )
+    remembered_colors: np.ndarray = field(
         default_factory=lambda: np.zeros((21, 79), dtype=np.uint8)
     )
     searched_counts: np.ndarray = field(
@@ -638,19 +685,16 @@ class FloorMemory:
     _passable_mask: np.ndarray = field(
         default_factory=lambda: np.zeros((21, 79), dtype=np.bool_), repr=False
     )
+    _safe_passable_mask: np.ndarray = field(
+        default_factory=lambda: np.zeros((21, 79), dtype=np.bool_), repr=False
+    )
     _passable_dirty: bool = True
     locked_doors: set[tuple[int, int]] = field(default_factory=set)
 
-    @property
-    def passable_mask(self) -> np.ndarray:
-        """Returns boolean mask of known walkable tiles (floor, corridor, open door, stairs, altar, fountain, throne)."""
-        if (
-            not self._passable_dirty
-            and self._passable_mask.shape == self.remembered_chars.shape
-        ):
-            return self._passable_mask.copy()
+    def _recompute_passability(self) -> None:
         c = self.remembered_chars
-        self._passable_mask = (
+        rg = self.remembered_glyphs
+        char_pass = (
             (c == ord("."))
             | (c == ord("#"))
             | (c == ord(">"))
@@ -658,9 +702,45 @@ class FloorMemory:
             | (c == ord("_"))
             | (c == ord("{"))
             | (c == ord("\\"))
+            | (c == ord("^"))
         )
+        if rg.shape == c.shape:
+            has_rg = rg > 0
+            valid_rg = np.where(has_rg & (rg < _MAX_GLYPH), rg, 0)
+            glyph_pass = _IS_PASSABLE_CMAP_LUT[valid_rg]
+            glyph_haz = _IS_HAZARD_CMAP_LUT[valid_rg]
+            self._passable_mask = np.where(has_rg, glyph_pass, char_pass)
+            self._safe_passable_mask = (
+                self._passable_mask
+                & (~(has_rg & glyph_haz))
+                & (self.remembered_trap_glyphs == 0)
+            )
+        else:
+            self._passable_mask = char_pass
+            self._safe_passable_mask = char_pass & (self.remembered_trap_glyphs == 0)
         self._passable_dirty = False
+
+    @property
+    def passable_mask(self) -> np.ndarray:
+        """Returns boolean mask of known walkable tiles (including discovered traps/ice/drawbridges)."""
+        if (
+            not self._passable_dirty
+            and self._passable_mask.shape == self.remembered_chars.shape
+        ):
+            return self._passable_mask.copy()
+        self._recompute_passability()
         return self._passable_mask.copy()
+
+    @property
+    def safe_passable_mask(self) -> np.ndarray:
+        """Returns boolean mask of known walkable tiles excluding remembered traps and terrain hazards."""
+        if (
+            not self._passable_dirty
+            and self._safe_passable_mask.shape == self.remembered_chars.shape
+        ):
+            return self._safe_passable_mask.copy()
+        self._recompute_passability()
+        return self._safe_passable_mask.copy()
 
     def ensure_shape(self, min_h: int, min_w: int) -> None:
         """Dynamically resizes spatial grids if game coordinates exceed initial bounds (e.g. Craftax 48x48)."""
@@ -681,6 +761,20 @@ class FloorMemory:
             new_remembered[:cur_h, :cur_w] = self.remembered_chars
             self.remembered_chars = new_remembered
 
+            new_rem_glyphs = np.zeros((new_h, new_w), dtype=np.int16)
+            rem_gh, rem_gw = self.remembered_glyphs.shape
+            new_rem_glyphs[: min(rem_gh, new_h), : min(rem_gw, new_w)] = (
+                self.remembered_glyphs[: min(rem_gh, new_h), : min(rem_gw, new_w)]
+            )
+            self.remembered_glyphs = new_rem_glyphs
+
+            new_rem_colors = np.zeros((new_h, new_w), dtype=np.uint8)
+            rem_ch, rem_cw = self.remembered_colors.shape
+            new_rem_colors[: min(rem_ch, new_h), : min(rem_cw, new_w)] = (
+                self.remembered_colors[: min(rem_ch, new_h), : min(rem_cw, new_w)]
+            )
+            self.remembered_colors = new_rem_colors
+
             new_searched = np.zeros((new_h, new_w), dtype=np.int16)
             new_searched[:cur_h, :cur_w] = self.searched_counts
             self.searched_counts = new_searched
@@ -698,6 +792,7 @@ class FloorMemory:
             self.remembered_trap_glyphs = new_trap_glyphs
 
             self._passable_mask = np.zeros((new_h, new_w), dtype=np.bool_)
+            self._safe_passable_mask = np.zeros((new_h, new_w), dtype=np.bool_)
             self._passable_dirty = True
 
 
@@ -714,6 +809,7 @@ class WorldMemory:
         "pos_history",
         "current_floor_key",
         "stair_graph",
+        "level_exits",
         "kv",
         "recent_messages",
         "prev_turn",
@@ -730,6 +826,7 @@ class WorldMemory:
         self.stair_graph: dict[
             tuple[int, int, int, int], tuple[int, int, int, int]
         ] = {}
+        self.level_exits: dict[tuple[int, int], dict[tuple[int, int], int]] = {}
         self.kv: dict[str, Any] = {}
         self.recent_messages: collections.deque[tuple[int, int, str]] = (
             collections.deque(maxlen=25)
@@ -743,6 +840,7 @@ class WorldMemory:
         self.pos_history.clear()
         self.current_floor_key = (0, 1)
         self.stair_graph.clear()
+        self.level_exits.clear()
         self.kv.clear()
         self.recent_messages.clear()
         self.prev_turn = -1
@@ -758,6 +856,8 @@ class WorldMemory:
                 visited=np.zeros(shape, dtype=np.bool_),
                 visit_count=np.zeros(shape, dtype=np.int32),
                 remembered_chars=np.zeros(shape, dtype=np.uint8),
+                remembered_glyphs=np.zeros(shape, dtype=np.int16),
+                remembered_colors=np.zeros(shape, dtype=np.uint8),
                 searched_counts=np.zeros(shape, dtype=np.int16),
                 door_mask=np.zeros(shape, dtype=np.bool_),
                 remembered_obj_glyphs=np.zeros(shape, dtype=np.int32),
@@ -782,12 +882,24 @@ class WorldMemory:
         return self.current_floor.remembered_chars
 
     @property
+    def remembered_glyphs(self) -> np.ndarray:
+        return self.current_floor.remembered_glyphs
+
+    @property
+    def remembered_colors(self) -> np.ndarray:
+        return self.current_floor.remembered_colors
+
+    @property
     def door_mask(self) -> np.ndarray:
         return self.current_floor.door_mask
 
     @property
     def passable_mask(self) -> np.ndarray:
         return self.current_floor.passable_mask
+
+    @property
+    def safe_passable_mask(self) -> np.ndarray:
+        return self.current_floor.safe_passable_mask
 
     @property
     def locked_doors(self) -> set[tuple[int, int]]:
@@ -816,7 +928,12 @@ class WorldMemory:
         unique_tiles = {(p[2], p[3]) for p in recent}
         return len(unique_tiles) <= 3
 
-    def update(self, state: GameState, action_name: str = "") -> None:
+    def update(
+        self,
+        state: GameState,
+        action_name: str = "",
+        messages: list[str] | None = None,
+    ) -> None:
         try:
             dnum = int(state.dungeon_num)
             dlvl = int(state.level_num)
@@ -871,17 +988,28 @@ class WorldMemory:
                 self.stair_graph[prev] = now
                 self.stair_graph[now] = prev
 
-        if hasattr(state, "message") and state.message:
+        turn_now = int(getattr(state, "turns", getattr(state, "turn", 0)))
+        if messages:
+            for m in messages:
+                m_str = str(m or "").strip()
+                if m_str and (
+                    not self.recent_messages or self.recent_messages[-1][2] != m_str
+                ):
+                    self.recent_messages.append((turn_now, int(dlvl), m_str))
+        elif hasattr(state, "message") and state.message:
             msg_str = str(state.message).strip()
             if msg_str:
-                self.recent_messages.append(
-                    (int(getattr(state, "turns", 0)), int(dlvl), msg_str)
-                )
+                self.recent_messages.append((turn_now, int(dlvl), msg_str))
 
-        # Update remembered terrain chars, doorway mask, objects, traps, and passable_mask
+        # Update remembered terrain chars, glyphs, colors, doorway mask, objects, traps, and passability
         try:
             glyphs = state.glyphs
             chars = state.chars
+            colors = getattr(state, "colors", None)
+            if not isinstance(colors, np.ndarray) or colors.shape != glyphs.shape:
+                colors = np.zeros(glyphs.shape, dtype=np.uint8)
+            elif colors.dtype != np.uint8 or not colors.flags.c_contiguous:
+                colors = np.ascontiguousarray(colors, dtype=np.uint8)
             on_down = bool(getattr(state, "is_on_stairs_down", False))
             if (
                 _HAS_RUST_FLOOR_MEM
@@ -896,15 +1024,23 @@ class WorldMemory:
                     floor._passable_mask = np.zeros_like(
                         floor.remembered_chars, dtype=np.bool_
                     )
+                if floor._safe_passable_mask.shape != floor.remembered_chars.shape:
+                    floor._safe_passable_mask = np.zeros_like(
+                        floor.remembered_chars, dtype=np.bool_
+                    )
                 lox_core.fast_update_floor_memory(
                     glyphs,
                     chars,
+                    colors,
                     _FLOOR_GLYPH_FLAGS_LUT,
                     floor.remembered_chars,
+                    floor.remembered_glyphs,
+                    floor.remembered_colors,
                     floor.door_mask,
                     floor.remembered_obj_glyphs,
                     floor.remembered_trap_glyphs,
                     floor._passable_mask,
+                    floor._safe_passable_mask,
                     int(sy),
                     int(sx),
                     on_down,
@@ -913,20 +1049,12 @@ class WorldMemory:
             else:
                 is_cmap = _IS_CMAP_LUT[glyphs]
 
-                # 1. Update remembered_chars for cmap terrain
+                # 1. Update lossless remembered_chars, remembered_glyphs, and remembered_colors for cmap terrain
                 mask = is_cmap & (chars != 0) & (chars != ord(" "))
                 floor.remembered_chars[mask] = chars[mask]
-
-                open_door_mask = is_cmap & _IS_OPEN_DOOR_GLYPH_LUT[glyphs]
-                floor.remembered_chars[open_door_mask] = ord(".")
-
-                impassable_cmap = is_cmap & _IS_IRON_BARS_OR_TREE_LUT[glyphs]
-                floor.remembered_chars[impassable_cmap] = ord("|")
-
-                walkable_special = is_cmap & (
-                    _IS_ICE_GLYPH_LUT[glyphs] | _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT[glyphs]
-                )
-                floor.remembered_chars[walkable_special] = ord(".")
+                if floor.remembered_glyphs.shape == glyphs.shape:
+                    floor.remembered_glyphs[is_cmap] = glyphs[is_cmap]
+                    floor.remembered_colors[is_cmap] = colors[is_cmap]
 
                 # 2. Update door_mask
                 doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
@@ -953,6 +1081,17 @@ class WorldMemory:
                 trap_mask = _IS_TRAP_LUT[glyphs]
                 floor.remembered_trap_glyphs[trap_mask] = glyphs[trap_mask]
                 floor._passable_dirty = True
+
+            # Record remembered exits (stairs/ladders/portals) for unvisited branch graph
+            if isinstance(glyphs, np.ndarray) and glyphs.ndim == 2:
+                exit_ys, exit_xs = np.where(_IS_EXIT_CMAP_LUT[glyphs])
+                if len(exit_ys) > 0:
+                    f_exits = self.level_exits.setdefault((dnum, dlvl), {})
+                    for ey, ex in zip(exit_ys.tolist(), exit_xs.tolist()):
+                        f_exits[(ey, ex)] = int(glyphs[ey, ex])
+                if on_down and 0 <= sy < glyphs.shape[0] and 0 <= sx < glyphs.shape[1]:
+                    f_exits = self.level_exits.setdefault((dnum, dlvl), {})
+                    f_exits.setdefault((sy, sx), int(glyphs[sy, sx]))
         except Exception:
             pass
 
@@ -1534,6 +1673,15 @@ class GameState:
                 return cmap
             if (
                 self.mem is not None
+                and hasattr(self.mem, "remembered_glyphs")
+                and 0 <= y < self.mem.remembered_glyphs.shape[0]
+                and 0 <= x < self.mem.remembered_glyphs.shape[1]
+            ):
+                rg = int(self.mem.remembered_glyphs[y, x])
+                if 0 < rg < _MAX_GLYPH and _CMAP_NAME_BY_GLYPH[rg] is not None:
+                    return str(_CMAP_NAME_BY_GLYPH[rg])
+            if (
+                self.mem is not None
                 and 0 <= y < self.mem.remembered_chars.shape[0]
                 and 0 <= x < self.mem.remembered_chars.shape[1]
             ):
@@ -1714,8 +1862,17 @@ class GameState:
 
     @property
     def portal_positions(self) -> list[tuple[int, int]]:
-        """All visible magic portal coordinates on the current floor."""
-        ys, xs = np.where(_IS_PORTAL_GLYPH_LUT[self.glyphs])
+        """All visible or remembered magic portal coordinates on the current floor."""
+        mask = _IS_PORTAL_GLYPH_LUT[self.glyphs]
+        if (
+            self.mem is not None
+            and hasattr(self.mem, "remembered_glyphs")
+            and self.mem.remembered_glyphs.shape == self.glyphs.shape
+        ):
+            rg = self.mem.remembered_glyphs
+            valid_rg = np.where((rg > 0) & (rg < _MAX_GLYPH), rg, 0)
+            mask = mask | _IS_PORTAL_GLYPH_LUT[valid_rg]
+        ys, xs = np.where(mask)
         return list(zip(ys.tolist(), xs.tolist()))
 
     @property
@@ -1842,6 +1999,50 @@ class GameState:
                 return True
         return "--more--" in self.message.lower()
 
+    def _prompt_text_lower(self) -> str:
+        msg = self.message.strip().lower()
+        if msg:
+            return msg
+        tty_c = self.tty_chars
+        if tty_c is not None and len(tty_c) > 0:
+            return bytes(tty_c[0]).decode("latin1", errors="ignore").strip().lower()
+        return ""
+
+    @property
+    def in_getobj_prompt(self) -> bool:
+        """True when NetHack asks for an inventory letter (`What do you want to ... [?*]` etc.)."""
+        if (
+            self.internal is not None
+            and len(self.internal) > 3
+            and bool(self.internal[3])
+            and self._has_more_on_topline()
+        ):
+            return False
+        if not self.is_in_yn:
+            return False
+        msg = self._prompt_text_lower()
+        return (
+            "[?*" in msg
+            or "?*]" in msg
+            or "what do you want to " in msg
+            or "for what" in msg
+        )
+
+    @property
+    def in_getdir_prompt(self) -> bool:
+        """True when NetHack asks for a direction (`In what direction?` etc.)."""
+        if (
+            self.internal is not None
+            and len(self.internal) > 3
+            and bool(self.internal[3])
+            and self._has_more_on_topline()
+        ):
+            return False
+        if not self.is_in_yn:
+            return False
+        msg = self._prompt_text_lower()
+        return "in what direction" in msg or "direction?" in msg
+
     @property
     def in_yn_prompt(self) -> bool:
         if (
@@ -1852,6 +2053,8 @@ class GameState:
         ):
             # NLE can keep internal[1] (in_yn) set while waiting on a `--More--` banner;
             # pressing y/n does not dismiss `--More--`, only Space/Enter/ESC does.
+            return False
+        if self.in_getobj_prompt or self.in_getdir_prompt:
             return False
         if self.internal is not None and len(self.internal) > 1:
             return bool(self.internal[1])
@@ -2116,29 +2319,62 @@ class GameState:
         """Recent game log messages as (turn, dlvl, message) tuples."""
         return list(self.mem.recent_messages) if self.mem is not None else []
 
+    @property
+    def level_exits(self) -> dict[tuple[int, int], dict[tuple[int, int], int]]:
+        """Remembered stairs, ladders, and portal coordinates keyed by `(dungeon_num, level_num)`."""
+        return self.mem.level_exits if self.mem is not None else {}
+
+    @property
+    def worn_oprop_mask(self) -> int:
+        """Bitwise OR of C `objclass.oc_oprop` across all worn or wielded inventory items."""
+        mask = 0
+        for it in self.inventory:
+            if (it.is_worn or it.is_wielded) and it.info is not None:
+                mask |= int(getattr(it.info, "oprop", 0) or 0)
+        return mask
+
+    def _effective_cmap_glyph(self, y: int, x: int) -> int:
+        g = int(self.glyphs[y, x])
+        if 0 <= g < _MAX_GLYPH and _IS_CMAP_LUT[g]:
+            return g
+        if (
+            self.mem is not None
+            and hasattr(self.mem, "remembered_glyphs")
+            and 0 <= y < self.mem.remembered_glyphs.shape[0]
+            and 0 <= x < self.mem.remembered_glyphs.shape[1]
+        ):
+            rg = int(self.mem.remembered_glyphs[y, x])
+            if 0 < rg < _MAX_GLYPH:
+                return rg
+        return g
+
     def is_water(self, y: int, x: int) -> bool:
         """Returns True if (y, x) is water, pool, or moat according to the C engine symbol table."""
         if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
             return False
-        return bool(_IS_WATER_GLYPH_LUT[int(self.glyphs[y, x])])
+        eg = self._effective_cmap_glyph(y, x)
+        return 0 <= eg < _MAX_GLYPH and bool(_IS_WATER_GLYPH_LUT[eg])
 
     def is_lava(self, y: int, x: int) -> bool:
         """Returns True if (y, x) is molten lava according to the C engine symbol table."""
         if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
             return False
-        return bool(_IS_LAVA_GLYPH_LUT[int(self.glyphs[y, x])])
+        eg = self._effective_cmap_glyph(y, x)
+        return 0 <= eg < _MAX_GLYPH and bool(_IS_LAVA_GLYPH_LUT[eg])
 
     def is_ice(self, y: int, x: int) -> bool:
         """Returns True if (y, x) is ice according to the C engine symbol table."""
         if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
             return False
-        return bool(_IS_ICE_GLYPH_LUT[int(self.glyphs[y, x])])
+        eg = self._effective_cmap_glyph(y, x)
+        return 0 <= eg < _MAX_GLYPH and bool(_IS_ICE_GLYPH_LUT[eg])
 
     def is_iron_bars(self, y: int, x: int) -> bool:
         """Returns True if (y, x) is iron bars or tree according to the C engine symbol table."""
         if not (0 <= y < self.glyphs.shape[0] and 0 <= x < self.glyphs.shape[1]):
             return False
-        return bool(_IS_IRON_BARS_OR_TREE_LUT[int(self.glyphs[y, x])])
+        eg = self._effective_cmap_glyph(y, x)
+        return 0 <= eg < _MAX_GLYPH and bool(_IS_IRON_BARS_OR_TREE_LUT[eg])
 
     def is_boulder(self, y: int, x: int) -> bool:
         """Returns True if (y, x) contains a boulder according to the C engine symbol table."""
@@ -2154,7 +2390,7 @@ class GameState:
 
     @property
     def passable_mask(self) -> np.ndarray:
-        """Returns boolean mask of known walkable tiles (floor, corridor, open door, stairs, altar, fountain, throne)."""
+        """Returns boolean mask of known walkable tiles (including traps/ice/lowered drawbridges)."""
         if self.mem is not None:
             return self.mem.passable_mask
         c = self.chars
@@ -2166,7 +2402,15 @@ class GameState:
             | (c == ord("_"))
             | (c == ord("{"))
             | (c == ord("\\"))
+            | (c == ord("^"))
         )
+
+    @property
+    def safe_passable_mask(self) -> np.ndarray:
+        """Returns boolean mask of known walkable tiles excluding remembered traps and terrain hazards."""
+        if self.mem is not None:
+            return self.mem.safe_passable_mask
+        return self.passable_mask & (~_IS_HAZARD_CMAP_LUT[self.glyphs])
 
     def ascii_map(self) -> str:
         """Renders the current 21x79 `chars` grid as a 21-line ASCII string."""

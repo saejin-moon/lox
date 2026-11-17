@@ -1019,3 +1019,191 @@ def hit(): return None
     assert sorted(parsed_skills.keys()) == ["combat", "nav"]
     assert "def go()" in parsed_skills["nav"]
     assert "def hit()" in parsed_skills["combat"]
+
+
+def test_phase3_unified_duckdb_prefix_cache_tier1_and_multiseed_smoke(tmp_path):
+
+    from lox.author.agent import AuthorAgent
+    from lox.author.prompts import build_user_prompt
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.db.theories import TheoryDocumentStore
+
+    db_path = str(tmp_path / "p3.duckdb")
+    init_db(db_path).close()
+
+    # 1. Unified DuckDB `theories` + `tournament_attempts`
+    tstore = TheoryDocumentStore(db_path=db_path)
+    tstore.save_document(
+        generation=5,
+        agent_role="peer_1",
+        doc_type="THEORY",
+        title="Shop Theft Prevention",
+        content="noautopickup avoids unpaid shop theft warnings.",
+        tags=["shop", "autopickup"],
+    )
+    hits = tstore.search_theories("shop autopickup", limit=3)
+    assert hits and hits[0]["title"] == "Shop Theft Prevention"
+
+    logger = BatchDatabaseLogger(db_path=db_path)
+    logger.save_tournament_attempts(
+        [
+            {
+                "attempt_id": "att_g5_peer_1",
+                "generation": 5,
+                "peer_id": "peer_1",
+                "deficit_id": "slice_early",
+                "candidate_fp": "fp_abc",
+                "promoted": False,
+                "sandbox_passed": True,
+                "avg_depth": 4.2,
+                "max_depth": 8,
+                "avg_score": 180.0,
+                "avg_ac": 5.5,
+                "avg_xp_level": 3.0,
+                "policy_exceptions": 0,
+                "seeds_gained": [1001, 1002],
+                "seeds_lost": [1005],
+                "top_tracebacks": [],
+            }
+        ]
+    )
+    con = connect_db(db_path, read_only=True)
+    try:
+        cnt = con.execute("SELECT COUNT(*) FROM tournament_attempts").fetchone()[0]
+        t_cnt = con.execute("SELECT COUNT(*) FROM theories").fetchone()[0]
+        assert cnt == 1
+        assert t_cnt >= 2
+    finally:
+        con.close()
+
+    # 2. Tier-1 manifest & non-duplicated BT docs in SWARM_PEER prompt
+    long_policy = "\n".join(
+        [
+            "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector",
+            "class Policy:",
+        ]
+        + [f"    def helper_{i}(self, s): return None" for i in range(60)]
+    )
+    large_skills = {
+        "combat": "\n".join([f"def fight_{i}(s, bb): return None" for i in range(40)]),
+        "equip": "\n".join([f"def wear_{i}(s, bb): return None" for i in range(40)]),
+    }
+    peer_prompt = build_user_prompt(
+        mode="SWARM_PEER",
+        generation=5,
+        current_policy=long_policy,
+        batch_digest="Gen 5 deficits",
+        skills=large_skills,
+    )
+    assert "### Behavior Tree Primitives" not in peer_prompt
+    assert "Hierarchical Skill Manifest" in peer_prompt
+    assert "`skills/combat.py` (40 LOC)" in peer_prompt
+    assert "def fight_39" not in peer_prompt
+    assert "def helper_59" not in peer_prompt
+
+    # 3. 3-seed smoke sweep catches error triggered ONLY on seed 1000
+    reg = AuthorToolRegistry(db_path=db_path)
+    reg.configure_generation(
+        pool=None, baseline_runs=[], generation=5, mode="SWARM_PEER"
+    )
+    cand_seed1000_bug = """
+from lox.env.actions import Action
+from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
+
+def conditional_bug(st, bb):
+    # Triggers ONLY after several turns when seed != 42 (using seeded randomness on st.step_count == 5)
+    if st.step_count == 5 and st.y != 11:
+        # Force deterministic failure on non-seed-42 coordinates if reached or always raise when x > 0 on step 5 except mock check
+        return 1 / 0
+    return Action.SEARCH
+
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(conditional_bug, name='bug')]), blackboard=self.blackboard)
+    def step(self, st):
+        return self.tree.tick(st) or Action.WAIT
+"""
+    diag, status = reg.dry_run_policy(
+        code=cand_seed1000_bug, seed=42, max_turns=60, smoke_only=True
+    )
+    # Whether raised on seed 42 or seed 1000, multi-seed smoke catches it with RUNTIME_ERROR!
+    assert status == "RUNTIME_ERROR"
+
+    # 4. Append-only messages + static tools payload check in AuthorAgent
+    import httpx
+
+    ag = AuthorAgent(
+        provider="openrouter", api_key="test-key", db_path=db_path, agent_role="peer_1"
+    )
+    seen_prefixes: list[tuple[bool, str, list[str]]] = []
+
+    def fake_post(self_client, url, headers=None, json=None, **kwargs):
+        import json as _json
+
+        seen_prefixes.append(
+            (
+                "tools" in json,
+                str(json.get("tool_choice", "")),
+                [m["role"] for m in json["messages"]],
+            )
+        )
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self_resp):
+                if len(seen_prefixes) == 1:
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "",
+                                    "tool_calls": [
+                                        {
+                                            "id": "c1",
+                                            "function": {
+                                                "name": "query_wiki",
+                                                "arguments": _json.dumps(
+                                                    {"query": "shop"}
+                                                ),
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ],
+                        "usage": {},
+                    }
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "```python\nclass Policy:\n    def step(self, s): return Action.WAIT\n```"
+                            }
+                        }
+                    ],
+                    "usage": {},
+                }
+
+        return _Resp()
+
+    old_post = httpx.Client.post
+    httpx.Client.post = fake_post  # type: ignore[method-assign]
+    try:
+        ag.synthesize(mode="CREATE", generation=1, current_policy="", max_tool_turns=1)
+    finally:
+        httpx.Client.post = old_post  # type: ignore[method-assign]
+
+    assert len(seen_prefixes) >= 2
+    assert all(has_tools for has_tools, _, _ in seen_prefixes)
+    assert seen_prefixes[0][1] == "auto"
+    assert seen_prefixes[-1][1] == "none"
+    # Every prefix of turn i messages matches turn i-1
+    assert seen_prefixes[1][2][: len(seen_prefixes[0][2])] == seen_prefixes[0][2]

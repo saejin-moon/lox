@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import symtable
 import textwrap
 from typing import Any
 
@@ -349,6 +350,111 @@ def splice_functions_into_policy(
     if target_class is not None:
         target_class.body = _dedup_assigns_keep_last(target_class.body)
 
+    def _merge_top_extras(extras: list[ast.stmt]) -> list[str]:
+        """Merges imports (unioning ImportFrom aliases), top-level constants, and helper classes."""
+        changed_top: list[str] = []
+        if not extras:
+            return changed_top
+        existing_top_src = {
+            ast.unparse(stmt).strip()
+            for stmt in base_tree.body
+            if not isinstance(
+                stmt, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+            )
+        }
+        existing_top_classes = {
+            stmt.name: idx
+            for idx, stmt in enumerate(base_tree.body)
+            if isinstance(stmt, ast.ClassDef)
+        }
+        existing_top_assigns = {
+            _assign_target_name(stmt): idx
+            for idx, stmt in enumerate(base_tree.body)
+            if _assign_target_name(stmt) is not None
+        }
+
+        def _insert_pos_for(stmt: ast.stmt) -> int:
+            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                idx = 0
+                if (
+                    base_tree.body
+                    and isinstance(base_tree.body[0], ast.Expr)
+                    and isinstance(base_tree.body[0].value, ast.Constant)
+                    and isinstance(base_tree.body[0].value.value, str)
+                ):
+                    idx = 1
+                while idx < len(base_tree.body) and isinstance(
+                    base_tree.body[idx], (ast.Import, ast.ImportFrom)
+                ):
+                    idx += 1
+                return idx
+            for j, st in enumerate(base_tree.body):
+                if isinstance(
+                    st, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    return j
+            return len(base_tree.body)
+
+        for extra in extras:
+            if isinstance(extra, ast.ClassDef):
+                if extra.name in existing_top_classes:
+                    base_tree.body[existing_top_classes[extra.name]] = extra
+                else:
+                    base_tree.body.insert(_insert_pos_for(extra), extra)
+                changed_top.append(extra.name)
+            elif isinstance(extra, ast.ImportFrom):
+                matched_idx = None
+                for i, st in enumerate(base_tree.body):
+                    if (
+                        isinstance(st, ast.ImportFrom)
+                        and st.module == extra.module
+                        and st.level == extra.level
+                    ):
+                        matched_idx = i
+                        break
+                if matched_idx is not None:
+                    ex_if = base_tree.body[matched_idx]
+                    assert isinstance(ex_if, ast.ImportFrom)
+                    have = {(a.name, a.asname) for a in ex_if.names}
+                    for a in extra.names:
+                        if (a.name, a.asname) not in have:
+                            ex_if.names.append(copy.deepcopy(a))
+                            have.add((a.name, a.asname))
+                            changed_top.append(f"import:{extra.module or ''}.{a.name}")
+                else:
+                    base_tree.body.insert(_insert_pos_for(extra), extra)
+                    changed_top.append(f"import:{extra.module or ''}")
+            elif isinstance(extra, ast.Import):
+                raw = ast.unparse(extra).strip()
+                if raw not in existing_top_src:
+                    base_tree.body.insert(_insert_pos_for(extra), extra)
+                    existing_top_src.add(raw)
+                    changed_top.append(raw)
+            else:
+                t_nm = _assign_target_name(extra)
+                if t_nm is not None and t_nm in existing_top_assigns:
+                    old_dump = ast.dump(base_tree.body[existing_top_assigns[t_nm]])
+                    base_tree.body[existing_top_assigns[t_nm]] = extra
+                    if ast.dump(extra) != old_dump:
+                        changed_top.append(t_nm)
+                elif ast.unparse(extra).strip() not in existing_top_src:
+                    pos = _insert_pos_for(extra)
+                    base_tree.body.insert(pos, extra)
+                    existing_top_src.add(ast.unparse(extra).strip())
+                    if t_nm is not None:
+                        changed_top.append(t_nm)
+                        existing_top_assigns = {
+                            _assign_target_name(s): i
+                            for i, s in enumerate(base_tree.body)
+                            if _assign_target_name(s) is not None
+                        }
+                        existing_top_classes = {
+                            s.name: i
+                            for i, s in enumerate(base_tree.body)
+                            if isinstance(s, ast.ClassDef)
+                        }
+        return changed_top
+
     for node in patch_tree.body:
         if isinstance(node, ast.ClassDef):
             if target_class is not None and (
@@ -384,19 +490,25 @@ def splice_functions_into_policy(
         elif isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign)):
             patch_top_extras.append(node)
 
+    # Merge top-level imports, constants, and helper classes BEFORE checking target_class is None
+    # so modular skill patches (`skills/*.py`) keep imports & module constants too.
+    top_changed = _merge_top_extras(patch_top_extras)
+
     if target_class is None:
-        # Base has no class; just merge top-level functions
-        changed: list[str] = []
+        # Base has no class; merge top-level functions (deduplicating existing names in-place)
+        changed: list[str] = list(top_changed)
         existing_map = {
             n.name: i
             for i, n in enumerate(base_tree.body)
-            if isinstance(n, ast.FunctionDef)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         for name, fn_node in {**patch_top_funcs, **patch_methods}.items():
-            changed.append(name)
             if name in existing_map:
+                if ast.dump(base_tree.body[existing_map[name]]) != ast.dump(fn_node):
+                    changed.append(name)
                 base_tree.body[existing_map[name]] = fn_node
             else:
+                changed.append(name)
                 base_tree.body.append(fn_node)
         return ast.unparse(base_tree), changed
 
@@ -412,41 +524,6 @@ def splice_functions_into_policy(
                 target_class.body[existing_cls_assigns[c_nm]] = c_stmt
             else:
                 target_class.body.insert(0, c_stmt)
-
-    # Merge any top-level imports, constants, or helper classes before target_class (replacing constants in-place!)
-    existing_top_src = {
-        ast.unparse(stmt).strip()
-        for stmt in base_tree.body
-        if not isinstance(stmt, (ast.ClassDef, ast.FunctionDef))
-    }
-    existing_top_classes = {
-        stmt.name: idx
-        for idx, stmt in enumerate(base_tree.body)
-        if isinstance(stmt, ast.ClassDef)
-    }
-    existing_top_assigns = {
-        _assign_target_name(stmt): idx
-        for idx, stmt in enumerate(base_tree.body)
-        if _assign_target_name(stmt) is not None
-    }
-    for extra in reversed(patch_top_extras):
-        if isinstance(extra, ast.ClassDef):
-            if extra.name in existing_top_classes:
-                base_tree.body[existing_top_classes[extra.name]] = extra
-            else:
-                base_tree.body.insert(0, extra)
-        else:
-            t_nm = _assign_target_name(extra)
-            if t_nm is not None and t_nm in existing_top_assigns:
-                base_tree.body[existing_top_assigns[t_nm]] = extra
-            elif ast.unparse(extra).strip() not in existing_top_src:
-                base_tree.body.insert(0, extra)
-                if t_nm is not None:
-                    existing_top_assigns = {
-                        _assign_target_name(s): i
-                        for i, s in enumerate(base_tree.body)
-                        if _assign_target_name(s) is not None
-                    }
 
     # Compute which methods in patch_methods are genuinely new or modified compared to target_class
     existing_methods: dict[str, ast.FunctionDef] = {
@@ -909,3 +986,460 @@ def extract_module_outline(code: str, module_name: str = "") -> str:
             lines.append("    ...")
 
     return "\n".join(lines)
+
+
+def _node_dump(node: ast.AST | None) -> str:
+    return ast.dump(node, include_attributes=False) if node is not None else ""
+
+
+def _try_merge_priority_selector_fn(
+    fn_base: ast.FunctionDef,
+    fn_a: ast.FunctionDef,
+    fn_b: ast.FunctionDef,
+) -> ast.FunctionDef | None:
+    """
+    If two branches both edited `build_tree` (or similar method) solely by adding/modifying
+    distinct children inside `PrioritySelector([...])` without conflicting non-list lines,
+    returns a merged FunctionDef; otherwise returns None.
+    """
+    if len(fn_base.body) != len(fn_a.body) or len(fn_base.body) != len(fn_b.body):
+        return None
+
+    merged_fn = copy.deepcopy(fn_base)
+
+    def _find_ps_lists(tree: ast.AST) -> list[ast.List]:
+        found: list[ast.List] = []
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call):
+                fid = (
+                    n.func.id
+                    if isinstance(n.func, ast.Name)
+                    else (n.func.attr if isinstance(n.func, ast.Attribute) else "")
+                )
+                if (
+                    fid in ("PrioritySelector", "BehaviorTree")
+                    and n.args
+                    and isinstance(n.args[0], ast.List)
+                ):
+                    found.append(n.args[0])
+        return found
+
+    ps_base = _find_ps_lists(fn_base)
+    ps_a = _find_ps_lists(fn_a)
+    ps_b = _find_ps_lists(fn_b)
+    if not ps_base or len(ps_base) != len(ps_a) or len(ps_base) != len(ps_b):
+        return None
+
+    # Verify everything OUTSIDE the PrioritySelector list items matches across base, A, B
+    def _skeleton(fn: ast.FunctionDef) -> str:
+        c = copy.deepcopy(fn)
+        for lst in _find_ps_lists(c):
+            lst.elts = []
+        return ast.dump(c, include_attributes=False)
+
+    if _skeleton(fn_base) != _skeleton(fn_a) or _skeleton(fn_base) != _skeleton(fn_b):
+        return None
+
+    ps_merged = _find_ps_lists(merged_fn)
+    for lb, la, lc, lm in zip(ps_base, ps_a, ps_b, ps_merged):
+        base_dumps = [_node_dump(e) for e in lb.elts]
+        a_dumps = [_node_dump(e) for e in la.elts]
+        b_dumps = [_node_dump(e) for e in lc.elts]
+        # Simple 3-way list merge: keep surviving/updated base elements + append additions from A and B
+        a_set = set(a_dumps)
+        b_set = set(b_dumps)
+        new_elts: list[ast.expr] = []
+        seen_dumps: set[str] = set()
+        # Keep items from base present in both A and B (unless removed only by one -> respect removal)
+        for elt, d in zip(lb.elts, base_dumps):
+            if d in a_set and d in b_set and d not in seen_dumps:
+                new_elts.append(copy.deepcopy(elt))
+                seen_dumps.add(d)
+        # Additions from A (or kept ordering relative to additions)
+        base_set = set(base_dumps)
+        for elt, d in zip(la.elts, a_dumps):
+            if d not in base_set and d not in seen_dumps:
+                new_elts.append(copy.deepcopy(elt))
+                seen_dumps.add(d)
+        for elt, d in zip(lc.elts, b_dumps):
+            if d not in base_set and d not in seen_dumps:
+                new_elts.append(copy.deepcopy(elt))
+                seen_dumps.add(d)
+        lm.elts = new_elts
+    return merged_fn
+
+
+def three_way_ast_merge(base_src: str, src_a: str, src_b: str) -> str | None:
+    """
+    Deterministic AST-level 3-way merge of `(base_src, src_a, src_b)`.
+    Supports module-level imports (unioned), constants/assignments, top-level functions,
+    and `Policy` / `Agent` class definitions + disjoint `PrioritySelector([...])` edits.
+    Returns merged source string, or `None` if both branches mutated the same symbol differently.
+    """
+    try:
+        t_base = ast.parse(smart_dedent(base_src).strip() or "pass")
+        t_a = ast.parse(smart_dedent(src_a).strip())
+        t_b = ast.parse(smart_dedent(src_b).strip())
+    except Exception:
+        return None
+
+    if _node_dump(t_a) == _node_dump(t_base):
+        return smart_dedent(src_b).strip()
+    if _node_dump(t_b) == _node_dump(t_base):
+        return smart_dedent(src_a).strip()
+    if _node_dump(t_a) == _node_dump(t_b):
+        return smart_dedent(src_a).strip()
+
+    def _stmt_key(stmt: ast.stmt) -> tuple[str, str] | None:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return ("fn", stmt.name)
+        if isinstance(stmt, ast.ClassDef):
+            return ("cls", stmt.name)
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            return ("assign", stmt.targets[0].id)
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            return ("assign", stmt.target.id)
+        return None
+
+    def _merge_body_lists(
+        b_body: list[ast.stmt],
+        a_body: list[ast.stmt],
+        c_body: list[ast.stmt],
+        allow_selector_merge: bool = False,
+    ) -> list[ast.stmt] | None:
+        # Union-merge Import / ImportFrom statements first
+        imports_merged: list[ast.stmt] = []
+        import_from_map: dict[tuple[str | None, int], ast.ImportFrom] = {}
+        seen_imports: set[str] = set()
+        other_base: list[ast.stmt] = []
+        other_a: list[ast.stmt] = []
+        other_b: list[ast.stmt] = []
+
+        for body, bucket in (
+            (b_body, other_base),
+            (a_body, other_a),
+            (c_body, other_b),
+        ):
+            for st in body:
+                if isinstance(st, ast.ImportFrom):
+                    key = (st.module, int(st.level or 0))
+                    if key not in import_from_map:
+                        cp = copy.deepcopy(st)
+                        import_from_map[key] = cp
+                        imports_merged.append(cp)
+                    else:
+                        ex = import_from_map[key]
+                        have = {(al.name, al.asname) for al in ex.names}
+                        for al in st.names:
+                            if (al.name, al.asname) not in have:
+                                ex.names.append(copy.deepcopy(al))
+                                have.add((al.name, al.asname))
+                elif isinstance(st, ast.Import):
+                    d = _node_dump(st)
+                    if d not in seen_imports:
+                        seen_imports.add(d)
+                        imports_merged.append(copy.deepcopy(st))
+                else:
+                    bucket.append(st)
+
+        # Keep module docstring if any
+        doc_stmt: ast.stmt | None = None
+        for bucket in (other_a, other_b, other_base):
+            if (
+                bucket
+                and isinstance(bucket[0], ast.Expr)
+                and isinstance(bucket[0].value, ast.Constant)
+                and isinstance(bucket[0].value.value, str)
+            ):
+                if doc_stmt is None:
+                    doc_stmt = copy.deepcopy(bucket[0])
+                bucket.pop(0)
+
+        def _index(
+            stmts: list[ast.stmt],
+        ) -> tuple[dict[tuple[str, str], ast.stmt], list[ast.stmt]]:
+            mp: dict[tuple[str, str], ast.stmt] = {}
+            misc: list[ast.stmt] = []
+            for st in stmts:
+                k = _stmt_key(st)
+                if k is not None:
+                    mp[k] = st
+                else:
+                    misc.append(st)
+            return mp, misc
+
+        mb, misc_base = _index(other_base)
+        ma, misc_a = _index(other_a)
+        mc, misc_b = _index(other_b)
+
+        # Verify misc (e.g. top-level calls) didn't diverge incompatibly
+        sb, sa, sc = (
+            [_node_dump(x) for x in misc_base],
+            [_node_dump(x) for x in misc_a],
+            [_node_dump(x) for x in misc_b],
+        )
+        if sa != sb and sc != sb and sa != sc:
+            return None
+        merged_misc = misc_a if sa != sb else misc_b
+
+        all_keys: list[tuple[str, str]] = []
+        seen_k: set[tuple[str, str]] = set()
+        for mp in (mb, ma, mc):
+            for k in mp:
+                if k not in seen_k:
+                    seen_k.add(k)
+                    all_keys.append(k)
+
+        merged_named: list[ast.stmt] = []
+        for k in all_keys:
+            nb, na, nc = mb.get(k), ma.get(k), mc.get(k)
+            db, da, dc = _node_dump(nb), _node_dump(na), _node_dump(nc)
+            if da == dc:
+                if na is not None:
+                    merged_named.append(copy.deepcopy(na))
+            elif da == db:
+                if nc is not None:
+                    merged_named.append(copy.deepcopy(nc))
+            elif dc == db:
+                if na is not None:
+                    merged_named.append(copy.deepcopy(na))
+            elif (
+                isinstance(nb, ast.ClassDef)
+                and isinstance(na, ast.ClassDef)
+                and isinstance(nc, ast.ClassDef)
+            ):
+                cls_body = _merge_body_lists(
+                    nb.body, na.body, nc.body, allow_selector_merge=True
+                )
+                if cls_body is None:
+                    return None
+                merged_cls = copy.deepcopy(nb)
+                merged_cls.body = cls_body or [ast.Pass()]
+                merged_named.append(merged_cls)
+            elif (
+                allow_selector_merge
+                and isinstance(nb, ast.FunctionDef)
+                and isinstance(na, ast.FunctionDef)
+                and isinstance(nc, ast.FunctionDef)
+            ):
+                ps_merged = _try_merge_priority_selector_fn(nb, na, nc)
+                if ps_merged is None:
+                    return None
+                merged_named.append(ps_merged)
+            else:
+                return None
+
+        out: list[ast.stmt] = []
+        if doc_stmt is not None:
+            out.append(doc_stmt)
+        out.extend(imports_merged)
+        out.extend(merged_named)
+        out.extend(copy.deepcopy(merged_misc))
+        return out
+
+    merged_body = _merge_body_lists(
+        t_base.body, t_a.body, t_b.body, allow_selector_merge=True
+    )
+    if merged_body is None:
+        return None
+    out_mod = ast.Module(body=merged_body, type_ignores=[])
+    ast.fix_missing_locations(out_mod)
+    return ast.unparse(out_mod)
+
+
+def _extract_module_exports(tree: ast.Module) -> tuple[set[str], bool]:
+    """Returns `(exported_names, has_star_import)` for a skill module AST."""
+    exports: set[str] = set()
+    has_star = False
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            exports.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    exports.add(t.id)
+                elif isinstance(t, (ast.Tuple, ast.List)):
+                    for elt in t.elts:
+                        if isinstance(elt, ast.Name):
+                            exports.add(elt.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            exports.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            for al in node.names:
+                exports.add(al.asname or al.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            for al in node.names:
+                if al.name == "*":
+                    has_star = True
+                else:
+                    exports.add(al.asname or al.name)
+    return exports, has_star
+
+
+def check_undefined_symbols(
+    policy_code: str,
+    skills: dict[str, str] | None = None,
+    allowed_globals: frozenset[str] = frozenset(),
+) -> None:
+    """
+    Fast (<2ms) CPython `symtable` undefined-symbol and cross-skill export gate.
+    Raises `PolicyValidationError` if any function, lambda, comprehension, or module
+    references a free/global name that is not defined in the module or execution namespace,
+    or imports/accesses a missing symbol from `skills.<mod>`.
+    """
+    import builtins
+
+    known_builtins = frozenset(dir(builtins)) | frozenset(
+        {"__name__", "__doc__", "__builtins__", "__package__", "__class__", "skills"}
+    )
+    global_env = known_builtins | frozenset(allowed_globals)
+
+    skill_map = dict(skills or {})
+    skill_exports: dict[str, set[str]] = {}
+    skill_has_star: dict[str, bool] = {}
+
+    sources: list[tuple[str, str]] = []
+    for s_name, s_src in sorted(skill_map.items()):
+        if not s_src or not s_src.strip():
+            continue
+        cleaned = smart_dedent(s_src.replace("\t", "    ")).strip()
+        try:
+            tree = ast.parse(cleaned, filename=f"skills/{s_name}.py")
+        except SyntaxError as exc:
+            raise PolicyValidationError(
+                f"SyntaxError in skills/{s_name}.py line {exc.lineno}: {exc.msg}"
+            ) from exc
+        exp, has_star = _extract_module_exports(tree)
+        skill_exports[s_name] = exp
+        skill_has_star[s_name] = has_star
+        sources.append((f"skills/{s_name}.py", cleaned))
+
+    cleaned_pol = smart_dedent((policy_code or "").replace("\t", "    ")).strip()
+    if cleaned_pol:
+        sources.append(("policy.py", cleaned_pol))
+
+    for filename, src in sources:
+        try:
+            tree = ast.parse(src, filename=filename)
+        except SyntaxError as exc:
+            raise PolicyValidationError(
+                f"SyntaxError in {filename} line {exc.lineno}: {exc.msg}"
+            ) from exc
+
+        # 1. Cross-skill import & attribute validation
+        skill_aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                mod = str(node.module or "")
+                if mod == "skills":
+                    for al in node.names:
+                        s_mod = al.name
+                        if skill_map and s_mod not in skill_exports:
+                            raise PolicyValidationError(
+                                f"Undefined skill module 'skills.{s_mod}' imported in {filename}"
+                            )
+                        skill_aliases[al.asname or s_mod] = s_mod
+                elif mod.startswith("skills."):
+                    s_mod = mod.split(".", 1)[1].split(".", 1)[0]
+                    if skill_map and s_mod not in skill_exports:
+                        raise PolicyValidationError(
+                            f"Undefined skill module 'skills.{s_mod}' imported in {filename}"
+                        )
+                    if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
+                        for al in node.names:
+                            if al.name != "*" and al.name not in skill_exports[s_mod]:
+                                raise PolicyValidationError(
+                                    f"Symbol '{al.name}' not exported by skills/{s_mod}.py (referenced in {filename})"
+                                )
+            elif isinstance(node, ast.Import):
+                for al in node.names:
+                    if al.name.startswith("skills."):
+                        s_mod = al.name.split(".", 1)[1].split(".", 1)[0]
+                        if skill_map and s_mod not in skill_exports:
+                            raise PolicyValidationError(
+                                f"Undefined skill module 'skills.{s_mod}' imported in {filename}"
+                            )
+                        if al.asname:
+                            skill_aliases[al.asname] = s_mod
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and not node.attr.startswith("_"):
+                # Match skills.<mod>.<attr> or <alias>.<attr>
+                if (
+                    isinstance(node.value, ast.Attribute)
+                    and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == "skills"
+                ):
+                    s_mod = node.value.attr
+                    if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
+                        if node.attr not in skill_exports[s_mod]:
+                            raise PolicyValidationError(
+                                f"Symbol 'skills.{s_mod}.{node.attr}' not found in skills/{s_mod}.py (referenced in {filename})"
+                            )
+                elif (
+                    isinstance(node.value, ast.Name) and node.value.id in skill_aliases
+                ):
+                    s_mod = skill_aliases[node.value.id]
+                    if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
+                        if node.attr not in skill_exports[s_mod]:
+                            raise PolicyValidationError(
+                                f"Symbol '{node.value.id}.{node.attr}' not found in skills/{s_mod}.py (referenced in {filename})"
+                            )
+
+        # 2. CPython symtable undefined-global check
+        try:
+            top_st = symtable.symtable(src, filename, "exec")
+        except SyntaxError as exc:
+            raise PolicyValidationError(
+                f"SyntaxError in {filename} line {exc.lineno}: {exc.msg}"
+            ) from exc
+
+        mod_defined: set[str] = set()
+        for sym in top_st.get_symbols():
+            if sym.is_local() or sym.is_imported():
+                mod_defined.add(sym.get_name())
+        # Also include explicit star-imported symbols from known skills
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom):
+                mod = str(node.module or "")
+                if mod.startswith("skills."):
+                    s_mod = mod.split(".", 1)[1].split(".", 1)[0]
+                    if (
+                        any(al.name == "*" for al in node.names)
+                        and s_mod in skill_exports
+                    ):
+                        mod_defined.update(skill_exports[s_mod])
+
+        valid_globals = global_env | mod_defined | set(skill_exports.keys())
+
+        def _check_table(tbl: symtable.SymbolTable, is_root: bool) -> None:
+            for sym in tbl.get_symbols():
+                nm = sym.get_name()
+                if is_root:
+                    if (
+                        sym.is_referenced()
+                        and not sym.is_local()
+                        and not sym.is_imported()
+                        and nm not in valid_globals
+                    ):
+                        raise PolicyValidationError(
+                            f"Undefined global symbol '{nm}' at module level in {filename}"
+                        )
+                else:
+                    if (
+                        sym.is_global()
+                        and sym.is_referenced()
+                        and nm not in valid_globals
+                    ):
+                        scope_nm = tbl.get_name()
+                        raise PolicyValidationError(
+                            f"Undefined symbol '{nm}' in {filename}::{scope_nm}"
+                        )
+            for child in tbl.get_children():
+                _check_table(child, is_root=False)
+
+        _check_table(top_st, is_root=True)

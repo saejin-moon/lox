@@ -54,6 +54,14 @@ def extract_priority_selector_branches(policy_code: str) -> list[dict[str, str]]
     except Exception:
         return []
 
+    def _expr_name(expr: ast.AST) -> str:
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Attribute):
+            base = _expr_name(expr.value)
+            return f"{base}.{expr.attr}" if base else expr.attr
+        return ""
+
     selector_calls: list[ast.Call] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -65,6 +73,12 @@ def extract_priority_selector_branches(policy_code: str) -> list[dict[str, str]]
             if func_id == "PrioritySelector" and node.args:
                 if isinstance(node.args[0], (ast.List, ast.Tuple)):
                     selector_calls.append(node)
+            elif (
+                func_id == "from_modules"
+                and isinstance(node.func, ast.Attribute)
+                and _expr_name(node.func.value) == "PrioritySelector"
+            ):
+                selector_calls.append(node)
 
     if not selector_calls:
         return []
@@ -80,17 +94,39 @@ def extract_priority_selector_branches(policy_code: str) -> list[dict[str, str]]
                 target_call = c
                 break
 
+    if (
+        isinstance(target_call.func, ast.Attribute)
+        and target_call.func.attr == "from_modules"
+    ):
+        branches_fm: list[dict[str, str]] = []
+        for idx, arg in enumerate(target_call.args, start=1):
+            nm = _expr_name(arg) or f"module_{idx}"
+            branches_fm.append(
+                {"priority": str(idx), "leaf_name": nm, "fn_name": nm.split(".")[-1]}
+            )
+        return branches_fm
+
     seq_node = target_call.args[0]
     elts = getattr(seq_node, "elts", [])
     branches: list[dict[str, str]] = []
 
-    def _expr_name(expr: ast.AST) -> str:
-        if isinstance(expr, ast.Name):
-            return expr.id
-        if isinstance(expr, ast.Attribute):
-            base = _expr_name(expr.value)
-            return f"{base}.{expr.attr}" if base else expr.attr
-        return ""
+    def _collect_call_fns(call_node: ast.Call) -> list[str]:
+        sub_fns: list[str] = []
+        if call_node.args:
+            first = call_node.args[0]
+            if isinstance(first, (ast.List, ast.Tuple)):
+                for sub in first.elts:
+                    if isinstance(sub, ast.Call):
+                        sub_fns.extend(_collect_call_fns(sub))
+                    else:
+                        s_fn = _expr_name(sub).split(".")[-1]
+                        if s_fn:
+                            sub_fns.append(s_fn)
+            else:
+                s_fn = _expr_name(first).split(".")[-1]
+                if s_fn:
+                    sub_fns.append(s_fn)
+        return sub_fns
 
     for idx, elt in enumerate(elts, start=1):
         leaf_name = ""
@@ -99,18 +135,9 @@ def extract_priority_selector_branches(policy_code: str) -> list[dict[str, str]]
             for kw in elt.keywords:
                 if kw.arg == "name" and isinstance(kw.value, ast.Constant):
                     leaf_name = str(kw.value.value)
-            if elt.args:
-                first_arg = elt.args[0]
-                if isinstance(first_arg, (ast.List, ast.Tuple)):
-                    sub_fns = []
-                    for sub in first_arg.elts:
-                        if isinstance(sub, ast.Call) and sub.args:
-                            s_fn = _expr_name(sub.args[0]).split(".")[-1]
-                            if s_fn:
-                                sub_fns.append(s_fn)
-                    fn_name = "+".join(sub_fns)
-                else:
-                    fn_name = _expr_name(first_arg).split(".")[-1]
+            fns = _collect_call_fns(elt)
+            if fns:
+                fn_name = "+".join(fns)
             if not leaf_name:
                 leaf_name = fn_name or _expr_name(elt.func)
         else:

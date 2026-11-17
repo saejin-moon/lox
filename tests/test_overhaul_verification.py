@@ -793,8 +793,9 @@ def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
     st.chars[10, 15] = ord("-")  # C engine ASCII for horizontal open door
     mem.update(st)
 
-    # Open door char should be normalized to '.' in remembered_chars (never '-' or '|')
-    assert mem.current_floor.remembered_chars[10, 15] == ord(".")
+    # Lossless remembered_chars + remembered_glyphs + door_mask + passable_mask
+    assert mem.current_floor.remembered_chars[10, 15] == ord("-")
+    assert mem.current_floor.remembered_glyphs[10, 15] == od_g
     assert bool(mem.door_mask[10, 15]) is True
     assert bool(mem.passable_mask[10, 15]) is True
 
@@ -1299,20 +1300,25 @@ def test_pass8_long_horizon_and_unattended_ops(tmp_path: Path) -> None:
         assert hasattr(state, "recent_messages")
         assert isinstance(state.recent_messages, list)
 
-        # Tree / Iron bars normalization to ord("|")
+        # Tree / Iron bars lossless remembered_chars + remembered_glyphs + passable_mask
         tree_g = int(np.where(_IS_IRON_BARS_OR_TREE_LUT)[0][0])
         state.glyphs[10, 10] = tree_g
         state.chars[10, 10] = ord("#")
         state.mem.update(state)
         fl = state.mem.get_floor(state.dungeon_num, state.level_num)
-        assert fl.remembered_chars[10, 10] == ord("|")
+        assert fl.remembered_chars[10, 10] == ord("#")
+        assert int(fl.remembered_glyphs[10, 10]) == tree_g
+        assert bool(fl.passable_mask[10, 10]) is False
 
-        # Ice / Lowered drawbridge normalization to ord(".")
+        # Ice lossless remembered_chars + remembered_glyphs + passable_mask + is_ice
         ice_g = int(np.where(_IS_ICE_GLYPH_LUT)[0][0])
         state.glyphs[11, 11] = ice_g
         state.chars[11, 11] = ord("-")
         state.mem.update(state)
-        assert fl.remembered_chars[11, 11] == ord(".")
+        assert fl.remembered_chars[11, 11] == ord("-")
+        assert int(fl.remembered_glyphs[11, 11]) == ice_g
+        assert bool(fl.passable_mask[11, 11]) is True
+        assert bool(state.is_ice(11, 11)) is True
 
         assert hasattr(state, "is_water")
         assert hasattr(state, "is_lava")

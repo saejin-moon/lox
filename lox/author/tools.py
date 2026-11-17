@@ -78,17 +78,45 @@ def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
         for n in ca_tree.body
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
+    ex_assigns = {
+        t.id
+        for n in ex_tree.body
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+    ca_assigns = {
+        t.id
+        for n in ca_tree.body
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
     first_line = cand.splitlines()[0].strip().lower() if cand.splitlines() else ""
     looks_patch_comment = (
         first_line.startswith("# patch")
         or "other functions unchanged" in cand[:300].lower()
     )
     dropped_most_defs = len(ex_defs) >= 3 and len(ca_defs) < max(2, len(ex_defs) // 2)
+    partial_subset = (
+        len(ex_defs) >= 2 and 0 < len(ca_defs) < len(ex_defs) and ca_defs <= ex_defs
+    ) or (len(ex_defs) >= 1 and len(ca_defs) == 0 and len(ca_assigns) > 0)
     missing_imports = (
-        ex_has_imports and not ca_has_imports and len(ca_defs) < len(ex_defs)
+        ex_has_imports
+        and not ca_has_imports
+        and (len(ca_defs) < len(ex_defs) or len(ex_defs) == 0)
+    )
+    missing_constants = (
+        len(ex_assigns) > 0 and len(ca_assigns) == 0 and len(ca_defs) <= len(ex_defs)
     )
 
-    if looks_patch_comment or dropped_most_defs or missing_imports:
+    if (
+        looks_patch_comment
+        or dropped_most_defs
+        or partial_subset
+        or missing_imports
+        or missing_constants
+    ):
         try:
             spliced, _ = splice_functions_into_policy(existing_src, cand)
             return spliced
@@ -1495,10 +1523,34 @@ class AuthorToolRegistry:
                     f"- Leaf `{n}` raised {e}" for n, e in swallowed_leaf_errs[:8]
                 )
                 return (
-                    f"Runtime Error in BehaviorTree leaf during smoke test:\n{err_lines}\n"
+                    f"Runtime Error in BehaviorTree leaf during smoke test (seed {seed}):\n{err_lines}\n"
                     "Fix the crashing leaf or missing attribute/import before finalizing.",
                     "RUNTIME_ERROR",
                 )
+
+            # Multi-seed smoke sweep on diverse seeds [1000, 1001] when running smoke check
+            if not is_macro and not has_replay and smoke_only:
+                extra_smoke_steps = min(100, max(50, int(max_turns)))
+                for extra_s in (1000, 1001):
+                    if int(seed) == extra_s:
+                        continue
+                    extra_runner = compiled.create_runner()
+                    est = harness.reset(seed=extra_s)
+                    for _ in range(extra_smoke_steps):
+                        eact, _ = extra_runner.next_action(est)
+                        est, edone, _ = harness.step(eact)
+                        if edone:
+                            break
+                    extra_leaf_errs = extract_runner_leaf_errors(extra_runner)
+                    if extra_leaf_errs:
+                        err_lines = "\n".join(
+                            f"- Leaf `{n}` raised {e}" for n, e in extra_leaf_errs[:8]
+                        )
+                        return (
+                            f"Runtime Error in BehaviorTree leaf during smoke sweep (seed {extra_s}):\n{err_lines}\n"
+                            "Fix the crashing leaf or missing attribute/import before finalizing.",
+                            "RUNTIME_ERROR",
+                        )
 
             warn_lines: list[str] = []
             for h_warn in audit_policy_ast_hygiene(spliced_policy):

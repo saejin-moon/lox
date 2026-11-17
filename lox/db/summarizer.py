@@ -725,28 +725,6 @@ def compute_function_stats(
             float(np.mean(depth_progression_gains)) if depth_progression_gains else 0.0
         )
 
-        # Ochiai similarity with within-depth progression weighting
-        denom_good = math.sqrt(float(max(1, n_good) * max(1, eps_trig)))
-        base_ochiai = e_good / denom_good if n_good > 0 and eps_trig > 0 else 0.0
-        if base_ochiai >= 1.0:
-            ochiai_good = 1.0
-        else:
-            ochiai_good = (
-                max(
-                    0.0,
-                    min(1.0, base_ochiai * 0.7 + max(0.0, prog_bonus + 0.5) * 0.3),
-                )
-                if n_good > 0
-                else max(0.0, min(1.0, 0.5 + prog_bonus))
-            )
-
-        # Liblit failure importance (dies while active vs overall active rate)
-        liblit_fail = (
-            death_rate
-            * math.log(deaths_while_active + 1.0)
-            / math.log(total_runs + 1.0)
-        )
-
         fn_stag_turns = fn_stagnation_turns_map.get(fn, 0)
         stag_share = (
             fn_stag_turns / float(max(1, batch_total_stagnation_turns))
@@ -757,6 +735,31 @@ def compute_function_stats(
             (fn_stag_turns / float(max(1, total_turns))) * trig_rate
             if total_turns > 0
             else 0.0
+        )
+
+        # Ochiai similarity with within-depth progression weighting & stagnation discounting
+        # so high-stagnation fallback/livelock functions do not keep artificially high Ochiai.
+        denom_good = math.sqrt(float(max(1, n_good) * max(1, eps_trig)))
+        base_ochiai = e_good / denom_good if n_good > 0 and eps_trig > 0 else 0.0
+        if base_ochiai >= 1.0:
+            raw_ochiai = 1.0
+        else:
+            raw_ochiai = (
+                max(
+                    0.0,
+                    min(1.0, base_ochiai * 0.7 + max(0.0, prog_bonus + 0.5) * 0.3),
+                )
+                if n_good > 0
+                else max(0.0, min(1.0, 0.5 + prog_bonus))
+            )
+        stag_penalty = min(0.85, max(0.0, stag_share))
+        ochiai_good = raw_ochiai * (1.0 - stag_penalty)
+
+        # Liblit failure importance (dies while active vs overall active rate)
+        liblit_fail = (
+            death_rate
+            * math.log(deaths_while_active + 1.0)
+            / math.log(total_runs + 1.0)
         )
 
         stats_rows.append(

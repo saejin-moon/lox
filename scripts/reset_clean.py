@@ -68,6 +68,9 @@ def reset_clean(
                 "experiments",
                 "discoveries",
                 "synthesis_logs",
+                "theories",
+                "tournament_attempts",
+                "archive_policies",
             ]:
                 try:
                     con.execute(f"DELETE FROM {table}")

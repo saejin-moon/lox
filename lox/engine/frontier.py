@@ -8,6 +8,7 @@ so candidate policies can be tested on mid-game tactical situations without grin
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 from dataclasses import asdict, dataclass
@@ -29,6 +30,7 @@ class FrontierCheckpoint:
     action_bytes: bytes
     game_log: str = ""
     created_at: float = 0.0
+    visit_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -106,6 +108,7 @@ class FrontierArchive:
                         action_bytes=act_bytes,
                         game_log=str(meta.get("game_log", "")),
                         created_at=float(meta.get("created_at", 0.0)),
+                        visit_count=int(meta.get("visit_count", 0) or 0),
                     )
                     self.checkpoints[cid] = cp
                     loaded += 1
@@ -132,8 +135,16 @@ class FrontierArchive:
             max_d = max(c.depth for c in pool)
             deep_tier = [c for c in pool if c.depth >= max(min_depth or 1, max_d - 2)]
             if deep_tier:
-                return random.choice(deep_tier)
-        return random.choice(pool)
+                pool = deep_tier
+        # Go-Explore inverse-visit exploration weighting: depth / sqrt(visit_count + 1)
+        weights = [
+            max(0.1, float(c.depth)) / math.sqrt(max(0, int(c.visit_count)) + 1.0)
+            for c in pool
+        ]
+        chosen = random.choices(pool, weights=weights, k=1)[0]
+        chosen.visit_count += 1
+        self._persist_checkpoint(chosen)
+        return chosen
 
     def replay_into(
         self,

@@ -36,6 +36,7 @@ from lox.author.swarm_worker import SwarmWorker
 from lox.core.contracts import BatchEvaluation
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
+from lox.db.shards import mine_organic_scenarios
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
 from lox.engine.map_elites import MAPElitesArchive
@@ -99,8 +100,8 @@ class SwarmCampaignOrchestrator:
         init_db(self.db_path)
         self.db_logger = BatchDatabaseLogger(db_path=self.db_path)
 
-        # Initialize LanceDB Theory Store & Frontier Archive
-        theories_path = os.path.join(self.workspace_dir, "theories.lance")
+        # Initialize Unified DuckDB Theory Store & Frontier Archive
+        theories_path = self.db_path
         self.theories = TheoryDocumentStore(db_path=theories_path)
         self.frontier = FrontierArchive(frontier_dir=self.frontier_dir)
 
@@ -257,7 +258,7 @@ class SwarmCampaignOrchestrator:
             else {}
         )
 
-        # 1. Deterministic Deficit Discovery + Adaptive Horizon (0 LLM calls)
+        # 1. Deterministic Deficit Discovery + Organic Scenario Bank + Adaptive Horizon
         active_max_steps = self._compute_active_max_steps()
         self._plateau_streak = self._compute_depth_plateau_streak()
         deficit_report = self.deficit_analyzer.analyze(
@@ -265,16 +266,25 @@ class SwarmCampaignOrchestrator:
             current_policy=current_policy,
             skills=initial_skills,
         )
-        if self._plateau_streak >= 3 and deficit_report.regime != "BOOTSTRAP":
+        try:
+            deficit_report.organic_shards = mine_organic_scenarios(
+                self.db_path,
+                frontier_dir=self.frontier_dir,
+                max_total=8,
+            )
+        except Exception:
+            deficit_report.organic_shards = []
+
+        if self._plateau_streak >= 2 and deficit_report.regime != "BOOTSTRAP":
             deficit_report.regime = "PLATEAU"
-        if self._plateau_streak >= 3 and getattr(self.map_elites, "cells", None):
+        if self._plateau_streak >= 2 and getattr(self.map_elites, "cells", None):
             top_elites = sorted(
                 self.map_elites.cells.values(),
                 key=lambda e: float(e.fitness),
                 reverse=True,
             )[:3]
             deficit_report.plateau_hints = [
-                f"{el.cell_id} (batch={el.batch_id}, gen={el.generation}, D={el.metrics.get('avg_depth', 1.0):.2f}/S={el.metrics.get('avg_score', 0.0):.0f})"
+                f"{el.cell_id} (batch={el.batch_id}, gen={el.generation}, D={el.metrics.get('avg_depth', 1.0):.2f}/AC={el.metrics.get('avg_ac', 10.0):.1f}/S={el.metrics.get('avg_score', 0.0):.0f})"
                 for el in top_elites
             ]
         if deficit_report.regime == "CLIMBING":
@@ -282,29 +292,44 @@ class SwarmCampaignOrchestrator:
         else:
             active_peers = max(1, int(self.num_workers))
 
+        # Select orthogonal clusters with disjoint dominant_fns when possible
+        clusters = deficit_report.fail_clusters
+        orthogonal_clusters: list[Any] = []
+        used_dom_fns: set[str] = set()
+        for cl in clusters:
+            dom = str((cl.dominant_fns or [""])[0] or "").strip()
+            if not dom or dom not in used_dom_fns:
+                orthogonal_clusters.append(cl)
+                if dom:
+                    used_dom_fns.add(dom)
+        if not orthogonal_clusters:
+            orthogonal_clusters = list(clusters)
+
         ui.info(
             f"Gen {generation}: Regime={deficit_report.regime} "
             f"(Δ={deficit_report.rolling_depth_delta:+.2f}, streak={self._plateau_streak}) | "
-            f"Clusters={len(deficit_report.fail_clusters)} | Peers={active_peers} | MaxSteps={active_max_steps}"
+            f"Clusters={len(clusters)} (ortho={len(orthogonal_clusters)}) | Peers={active_peers} | MaxSteps={active_max_steps}"
         )
 
-        # 2. Shared Incubation Micro-Shard Baseline (reuse cached incumbent runs when available)
+        # 2. Shared Paired CRN Seeds (100% Fresh Per Generation: S_g != S_{g-1}) + Hidden Holdout Seeds
+        seeds = [
+            10_000 + int(generation) * 100 + i for i in range(self.seeds_per_batch)
+        ]
+        holdout_seeds = [
+            100_000 + i for i in range(max(4, min(8, int(self.seeds_per_batch))))
+        ]
         raw_shard_seeds = list(
             dict.fromkeys(
                 deficit_report.d_succ_seeds[:2]
-                + [
-                    sd
-                    for cl in deficit_report.fail_clusters
-                    for sd in cl.sample_seeds[:2]
-                ]
-                + [1000, 1001]
+                + [sd for cl in clusters for sd in cl.sample_seeds[:2]]
+                + seeds[:2]
             )
         )
         max_shard = min(6, max(2, int(self.seeds_per_batch)))
         shard_seeds = raw_shard_seeds[:max_shard]
         incumbent_shard_runs: dict[int, dict[str, Any]] = {}
         if current_policy.strip() and shard_seeds:
-            full_seeds_key = tuple(1000 + i for i in range(self.seeds_per_batch))
+            full_seeds_key = tuple(int(s) for s in seeds)
             inc_fp = _package_fingerprint(current_policy, initial_skills)
             cache_k = (
                 id(self.eval_pool),
@@ -335,16 +360,40 @@ class SwarmCampaignOrchestrator:
                 for r in inc_shard.get("runs", []) or []:
                     incumbent_shard_runs[int(r.get("seed", 0))] = dict(r)
 
-        # 3. Concurrent Symmetric Peer Agents + Isolated Sandbox Incubation (rotate clusters per gen)
-        clusters = deficit_report.fail_clusters
-        peer_assignments = [
-            (f"peer_{i + 1}", clusters[(generation + i) % len(clusters)])
-            for i in range(active_peers)
-        ]
-        peer_tool_turns = max(4, int(self.turns_per_worker) * 3)
+        # 3. Concurrent Symmetric Peer Agents + Plateau MAP-Elites UCB Branching
+        peer_assignments: list[tuple[str, Any, str, dict[str, str], str | None]] = []
+        sampled_elite_ids: list[str] = []
+        use_elite_reseed = (
+            self._plateau_streak >= 2
+            and len(getattr(self.map_elites, "cells", {})) >= 2
+            and bool(current_policy.strip())
+        )
+        reseed_slots = max(1, active_peers // 2) if use_elite_reseed else 0
+        for i in range(active_peers):
+            cl = orthogonal_clusters[(generation + i) % len(orthogonal_clusters)]
+            start_pol = current_policy
+            start_sk = initial_skills
+            elite_cid: str | None = None
+            if i < reseed_slots:
+                el = self.map_elites.sample_elite(strategy="ucb_curiosity")
+                if el is not None and str(el.policy_code or "").strip():
+                    start_pol = el.policy_code
+                    start_sk = dict(el.skills or initial_skills)
+                    elite_cid = el.cell_id
+                    sampled_elite_ids.append(elite_cid)
+            peer_assignments.append(
+                (f"peer_{i + 1}", cl, start_pol, start_sk, elite_cid)
+            )
+
+        peer_tool_turns = max(6, int(self.turns_per_worker) * 3)
         peer_candidates: list[PeerCandidate] = []
 
-        def _run_peer(peer_id: str, cluster: Any) -> PeerCandidate:
+        def _run_peer(
+            peer_id: str,
+            cluster: Any,
+            p_policy: str,
+            p_skills: dict[str, str],
+        ) -> PeerCandidate:
             peer = SwarmPeerAgent(
                 peer_id=peer_id,
                 provider=self.provider,
@@ -357,8 +406,8 @@ class SwarmCampaignOrchestrator:
                 generation=generation,
                 deficit_report=deficit_report,
                 claimed_deficit=cluster,
-                current_policy=current_policy,
-                current_skills=initial_skills,
+                current_policy=p_policy,
+                current_skills=p_skills,
                 eval_pool=self.eval_pool,
                 incumbent_shard_runs=incumbent_shard_runs,
                 shard_seeds=shard_seeds,
@@ -369,7 +418,8 @@ class SwarmCampaignOrchestrator:
             max_workers=len(peer_assignments)
         ) as executor:
             fut_map = {
-                executor.submit(_run_peer, pid, cl): pid for pid, cl in peer_assignments
+                executor.submit(_run_peer, pid, cl, sp, ss): pid
+                for pid, cl, sp, ss, _ecid in peer_assignments
             }
             for fut in concurrent.futures.as_completed(fut_map):
                 pid = fut_map[fut]
@@ -378,8 +428,7 @@ class SwarmCampaignOrchestrator:
                 except Exception as exc:
                     ui.warn(f"Peer [{pid}] failed: {exc}")
 
-        # 4. Deterministic CRN Tournament & Optional AST-Disjoint Orthogonal Merge
-        seeds = [1000 + i for i in range(self.seeds_per_batch)]
+        # 4. Deterministic CRN Tournament + AST 3-Way Composition + Hidden Holdout Audit
         verdict = self.referee.evaluate_tournament(
             generation=generation,
             candidates=peer_candidates,
@@ -388,6 +437,7 @@ class SwarmCampaignOrchestrator:
             eval_pool=self.eval_pool,
             seeds=seeds,
             max_steps=active_max_steps,
+            holdout_seeds=holdout_seeds,
         )
 
         # 4b. Sparse Hysteresis Circuit Breaker: deterministic bit-identical AST modularization
@@ -483,7 +533,13 @@ class SwarmCampaignOrchestrator:
             },
         )
 
-        # 5. Extract Frontier Checkpoints (from active/promoted policy only) & Ingest into MAP-Elites Archive
+        # Persist challenger tournament attempts (including rejected peers + tracebacks)
+        try:
+            self.db_logger.save_tournament_attempts(verdict.attempts_summary)
+        except Exception:
+            pass
+
+        # 5. Extract Frontier Checkpoints (all deep/valid runs) & Ingest into MAP-Elites v2 Archive
         new_cps = self._ingest_frontier_and_map_elites(
             generation=generation,
             runs=runs,
@@ -492,8 +548,20 @@ class SwarmCampaignOrchestrator:
             skills=verdict.winner_skills,
             batch_id=batch_id,
             runner_ups=verdict.all_runner_up_batches,
-            allow_frontier=bool(verdict.promoted or generation <= 2),
+            allow_frontier=bool(verdict.promoted or generation <= 2 or runs),
         )
+        if sampled_elite_ids:
+            try:
+                _con_u = connect_db(self.db_path, read_only=False)
+                try:
+                    for ecid in sampled_elite_ids:
+                        self.map_elites.record_outcome(
+                            ecid, bool(verdict.promoted), con=_con_u
+                        )
+                finally:
+                    _con_u.close()
+            except Exception:
+                pass
         self._sync_batch_cost(batch_id, generation)
         self._plateau_streak = self._compute_depth_plateau_streak()
 
@@ -582,7 +650,10 @@ class SwarmCampaignOrchestrator:
         }
 
     def _compute_depth_plateau_streak(self) -> int:
-        """Counts consecutive recent generations without meaningful avg_depth (>=0.05) or max_depth progress."""
+        """
+        Counts consecutive recent SWARM generations without a promoted breakthrough or
+        paired progression gain (immune to across-generation random seed difficulty variance).
+        """
         try:
             con = connect_db(self.db_path, read_only=True)
             try:
@@ -599,26 +670,11 @@ class SwarmCampaignOrchestrator:
                 con.close()
             if len(rows) < 2:
                 return 0
-            # Chronological newest -> oldest: stop when we see a meaningful depth breakthrough
             streak = 0
-            latest_avg = float(rows[0][1] or 1.0)
-            latest_max = int(rows[0][2] or 1)
-            for idx in range(len(rows) - 1):
-                cur_avg = float(rows[idx][1] or 1.0)
-                prev_avg = float(rows[idx + 1][1] or 1.0)
-                cur_max = int(rows[idx][2] or 1)
-                prev_max = int(rows[idx + 1][2] or 1)
-                if (cur_avg - prev_avg) >= 0.05 or cur_max > prev_max:
+            for gen_i, _ad, _md, passed in rows:
+                if bool(passed):
                     break
                 streak += 1
-            if streak == 0 and len(rows) >= 3:
-                # Also detect oscillation back to identical max/avg within 3 gens
-                max_prev = max(int(r[2] or 1) for r in rows[1:4])
-                if (
-                    latest_max <= max_prev
-                    and latest_avg <= max(float(r[1] or 1.0) for r in rows[1:4]) + 0.02
-                ):
-                    streak = max(streak, sum(1 for r in rows[:4] if not r[3]))
             return streak
         except Exception:
             return 0
@@ -702,6 +758,24 @@ class SwarmCampaignOrchestrator:
             "avg_depth": float(batch_eval.get("avg_depth", 1.0)),
             "max_depth": int(batch_eval.get("max_depth", 1)),
             "avg_score": float(batch_eval.get("avg_score", 0.0)),
+            "avg_ac": float(
+                np.mean(
+                    [
+                        r.get("final_ac", 10) if r.get("final_ac") is not None else 10
+                        for r in runs
+                    ]
+                )
+            )
+            if runs
+            else 10.0,
+            "avg_xp_level": float(np.mean([r.get("xp_level", 1) or 1 for r in runs]))
+            if runs
+            else 1.0,
+            "avg_unique_tiles": float(
+                np.mean([r.get("unique_tiles", 0) or 0 for r in runs])
+            )
+            if runs
+            else 0.0,
             "pct_wait": float(np.mean([r.get("pct_wait", 0.0) for r in runs]))
             if runs
             else 0.0,
@@ -786,7 +860,7 @@ class SwarmCampaignOrchestrator:
 
         # 3. Concurrent Worker Exploration
         worker_reports: dict[str, dict[str, Any]] = {}
-        theories_path = os.path.join(self.workspace_dir, "theories.lance")
+        theories_path = self.db_path
 
         def _run_worker(cat: dict[str, Any]) -> dict[str, Any]:
             worker = SwarmWorker(

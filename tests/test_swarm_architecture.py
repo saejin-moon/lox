@@ -807,8 +807,8 @@ def test_swarm_worker_multi_hypothesis_session(tmp_path):
     assert len(res["experiments"]) == 3
     assert "h3_explore" in res["best_code"]
 
-    assert worker.theories._table is not None
-    docs = worker.theories._table.to_arrow().to_pylist()
+    docs = worker.theories.list_documents()
+    assert len(docs) >= 4
     theory_docs = [d for d in docs if d["doc_type"] == "THEORY"]
     ref_docs = [d for d in docs if d["doc_type"] == "REFLECTION_REPORT"]
     assert len(theory_docs) == 3
@@ -877,7 +877,11 @@ def test_two_pass_advisory_critic_meta_revision_and_diagnostics(tmp_path):
     assert not (skills_dir / "combat_tactics.py").exists()
     assert (skills_dir / "good_skill.py").exists()
 
-    with pytest.raises(ImportError, match="skills.nonexistent"):
+    from lox.lang.validator import PolicyValidationError
+
+    with pytest.raises(
+        (ImportError, PolicyValidationError), match="skills.nonexistent"
+    ):
         compile_policy_package(
             "import skills.nonexistent\nclass Policy:\n    def step(self, state): return Action.WAIT\n",
             skills=built,
@@ -2326,19 +2330,23 @@ def test_prompt_docs_split_schema_noop_diff_and_map_elites(tmp_path):
     )
     assert st_noop == "NOOP_DIFF", msg_noop
 
-    # MAPElitesArchive normalizes 0..100 pct_wait/pct_search cleanly
-    cid_pct, d_b, c_b, r_b = MAPElitesArchive.compute_cell_id(
+    # MAPElitesArchive v2 isolates avg_depth & armor/XL vitals without max_depth aliasing
+    cid_pct, d_b, v_b, t_b = MAPElitesArchive.compute_cell_id(
         {
             "avg_depth": 4.5,
             "max_depth": 9,
-            "pct_wait": 12.0,
-            "pct_search": 8.0,
-            "avg_score": 600.0,
+            "avg_ac": 5.0,
+            "avg_xp_level": 3.0,
+            "avg_unique_tiles": 900.0,
             "avg_turns": 1500.0,
         }
     )
-    assert c_b == 1  # 20% -> 0.20 in [0.10, 0.25) -> c1 instead of saturating c3
-    assert d_b == 3  # Dlvl 9 in [7.0, 12.0) -> d3 instead of saturating d4
+    assert cid_pct.startswith("cell_v2_")
+    assert (
+        d_b == 3
+    )  # avg_depth 4.5 in [4.0, 6.5) -> d3 (ignores single outlier max_depth 9)
+    assert v_b == 2  # (10-5) + 1.5*(3-1) = 8.0 in [7.0, 12.0) -> v2
+    assert t_b == 1  # 900/1500 = 0.60 in [0.30, 0.70) -> t1
 
 
 def test_gamestate_cursed_bug_traps_menu_and_guarded_range():
@@ -2522,3 +2530,267 @@ def test_more_yn_collision_opt_in_menu_linger_and_hypothesis_summary(tmp_path):
     reg.query_wiki("armor slot weight")
     _msg_r3, st_r3 = reg.dry_run_policy(pol_code, seed=42, max_turns=15)
     assert st_r3 != "RESEARCH_REQUIRED"
+
+
+def test_phase4_and_5_organic_scenarios_referee_composition_holdout_and_scoped_ochiai(
+    tmp_path,
+):
+    import json
+
+    from lox.author.swarm_deficits import DeficitAnalyzer, DeficitReport
+    from lox.author.swarm_peer import (
+        PeerCandidate,
+        compute_candidate_skill_symbols,
+        incubate_candidate,
+    )
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.db.shards import mine_organic_scenarios
+    from lox.db.summarizer import compute_function_stats
+    from lox.engine.frontier import FrontierArchive
+    from lox.engine.swarm_referee import SwarmReferee
+
+    db_path = str(tmp_path / "p45.duckdb")
+    f_dir = str(tmp_path / "frontier")
+    init_db(db_path).close()
+
+    # 1. FrontierArchive inverse-visit visit_count persistence
+    fa = FrontierArchive(frontier_dir=f_dir)
+    fa.add_checkpoint(
+        seed=10,
+        depth=6,
+        milestone="dlvl_6",
+        turns=500,
+        action_bytes=b"llllkjjjjhhh" * 2,
+    )
+    fa.add_checkpoint(
+        seed=11,
+        depth=6,
+        milestone="dlvl_6",
+        turns=520,
+        action_bytes=b"kkkkhhhhllll" * 2,
+    )
+    cp = fa.sample_checkpoint(min_depth=4)
+    assert cp is not None and cp.visit_count == 1
+    fa_reloaded = FrontierArchive(frontier_dir=f_dir)
+    assert any(c.visit_count == 1 for c in fa_reloaded.checkpoints.values())
+
+    # 2. mine_organic_scenarios across structural buckets
+    con = connect_db(db_path, read_only=False)
+    ab_long = b"l" * 120
+    con.execute(
+        """
+        INSERT INTO runs (
+            run_id, batch_id, generation, seed, role, depth, max_depth, score, turns, steps,
+            end_reason, auto_esc_count, starved_with_food, died_unarmored, is_shard, action_bytes, milestones_json
+        ) VALUES
+        ('r_deep', 'b1', 1, 2001, 'val', 5, 5, 400, 1200, 1200, 'killed by ant', 0, FALSE, FALSE, FALSE, ?, '{"depth_first_turn":{"2":200}}'),
+        ('r_stall', 'b1', 1, 2002, 'val', 1, 1, 10, 80, 200, 'stalled_zero_turn', 3, FALSE, FALSE, FALSE, ?, '{}'),
+        ('r_unarm', 'b1', 1, 2003, 'val', 2, 2, 80, 400, 400, 'killed by orc', 0, FALSE, TRUE, FALSE, ?, '{"unworn_armor_in_pack":true,"depth_first_turn":{"2":250}}'),
+        ('r_ill', 'b1', 1, 2004, 'val', 2, 2, 70, 500, 500, 'died of terminal illness', 0, TRUE, FALSE, FALSE, ?, '{}')
+        """,
+        [ab_long, ab_long, ab_long, ab_long],
+    )
+    con.close()
+    mined = mine_organic_scenarios(db_path, frontier_dir=f_dir, max_total=10)
+    buckets = {sh.trigger_context for sh in mined}
+    assert "frontier_deep" in buckets
+    assert "stall_or_prompt" in buckets
+    assert "unequipped_crisis" in buckets
+    assert "resource_or_mortality" in buckets
+
+    # 3. Hard exception rejection during incubate_candidate
+    base_pol = """
+from lox.env.actions import Action
+from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
+from skills.sub import h_base
+
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(h_base, name='base')]), blackboard=self.blackboard)
+    def step(self, state):
+        return self.tree.tick(state) or Action.WAIT
+"""
+    base_skills = {
+        "sub": "from lox.env.actions import Action\ndef h_base(s, bb):\n    return Action.SEARCH\n"
+    }
+    cand_exc = PeerCandidate(
+        peer_id="p_exc",
+        claimed_deficit_id="c1",
+        claimed_label="raises in pool",
+        policy_code=base_pol,
+        skills=base_skills,
+    )
+
+    class _ExcPool:
+        def evaluate_batch(self, **kwargs):
+            return {
+                "runs": [
+                    {
+                        "run_id": "x1",
+                        "seed": 42,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 50,
+                        "turns": 100,
+                        "policy_exceptions": 2,
+                        "end_reason": "policy_error:KeyError",
+                        "milestones_json": json.dumps(
+                            {"exception_tracebacks": ["sub.py:5: KeyError: 'k'"]}
+                        ),
+                    }
+                ]
+            }
+
+    rep_inc = DeficitReport(generation=2, regime="PLATEAU")
+    inc_out = incubate_candidate(
+        cand_exc,
+        deficit_report=rep_inc,
+        claimed_deficit=DeficitAnalyzer._bootstrap_clusters()[0],
+        eval_pool=_ExcPool(),
+        shard_seeds=[42],
+    )
+    assert inc_out.sandbox_passed is False
+    assert "exception" in inc_out.error.lower()
+
+    # 4. Top-K 3-way AST composition inside the SAME skill module + Hidden Holdout audit cancellation
+    sk_a = base_skills["sub"] + "\ndef h_alpha(s, bb):\n    return Action.EAST\n"
+    sk_b = base_skills["sub"] + "\ndef h_beta(s, bb):\n    return Action.WEST\n"
+    pol_a = base_pol.replace(
+        "from skills.sub import h_base", "from skills.sub import h_alpha, h_base"
+    ).replace(
+        "ActionLeaf(h_base, name='base')",
+        "ActionLeaf(h_alpha, name='alpha'), ActionLeaf(h_base, name='base')",
+    )
+    pol_b = base_pol.replace(
+        "from skills.sub import h_base", "from skills.sub import h_base, h_beta"
+    ).replace(
+        "ActionLeaf(h_base, name='base')",
+        "ActionLeaf(h_base, name='base'), ActionLeaf(h_beta, name='beta')",
+    )
+    ca = PeerCandidate(
+        peer_id="pA",
+        claimed_deficit_id="da",
+        claimed_label="alpha",
+        policy_code=pol_a,
+        skills={"sub": sk_a},
+        touched_skills={"sub"},
+        touched_branches={"alpha"},
+        touched_skill_symbols=compute_candidate_skill_symbols(
+            {"sub": sk_a}, base_skills
+        ),
+        sandbox_passed=True,
+    )
+    cb = PeerCandidate(
+        peer_id="pB",
+        claimed_deficit_id="db",
+        claimed_label="beta",
+        policy_code=pol_b,
+        skills={"sub": sk_b},
+        touched_skills={"sub"},
+        touched_branches={"beta"},
+        touched_skill_symbols=compute_candidate_skill_symbols(
+            {"sub": sk_b}, base_skills
+        ),
+        sandbox_passed=True,
+    )
+    combos = SwarmReferee.build_orthogonal_candidates([ca, cb], base_pol, base_skills)
+    assert len(combos) == 1
+    assert "h_alpha" in combos[0].skills["sub"] and "h_beta" in combos[0].skills["sub"]
+    assert "h_alpha" in combos[0].policy_code and "h_beta" in combos[0].policy_code
+
+    # Holdout cancellation check
+    class _HoldoutFailPool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [1, 2])
+            if batch_id.startswith("holdout_") and "_inc_" not in batch_id:
+                return {
+                    "runs": [
+                        {
+                            "run_id": f"hr_{s}",
+                            "seed": s,
+                            "depth": 1,
+                            "max_depth": 1,
+                            "score": 0,
+                            "turns": 50,
+                            "final_ac": 10,
+                            "xp_level": 1,
+                        }
+                        for s in s_list
+                    ]
+                }
+            if "_inc_" in batch_id:
+                return {
+                    "runs": [
+                        {
+                            "run_id": f"ir_{s}",
+                            "seed": s,
+                            "depth": 2,
+                            "max_depth": 2,
+                            "score": 100,
+                            "turns": 200,
+                            "final_ac": 9,
+                            "xp_level": 2,
+                        }
+                        for s in s_list
+                    ]
+                }
+            return {
+                "runs": [
+                    {
+                        "run_id": f"cr_{s}",
+                        "seed": s,
+                        "depth": 4,
+                        "max_depth": 4,
+                        "score": 300,
+                        "turns": 500,
+                        "final_ac": 6,
+                        "xp_level": 3,
+                    }
+                    for s in s_list
+                ]
+            }
+
+    ref = SwarmReferee()
+    hv = ref.evaluate_tournament(
+        generation=10,
+        candidates=[ca],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=_HoldoutFailPool(),
+        seeds=[1001, 1002, 1003, 1004],
+        holdout_seeds=[100000, 100001, 100002, 100003],
+    )
+    assert hv.promoted is False
+    assert hv.holdout_iqm_delta is not None and hv.holdout_iqm_delta < -0.15
+    assert len(hv.attempts_summary) >= 1
+
+    # 5. Stagnation-discounted Ochiai + tournament_attempts surfaced by DeficitAnalyzer
+    fn_stats = compute_function_stats(
+        "b_stag",
+        10,
+        [
+            {
+                "run_id": "r_g",
+                "is_outlier_good": True,
+                "max_depth": 5,
+                "turns": 100,
+                "end_reason": "killed",
+                "triggered_functions": json.dumps({"good_fn": 20, "wait_stag": 10}),
+                "milestones": {"stagnation_fn_turns": {"wait_stag": 85}},
+                "summary_digest": "Stalls: wait_stag stalled (T5..T90 (85 turns))",
+            }
+        ],
+    )
+    by_fn_st = {row["function_name"]: row for row in fn_stats}
+    assert (
+        by_fn_st["wait_stag"]["ochiai_good_run_score"]
+        < by_fn_st["good_fn"]["ochiai_good_run_score"]
+    )
+
+    BatchDatabaseLogger(db_path=db_path).save_tournament_attempts(hv.attempts_summary)
+    rep_after = DeficitAnalyzer(db_path).analyze(generation=11, current_policy=base_pol)
+    assert any(
+        "REJECTED" in line and "pA" in line for line in rep_after.recent_attempts
+    )
