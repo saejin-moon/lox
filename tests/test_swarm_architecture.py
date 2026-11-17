@@ -3605,7 +3605,7 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
     assert "from skills.exploration_nav import h_0" in merged
     assert "def h_150" not in merged
 
-    # 4. Option A: maybe_auto_modularize deterministically splits a bloated skill >= 320 LOC
+    # 4. Option A: maybe_auto_modularize deterministically splits a bloated skill >= 450 LOC
     ws = tmp_path / "ws_ref"
     (ws / "skills").mkdir(parents=True, exist_ok=True)
     skill_pol = (
@@ -3622,18 +3622,18 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
         "    return state.hp >= STEP_CONST\n\n"
         + "\n".join(
             f"def _pad_a_{i}():\n    return {i if i == 0 else f'_pad_a_{i - 1}()'}\n"
-            for i in range(85)
+            for i in range(120)
         )
         + "\n".join(
             f"def _pad_b_{i}():\n    return {i if i == 0 else f'_pad_b_{i - 1}()'}\n"
-            for i in range(85)
+            for i in range(120)
         )
         + "def search_step(state):\n"
-        "    if _shared_ok(state) and _pad_a_84() >= 0 and state.step_count % 2 == 0:\n"
+        "    if _shared_ok(state) and _pad_a_119() >= 0 and state.step_count % 2 == 0:\n"
         "        return Action.SEARCH\n"
         "    return None\n\n"
         "def explore_step(state):\n"
-        "    if _shared_ok(state) and _pad_b_84() >= 0:\n"
+        "    if _shared_ok(state) and _pad_b_119() >= 0:\n"
         "        return Action.E\n"
         "    return None\n"
     )
@@ -3724,3 +3724,99 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
         max_turns=20,
     )
     assert "PASSED" in st_f or st_f == "PASSED"
+
+
+def test_g17_fixes_glm5_medium_reasoning_export_preserve_and_no_nested_resplit():
+    from unittest.mock import MagicMock, patch
+
+    from lox.author.agent import AuthorAgent
+    from lox.author.tools import merge_skill_module_update
+    from lox.lang.modularize import maybe_auto_modularize
+
+    # 1. glm-5 with reasoning_effort="medium" sends "medium" (no silent "high" override) and caps max_tokens=32768
+    captured_payloads = []
+
+    class _FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "ok", "reasoning": "short"}}],
+                "usage": {},
+            }
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured_payloads.append(json)
+            return _FakeResp()
+
+    agent_med = AuthorAgent(
+        provider="openrouter",
+        model="z-ai/glm-5.3-flash:nitro",
+        api_key="sk-test-key",
+        reasoning_effort="medium",
+    )
+    with patch("httpx.Client", _FakeClient):
+        agent_med._call_llm_api([{"role": "user", "content": "hi"}], allow_tools=False)
+    assert captured_payloads[-1]["reasoning"] == {"effort": "medium"}
+    assert captured_payloads[-1]["max_tokens"] == 32768
+
+    agent_max = AuthorAgent(
+        provider="openrouter",
+        model="z-ai/glm-5.3-flash:nitro",
+        api_key="sk-test-key",
+        reasoning_effort="max",
+    )
+    with patch("httpx.Client", _FakeClient):
+        agent_max._call_llm_api([{"role": "user", "content": "hi"}], allow_tools=False)
+    assert captured_payloads[-1]["reasoning"] == {"effort": "max"}
+    assert captured_payloads[-1]["max_tokens"] == 65536
+    MagicMock()
+
+    # 2. merge_skill_module_update preserves facade-exported constants/helpers when peer adds new helpers
+    existing_sub = (
+        "from lox.env.actions import Action\n"
+        "_INF = 10 ** 8\n"
+        "def _mdiff(m):\n"
+        "    return 0\n"
+        "def melee_step(state, bb):\n"
+        "    return Action.E\n"
+    )
+    patch_with_new_helpers = (
+        "def _hold_msg(state):\n"
+        "    return ''\n"
+        "def _last_move_delta(state):\n"
+        "    return None\n"
+        "def melee_step(state, bb):\n"
+        "    return None if _hold_msg(state) else Action.N\n"
+    )
+    merged_sub = merge_skill_module_update(existing_sub, patch_with_new_helpers)
+    assert "_INF = 10 ** 8" in merged_sub
+    assert "def _mdiff(m):" in merged_sub
+    assert "def _hold_msg(state):" in merged_sub
+
+    # 3. Nested submodule under a Modular facade is NOT recursively split below 1.5x threshold
+    pol = "import skills.exploration as exploration\nclass Policy:\n    def step(self, s): return exploration.go(s)\n"
+    sub_350 = "\n".join(f"def _f_{i}():\n    return {i}" for i in range(180))
+    ch, _, _, _ = maybe_auto_modularize(
+        pol,
+        {
+            "exploration": '"""Modular facade for `exploration`."""\nfrom skills.exploration_nav import go\n',
+            "exploration_nav": f"def go(s):\n    return None\n{sub_350}\n",
+        },
+        verify_seeds=[1000],
+        verify_steps=10,
+    )
+    assert ch is False

@@ -719,10 +719,18 @@ class AuthorAgent:
                 else:
                     api_messages.append(m_item)
 
+        eff = (
+            str(self.reasoning_effort or "").lower()
+            if self.provider == "openrouter"
+            else ""
+        )
+        effective_max_tokens = (
+            min(self.max_tokens, 32768) if eff in ("low", "medium") else self.max_tokens
+        )
         payload: dict[str, Any] = {
             "model": model_id,
             "messages": api_messages,
-            "max_tokens": self.max_tokens,
+            "max_tokens": effective_max_tokens,
             "temperature": 0.4,
         }
         active_tools = tool_specs if tool_specs is not None else OPENAI_TOOL_SPECS
@@ -730,14 +738,7 @@ class AuthorAgent:
             # Keep tool definitions static across turns so provider prefix caches match on wrap-up turns.
             payload["tools"] = active_tools
             payload["tool_choice"] = "auto" if allow_tools else "none"
-        if (
-            self.provider == "openrouter"
-            and self.reasoning_effort
-            and str(self.reasoning_effort).lower() != "none"
-        ):
-            eff = str(self.reasoning_effort).lower()
-            if "glm-5" in model_id.lower() and eff == "medium":
-                eff = "high"
+        if self.provider == "openrouter" and eff and eff != "none":
             payload["reasoning"] = {"effort": eff}
 
         headers = {
@@ -748,14 +749,15 @@ class AuthorAgent:
             raise PermissionError(
                 "Missing or placeholder API key. Set a valid OPENROUTER_API_KEY in `.env` or pass `--api-key`."
             )
+        should_strip_routing = False
         for attempt in range(5):
-            if attempt >= 2:
+            if attempt >= 2 and should_strip_routing:
                 for suffix in (":nitro", ":floor"):
                     if payload.get("model", "").endswith(suffix):
                         payload["model"] = payload["model"][: -len(suffix)]
                         break
             try:
-                with httpx.Client(timeout=60.0) as client:
+                with httpx.Client(timeout=90.0) as client:
                     resp = client.post(url, headers=headers, json=payload)
                     if resp.status_code in (401, 402, 403):
                         err_detail = resp.text[:200]
@@ -836,6 +838,8 @@ class AuthorAgent:
                 KeyError,
                 IndexError,
             ) as exc:
+                if isinstance(exc, (httpx.RequestError, httpx.HTTPStatusError)):
+                    should_strip_routing = True
                 if attempt == 4:
                     raise
                 ui.warn(

@@ -728,7 +728,7 @@ def maybe_auto_modularize(
     *,
     loc_threshold: int = 250,
     monolith_threshold: int = 200,
-    skill_loc_threshold: int = 320,
+    skill_loc_threshold: int = 450,
     num_modules: int = 4,
     verify_seeds: list[int] | None = None,
     verify_steps: int = 300,
@@ -745,10 +745,24 @@ def maybe_auto_modularize(
     needs_pol_split = loc_before >= loc_threshold or (
         not orig_skills and loc_before >= monolith_threshold
     )
+
+    def _is_nested_submod(sk: str, src: str) -> bool:
+        sk_len = len(src.splitlines())
+        if sk.endswith("_shared") and sk_len < int(skill_loc_threshold * 1.5):
+            return True
+        return any(
+            k != sk
+            and sk.startswith(f"{k}_")
+            and "Modular facade" in (orig_skills.get(k) or "")
+            for k in orig_skills
+        ) and sk_len < int(skill_loc_threshold * 1.5)
+
     bloated_skills = [
         sk
         for sk, src in sorted(orig_skills.items())
-        if src and len(src.splitlines()) >= skill_loc_threshold
+        if src
+        and len(src.splitlines()) >= skill_loc_threshold
+        and not _is_nested_submod(sk, src)
     ]
     if not needs_pol_split and not bloated_skills:
         return (

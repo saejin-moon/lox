@@ -96,21 +96,29 @@ def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
         if isinstance(t, ast.Name)
     }
     first_line = cand.splitlines()[0].strip().lower() if cand.splitlines() else ""
+    if first_line.startswith("# replace") or first_line.startswith("# full replace"):
+        return cand
     looks_patch_comment = (
         first_line.startswith("# patch")
         or "other functions unchanged" in cand[:300].lower()
     )
     dropped_most_defs = len(ex_defs) >= 3 and len(ca_defs) < max(2, len(ex_defs) // 2)
+    omitted_existing = bool((ex_defs - ca_defs) | (ex_assigns - ca_assigns))
+    overlaps_existing = bool((ex_defs & ca_defs) or (ex_assigns & ca_assigns))
     partial_subset = (
-        len(ex_defs) >= 2 and 0 < len(ca_defs) < len(ex_defs) and ca_defs <= ex_defs
-    ) or (len(ex_defs) >= 1 and len(ca_defs) == 0 and len(ca_assigns) > 0)
+        (len(ex_defs) >= 2 and 0 < len(ca_defs) < len(ex_defs) and ca_defs <= ex_defs)
+        or (len(ex_defs) >= 1 and len(ca_defs) == 0 and len(ca_assigns) > 0)
+        or (omitted_existing and overlaps_existing and len(ex_defs | ex_assigns) >= 2)
+    )
     missing_imports = (
         ex_has_imports
         and not ca_has_imports
-        and (len(ca_defs) < len(ex_defs) or len(ex_defs) == 0)
+        and (len(ca_defs) < len(ex_defs) or len(ex_defs) == 0 or omitted_existing)
     )
     missing_constants = (
-        len(ex_assigns) > 0 and len(ca_assigns) == 0 and len(ca_defs) <= len(ex_defs)
+        len(ex_assigns) > 0
+        and len(ca_assigns) == 0
+        and (len(ca_defs) <= len(ex_defs) or omitted_existing)
     )
 
     def _imported_skill_modules(tr: ast.AST) -> set[str]:
