@@ -414,6 +414,7 @@ def build_user_prompt(
             for s_name, s_src in sorted(skills.items()):
                 loc_cnt = len(s_src.splitlines())
                 exports: list[str] = []
+                consts: list[str] = []
                 try:
                     st_tree = ast.parse(s_src)
                     for nd in st_tree.body:
@@ -421,18 +422,27 @@ def build_user_prompt(
                             nd, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
                         ):
                             exports.append(nd.name)
+                        elif isinstance(nd, ast.Assign):
+                            for tgt in nd.targets:
+                                if isinstance(tgt, ast.Name):
+                                    consts.append(tgt.id)
+                        elif isinstance(nd, ast.AnnAssign) and isinstance(
+                            nd.target, ast.Name
+                        ):
+                            consts.append(nd.target.id)
                 except Exception:
                     pass
-                exp_str = ", ".join(exports[:12]) + (
-                    f" (+{len(exports) - 12})" if len(exports) > 12 else ""
+                all_syms = exports + [c for c in consts if c not in exports]
+                exp_str = ", ".join(all_syms[:28]) + (
+                    f" (+{len(all_syms) - 28})" if len(all_syms) > 28 else ""
                 )
                 manifest_lines.append(
-                    f"- `skills/{s_name}.py` ({loc_cnt} LOC) | exports: {exp_str or '(constants/script)'}"
+                    f"- `skills/{s_name}.py` ({loc_cnt} LOC) | symbols: {exp_str or '(script)'}"
                 )
             skills_block = (
                 "\n### Hierarchical Skill Manifest (Lazy Read):\n"
                 + "\n".join(manifest_lines)
-                + "\n*(Call `read_skill(skill_name)` to inspect any module source before editing.)*\n"
+                + "\n*(Call `read_skill(skill_name)` to inspect any module source before editing; private `_` helpers stay internal unless exported.)*\n"
             )
         else:
             outlines = [

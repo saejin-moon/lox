@@ -156,13 +156,13 @@ def test_map_elites_archive(tmp_path):
     archive = MAPElitesArchive()
     assert archive.coverage() == 0.0
 
-    # Policy A: Dlvl 1, unarmored (AC=10), slow tempo
+    # Policy A: Dlvl 1, unarmored (AC=10), slow tempo (< 0.08 tiles/turn)
     metrics_a = {
         "avg_depth": 1.0,
         "max_depth": 1,
         "avg_ac": 10.0,
         "avg_xp_level": 1.0,
-        "avg_unique_tiles": 20.0,
+        "avg_unique_tiles": 5.0,
         "avg_turns": 100.0,
         "avg_score": 10.0,
     }
@@ -177,13 +177,13 @@ def test_map_elites_archive(tmp_path):
     assert cell_a == "cell_v2_d0_v0_t0"
     assert archive.coverage() > 0.0
 
-    # Policy B: Dlvl 2, armor/XL stepping stone (AC=5.0, XL=3), brisk tempo
+    # Policy B: Dlvl 1.5, armor/XL stepping stone (AC=5.0, XL=3), moderate tempo (0.20 tiles/turn)
     metrics_b = {
-        "avg_depth": 2.0,
+        "avg_depth": 1.5,
         "max_depth": 2,
         "avg_ac": 5.0,
         "avg_xp_level": 3.0,
-        "avg_unique_tiles": 160.0,
+        "avg_unique_tiles": 40.0,
         "avg_turns": 200.0,
         "avg_score": 150.0,
     }
@@ -203,8 +203,8 @@ def test_map_elites_archive(tmp_path):
         "max_depth": 1,
         "avg_ac": 10.0,
         "avg_xp_level": 1.0,
-        "avg_unique_tiles": 2.0,
-        "avg_turns": 20.0,
+        "avg_unique_tiles": 1.0,
+        "avg_turns": 50.0,
         "avg_score": 0.0,
     }
     added_aw, cell_aw, _ = archive.add_candidate(

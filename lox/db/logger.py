@@ -1005,8 +1005,9 @@ class BatchDatabaseLogger:
                         attempt_id, generation, peer_id, deficit_id, candidate_fp,
                         promoted, sandbox_passed, sandbox_error, avg_depth, max_depth,
                         avg_score, avg_ac, avg_xp_level, policy_exceptions,
-                        seeds_gained_json, seeds_lost_json, top_tracebacks_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        seeds_gained_json, seeds_lost_json, top_tracebacks_json,
+                        holdout_avg_depth, holdout_iqm_delta, holdout_rejected, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         str(a.get("attempt_id", "")),
@@ -1026,6 +1027,13 @@ class BatchDatabaseLogger:
                         json.dumps(a.get("seeds_gained", [])),
                         json.dumps(a.get("seeds_lost", [])),
                         json.dumps(a.get("top_tracebacks", [])),
+                        float(a["holdout_avg_depth"])
+                        if a.get("holdout_avg_depth") is not None
+                        else None,
+                        float(a["holdout_iqm_delta"])
+                        if a.get("holdout_iqm_delta") is not None
+                        else None,
+                        bool(a.get("holdout_rejected", False)),
                         now,
                     ],
                 )

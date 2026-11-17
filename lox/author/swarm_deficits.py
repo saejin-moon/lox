@@ -328,7 +328,8 @@ class DeficitAnalyzer:
                 SELECT generation, peer_id, deficit_id, promoted, sandbox_passed,
                        ROUND(avg_depth, 2), max_depth, ROUND(avg_ac, 1),
                        policy_exceptions, seeds_gained_json, seeds_lost_json,
-                       top_tracebacks_json, sandbox_error
+                       top_tracebacks_json, sandbox_error,
+                       COALESCE(holdout_rejected, FALSE), holdout_iqm_delta
                 FROM tournament_attempts
                 WHERE generation >= ? AND generation < ?
                 ORDER BY generation DESC, promoted DESC, avg_depth DESC
@@ -350,16 +351,24 @@ class DeficitAnalyzer:
                 sl_json,
                 tb_json,
                 sb_err,
+                holdout_rej,
+                holdout_iqm,
             ) in ta_rows:
                 tag = (
                     "PROMOTED"
                     if promoted
-                    else ("REJECTED" if sb_ok else "SANDBOX_FAIL")
+                    else (
+                        "HOLD_REJECTED"
+                        if holdout_rej
+                        else ("CRN_REJECTED" if sb_ok else "SANDBOX_FAIL")
+                    )
                 )
                 gained = json.loads(sg_json) if sg_json else []
                 lost = json.loads(sl_json) if sl_json else []
                 tbs = json.loads(tb_json) if tb_json else []
                 extra = []
+                if holdout_iqm is not None:
+                    extra.append(f"holdout_iqm={float(holdout_iqm):+.2f}")
                 if gained:
                     extra.append(f"+seeds={gained[:3]}")
                 if lost:
@@ -588,7 +597,8 @@ class DeficitAnalyzer:
                    COALESCE(last_active_function, '') AS last_active_fn,
                    COALESCE(summary_digest, '') AS summary_digest,
                    action_bytes,
-                   milestones_json
+                   milestones_json,
+                   COALESCE(RIGHT(game_log, 600), '') AS game_log_tail
             FROM runs
             WHERE {where_runs}
             ORDER BY generation DESC, turns DESC
@@ -660,12 +670,17 @@ class DeficitAnalyzer:
                 digest,
                 _abytes,
                 m_json,
+                game_log_tail,
             ) = row
 
             end_str = str(end_reason or "unknown").strip() or "unknown"
             if end_str in ("ascended", "escaped"):
                 continue
             digest_s = str(digest or "")
+            gl_lines = [
+                ln.strip() for ln in str(game_log_tail or "").splitlines() if ln.strip()
+            ]
+            gl_tail = " | ".join(gl_lines[-3:])[-160:] if gl_lines else ""
             stall_count = 0
             unworn_armor_pack = False
             if m_json:
@@ -677,7 +692,16 @@ class DeficitAnalyzer:
                     stall_count = 0
 
             # Purely domain-agnostic trajectory-outcome & capability slices (zero NetHack keywords)
-            if (
+            if end_str.lower() == "max_steps" and int(max_depth or 1) <= 2:
+                _add_to_cluster(
+                    "slice_max_steps_confinement",
+                    "confinement_horizon",
+                    "Horizon limit reached at shallow depth (Dlvl <= 2)",
+                    row,
+                    f"end=`{end_str}`, turns={turns}, Dlvl={max_depth}, tiles={unique_tiles}"
+                    + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
+                )
+            elif (
                 stall_count >= 25
                 or "CONFINEMENT_STALL" in digest_s
                 or "stalled" in end_str.lower()
@@ -694,7 +718,8 @@ class DeficitAnalyzer:
                     "stalled_trajectory",
                     f"Stalled / low-progress trajectories (Dlvl {int(max_depth or 1)})",
                     row,
-                    f"end=`{end_str}`, tiles={unique_tiles}, pct_wait={float(pct_wait or 0):.1f}%",
+                    f"end=`{end_str}`, tiles={unique_tiles}, pct_wait={float(pct_wait or 0):.1f}%"
+                    + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
                 )
             elif int(policy_excs or 0) > 0 or int(auto_esc or 0) > 2:
                 _add_to_cluster(
@@ -702,7 +727,8 @@ class DeficitAnalyzer:
                     "runtime_or_prompt_trap",
                     "Runtime exceptions or unhandled prompt traps",
                     row,
-                    f"policy_exceptions={policy_excs}, auto_esc={auto_esc}",
+                    f"policy_exceptions={policy_excs}, auto_esc={auto_esc}"
+                    + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
                 )
             elif bool(_unarmored) or unworn_armor_pack:
                 _add_to_cluster(

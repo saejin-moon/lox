@@ -344,6 +344,9 @@ CREATE TABLE IF NOT EXISTS tournament_attempts (
     seeds_gained_json TEXT,
     seeds_lost_json TEXT,
     top_tracebacks_json TEXT,
+    holdout_avg_depth DOUBLE,
+    holdout_iqm_delta DOUBLE,
+    holdout_rejected BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -578,6 +581,25 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                         try:
                             con.execute(
                                 f"ALTER TABLE archive_policies ADD COLUMN {c_name} {c_typ}"
+                            )
+                        except Exception:
+                            pass
+            if "tournament_attempts" in tables:
+                cols_ta = [
+                    r[1]
+                    for r in con.execute(
+                        "PRAGMA table_info('tournament_attempts')"
+                    ).fetchall()
+                ]
+                for c_name, c_typ in [
+                    ("holdout_avg_depth", "DOUBLE"),
+                    ("holdout_iqm_delta", "DOUBLE"),
+                    ("holdout_rejected", "BOOLEAN DEFAULT FALSE"),
+                ]:
+                    if c_name not in cols_ta:
+                        try:
+                            con.execute(
+                                f"ALTER TABLE tournament_attempts ADD COLUMN {c_name} {c_typ}"
                             )
                         except Exception:
                             pass

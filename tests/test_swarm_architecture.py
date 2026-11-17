@@ -2333,20 +2333,20 @@ def test_prompt_docs_split_schema_noop_diff_and_map_elites(tmp_path):
     # MAPElitesArchive v2 isolates avg_depth & armor/XL vitals without max_depth aliasing
     cid_pct, d_b, v_b, t_b = MAPElitesArchive.compute_cell_id(
         {
-            "avg_depth": 4.5,
+            "avg_depth": 3.0,
             "max_depth": 9,
             "avg_ac": 5.0,
             "avg_xp_level": 3.0,
-            "avg_unique_tiles": 900.0,
+            "avg_unique_tiles": 300.0,
             "avg_turns": 1500.0,
         }
     )
     assert cid_pct.startswith("cell_v2_")
     assert (
         d_b == 3
-    )  # avg_depth 4.5 in [4.0, 6.5) -> d3 (ignores single outlier max_depth 9)
+    )  # avg_depth 3.0 in [2.5, 4.0) -> d3 (ignores single outlier max_depth 9)
     assert v_b == 2  # (10-5) + 1.5*(3-1) = 8.0 in [7.0, 12.0) -> v2
-    assert t_b == 1  # 900/1500 = 0.60 in [0.30, 0.70) -> t1
+    assert t_b == 2  # 300/1500 = 0.20 in [0.16, 0.30) -> t2
 
 
 def test_gamestate_cursed_bug_traps_menu_and_guarded_range():
@@ -2794,3 +2794,487 @@ class Policy:
     assert any(
         "REJECTED" in line and "pA" in line for line in rep_after.recent_attempts
     )
+
+
+def test_swarm_orchestrator_permission_error_fast_fail_and_all_peer_crash_abort(
+    tmp_path, monkeypatch
+):
+    from unittest.mock import patch
+
+    import pytest
+
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+
+    db_p = str(tmp_path / "perm.duckdb")
+    ws_p = tmp_path / "ws"
+    ws_p.mkdir()
+    fr_p = str(tmp_path / "frontier")
+    init_db(db_p)
+
+    # Seed Gen 1 policy so Gen 2 exercises peer generation path without Gen 1 empty-incumbent fallback
+    (ws_p / "policy.py").write_text(
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n",
+        encoding="utf-8",
+    )
+
+    class _NoRolloutPool:
+        def evaluate_batch(self, batch_id="", priority_seeds=None, **kwargs):
+            if str(batch_id).startswith("incubate_inc_"):
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 1,
+                            "max_depth": 1,
+                            "score": 10,
+                            "turns": 50,
+                        }
+                        for s in (priority_seeds or [10000, 10001])
+                    ],
+                }
+            raise AssertionError(
+                f"Zombie tournament/incumbent evaluation `{batch_id}` should not run after peer failure!"
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "lox.engine.swarm_orchestrator.PersistentEvalPool",
+        lambda *a, **k: _NoRolloutPool(),
+    )
+
+    # 1. PermissionError in any peer aborts campaign immediately and writes campaign_errors.log
+    orch = SwarmCampaignOrchestrator(
+        db_path=db_p,
+        workspace_dir=str(ws_p),
+        frontier_dir=fr_p,
+        provider="mock",
+        model="mock-model",
+        num_workers=2,
+        seeds_per_batch=4,
+    )
+    with patch(
+        "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+        side_effect=PermissionError("HTTP 402 Insufficient credits"),
+    ):
+        with pytest.raises(PermissionError, match="Insufficient credits"):
+            orch.run(generations=3)
+
+    err_log = (ws_p / "campaign_errors.log").read_text(encoding="utf-8")
+    assert "PermissionError" in err_log
+    con = connect_db(db_p, read_only=True)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM policies").fetchone()[0] == 0
+    finally:
+        con.close()
+
+    # 2. HTTP 402 string wrapped in RuntimeError also escalates to PermissionError immediately
+    orch2 = SwarmCampaignOrchestrator(
+        db_path=db_p,
+        workspace_dir=str(ws_p),
+        frontier_dir=fr_p,
+        provider="mock",
+        model="mock-model",
+        num_workers=2,
+        seeds_per_batch=4,
+    )
+    with patch(
+        "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+        side_effect=RuntimeError("OpenRouter returned HTTP 402: out of credits"),
+    ):
+        with pytest.raises(PermissionError):
+            orch2.run(generations=2)
+
+    # 3. Non-PermissionError crash across ALL peers aborts generation and breaks campaign after 3 failures
+    orch3 = SwarmCampaignOrchestrator(
+        db_path=db_p,
+        workspace_dir=str(ws_p),
+        frontier_dir=fr_p,
+        provider="mock",
+        model="mock-model",
+        num_workers=2,
+        seeds_per_batch=4,
+    )
+    with patch(
+        "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+        side_effect=ValueError("Transient upstream outage"),
+    ) as m_peer:
+        hist = orch3.run(generations=6)
+    assert hist == []
+    assert m_peer.call_count <= 3 * orch3.num_workers
+
+
+def test_swarm_referee_stall_tol_holdout_telemetry_and_experiments_discoveries(
+    tmp_path,
+):
+    from unittest.mock import patch
+
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+    from lox.engine.swarm_referee import SwarmReferee
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n"
+    )
+    cand_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.DOWN\n"
+    )
+
+    # 1. Across 32 seeds, 1 extra hard stall with +0.125 depth and +40 score passes _passes_score_guard
+    class _Pool32:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "p4" in batch_id and not batch_id.startswith("holdout_"):
+                runs = [
+                    {
+                        "run_id": f"c_{s}",
+                        "seed": s,
+                        "depth": 3 if idx < 4 else 2,
+                        "max_depth": 3 if idx < 4 else 2,
+                        "score": 140,
+                        "turns": 450,
+                        "final_ac": 7,
+                        "xp_level": 2,
+                        "end_reason": "stalled_zero_turn" if idx == 0 else "killed",
+                    }
+                    for idx, s in enumerate(s_list)
+                ]
+                return {"batch_id": batch_id, "runs": runs}
+            if batch_id.startswith("holdout_") and "_inc_" not in batch_id:
+                runs = [
+                    {
+                        "run_id": f"hc_{s}",
+                        "seed": s,
+                        "depth": 3,
+                        "max_depth": 3,
+                        "score": 150,
+                        "turns": 500,
+                        "final_ac": 7,
+                        "xp_level": 2,
+                    }
+                    for s in s_list
+                ]
+                return {"batch_id": batch_id, "runs": runs}
+            runs = [
+                {
+                    "run_id": f"i_{s}",
+                    "seed": s,
+                    "depth": 2,
+                    "max_depth": 2,
+                    "score": 100,
+                    "turns": 400,
+                    "final_ac": 7,
+                    "xp_level": 2,
+                    "end_reason": "killed",
+                }
+                for s in s_list
+            ]
+            return {"batch_id": batch_id, "runs": runs}
+
+    ref = SwarmReferee()
+    c4 = PeerCandidate(
+        peer_id="p4",
+        claimed_deficit_id="slice_early_terminations",
+        claimed_label="Early termination gap",
+        policy_code=cand_pol,
+        skills={},
+        touched_branches={"step"},
+        sandbox_passed=True,
+    )
+    verdict32 = ref.evaluate_tournament(
+        generation=41,
+        candidates=[c4],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_Pool32(),
+        seeds=[14100 + i for i in range(32)],
+        holdout_seeds=[100000 + i for i in range(16)],
+    )
+    assert verdict32.promoted is True, verdict32.reason
+    assert verdict32.holdout_rejected is False
+    assert verdict32.attempts_summary[0]["holdout_avg_depth"] == 3.0
+
+    # 2. Holdout rejection persists holdout_rejected=True and surfaces HOLD_REJECTED in DeficitAnalyzer
+    class _HoldoutDropPool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if batch_id.startswith("holdout_") and "_inc_" not in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"hd_{s}",
+                            "seed": s,
+                            "depth": 1,
+                            "max_depth": 1,
+                            "score": 0,
+                            "turns": 50,
+                        }
+                        for s in s_list
+                    ],
+                }
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"hi_{s}",
+                            "seed": s,
+                            "depth": 2,
+                            "max_depth": 2,
+                            "score": 80,
+                            "turns": 250,
+                        }
+                        for s in s_list
+                    ],
+                }
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"cp_{s}",
+                        "seed": s,
+                        "depth": 3,
+                        "max_depth": 3,
+                        "score": 200,
+                        "turns": 400,
+                    }
+                    for s in s_list
+                ],
+            }
+
+    db_p = str(tmp_path / "holdout.duckdb")
+    init_db(db_p)
+    v_h = SwarmReferee().evaluate_tournament(
+        generation=5,
+        candidates=[c4],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_HoldoutDropPool(),
+        seeds=[2000 + i for i in range(8)],
+        holdout_seeds=[100000 + i for i in range(8)],
+    )
+    assert v_h.promoted is False
+    assert v_h.holdout_rejected is True
+    assert "holdout gate rejected" in v_h.reason.lower()
+    BatchDatabaseLogger(db_path=db_p).save_tournament_attempts(v_h.attempts_summary)
+    rep_h = DeficitAnalyzer(db_p).analyze(generation=6, current_policy=base_pol)
+    assert any("HOLD_REJECTED" in line for line in rep_h.recent_attempts)
+
+    # 3. SwarmOrchestrator persists experiments & discoveries and rotates 16-seed holdout vault
+    seen_holdout_sets: list[list[int]] = []
+
+    class _OrchPool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if batch_id.startswith("holdout_") and "_inc_" not in batch_id:
+                seen_holdout_sets.append(list(s_list))
+            is_cand = ("p1" in batch_id) and not batch_id.startswith("holdout_")
+            d = (
+                3
+                if is_cand
+                or (batch_id.startswith("holdout_") and "_inc_" not in batch_id)
+                else 2
+            )
+            return {
+                "batch_id": batch_id,
+                "avg_depth": float(d),
+                "max_depth": d,
+                "avg_score": 200.0 if is_cand else 100.0,
+                "runs": [
+                    {
+                        "run_id": f"{batch_id}_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": 200 if is_cand else 100,
+                        "turns": 300,
+                        "final_ac": 7,
+                        "xp_level": 2,
+                        "end_reason": "killed",
+                    }
+                    for s in s_list
+                ],
+            }
+
+        def close(self):
+            pass
+
+    ws2 = tmp_path / "ws_exp"
+    ws2.mkdir()
+    (ws2 / "policy.py").write_text(base_pol, encoding="utf-8")
+    db2 = str(tmp_path / "exp.duckdb")
+    init_db(db2)
+
+    with patch(
+        "lox.engine.swarm_orchestrator.PersistentEvalPool", lambda *a, **k: _OrchPool()
+    ):
+        orch = SwarmCampaignOrchestrator(
+            db_path=db2,
+            workspace_dir=str(ws2),
+            frontier_dir=str(tmp_path / "fr2"),
+            provider="mock",
+            model="mock-model",
+            num_workers=2,
+            seeds_per_batch=16,
+        )
+        with patch(
+            "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+            return_value=PeerCandidate(
+                peer_id="p1",
+                claimed_deficit_id="slice_early_terminations",
+                claimed_label="Early termination gap",
+                policy_code=cand_pol,
+                skills={},
+                touched_branches={"step"},
+                sandbox_passed=True,
+            ),
+        ):
+            orch.run(generations=2)
+
+    assert len(seen_holdout_sets) >= 1
+    assert len(seen_holdout_sets[0]) == 16
+    assert all(100_000 <= s < 100_064 for s in seen_holdout_sets[0])
+    con2 = connect_db(db2, read_only=True)
+    try:
+        assert (
+            con2.execute(
+                "SELECT COUNT(*) FROM experiments WHERE mode='SWARM'"
+            ).fetchone()[0]
+            >= 1
+        )
+        assert (
+            con2.execute(
+                "SELECT COUNT(*) FROM discoveries WHERE mode='SWARM'"
+            ).fetchone()[0]
+            >= 1
+        )
+    finally:
+        con2.close()
+
+
+def test_map_elites_v2_calibration_deficits_confinement_and_private_symbols(tmp_path):
+    from lox.author.prompts import build_user_prompt
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.hypothesis import progression_metric
+    from lox.engine.map_elites import MAPElitesArchive
+
+    # 1. Empirical NetHack tiles/turns (0.04..0.35) & depths (1.1..2.6) spread across distinct MAP-Elites cells
+    arch = MAPElitesArchive()
+    c1, *_ = arch.compute_cell_id(
+        {
+            "avg_depth": 1.12,
+            "avg_ac": 9.0,
+            "avg_xp_level": 1.0,
+            "avg_unique_tiles": 40.0,
+            "avg_turns": 1000.0,
+        }
+    )
+    c2, *_ = arch.compute_cell_id(
+        {
+            "avg_depth": 1.45,
+            "avg_ac": 8.0,
+            "avg_xp_level": 2.0,
+            "avg_unique_tiles": 95.0,
+            "avg_turns": 1000.0,
+        }
+    )
+    c3, *_ = arch.compute_cell_id(
+        {
+            "avg_depth": 1.90,
+            "avg_ac": 6.0,
+            "avg_xp_level": 3.0,
+            "avg_unique_tiles": 190.0,
+            "avg_turns": 1000.0,
+        }
+    )
+    c4, *_ = arch.compute_cell_id(
+        {
+            "avg_depth": 2.60,
+            "avg_ac": 5.0,
+            "avg_xp_level": 4.0,
+            "avg_unique_tiles": 350.0,
+            "avg_turns": 1000.0,
+        }
+    )
+    assert len({c1, c2, c3, c4}) == 4
+
+    # 2. progression_metric applies mild -0.15 confinement discount to low-depth max_steps stalls
+    norm_run = {
+        "depth": 1,
+        "max_depth": 1,
+        "score": 50,
+        "turns": 500,
+        "end_reason": "killed",
+        "unique_tiles": 60,
+    }
+    camp_run = {
+        "depth": 1,
+        "max_depth": 1,
+        "score": 50,
+        "turns": 5000,
+        "end_reason": "max_steps",
+        "unique_tiles": 60,
+        "summary_digest": "CONFINEMENT_STALL",
+    }
+    assert (
+        abs((progression_metric(norm_run) - progression_metric(camp_run)) - 0.15) < 1e-6
+    )
+
+    # 3. DeficitAnalyzer isolates shallow max_steps confinement & surfaces raw game_log tail
+    db_p = str(tmp_path / "confine.duckdb")
+    init_db(db_p)
+    con = connect_db(db_p, read_only=False)
+    try:
+        con.execute(
+            "INSERT INTO batches (batch_id, generation, mode, avg_depth, max_depth) VALUES ('b1', 1, 'SWARM', 1.5, 2)"
+        )
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, role, depth, max_depth, score, turns, steps,
+                              end_reason, unique_tiles, game_log, last_active_function)
+            VALUES ('r_conf', 'b1', 1, 9001, 'val', 2, 2, 120, 4950, 5000, 'max_steps', 45,
+                    'line1\nYou cannot pass through the closed obstacle.', 'explore_loop')
+            """
+        )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(db_p).analyze(generation=2)
+    cids = {c.cluster_id for c in rep.fail_clusters}
+    assert "slice_max_steps_confinement" in cids
+    conf_c = next(
+        c for c in rep.fail_clusters if c.cluster_id == "slice_max_steps_confinement"
+    )
+    assert "closed obstacle" in conf_c.evidence
+
+    # 4. Tier-1 SWARM_PEER manifest includes private _helpers and module constants
+    prompt = build_user_prompt(
+        generation=2,
+        mode="SWARM_PEER",
+        current_policy="class Policy:\n    def step(self, s): return None\n",
+        skills={
+            "nav": "_STALL_CAP = 5\n\ndef _private_helper(state):\n    return None\n\ndef public_step(state):\n    return None\n"
+        },
+        recent_discoveries=[],
+    )
+    assert "_private_helper" in prompt
+    assert "_STALL_CAP" in prompt

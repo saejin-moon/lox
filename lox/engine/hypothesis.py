@@ -68,7 +68,32 @@ def progression_metric(run: dict[str, Any], benchmark: str | None = None) -> flo
         else 0.0
     )
 
-    return d + xl + ac_bonus + sc + stairs_bonus + tiles_bonus + shard_survival_bonus
+    # Mildly discount low-depth max_steps confinement stalls so multi-thousand-turn
+    # room-camping does not inflate IQM over genuine descent/exploration progress.
+    confinement_penalty = (
+        0.15
+        if (
+            not run.get("is_shard")
+            and str(run.get("end_reason", "")).strip().lower() == "max_steps"
+            and d <= 2.0
+            and (
+                "CONFINEMENT_STALL" in str(run.get("summary_digest", ""))
+                or int(run.get("turns", 0) or 0) >= 2500
+            )
+        )
+        else 0.0
+    )
+
+    return (
+        d
+        + xl
+        + ac_bonus
+        + sc
+        + stairs_bonus
+        + tiles_bonus
+        + shard_survival_bonus
+        - confinement_penalty
+    )
 
 
 def compute_confidence_sequence(

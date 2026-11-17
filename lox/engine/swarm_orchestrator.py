@@ -315,8 +315,9 @@ class SwarmCampaignOrchestrator:
         seeds = [
             10_000 + int(generation) * 100 + i for i in range(self.seeds_per_batch)
         ]
+        n_holdout = max(4, min(16, int(self.seeds_per_batch)))
         holdout_seeds = [
-            100_000 + i for i in range(max(4, min(8, int(self.seeds_per_batch))))
+            100_000 + ((int(generation) * 7 + i) % 64) for i in range(n_holdout)
         ]
         raw_shard_seeds = list(
             dict.fromkeys(
@@ -414,9 +415,12 @@ class SwarmCampaignOrchestrator:
                 frontier=self.frontier,
             )
 
-        with concurrent.futures.ThreadPoolExecutor(
+        peer_errors: list[tuple[str, BaseException]] = []
+        err_log_path = self.workspace_dir / "campaign_errors.log"
+        executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=len(peer_assignments)
-        ) as executor:
+        )
+        try:
             fut_map = {
                 executor.submit(_run_peer, pid, cl, sp, ss): pid
                 for pid, cl, sp, ss, _ecid in peer_assignments
@@ -425,8 +429,45 @@ class SwarmCampaignOrchestrator:
                 pid = fut_map[fut]
                 try:
                     peer_candidates.append(fut.result())
+                except PermissionError as exc:
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    try:
+                        with err_log_path.open("a", encoding="utf-8") as ef:
+                            ef.write(
+                                f"\n[{ts}] Generation {generation} Peer [{pid}] Fatal PermissionError: {exc}\n"
+                            )
+                    except Exception:
+                        pass
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
                 except Exception as exc:
-                    ui.warn(f"Peer [{pid}] failed: {exc}")
+                    msg_l = str(exc).lower()
+                    if "402" in msg_l or "insufficient credits" in msg_l:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise PermissionError(str(exc)) from exc
+                    peer_errors.append((pid, exc))
+                    ui.warn(f"Peer [{pid}] failed: {type(exc).__name__}: {exc}")
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    tb_txt = "".join(
+                        traceback.format_exception(type(exc), exc, exc.__traceback__)
+                    )
+                    try:
+                        with err_log_path.open("a", encoding="utf-8") as ef:
+                            ef.write(
+                                f"\n[{ts}] Generation {generation} Peer [{pid}] Error:\n{tb_txt}\n"
+                            )
+                    except Exception:
+                        pass
+        finally:
+            executor.shutdown(wait=False)
+
+        if not peer_candidates and peer_errors:
+            first_pid, first_exc = peer_errors[0]
+            raise RuntimeError(
+                f"Gen {generation}: All {len(peer_errors)} peers failed "
+                f"({first_pid}: {type(first_exc).__name__}: {first_exc}); "
+                "aborting generation to avoid zombie incumbent rollouts."
+            )
 
         # 4. Deterministic CRN Tournament + AST 3-Way Composition + Hidden Holdout Audit
         verdict = self.referee.evaluate_tournament(
@@ -536,6 +577,71 @@ class SwarmCampaignOrchestrator:
         # Persist challenger tournament attempts (including rejected peers + tracebacks)
         try:
             self.db_logger.save_tournament_attempts(verdict.attempts_summary)
+        except Exception:
+            pass
+
+        # Persist generation outcome into `experiments` and promotions into `discoveries`
+        try:
+            bp = dict(getattr(verdict, "best_pair", {}) or {})
+            exp_verdict = {
+                "passed": bool(verdict.promoted),
+                "mean_delta": float(
+                    bp.get(
+                        "mean_delta",
+                        verdict.winner_avg_depth - verdict.incumbent_avg_depth,
+                    )
+                ),
+                "ci_lower": float(bp.get("ci_lower", 0.0)),
+                "ci_upper": float(bp.get("ci_upper", 0.0)),
+                "wilcoxon_p": float(bp.get("wilcoxon_p", 1.0)),
+                "wins": int(bp.get("wins", 0)),
+                "losses": int(bp.get("losses", 0)),
+                "ties": int(bp.get("ties", 0)),
+                "seeds_evaluated": int(bp.get("paired_count", len(runs))),
+                "is_early_stopped": False,
+                "pilot_best_delta": float(bp.get("iqm_delta", 0.0)),
+                "reason": str(verdict.reason or ""),
+            }
+            exp_hyp = {
+                "observation_from_db": f"Swarm targets: {', '.join(verdict.target_functions[:4])}",
+                "mechanism": str(verdict.reason or ""),
+                "winner_id": str(verdict.winner_id),
+                "holdout_iqm_delta": verdict.holdout_iqm_delta,
+                "holdout_rejected": bool(getattr(verdict, "holdout_rejected", False)),
+            }
+            self.db_logger.save_experiment(
+                experiment_id=f"exp_swarm_g{generation}",
+                generation=generation,
+                batch_id=batch_id,
+                mode="SWARM",
+                target_functions=verdict.target_functions,
+                hypothesis=exp_hyp,
+                verdict=exp_verdict,
+            )
+            if verdict.promoted and verdict.winner_id != "incumbent":
+                self.db_logger.save_discovery(
+                    discovery_id=f"disc_swarm_g{generation}",
+                    generation=generation,
+                    batch_id=batch_id,
+                    mode="SWARM",
+                    target_functions=verdict.target_functions,
+                    binding_constraint=f"Deficits: {', '.join(verdict.target_functions[:3])}",
+                    verified_c_rule=(
+                        f"{verdict.winner_id} CRN Δdepth="
+                        f"{verdict.winner_avg_depth - verdict.incumbent_avg_depth:+.2f}, "
+                        f"IQMΔ={float(bp.get('iqm_delta', 0.0)):+.3f}"
+                    ),
+                    mechanism=str(verdict.reason or ""),
+                    mean_delta=float(
+                        bp.get(
+                            "iqm_delta",
+                            verdict.winner_avg_depth - verdict.incumbent_avg_depth,
+                        )
+                    ),
+                    avg_depth=float(batch_metrics["avg_depth"]),
+                    p90_depth=float(batch_metrics["p90_depth"]),
+                    max_depth=int(batch_metrics["max_depth"]),
+                )
         except Exception:
             pass
 
@@ -1128,14 +1234,31 @@ class SwarmCampaignOrchestrator:
         )
         history: list[dict[str, Any]] = []
         err_log_path = self.workspace_dir / "campaign_errors.log"
+        consec_failures = 0
         try:
             for g in range(start_gen, end_gen + 1):
                 try:
                     res = self.run_generation(generation=g)
                     history.append(res)
-                except (KeyboardInterrupt, PermissionError):
+                    consec_failures = 0
+                except KeyboardInterrupt:
+                    raise
+                except PermissionError as exc:
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    ui.error(
+                        f"Campaign halted on Generation {g}: PermissionError ({exc}). "
+                        f"Logged to `{err_log_path}`."
+                    )
+                    try:
+                        with err_log_path.open("a", encoding="utf-8") as ef:
+                            ef.write(
+                                f"\n[{ts}] Generation {g} Fatal PermissionError:\n{traceback.format_exc()}\n"
+                            )
+                    except Exception:
+                        pass
                     raise
                 except Exception as exc:
+                    consec_failures += 1
                     tb = traceback.format_exc()
                     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     ui.warn(
@@ -1146,6 +1269,11 @@ class SwarmCampaignOrchestrator:
                             ef.write(f"\n[{ts}] Generation {g} Error:\n{tb}\n")
                     except Exception:
                         pass
+                    if consec_failures >= 3:
+                        ui.error(
+                            f"Campaign halting after {consec_failures} consecutive failed generations."
+                        )
+                        break
         finally:
             self.close()
 

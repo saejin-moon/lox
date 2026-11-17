@@ -51,6 +51,8 @@ class TournamentVerdict:
     attempts_summary: list[dict[str, Any]] = field(default_factory=list)
     holdout_avg_depth: float | None = None
     holdout_iqm_delta: float | None = None
+    holdout_rejected: bool = False
+    best_pair: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
 
 
@@ -148,6 +150,7 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
             "hard_stall_count": 0,
             "policy_exceptions": 0,
             "exc_runs": 0,
+            "run_count": 0,
             "top_tracebacks": [],
             "loc_total": loc_total,
         }
@@ -212,6 +215,7 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
         "hard_stall_count": hard_stalls,
         "policy_exceptions": exc_total,
         "exc_runs": exc_runs,
+        "run_count": len(runs),
         "top_tracebacks": list(dict.fromkeys(tbs))[:5],
         "loc_total": loc_total,
     }
@@ -645,8 +649,13 @@ class SwarmReferee:
                 return False
             inc_hard = int(inc_stats.get("hard_stall_count", 0))
             cand_hard = int(cand_stats.get("hard_stall_count", 0))
-            if cand_hard > inc_hard and d_gain < 0.25:
-                return False
+            cand_n = max(1, int(cand_stats.get("run_count", 0) or 0))
+            stall_tol = cand_n // 16
+            if cand_hard > inc_hard:
+                if d_gain < 0.05 and cand_s <= inc_s:
+                    return False
+                if cand_hard > inc_hard + stall_tol and d_gain < 0.25:
+                    return False
             return True
 
         # Compute paired hypothesis stats (IQM, CS, Wilcoxon) for each evaluated finalist
@@ -753,6 +762,7 @@ class SwarmReferee:
         # Hidden Holdout Audit on candidate winner (never exposed to Peer prompts or DuckDB deficits)
         holdout_avg_depth: float | None = None
         holdout_iqm_delta: float | None = None
+        holdout_rejected = False
         if beats_incumbent and holdout_seeds and base_policy.strip():
             try:
                 h_seeds = [int(s) for s in holdout_seeds]
@@ -793,8 +803,9 @@ class SwarmReferee:
                 holdout_avg_depth = float(h_cand_stats.get("avg_depth", 1.0))
                 holdout_iqm_delta = float(h_pair.get("iqm_delta", 0.0))
                 h_exc = int(h_cand_stats.get("policy_exceptions", 0) or 0)
-                if h_exc > 0 or holdout_iqm_delta < -0.15:
+                if h_exc > 0 or holdout_iqm_delta < -0.35:
                     beats_incumbent = False
+                    holdout_rejected = True
                     ui.warn(
                         f"Gen {generation}: Holdout gate cancelled promotion of `{best_cand.peer_id}` "
                         f"(holdout_iqm_delta={holdout_iqm_delta:+.3f}, exc={h_exc})."
@@ -807,6 +818,7 @@ class SwarmReferee:
         attempts_summary: list[dict[str, Any]] = []
         for idx_e, (c, _be, st) in enumerate(evaluated_entries):
             pr = paired_by_idx[idx_e]
+            is_best = c.peer_id == best_cand.peer_id
             attempts_summary.append(
                 {
                     "attempt_id": f"att_g{generation}_{c.peer_id}_{int(time.time() * 1000)}",
@@ -814,9 +826,7 @@ class SwarmReferee:
                     "peer_id": c.peer_id,
                     "deficit_id": c.claimed_deficit_id,
                     "candidate_fp": _package_fingerprint(c.policy_code, c.skills),
-                    "promoted": bool(
-                        beats_incumbent and c.peer_id == best_cand.peer_id
-                    ),
+                    "promoted": bool(beats_incumbent and is_best),
                     "sandbox_passed": bool(c.sandbox_passed),
                     "sandbox_error": str(c.error or ""),
                     "avg_depth": float(st.get("avg_depth", 1.0)),
@@ -828,6 +838,9 @@ class SwarmReferee:
                     "seeds_gained": list(pr.get("seeds_gained", [])),
                     "seeds_lost": list(pr.get("seeds_lost", [])),
                     "top_tracebacks": list(st.get("top_tracebacks", [])),
+                    "holdout_avg_depth": holdout_avg_depth if is_best else None,
+                    "holdout_iqm_delta": holdout_iqm_delta if is_best else None,
+                    "holdout_rejected": bool(holdout_rejected and is_best),
                 }
             )
         for c in candidates:
@@ -884,11 +897,18 @@ class SwarmReferee:
                 rej_set = self._rejected_fingerprints.setdefault(inc_fp, set())
                 for c, _be, _st in evaluated_entries:
                     rej_set.add(_package_fingerprint(c.policy_code, c.skills))
-            reject_note = (
-                "guard triggered (exceptions, score collapse, or hard-stall regression)"
-                if not guard_ok
-                else f"regressed or holdout-blocked (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}, IQMΔ={best_pair.get('iqm_delta', 0.0):+.3f})"
-            )
+            if not guard_ok:
+                reject_note = "guard triggered (exceptions, score collapse, or hard-stall regression)"
+            elif holdout_rejected:
+                reject_note = (
+                    f"holdout gate rejected (holdout_iqm_delta={holdout_iqm_delta or 0.0:+.3f}, "
+                    f"CRN Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f})"
+                )
+            else:
+                reject_note = (
+                    f"regressed vs incumbent (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}, "
+                    f"IQMΔ={best_pair.get('iqm_delta', 0.0):+.3f})"
+                )
             ui.warn(
                 f"Gen {generation}: Best peer `{best_cand.peer_id}` rejected ({reject_note}). Retaining Incumbent."
             )
@@ -911,6 +931,8 @@ class SwarmReferee:
                 attempts_summary=attempts_summary,
                 holdout_avg_depth=holdout_avg_depth,
                 holdout_iqm_delta=holdout_iqm_delta,
+                holdout_rejected=holdout_rejected,
+                best_pair=dict(best_pair),
                 reason=f"Rejected `{best_cand.peer_id}` ({reject_note}); kept incumbent.",
             )
 
@@ -942,6 +964,8 @@ class SwarmReferee:
             attempts_summary=attempts_summary,
             holdout_avg_depth=holdout_avg_depth,
             holdout_iqm_delta=holdout_iqm_delta,
+            holdout_rejected=False,
+            best_pair=dict(best_pair),
             reason=(
                 f"Promoted `{best_cand.peer_id}` targeting `{best_cand.claimed_deficit_id}` "
                 f"(Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}, IQMΔ={best_pair.get('iqm_delta', 0.0):+.3f})."

@@ -44,9 +44,9 @@ class MAPElitesArchive:
     DEPTH_BINS = 5
     CAUTION_BINS = 4
     RESOURCE_BINS = 4
-    DEFAULT_DEPTH_THRESHOLDS = (1.5, 2.5, 4.0, 6.5)
+    DEFAULT_DEPTH_THRESHOLDS = (1.25, 1.75, 2.5, 4.0)
     DEFAULT_CAUTION_THRESHOLDS = (3.0, 7.0, 12.0)  # Vitals progression axis
-    DEFAULT_DENSITY_THRESHOLDS = (0.30, 0.70, 1.20)  # Spatial tempo axis
+    DEFAULT_DENSITY_THRESHOLDS = (0.08, 0.16, 0.30)  # Spatial tempo axis
     DEFAULT_FITNESS_WEIGHTS = (1000.0, 250.0, 0.1, 0.05)
 
     def __init__(

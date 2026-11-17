@@ -495,8 +495,12 @@ def incubate_candidate(
                     if guard_d_diffs:
                         g_delta = sum(guard_d_diffs) / len(guard_d_diffs)
                         metrics["guard_depth_delta"] = round(g_delta, 4)
-                        # Reject if clobbering D_succ guards AND overall shard regressed
-                        if g_delta < -0.5 and metrics["depth_delta"] < 0.0:
+                        # Require >=2 paired guard seeds AND meaningful regression before incubation veto
+                        if (
+                            len(guard_d_diffs) >= 2
+                            and g_delta <= -1.5
+                            and metrics["depth_delta"] < -0.25
+                        ):
                             candidate.sandbox_metrics = metrics
                             candidate.sandbox_passed = False
                             candidate.error = (
