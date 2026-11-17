@@ -536,6 +536,7 @@ class SwarmPeerAgent:
             swarm_frontier=frontier,
             swarm_checkpoint=sampled_frontier[0] if sampled_frontier else None,
         )
+        self.author.tools.enforce_peer_research_gate = self.provider != "mock"
         self.author.tools.current_policy_code = str(current_policy or "")
 
         frontier_block = ""

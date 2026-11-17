@@ -246,6 +246,9 @@ class AuthorToolRegistry:
         self.swarm_scaffold_code: str = ""
         self.swarm_experiments: list[dict[str, Any]] = []
         self._reusable_harness: NetHackHarness | None = None
+        self.wiki_queries_run: int = 0
+        self.theories_queries_run: int = 0
+        self.enforce_peer_research_gate: bool = False
 
     def _get_harness(self, max_steps: int) -> NetHackHarness:
         steps = max(10, int(max_steps))
@@ -349,6 +352,9 @@ class AuthorToolRegistry:
         self.swarm_replay_fixtures = list(swarm_replay_fixtures or [])
         self.swarm_scaffold_code = str(swarm_scaffold_code or "")
         self.swarm_experiments = []
+        self.wiki_queries_run = 0
+        self.theories_queries_run = 0
+        self.enforce_peer_research_gate = False
         if skills is not None:
             self.skills = dict(skills)
         if benchmark is not None:
@@ -507,6 +513,7 @@ class AuthorToolRegistry:
 
     def query_wiki(self, query: str, top_k: int = 3) -> tuple[str, str]:
         """Searches the offline NetHack 3.6.6 Wiki."""
+        self.wiki_queries_run += 1
         k = max(1, min(6, int(top_k or 3)))
         hits = self.wiki.search_wiki(query, top_k=k)
         return self.wiki.query(query, top_k=k), f"{len(hits)} articles"
@@ -610,6 +617,7 @@ class AuthorToolRegistry:
         self, query: str = "", doc_type: str = "", limit: int = 6
     ) -> tuple[str, str]:
         """Searches LanceDB theories/reflections/decompositions without aggressive truncation."""
+        self.theories_queries_run += 1
         if self.theories_store is None:
             return "LanceDB theories store not attached in this session.", "unavailable"
         try:
@@ -1261,6 +1269,24 @@ class AuthorToolRegistry:
 
         if is_macro:
             return self._verify_macro_on_real_states(code)
+
+        if (
+            self.mode == "SWARM_PEER"
+            and self.enforce_peer_research_gate
+            and not smoke_only
+        ):
+            missing_tools: list[str] = []
+            if self.wiki_queries_run == 0:
+                missing_tools.append("query_wiki")
+            if self.theories_store is not None and self.theories_queries_run == 0:
+                missing_tools.append("query_theories")
+            if missing_tools:
+                return (
+                    "RESEARCH_REQUIRED: Before calling `dry_run_policy`, call BOTH `query_theories(...)` "
+                    "and at least 1 targeted `query_wiki(query=...)` search to verify prior outcomes and "
+                    f"exact NetHack rules (missing: {', '.join(missing_tools)}).",
+                    "RESEARCH_REQUIRED",
+                )
 
         if self.mode == "SWARM_WORKER":
             self.last_dry_run_mode = "worker"

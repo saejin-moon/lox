@@ -178,7 +178,7 @@ Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stat
 
 ### Available Investigation & Verification Tools
 1. `query_db(sql)`: Run ONE read-only `SELECT` query per call on DuckDB.
-2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact mechanics (only when verifying an unknown rule not already covered in Recent Memory).
+2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact game rules (armor/slots/curses, food/tins/illness, monsters, shop rules, prompts, altars, items).
 3. `query_monster(name)` / `query_item(name)`: Query exact C-level `permonst` / `objclass` structs.
 4. `read_policy(policy_id)` / `diff_policies(policy_id_a, policy_id_b)` / `read_skill(skill_name, policy_id="")`: Inspect current or historical `policies` and `skills/*.py` snapshots.
 5. `query_theories(query, doc_type="", limit=6)`: Search LanceDB for prior peer `THEORY` notes and CRN tournament `META_SYNTHESIS` verdicts.
@@ -542,10 +542,11 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 {BEHAVIOR_TREE_DOCS}
 
 ### Peer Author Protocol (Isolated Sandbox + CRN Tournament):
-1. **Check Rejection Memory & Capability Gaps Before Editing (Anti-Recycling)**:
-   - **Never repeat or trivially tweak a mechanism shown as `REJECTED` in `Recent Experiment & Rejection Memory` above** (check `query_theories(query=...)` and `diff_policies(id_a, id_b)` to see why recent attempts lost instead of re-proposing the same patch).
+1. **Required Grounding Before Editing (`query_theories` + `query_wiki` + `query_db` — Anti-Recycling)**:
+   - **Never repeat or trivially tweak a mechanism shown as `REJECTED` in `Recent Experiment & Rejection Memory` above**. Before your first `dry_run_policy` call, you MUST call **both**:
+     1. `query_theories(query=...)` (plus `query_db` / `diff_policies` as needed) to see why past attempts lost or regressed; AND
+     2. At least **1 targeted `query_wiki(query=...)` search** on the exact NetHack mechanic you plan to touch (e.g. armor slots/weight/encumbrance/curses, shop rules, sickness/tins, monster attacks) — keep wiki calls focused (1–2 distinct queries; never repeat identical query strings).
    - Compare `Incumbent Vital & Capability Telemetry` (`avg_ac`, `avg_xl`, `starved_with_food`, `unworn_armor_deaths`, `end_reason` histogram) against `expert_runs` / `expert_ticks` (`query_db`) to diagnose missing **high-leverage capabilities** (e.g., gear/armor/weapon management, consumables/identification, multi-floor/branch traversal, sustained subgoals) rather than tuning one constant repeatedly.
-   - **Targeted Grounding (No Redundant Searches):** Do NOT recycle identical `query_wiki` searches already covered in Recent Memory; call `query_wiki`, `query_monster`, or `query_item` only when verifying a **new** C mechanic, monster, or item class not yet verified.
    - Preserve high-Ochiai `D_succ` branches unless you prove improvement across both failure replays and `D_succ` guard runs.
 2. **Function-Level Surgical Patches & Unified XML Bundle Format (Cut Bloat)**:
    - **NEVER paste unchanged functions from `skills/*.py` or 1,000+ lines of boilerplate**, and **never** emit `<hypothesis>`/`<reflection>` tags inside `dry_run_policy(code=...)` arguments.
