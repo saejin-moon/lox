@@ -1942,7 +1942,8 @@ def test_gen41_prompt_grounding_and_xml_instructions():
         batch_digest="Gen 40 summary",
     )
     assert "query_wiki" in usr_prompt
-    assert "BEFORE your first `dry_run_policy" in usr_prompt
+    assert "query_theories" in usr_prompt
+    assert "Recent Experiment & Rejection Memory" in usr_prompt
     assert '<skill_code module="name">' in usr_prompt
     assert "<policy_code>" in usr_prompt
     assert "skills={{" not in usr_prompt
@@ -2062,7 +2063,7 @@ def test_swarm_referee_blocks_hard_stall_regression_on_minor_depth_tick():
         peer_id="peer_stalled",
         claimed_deficit_id="c1",
         claimed_label="minor tick + stall",
-        policy_code=base_pol + "\n# peer_stalled\n",
+        policy_code=base_pol + "\ndef _stalled_marker():\n    return 1\n",
         skills={},
         sandbox_passed=True,
         loc_total=5,
@@ -2071,7 +2072,7 @@ def test_swarm_referee_blocks_hard_stall_regression_on_minor_depth_tick():
         peer_id="peer_clean",
         claimed_deficit_id="c2",
         claimed_label="clean breakthrough",
-        policy_code=base_pol + "\n# peer_clean\n",
+        policy_code=base_pol + "\ndef _clean_marker():\n    return 2\n",
         skills={},
         sandbox_passed=True,
         loc_total=5,
@@ -2107,3 +2108,317 @@ def test_swarm_referee_blocks_hard_stall_regression_on_minor_depth_tick():
     )
     assert v2_res.promoted is True
     assert v2_res.winner_id == "peer_clean"
+
+
+def test_swarm_referee_no_overwrite_noop_rejected_filter_and_parallel_tasks():
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.engine.swarm_referee import SwarmReferee
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n"
+    )
+    noop_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        # comment only\n"
+        "        return Action.WAIT\n"
+    )
+    cand_noop = PeerCandidate(
+        peer_id="peer_noop",
+        claimed_deficit_id="c1",
+        claimed_label="noop",
+        policy_code=noop_pol,
+        skills={},
+        sandbox_passed=True,
+        loc_total=4,
+    )
+    cand_worse = PeerCandidate(
+        peer_id="peer_worse",
+        claimed_deficit_id="c2",
+        claimed_label="worse",
+        policy_code=base_pol + "\ndef _extra(s):\n    return None\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=6,
+    )
+    cand_better = PeerCandidate(
+        peer_id="peer_better",
+        claimed_deficit_id="c3",
+        claimed_label="better",
+        policy_code=base_pol.replace("Action.WAIT", "Action.SEARCH"),
+        skills={},
+        sandbox_passed=True,
+        loc_total=4,
+    )
+
+    referee = SwarmReferee()
+    # 1. No-op candidate is filtered even when pool has size 1
+    assert referee.select_finalists([cand_noop], base_pol, {}) == []
+
+    # 2. Evaluate incumbent + 2 challengers via parallel `evaluate_tasks`
+    class _ParallelStubPool:
+        role = "val-hum-law-fem"
+        max_steps = 100
+        benchmark = "nethack"
+
+        def __init__(self):
+            self.task_batches = []
+
+        def evaluate_tasks(self, tasks):
+            self.task_batches.append(len(tasks))
+            out = []
+            for tk in tasks:
+                rid = tk["run_id"]
+                sd = tk["seed"]
+                if "peer_better" in rid:
+                    d, sc = 5, 500
+                elif "peer_worse" in rid:
+                    d, sc = 1, 10
+                else:
+                    d, sc = 3, 200
+                out.append(
+                    {
+                        "run_id": rid,
+                        "seed": sd,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 100,
+                        "end_reason": "died",
+                        "summary_digest": f"Overview: Depth={d}",
+                    }
+                )
+            return out
+
+    par_pool = _ParallelStubPool()
+    verdict_rej = referee.evaluate_tournament(
+        generation=55,
+        candidates=[cand_worse],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=par_pool,
+        seeds=[1000, 1001],
+    )
+    assert par_pool.task_batches == [
+        4
+    ]  # incumbent (2) + peer_worse (2) dispatched together
+    assert verdict_rej.promoted is False
+    assert "inc_retained" in verdict_rej.winner_batch_eval["batch_id"]
+    assert verdict_rej.winner_batch_eval["avg_depth"] == 3.0
+
+    # Rejected fingerprint is never re-admitted against the same incumbent
+    assert referee.select_finalists([cand_worse], base_pol, {}) == []
+
+    # When 0 finalists remain, retained incumbent uses a fresh cloned batch_id (never overwrites prior batch)
+    v_empty = referee.evaluate_tournament(
+        generation=56,
+        candidates=[cand_worse],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=par_pool,
+        seeds=[1000, 1001],
+    )
+    assert v_empty.promoted is False
+    assert (
+        v_empty.winner_batch_eval["batch_id"]
+        != verdict_rej.winner_batch_eval["batch_id"]
+    )
+    assert "g56_inc_retained" in v_empty.winner_batch_eval["batch_id"]
+
+    # Clean superior challenger wins
+    v_win = referee.evaluate_tournament(
+        generation=57,
+        candidates=[cand_better],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=par_pool,
+        seeds=[1000, 1001],
+    )
+    assert v_win.promoted is True
+    assert v_win.winner_id == "peer_better"
+
+
+def test_deficit_analyzer_filters_rejected_renders_memory_and_vitals(tmp_path):
+    from lox.author.swarm_deficits import DeficitAnalyzer
+
+    db_path = str(tmp_path / "def_clean.duckdb")
+    con = init_db(db_path)
+    try:
+        con.execute(
+            """
+            INSERT INTO batches (batch_id, generation, mode, candidate_policy_id, hypothesis_passed, seeds_evaluated, avg_score, avg_depth, p90_depth, max_depth, avg_turns)
+            VALUES ('b_prom_58', 58, 'SWARM', 'policy_swarm_g58', TRUE, 2, 650.0, 4.5, 5, 5, 1800.0),
+                   ('b_rej_60', 60, 'SWARM', 'policy_swarm_g60', FALSE, 2, 100.0, 1.0, 1, 1, 50.0)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, role, depth, max_depth, score, turns, final_ac, xp_level, end_reason, died_unarmored, milestones_json)
+            VALUES ('r_prom', 'b_prom_58', 58, 1000, 'val-hum-law-fem', 5, 5, 650, 1800, 6, 4, 'killed by fire ant', FALSE, '{"unworn_armor_in_pack": true}'),
+                   ('r_rej', 'b_rej_60', 60, 1000, 'val-hum-law-fem', 1, 1, 100, 50, 10, 1, 'stalled_bad_candidate', TRUE, '{}')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO synthesis_logs (log_id, generation, mode, turn_index, turn_type, agent_role, hypothesis_yaml, status)
+            VALUES ('s60', 60, 'SWARM_PEER', 8, 'SMOKE_CHECK', 'peer_4', 'hypothesis: H-wf-stall-fix failed', 'PASSED (smoke check)')
+            """
+        )
+    finally:
+        con.close()
+
+    thin_pol = "\n".join(f"# l{i}" for i in range(45)) + "\nclass Policy:\n    pass\n"
+    five_skills = {f"sk_{i}": "def fn():\n    return None\n" for i in range(5)}
+    report = DeficitAnalyzer(db_path).analyze(
+        generation=61, current_policy=thin_pol, skills=five_skills
+    )
+    assert report.bloat_warning is False
+    assert "DITCH MONOLITH" not in report.format_brief()
+    assert report.recent_attempts and "REJECTED" in report.recent_attempts[0]
+    assert "H-wf-stall-fix" in report.recent_attempts[0]
+    assert "avg_ac=6.0" in report.vital_summary
+    brief = report.format_brief()
+    assert "Recent Experiment & Rejection Memory" in brief
+    assert "stalled_bad_candidate" not in brief
+    assert any(
+        c.cluster_id == "slice_unequipped_progression" for c in report.fail_clusters
+    )
+
+
+def test_prompt_docs_split_schema_noop_diff_and_map_elites(tmp_path):
+    from lox.author.prompts import build_system_prompt
+    from lox.author.tools import AuthorToolRegistry
+    from lox.engine.map_elites import MAPElitesArchive
+
+    sys_swarm = build_system_prompt(is_swarm=True)
+    assert "3 Strict Generator Rules" not in sys_swarm
+    assert "state.in_menu" in sys_swarm
+    assert "no_diag=state.mem.door_mask" in sys_swarm
+    assert "`experiments`" not in sys_swarm
+    assert 'ActionLeaf(fn, name="...", min_commit=0)' in sys_swarm
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n\n"
+        "def leaf_wait(state, bb):\n"
+        "    return Action.WAIT\n\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.blackboard = Blackboard()\n"
+        "        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(leaf_wait, name='w')]), blackboard=self.blackboard)\n"
+        "    def step(self, state):\n"
+        "        return self.tree.tick(state) or Action.WAIT\n"
+    )
+    tools = AuthorToolRegistry(db_path=str(tmp_path / "noop.duckdb"))
+    tools.configure_generation(mode="SWARM_PEER", generation=62, skills={})
+    tools.current_policy_code = base_pol
+
+    # <hypothesis> wrapper is stripped and AST-identical candidate triggers NOOP_DIFF
+    msg_noop, st_noop = tools.dry_run_policy(
+        code="<hypothesis>\nhypothesis: test\n</hypothesis>\n<policy_code>\n"
+        + base_pol
+        + "\n</policy_code>\n",
+        smoke_only=False,
+    )
+    assert st_noop == "NOOP_DIFF", msg_noop
+
+    # MAPElitesArchive normalizes 0..100 pct_wait/pct_search cleanly
+    cid_pct, d_b, c_b, r_b = MAPElitesArchive.compute_cell_id(
+        {
+            "avg_depth": 4.5,
+            "max_depth": 9,
+            "pct_wait": 12.0,
+            "pct_search": 8.0,
+            "avg_score": 600.0,
+            "avg_turns": 1500.0,
+        }
+    )
+    assert c_b == 1  # 20% -> 0.20 in [0.10, 0.25) -> c1 instead of saturating c3
+    assert d_b == 3  # Dlvl 9 in [7.0, 12.0) -> d3 instead of saturating d4
+
+
+def test_gamestate_cursed_bug_traps_menu_and_guarded_range():
+    from lox.env.actions import Action
+    from lox.env.harness import NetHackHarness
+    from lox.env.state import _FLOOR_GLYPH_FLAGS_LUT, InventoryItem
+    from lox.lang.compiler import compile_policy_package
+    from lox.lang.instrument import PolicyLoopError
+
+    # 1. "uncursed" must NEVER match is_cursed
+    itm_un = InventoryItem(
+        letter="c",
+        name="an uncursed +3 small shield (being worn)",
+        glyph=1,
+        oclass=3,
+        char="[",
+        quantity=1,
+        info=None,
+        corpse_monster=None,
+    )
+    assert itm_un.is_uncursed is True
+    assert itm_un.is_cursed is False
+    assert itm_un.is_worn is True
+    assert itm_un.enchantment == 3
+
+    itm_cu = InventoryItem(
+        letter="d",
+        name="a cursed ring of hunger (on right hand)",
+        glyph=2,
+        oclass=4,
+        char="=",
+        quantity=1,
+        info=None,
+        corpse_monster=None,
+    )
+    assert itm_cu.is_cursed is True
+    assert itm_cu.is_worn is True
+
+    # 2. Interactive menu is preserved for at least 1 step instead of auto-dismissed
+    h = NetHackHarness(max_steps=30)
+    try:
+        st0 = h.reset(42)
+        st1, done1, _ = h.step(Action.INVENTORY)
+        assert not done1
+        assert st1.in_menu is True
+        st2, done2, _ = h.step(Action.ESC)
+        assert not done2
+        assert st2.in_menu is False
+        assert _FLOOR_GLYPH_FLAGS_LUT.shape[0] > 0
+    finally:
+        h.close()
+
+    # 3. guarded_range supports huge range with early break AND catches real zero-yield loops
+    ok_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        for i in range(10**9):\n"
+        "            if i >= 5:\n"
+        "                break\n"
+        "        return Action.WAIT\n"
+    )
+    compiled_ok = compile_policy_package(ok_pol)
+    runner_ok = compiled_ok.create_runner()
+    act, _ = runner_ok.next_action(st0)
+    assert act == Action.WAIT
+
+    bad_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        tot = 0\n"
+        "        for i in range(300000):\n"
+        "            tot += i\n"
+        "        return Action.WAIT\n"
+    )
+    compiled_bad = compile_policy_package(bad_pol, max_loop_ticks=50000)
+    runner_bad = compiled_bad.create_runner()
+    try:
+        runner_bad.next_action(st0)
+        raise AssertionError("Expected PolicyLoopError")
+    except PolicyLoopError:
+        pass

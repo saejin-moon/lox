@@ -59,6 +59,9 @@ class DeficitReport:
     skill_loc: int = 0
     skill_count: int = 0
     bloat_warning: bool = False
+    skill_bloat_notes: list[str] = field(default_factory=list)
+    vital_summary: str = ""
+    recent_attempts: list[str] = field(default_factory=list)
 
     def format_brief(self) -> str:
         lines = [
@@ -71,6 +74,14 @@ class DeficitReport:
                 else ""
             ),
         ]
+        if self.skill_bloat_notes:
+            lines.append(
+                f"- Large Skill Modules (split or keep surgical): {', '.join(self.skill_bloat_notes)}"
+            )
+        if self.vital_summary:
+            lines.append(
+                f"- Incumbent Vital & Capability Telemetry: {self.vital_summary}"
+            )
         if self.latest_completed_gen > 0:
             ticks_note = (
                 f", ticks stored for gen >= {self.ticks_min_gen}"
@@ -104,6 +115,12 @@ class DeficitReport:
                 "- MAP-Elites Diversity Stepping Stones (inspect via `read_policy` to escape plateau): "
                 + " | ".join(self.plateau_hints[:4])
             )
+        if self.recent_attempts:
+            lines.append(
+                "### Recent Experiment & Rejection Memory (DO NOT Repeat Rejected Mechanisms):"
+            )
+            for ra in self.recent_attempts[:6]:
+                lines.append(f"  * {ra}")
         if self.fail_clusters:
             lines.append("- Domain-Agnostic Trajectory Slices (D_fail):")
             for c in self.fail_clusters:
@@ -130,12 +147,12 @@ class DeficitAnalyzer:
         policy_loc = len(current_policy.splitlines()) if current_policy.strip() else 0
         skill_loc = sum(len(v.splitlines()) for v in skills_map.values() if v)
         skill_count = len(skills_map)
-        bloat_warning = (
-            (policy_loc >= 300 and skill_count == 0)
-            or (policy_loc >= 400)
-            or (skill_count >= 6)
-            or ((policy_loc + skill_loc) >= 500)
-        )
+        bloat_warning = (policy_loc >= 300 and skill_count == 0) or (policy_loc >= 350)
+        skill_bloat_notes = [
+            f"{k} ({len(v.splitlines())} LOC)"
+            for k, v in sorted(skills_map.items())
+            if v and len(v.splitlines()) >= 320
+        ]
 
         report = DeficitReport(
             generation=generation,
@@ -144,6 +161,7 @@ class DeficitAnalyzer:
             skill_loc=skill_loc,
             skill_count=skill_count,
             bloat_warning=bloat_warning,
+            skill_bloat_notes=skill_bloat_notes,
         )
 
         raw_branches = (
@@ -161,6 +179,8 @@ class DeficitAnalyzer:
             con = connect_db(self.db_path, read_only=True)
             self._populate_telemetry_window(con, report)
             self._populate_plateau_signal(con, report)
+            self._populate_vital_summary(con, report)
+            self._populate_recent_attempts(con, report)
             self._populate_d_succ_and_branches(con, report, raw_branches)
             self._populate_d_fail_clusters(con, report)
         except Exception:
@@ -216,12 +236,126 @@ class DeficitAnalyzer:
             pass
 
     @staticmethod
-    def _populate_plateau_signal(con: Any, report: DeficitReport) -> None:
+    def _has_verified_batches(con: Any) -> bool:
+        try:
+            row = con.execute(
+                "SELECT 1 FROM batches WHERE hypothesis_passed = TRUE OR batch_id LIKE '%_inc_%' LIMIT 1"
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
+    @classmethod
+    def _valid_runs_clause(cls, con: Any) -> str:
+        if cls._has_verified_batches(con):
+            return (
+                "generation > 0 AND ("
+                "batch_id LIKE '%_inc_%' OR EXISTS ("
+                "SELECT 1 FROM batches b WHERE b.batch_id = runs.batch_id AND b.hypothesis_passed = TRUE"
+                "))"
+            )
+        return "generation > 0"
+
+    @classmethod
+    def _populate_vital_summary(cls, con: Any, report: DeficitReport) -> None:
+        try:
+            where_sql = cls._valid_runs_clause(con)
+            latest_row = con.execute(
+                f"SELECT MAX(generation) FROM runs WHERE {where_sql}"
+            ).fetchone()
+            lat_gen = int(latest_row[0] or 0) if latest_row else 0
+            if lat_gen <= 0:
+                return
+            row = con.execute(
+                f"""
+                SELECT COUNT(*),
+                       ROUND(AVG(COALESCE(final_ac, 10)), 2),
+                       ROUND(AVG(COALESCE(xp_level, 1)), 2),
+                       ROUND(AVG(COALESCE(unique_tiles, 0)), 0),
+                       ROUND(AVG(COALESCE(pct_wait, 0.0)), 1),
+                       ROUND(AVG(COALESCE(pct_search, 0.0)), 1),
+                       SUM(CASE WHEN COALESCE(starved_with_food, FALSE) THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN COALESCE(died_unarmored, FALSE) THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN LOWER(COALESCE(milestones_json, '')) LIKE '%\"unworn_armor_in_pack\": true%' THEN 1 ELSE 0 END),
+                       SUM(COALESCE(auto_esc_count, 0)),
+                       SUM(COALESCE(policy_exceptions, 0))
+                FROM runs
+                WHERE {where_sql} AND generation = ?
+                """,
+                [lat_gen],
+            ).fetchone()
+            if row and int(row[0] or 0) > 0:
+                n_r = int(row[0])
+                report.vital_summary = (
+                    f"gen={lat_gen} (N={n_r}): avg_ac={row[1]}, avg_xl={row[2]}, "
+                    f"avg_tiles={int(row[3] or 0)}, pct_wait={row[4]}%, pct_search={row[5]}%, "
+                    f"starved_with_food={int(row[6] or 0)}, unworn_armor_deaths={int(row[7] or 0) or int(row[8] or 0)}, "
+                    f"auto_esc={int(row[9] or 0)}, policy_exc={int(row[10] or 0)}"
+                )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _populate_recent_attempts(con: Any, report: DeficitReport) -> None:
+        try:
+            min_g = max(1, int(report.generation) - 4)
+            b_rows = con.execute(
+                """
+                SELECT generation, candidate_policy_id, hypothesis_passed,
+                       ROUND(avg_depth, 2), max_depth, ROUND(avg_score, 1)
+                FROM batches
+                WHERE generation >= ? AND generation < ? AND UPPER(mode) = 'SWARM'
+                ORDER BY generation DESC, created_at DESC
+                LIMIT 5
+                """,
+                [min_g, int(report.generation)],
+            ).fetchall()
+            if not b_rows:
+                return
+            syn_by_gen: dict[int, list[str]] = {}
+            try:
+                s_rows = con.execute(
+                    """
+                    SELECT generation, agent_role, hypothesis_yaml
+                    FROM synthesis_logs
+                    WHERE generation >= ? AND generation < ?
+                      AND turn_type = 'SMOKE_CHECK'
+                      AND LENGTH(COALESCE(hypothesis_yaml, '')) > 5
+                    ORDER BY generation DESC, agent_role
+                    """,
+                    [min_g, int(report.generation)],
+                ).fetchall()
+                for sg, srole, shyp in s_rows:
+                    flat = " ".join(str(shyp or "").split())
+                    if len(flat) > 95:
+                        flat = flat[:92] + "..."
+                    syn_by_gen.setdefault(int(sg), []).append(f"{srole}: {flat}")
+            except Exception:
+                pass
+            attempts: list[str] = []
+            for gen_i, pid, passed, ad, md, asc in b_rows:
+                tag = "PROMOTED" if passed else "REJECTED"
+                hyps = "; ".join(syn_by_gen.get(int(gen_i), [])[:3])
+                hyp_str = f" | {hyps}" if hyps else ""
+                attempts.append(
+                    f"Gen {gen_i} [{tag} | {pid} | D={ad} (Max={md}), S={asc}]{hyp_str}"
+                )
+            report.recent_attempts = attempts
+        except Exception:
+            pass
+
+    @classmethod
+    def _populate_plateau_signal(cls, con: Any, report: DeficitReport) -> None:
+        where_extra = (
+            " AND (hypothesis_passed = TRUE OR batch_id LIKE '%_inc_%')"
+            if cls._has_verified_batches(con)
+            else ""
+        )
         rows = con.execute(
-            """
+            f"""
             SELECT generation, avg_depth, max_depth
             FROM batches
-            WHERE UPPER(mode) = 'SWARM'
+            WHERE UPPER(mode) = 'SWARM'{where_extra}
             ORDER BY generation DESC, created_at DESC
             LIMIT 4
             """
@@ -243,17 +377,19 @@ class DeficitAnalyzer:
             else:
                 report.regime = "CLIMBING"
 
-    @staticmethod
+    @classmethod
     def _populate_d_succ_and_branches(
+        cls,
         con: Any,
         report: DeficitReport,
         bt_branches: list[dict[str, str]],
     ) -> None:
+        where_runs = cls._valid_runs_clause(con)
         succ_rows = con.execute(
-            """
+            f"""
             SELECT run_id, seed, max_depth, score, turns
             FROM runs
-            WHERE generation > 0
+            WHERE {where_runs}
             ORDER BY is_outlier_good DESC, max_depth DESC, score DESC, turns DESC
             LIMIT 4
             """
@@ -306,10 +442,11 @@ class DeficitAnalyzer:
                         dormant.append(s_br)
             report.dormant_branches = dormant
 
-    @staticmethod
-    def _populate_d_fail_clusters(con: Any, report: DeficitReport) -> None:
+    @classmethod
+    def _populate_d_fail_clusters(cls, con: Any, report: DeficitReport) -> None:
+        where_runs = cls._valid_runs_clause(con)
         rows = con.execute(
-            """
+            f"""
             SELECT run_id, seed, depth, max_depth, turns, end_reason,
                    unique_tiles, pct_wait, pct_search,
                    COALESCE(starved_with_food, FALSE) AS starved_with_food,
@@ -321,7 +458,7 @@ class DeficitAnalyzer:
                    action_bytes,
                    milestones_json
             FROM runs
-            WHERE generation > 0
+            WHERE {where_runs}
             ORDER BY generation DESC, turns DESC
             LIMIT 48
             """
@@ -398,13 +535,16 @@ class DeficitAnalyzer:
                 continue
             digest_s = str(digest or "")
             stall_count = 0
+            unworn_armor_pack = False
             if m_json:
                 try:
-                    stall_count = int(json.loads(m_json).get("stall_count", 0) or 0)
+                    m_obj = json.loads(m_json)
+                    stall_count = int(m_obj.get("stall_count", 0) or 0)
+                    unworn_armor_pack = bool(m_obj.get("unworn_armor_in_pack", False))
                 except Exception:
                     stall_count = 0
 
-            # Purely domain-agnostic trajectory-outcome slices (zero NetHack keywords)
+            # Purely domain-agnostic trajectory-outcome & capability slices (zero NetHack keywords)
             if (
                 stall_count >= 25
                 or "CONFINEMENT_STALL" in digest_s
@@ -431,6 +571,14 @@ class DeficitAnalyzer:
                     "Runtime exceptions or unhandled prompt traps",
                     row,
                     f"policy_exceptions={policy_excs}, auto_esc={auto_esc}",
+                )
+            elif bool(_unarmored) or unworn_armor_pack:
+                _add_to_cluster(
+                    "slice_unequipped_progression",
+                    "capability_gap",
+                    "Terminated carrying unequipped gear / stagnant protection",
+                    row,
+                    f"end=`{end_str}`, Dlvl={max_depth}, unworn_armor={bool(_unarmored) or unworn_armor_pack}",
                 )
             elif float(max_depth or 1) >= max(2.0, high_depth_cut):
                 _add_to_cluster(

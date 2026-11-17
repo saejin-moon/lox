@@ -7,6 +7,7 @@ Supports 275,000 steps/sec deterministic C-level replay from recorded action byt
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
@@ -14,15 +15,21 @@ from nle import nethack as nh
 
 from lox.env.actions import normalize_action_to_bytes
 from lox.env.state import (
+    _FLOOR_GLYPH_FLAGS_LUT,
+    _HAS_RUST_FLOOR_MEM,
     _IS_CMAP_LUT,
     _IS_DOORWAY_GLYPH_LUT,
+    _IS_ICE_GLYPH_LUT,
     _IS_IRON_BARS_OR_TREE_LUT,
+    _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT,
     _IS_OBJECT_LUT,
     _IS_OPEN_DOOR_GLYPH_LUT,
+    _IS_TRAP_LUT,
     GameState,
     WorldMemory,
     astar_next_step,
     bfs_distance_grid,
+    lox_core,
 )
 
 # Pre-warm Numba JIT kernels once at module import
@@ -159,6 +166,27 @@ class NetHackHarness:
     def _in_getlin(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
         return bool(obs_tuple[self._internal_idx][2] == 1)
 
+    def _in_menu(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
+        """True when NetHack pauses for an interactive menu/pager rather than a plain `--More--` prompt."""
+        if not self._waiting_for_space(obs_tuple):
+            return False
+        tty_idx = self._idx_map.get("tty_chars")
+        if tty_idx is None or tty_idx >= len(obs_tuple):
+            return False
+        tty_chars = obs_tuple[tty_idx]
+        if tty_chars is None or len(tty_chars) == 0:
+            return False
+        row0 = bytes(tty_chars[0]).decode("latin1", errors="ignore").lower()
+        if "--more--" in row0:
+            return False
+        if any(k in row0 for k in ("pick up what", "what would you like", "for what")):
+            return True
+        joined = "\n".join(
+            bytes(tty_chars[r]).decode("latin1", errors="ignore")
+            for r in range(min(22, len(tty_chars)))
+        ).lower()
+        return "(end)" in joined or bool(re.search(r"\(\d+\s+of\s+\d+\)", joined))
+
     def _settle_prompts(
         self,
         obs_tuple: tuple[np.ndarray, ...],
@@ -167,7 +195,7 @@ class NetHackHarness:
     ) -> tuple[tuple[np.ndarray, ...], bool]:
         """
         Matches standard NLE prompt completion when NetHack pauses on `--More--`
-        (xwaitforspace), outside `in_moveloop`, or in lingering `yn_function`/`getlin` prompts.
+        (xwaitforspace), outside `in_moveloop`, or in lingering `yn_function`/`getlin`/menu prompts.
         """
         if not self.auto_dismiss_more:
             return obs_tuple, done
@@ -183,18 +211,26 @@ class NetHackHarness:
             and safety < 64
         ):
             safety += 1
-            if self._waiting_for_space(obs_tuple):
+            if self._is_game_over(obs_tuple):
                 b = ASCII_SPACE
-            elif self._is_game_over(obs_tuple):
-                b = ASCII_SPACE
-            elif self._in_yn(obs_tuple) or self._in_getlin(obs_tuple):
-                # Allow interactive prompt to be returned to policy for resolution
+            elif (
+                self._in_yn(obs_tuple)
+                or self._in_getlin(obs_tuple)
+                or self._in_menu(obs_tuple)
+            ):
+                # Allow interactive prompt/menu to be returned to policy for resolution
                 if self.prompt_linger_steps < self.max_prompt_linger:
                     self.prompt_linger_steps += 1
                     break
-                b = ASCII_ESC if self._in_getlin(obs_tuple) else ASCII_N
+                b = (
+                    ASCII_ESC
+                    if (self._in_getlin(obs_tuple) or self._in_menu(obs_tuple))
+                    else ASCII_N
+                )
                 self.prompt_aborts += 1
                 self.prompt_linger_steps = 0
+            elif self._waiting_for_space(obs_tuple):
+                b = ASCII_SPACE
             else:
                 b = ASCII_SPACE
             self.action_bytes.append(b)
@@ -251,7 +287,11 @@ class NetHackHarness:
             obs_tuple = self._last_raw_tuple
         self._last_raw_tuple = obs_tuple
         state = GameState(
-            obs_tuple, step_count=self.step_count, mem=self.mem, obs_keys=self._obs_keys
+            obs_tuple,
+            step_count=self.step_count,
+            mem=self.mem,
+            obs_keys=self._obs_keys,
+            obs_idx_map=self._idx_map,
         )
         self.mem.update(state)
         return state
@@ -267,6 +307,7 @@ class NetHackHarness:
                     self._last_raw_tuple,
                     step_count=self.step_count,
                     obs_keys=self._obs_keys,
+                    obs_idx_map=self._idx_map,
                 ),
                 True,
                 {"action_name": "DONE", "is_ascended": False},
@@ -308,6 +349,7 @@ class NetHackHarness:
             self._in_moveloop(obs_tuple)
             and not self._in_yn(obs_tuple)
             and not self._in_getlin(obs_tuple)
+            and not self._in_menu(obs_tuple)
         ):
             self.prompt_linger_steps = 0
 
@@ -345,7 +387,11 @@ class NetHackHarness:
         self.done = bool(done)
         self._last_raw_tuple = obs_tuple
         state = GameState(
-            obs_tuple, step_count=self.step_count, mem=self.mem, obs_keys=self._obs_keys
+            obs_tuple,
+            step_count=self.step_count,
+            mem=self.mem,
+            obs_keys=self._obs_keys,
+            obs_idx_map=self._idx_map,
         )
         state._message_cache = " | ".join(messages) if messages else ""
         self.mem.update(state, action_name=action_name)
@@ -439,19 +485,56 @@ class NetHackHarness:
             if in_moveloop or floor_changed:
                 glyphs = obs_tuple[glyphs_idx]
                 chars = obs_tuple[chars_idx]
-                is_cmap = _IS_CMAP_LUT[glyphs]
-                cmap_mask = is_cmap & (chars != 0) & (chars != ord(" "))
-                fl.remembered_chars[cmap_mask] = chars[cmap_mask]
-                open_door_mask = is_cmap & _IS_OPEN_DOOR_GLYPH_LUT[glyphs]
-                fl.remembered_chars[open_door_mask] = ord(".")
-                impassable_cmap = is_cmap & _IS_IRON_BARS_OR_TREE_LUT[glyphs]
-                fl.remembered_chars[impassable_cmap] = ord("|")
-                doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
-                fl.door_mask[doorway_mask] = True
-                fl.door_mask[is_cmap & (~_IS_DOORWAY_GLYPH_LUT[glyphs])] = False
-                fl.remembered_obj_glyphs[is_cmap] = 0
-                obj_mask = _IS_OBJECT_LUT[glyphs]
-                fl.remembered_obj_glyphs[obj_mask] = glyphs[obj_mask]
+                if (
+                    _HAS_RUST_FLOOR_MEM
+                    and isinstance(glyphs, np.ndarray)
+                    and isinstance(chars, np.ndarray)
+                    and glyphs.dtype == np.int16
+                    and chars.dtype == np.uint8
+                    and glyphs.flags.c_contiguous
+                    and chars.flags.c_contiguous
+                ):
+                    if fl._passable_mask.shape != fl.remembered_chars.shape:
+                        fl._passable_mask = np.zeros_like(
+                            fl.remembered_chars, dtype=np.bool_
+                        )
+                    lox_core.fast_update_floor_memory(
+                        glyphs,
+                        chars,
+                        _FLOOR_GLYPH_FLAGS_LUT,
+                        fl.remembered_chars,
+                        fl.door_mask,
+                        fl.remembered_obj_glyphs,
+                        fl.remembered_trap_glyphs,
+                        fl._passable_mask,
+                        int(by),
+                        int(bx),
+                        False,
+                    )
+                    fl._passable_dirty = False
+                else:
+                    is_cmap = _IS_CMAP_LUT[glyphs]
+                    cmap_mask = is_cmap & (chars != 0) & (chars != ord(" "))
+                    fl.remembered_chars[cmap_mask] = chars[cmap_mask]
+                    open_door_mask = is_cmap & _IS_OPEN_DOOR_GLYPH_LUT[glyphs]
+                    fl.remembered_chars[open_door_mask] = ord(".")
+                    impassable_cmap = is_cmap & _IS_IRON_BARS_OR_TREE_LUT[glyphs]
+                    fl.remembered_chars[impassable_cmap] = ord("|")
+                    walkable_special = is_cmap & (
+                        _IS_ICE_GLYPH_LUT[glyphs]
+                        | _IS_LOWERED_DRAWBRIDGE_GLYPH_LUT[glyphs]
+                    )
+                    fl.remembered_chars[walkable_special] = ord(".")
+                    doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
+                    fl.door_mask[doorway_mask] = True
+                    fl.door_mask[is_cmap & (~_IS_DOORWAY_GLYPH_LUT[glyphs])] = False
+                    fl.remembered_obj_glyphs[is_cmap] = 0
+                    obj_mask = _IS_OBJECT_LUT[glyphs]
+                    fl.remembered_obj_glyphs[obj_mask] = glyphs[obj_mask]
+                    fl.remembered_trap_glyphs[is_cmap & (~_IS_TRAP_LUT[glyphs])] = 0
+                    trap_mask = _IS_TRAP_LUT[glyphs]
+                    fl.remembered_trap_glyphs[trap_mask] = glyphs[trap_mask]
+                    fl._passable_dirty = True
 
             if in_moveloop and not self._waiting_for_space(obs_tuple):
                 step_ctr += 1
@@ -467,7 +550,11 @@ class NetHackHarness:
         self._last_raw_tuple = obs_tuple
         self.step_count = step_ctr
         state = GameState(
-            obs_tuple, step_count=step_ctr, mem=self.mem, obs_keys=self._obs_keys
+            obs_tuple,
+            step_count=step_ctr,
+            mem=self.mem,
+            obs_keys=self._obs_keys,
+            obs_idx_map=self._idx_map,
         )
         self.mem.update(state)
         return state

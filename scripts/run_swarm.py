@@ -81,8 +81,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--frontier-dir",
-        default=DEFAULT_FRONTIER_DIR,
-        help=f"Path to frontier checkpoint directory (default: {DEFAULT_FRONTIER_DIR}).",
+        default=None,
+        help="Path to frontier checkpoint directory (defaults to <workspace-dir>/checkpoints when custom workspace is set, else data/frontier).",
     )
     parser.add_argument(
         "--benchmark",
@@ -110,6 +110,13 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if not args.frontier_dir:
+        args.frontier_dir = (
+            os.path.join(args.workspace_dir, "checkpoints")
+            if os.path.abspath(args.workspace_dir)
+            != os.path.abspath(DEFAULT_WORKSPACE_DIR)
+            else DEFAULT_FRONTIER_DIR
+        )
 
     if args.clean:
         from scripts.reset_clean import reset_clean

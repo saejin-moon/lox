@@ -10,7 +10,7 @@ pub use bt::{
     PyActionLeaf, PyBehaviorTree, PyConditionLeaf, PyNodeStatus, PyPrioritySelector, PySequence,
 };
 pub use path::{fast_astar_next_step, fast_bfs_distance_grid};
-pub use replay::fast_replay_action_bytes;
+pub use replay::{fast_replay_action_bytes, fast_update_floor_memory};
 
 /// High-throughput LOX Native Core module (`lox_core`).
 #[pymodule]
@@ -26,6 +26,7 @@ fn lox_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fast_bfs_distance_grid, m)?)?;
     m.add_function(wrap_pyfunction!(fast_astar_next_step, m)?)?;
     m.add_function(wrap_pyfunction!(fast_replay_action_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(fast_update_floor_memory, m)?)?;
 
     Ok(())
 }

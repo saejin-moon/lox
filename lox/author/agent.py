@@ -984,6 +984,20 @@ class AuthorAgent:
         batch_id = f"gen_{generation:03d}_{mode.lower()}"
 
         for turn_idx in range(1, max_tool_turns + 2):
+            if turn_idx > 1 and len(messages) > 3:
+                for prev_msg in messages[2:-2]:
+                    tcs = prev_msg.get("tool_calls")
+                    if isinstance(tcs, list):
+                        for ptc in tcs:
+                            fn_p = ptc.get("function") or {}
+                            if fn_p.get("name") == "dry_run_policy":
+                                raw_a = fn_p.get("arguments")
+                                if isinstance(raw_a, str) and len(raw_a) > 4096:
+                                    fn_p["arguments"] = json.dumps(
+                                        {
+                                            "code": f"<previously tested {len(raw_a)} chars bundle; see tool output>"
+                                        }
+                                    )
             allow_tools = turn_idx <= max_tool_turns and not getattr(
                 self.tools, "last_pilot_improved", False
             )

@@ -519,12 +519,22 @@ def mark_outlier_good_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if n == 0:
         return runs
 
-    # Composite progression index: prioritizes max_depth, then xp_level, then AC improvement, then score, then turns survived
+    def _run_dungeons_count(r: dict[str, Any]) -> int:
+        ms = r.get("milestones")
+        if isinstance(ms, dict) and ms.get("dungeons_visited"):
+            return len(ms.get("dungeons_visited") or [])
+        tks = r.get("ticks") or []
+        if tks:
+            return len({t.get("dungeon_num", 0) for t in tks if isinstance(t, dict)})
+        return 1
+
+    # Composite progression index: prioritizes max_depth, branches explored, xp_level, AC improvement, score, then turns
     scores = np.array(
         [
             float(r.get("max_depth", 1)) * 100.0
+            + float(max(0, _run_dungeons_count(r) - 1)) * 40.0
             + float(r.get("xp_level", 1)) * 15.0
-            + max(0.0, 10.0 - float(r.get("final_ac", 10))) * 4.0
+            + max(0.0, 10.0 - float(r.get("final_ac", 10))) * 6.0
             + float(r.get("score", 0)) * 0.05
             + min(float(r.get("turns", 0)), 2000.0) * 0.005
             for r in runs

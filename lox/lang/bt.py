@@ -87,13 +87,12 @@ class ActionLeaf(BehaviorNode):
         )
         self.action_fn = action_fn
         self.is_running = is_running
+        code = getattr(action_fn, "__code__", None)
+        self._takes_bb = bool(code and code.co_argcount >= 2)
 
     def tick(self, state: Any, blackboard: Blackboard) -> tuple[NodeStatus, Any]:
         try:
-            # Inspect parameter count
-            code = getattr(self.action_fn, "__code__", None)
-            arg_count = code.co_argcount if code else 1
-            if arg_count >= 2:
+            if self._takes_bb:
                 act = self.action_fn(state, blackboard)
             else:
                 act = self.action_fn(state)
@@ -126,12 +125,12 @@ class ConditionLeaf(BehaviorNode):
     ) -> None:
         super().__init__(name=name or getattr(cond_fn, "__name__", "ConditionLeaf"))
         self.cond_fn = cond_fn
+        code = getattr(cond_fn, "__code__", None)
+        self._takes_bb = bool(code and code.co_argcount >= 2)
 
     def tick(self, state: Any, blackboard: Blackboard) -> tuple[NodeStatus, Any]:
         try:
-            code = getattr(self.cond_fn, "__code__", None)
-            arg_count = code.co_argcount if code else 1
-            if arg_count >= 2:
+            if self._takes_bb:
                 ok = bool(self.cond_fn(state, blackboard))
             else:
                 ok = bool(self.cond_fn(state))

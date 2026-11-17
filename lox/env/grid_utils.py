@@ -81,10 +81,22 @@ def bfs_distance_grid(
     """
     if HAS_RUST_CORE:
         try:
-            # Ensure contiguous boolean array for PyO3 numpy
-            c_passable = np.ascontiguousarray(passable, dtype=bool)
+            # Ensure contiguous boolean array for PyO3 numpy (zero-copy when already bool & C-contiguous)
+            c_passable = (
+                passable
+                if isinstance(passable, np.ndarray)
+                and passable.dtype == np.bool_
+                and passable.flags.c_contiguous
+                else np.ascontiguousarray(passable, dtype=bool)
+            )
             c_no_diag = (
-                np.ascontiguousarray(no_diag, dtype=bool)
+                (
+                    no_diag
+                    if isinstance(no_diag, np.ndarray)
+                    and no_diag.dtype == np.bool_
+                    and no_diag.flags.c_contiguous
+                    else np.ascontiguousarray(no_diag, dtype=bool)
+                )
                 if no_diag is not None
                 else None
             )
@@ -185,9 +197,21 @@ def astar_next_step(
     """
     if HAS_RUST_CORE:
         try:
-            c_passable = np.ascontiguousarray(passable, dtype=bool)
+            c_passable = (
+                passable
+                if isinstance(passable, np.ndarray)
+                and passable.dtype == np.bool_
+                and passable.flags.c_contiguous
+                else np.ascontiguousarray(passable, dtype=bool)
+            )
             c_no_diag = (
-                np.ascontiguousarray(no_diag, dtype=bool)
+                (
+                    no_diag
+                    if isinstance(no_diag, np.ndarray)
+                    and no_diag.dtype == np.bool_
+                    and no_diag.flags.c_contiguous
+                    else np.ascontiguousarray(no_diag, dtype=bool)
+                )
                 if no_diag is not None
                 else None
             )

@@ -119,6 +119,7 @@ class FrontierArchive:
         self,
         min_depth: int | None = None,
         milestone: str | None = None,
+        prefer_deep: bool = True,
     ) -> FrontierCheckpoint | None:
         pool = list(self.checkpoints.values())
         if min_depth is not None:
@@ -127,6 +128,11 @@ class FrontierArchive:
             pool = [c for c in pool if c.milestone.lower() == milestone.lower()]
         if not pool:
             return None
+        if prefer_deep and len(pool) > 1:
+            max_d = max(c.depth for c in pool)
+            deep_tier = [c for c in pool if c.depth >= max(min_depth or 1, max_d - 2)]
+            if deep_tier:
+                return random.choice(deep_tier)
         return random.choice(pool)
 
     def replay_into(
@@ -140,6 +146,16 @@ class FrontierArchive:
         rewinds before termination so candidate evaluation starts in a live active game state.
         """
         buf = bytes(checkpoint.action_bytes or b"")
+        ms = str(checkpoint.milestone or "").lower()
+        if len(buf) > 30 and any(k in ms for k in ("died", "killed", "starv", "faint")):
+            rewind = max(1, len(buf) - 30)
+            state = harness.replay_bytes(
+                seed=checkpoint.seed,
+                recorded_bytes=buf,
+                stop_at_byte_idx=rewind,
+            )
+            harness.step_count = 0
+            return state
         state = harness.replay_bytes(seed=checkpoint.seed, recorded_bytes=buf)
         if harness.done and len(buf) > 1:
             rewind = max(1, len(buf) - 30)

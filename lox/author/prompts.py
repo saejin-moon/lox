@@ -34,7 +34,7 @@ FULL_ACTION_DOCS = r"""### Complete NetHack Action Command Index
 - Extended commands: `extcmd("pray", "y")`, `extcmd("terrain")`, `extcmd("sit")`, `extcmd("chat", dir)`
 """
 
-POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
+GENERATOR_POLICY_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
 
 #### 1. Execution Model (`class Policy` and Modular Skills)
 - Your policy is a standard Python 3.11+ class named `class Policy:`.
@@ -54,173 +54,92 @@ POLICY_LANG_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
   ```
   - You can also write `def step(self, state: GameState) -> Action:` directly, or use generator subroutines via `state = yield from self.sub_gen(state)`.
   - **Zero-Turn Action & Stall Telemetry (`state.turn_advanced`, `state.consecutive_stalls`)**:
-    In NetHack, actions that fail (bumping into a peaceful creature without confirmation, attempting to lift an overweight corpse, kicking an unkickable door) consume **0 game turns** (`state.turn` does not advance).
-    - `state.turn_advanced: bool`: Returns `True` if the previous action advanced game time, `False` if stalled.
-    - `state.consecutive_stalls: int`: Returns the count of consecutive steps that failed to advance game time. If your action failed (`state.consecutive_stalls > 0`), **do not blindly repeat the same action**! Runs exceeding 100 consecutive zero-turn steps are truncated as `stalled_zero_turn`.
-  - **Interactive Prompts (`state.in_yn_prompt`, `state.in_text_prompt`)**:
-    - When NetHack prompts for confirmation (e.g. `Really attack <name>? [yn]`, `Continue lifting? [ynq]`, `Are you sure you want to pray? [yn]`), `state.in_yn_prompt` is `True`. You can respond on the next step by yielding `'y'` or `'n'`.
-    - When NetHack prompts for text input (e.g. `Call a scroll: `, `Call a potion: `), `state.in_text_prompt` is `True`.
-      Yield `Action.ESC` (`'\x1b'`) to dismiss text naming prompts immediately!
-    - The harness includes a safety fallback auto-ESC/auto-N after 3 unhandled turns to prevent permanent simulation lockups.
+    In NetHack, actions that fail (bumping into a peaceful creature without confirmation, attempting to lift an overweight corpse, kicking an unkickable door) consume **0 game turns** (`state.turn` does not advance). If `not state.turn_advanced`, do not repeat the same action blindly (`>= 100` consecutive stalls truncates as `stalled_zero_turn`).
+  - **Interactive Prompts & Menus (`state.in_yn_prompt`, `state.in_text_prompt`, `state.in_menu`)**:
+    - `state.in_yn_prompt`: `[yn]`/`[ynq]` prompts — respond `'y'`/`'n'`/`'q'`.
+    - `state.in_text_prompt`: text naming prompts — yield `Action.ESC` (`'\x1b'`).
+    - `state.in_menu`: interactive selection/pager menus (`Pick up what?`, `(end)`) — inspect `state.tty_lines` and send item letters, `Action.SPACE`, or `Action.ESC`.
   - **3 Strict Generator Rules**:
     1. In a generator (`def run` containing `yield`), ALWAYS receive the next state via `state = yield act` (never `return act` inside a generator—in Python `return val` inside a generator raises `StopIteration`!).
     2. If a helper method is a normal function that returns an `Action` or `None`, call it as `act = self.helper(state)` and then `state = yield act`.
     3. If a helper method is itself a generator (contains `yield`), call it via `state = yield from self.sub_gen(state)` and end `sub_gen` with `return state`. Never write `yield self.sub_gen(state)` without `from`!
-- **Supported Python**: Full Python 3.11+ syntax (`if/elif/else`, `for`, `while`, `try/except`, list/dict/set comprehensions, `@dataclass`, helper classes, recursion, `match/case`, lambdas). Pre-loaded in globals: `math`, `collections` (`deque`, `defaultdict`, `Counter`), `heapq`, `itertools`, `functools`, `re`, `enum`, `dataclasses`, `numpy` (`np`), `random`, `copy`, `bisect`.
-- **Configurable Parameters (`self.param`)**:
-  You can declare numeric thresholds/weights via `self.param("name", default, min_val, max_val)` (e.g. `self.param("heal_hp_ratio", 0.35, 0.10, 0.80)`).
+- **Supported Python**: Full Python 3.11+ syntax (`if/elif/else`, `for`, `while`, `try/except`, comprehensions, `@dataclass`, `match/case`). Pre-loaded: `math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `enum`, `dataclasses`, `numpy` (`np`), `random`, `copy`, `bisect`.
+- **Configurable Parameters (`self.param`)**: `self.param("name", default, min_val, max_val)`.
 
 #### 2. Modular Subsystems & Skill Modules (`skills/<module>.py`)
-- **Hierarchical Modularization**: Monolithic policy classes with dozens of methods become fragile and difficult to maintain. You can modularize domain capabilities into external skill files under `data/workspace/skills/<module>.py` (e.g. `skills/combat.py`, `skills/nutrition.py`, `skills/navigation.py`, `skills/identification.py`).
-- **Importing in Policy**:
-  In `policy.py` or helper methods, import routines or classes directly:
-  ```python
-  from skills.combat import melee_strike, tactical_retreat
-  from skills.nutrition import handle_nutrition
-  import skills.navigation as nav
-  ```
-- **Authoring Skills**:
-  - In `WRITE` or `REFACTOR`, you can create or update a modular skill module by specifying `skill_module: "mod_name"` in your YAML hypothesis and providing the skill code.
-  - When testing with `dry_run_policy(code=..., skill_name="mod_name", skill_code="...")`, the engine validates both together.
-  - Skill modules have access to the same sandboxed stdlib, macros, and NetHack primitives (`Action`, `seq`, `DIR_DELTAS`, `GameState`, `bfs_distance_grid`, `astar_next_step`, etc.).
-  - Methods in `class Policy` can delegate cleanly to skill functions: `act = melee_strike(self, state)` or `act = nav.step_frontier(state, self.visited)`.
-
-#### 3. Core 1-to-1 Action Working Set (`Action`, `key`, `seq`, `DIR_DELTAS`)
-Nothing is hardcoded in the harness: whatever you `yield` (or `return` from `step`) maps 1-to-1 to the exact keystroke(s) sent to NetHack:
-- **Compass Movement (`Action` or `(dy, dx)` via `DIR_DELTAS`)**:
-  `Action.N` (`'k'`, `(-1, 0)`), `Action.S` (`'j'`, `(1, 0)`), `Action.E` (`'l'`, `(0, 1)`), `Action.W` (`'h'`, `(0, -1)`),
-  `Action.NE` (`'u'`, `(-1, 1)`), `Action.NW` (`'y'`, `(-1, -1)`), `Action.SE` (`'n'`, `(1, 1)`), `Action.SW` (`'b'`, `(1, -1)`).
-  You can also look up `DIR_DELTAS[(dy, dx)]` directly!
-- **Vertical & Step**:
-  `Action.UP` (`'<'`), `Action.DOWN` (`'>'`), `Action.WAIT` (`'.'`), `Action.MORE` (`'\\r'`).
-- **Core Interactions**:
-  `Action.SEARCH` (`'s'`), `Action.OPEN` (`'o'`), `Action.KICK` (`C('d')`),
-  `Action.EAT` (`'e'`), `Action.WIELD` (`'w'`), `Action.WEAR` (`'W'`),
-  `Action.QUAFF` (`'q'`), `Action.READ` (`'r'`), `Action.ZAP` (`'z'`),
-  `Action.FIRE` (`'f'`), `Action.THROW` (`'t'`), `Action.PICKUP` (`','`),
-  `Action.DROP` (`'d'`), `Action.PRAY` (`M('p')`).
-  *(For specialized commands like dipping, chatting, or paying shopkeepers, call query_policy_docs("actions") to view the full command index).*
-- **Multi-Keystroke Sequences (`seq(...)`), Extended Commands (`extcmd`), & Repeats (`repeat`)**:
-  Many NetHack actions prompt for a direction, inventory slot letter, or text. Send the full sequence in one turn using `seq(...)`:
-  - Open a door at `(dy, dx)`: `yield seq(Action.OPEN, DIR_DELTAS[(dy, dx)])`
-  - Kick in direction `(dy, dx)`: `yield seq(Action.KICK, DIR_DELTAS[(dy, dx)])`
-  - Repeat action $N$ times: `yield repeat(10, Action.SEARCH)` or `yield repeat(5, Action.WAIT)`
-  - Extended commands: `yield extcmd("pray", "y")`, `yield extcmd("terrain")`, `yield extcmd("sit")`
-  - Eat inventory item in slot `'f'`: `yield seq(Action.EAT, 'f')`
-  - Eat a corpse on the floor (`'y'` to confirm): `yield seq(Action.EAT, 'y')` (`Action.EAT` on a floor item applies to objects on the hero's current tile `(state.y, state.x)` via `state.objects_here()`).
-  - Quaff potion in slot `'h'`: `yield seq(Action.QUAFF, 'h')`
-  - Wear armor in slot `'d'`: `yield seq(Action.WEAR, 'd')`
-  - Wield weapon in slot `'a'`: `yield seq(Action.WIELD, 'a')`
-  - Throw item `'b'` in direction `(dy, dx)`: `yield seq(Action.THROW, 'b', DIR_DELTAS[(dy, dx)])`
-  - Zap directional wand `'i'` in direction `(dy, dx)`: `yield seq(Action.ZAP, 'i', DIR_DELTAS[(dy, dx)])`
-
-#### 4. Querying `GameState` (`state`)
-Every turn, `state` exposes 100% of NetHack's observation arrays, terminal screens, and C symbol tables. Pay special attention to these crucial perception fields:
-- **Hero Vitals, Armor & Hunger**:
-  - `state.hp` and `state.max_hp`: Hero current and max hit points.
-  - `state.ac`: Numerical armor class.
-  - `state.hunger_state`: `0`=Satiated, `1`=Not Hungry, `2`=Hungry, `3`=Weak, `4`=Fainting, `5`=Fainted.
-  - `state.y` (0..20), `state.x` (0..78), `state.pos` (`(y, x)`), `state.turn`, `state.step_count`.
-  - `state.energy`, `state.max_energy`, `state.xp_level`, `state.xp`, `state.score`, `state.gold`.
-  - `state.depth` (dungeon depth 1..50), `state.dungeon_num` (`0`=Dungeons of Doom, `1`=Gehennom, `2`=Gnomish Mines, `3`=Quest, `4`=Sokoban).
-  - `state.deepest_level_reached` (`int`), `state.is_on_stairs_down` (`bool`), `state.internal_hunger` (`int` raw nutrition counter).
-  - `state.carrying_capacity` (`0`=Unencumbered, `1`=Burdened, `2`=Stressed, `3`=Strained, `4`=Overtaxed, `5`=Overloaded), `state.encumbrance_name`.
-- **Hero Inventory (`state.inventory -> list[InventoryItem]`)**:
-  Each `item` in `state.inventory` has:
-  - `item.letter` (`'a'..'z'`), `item.name` (full description string, e.g. `'a +1 long sword (weapon in hand)'`, `'2 food rations'`), `item.quantity` (`int`).
-  - Helper properties: `item.is_weapon`, `item.is_armor`, `item.is_food`, `item.is_corpse`, `item.is_worn`, `item.is_wielded`, `item.is_potion`, `item.is_scroll`, `item.is_wand`, `item.is_ring`, `item.is_amulet`, `item.is_tool`.
-  - Status: `item.is_blessed`, `item.is_uncursed`, `item.is_cursed`.
-  - C struct metadata: `item.info` (`ObjectInfo | None`: `name`, `descr`, `weight`, `cost`, `delay`, `oprop`) and `item.corpse_monster` (`MonsterInfo | None` if `is_corpse`).
-- **Visible Monsters (`state.visible_monsters() -> list[VisibleMonster]`) and Adjacent Monsters (`state.adjacent_monsters(exclude_pets: bool = True) -> list[VisibleMonster]`)**:
-  Each `m` in `state.visible_monsters()` has:
-  - `m.y`, `m.x`, `m.name`, `m.char`, `m.color`.
-  - `m.is_adjacent_to(state.y, state.x)` (8-way Chebyshev adjacency—monsters attack diagonally as well as orthogonally!), `m.is_pet`, `m.is_statue`, `m.is_invisible`.
-  - `m.info` (`MonsterInfo` 1-to-1 C `permonst` struct): `m.info.difficulty`, `m.info.ac`, `m.info.speed`, `m.info.level`, `m.info.mr`, `m.info.nutrition`, `m.info.weight`, `m.info.size`, `m.info.resistances_mask`, `m.info.conveys_mask`, `m.info.flags1`, `m.info.flags2`, and C bitmask properties: `is_acidic`, `is_poisonous`, `is_undead`, `is_were`, `is_human`, `is_elf`, `is_dwarf`, `is_gnome`, `is_orc`, `is_demon`, `is_giant`, `is_shapeshifter`, `is_domestic`, `conveys_poison_res`, `conveys_fire_res`, `conveys_cold_res`, `conveys_sleep_res`, `conveys_shock_res`, `conveys_disint_res`, `conveys_stone_flag`, `conveys_see_invis`, `conveys_teleport`, `conveys_teleport_control`.
-  `state.adjacent_monsters(exclude_pets=True)` returns all visible non-pet monsters in the 8 Chebyshev adjacent squares around the hero.
-  *Note on Peaceful vs. Hostile Monsters*: In NetHack, the C screen glyphs do NOT expose whether a monster is currently hostile or peaceful. Peaceful creatures (e.g. domestic animals, shopkeepers, Minetown watchmen, co-aligned priests) spawn peaceful; bumping into them triggers a `Really attack <name>? [yn]` prompt (`state.in_yn_prompt == True`).
-- **Visible Objects & Corpses (`state.visible_objects() -> list[VisibleObject]`) and Objects Here (`state.objects_here() -> list[VisibleObject]`)**:
-  `state.visible_objects()` returns all visible items on the floor (including items on the hero's tile `(state.y, state.x)`).
-  `state.objects_here()` returns only items directly on the hero's tile `(state.y, state.x)` (e.g. to inspect before pickup or eating).
-  Each `o` in `state.visible_objects()` / `state.objects_here()` has:
-  - `o.y`, `o.x`, `o.name`, `o.char`, `o.color`.
-  - `o.is_corpse`, `o.is_food`, `o.is_weapon`, `o.is_armor`, `o.is_potion`, `o.is_scroll`, `o.is_wand`.
-  - `o.info` (`ObjectInfo | None`: `name`, `descr`, `weight`, `cost`, `delay`, `oprop`) and `o.corpse_monster` (`MonsterInfo | None` if `is_corpse`: inspect `nutrition`, `is_poisonous`, `is_acidic`, `is_undead`, `is_were`, `conveys_poison_res`, etc. directly from C `permonst` without hardcoding monster name lists!).
-  - You can also look up any monster or object by name in O(1) via `state.monster_info_by_name(name)` and `state.object_info_by_name(name)`.
-- **Status Flags**:
-  `state.is_blind`, `state.is_confused`, `state.is_stunned`, `state.is_hallucinating`, `state.is_levitating`,
-  `state.is_food_poisoned`, `state.is_terminally_ill`, `state.is_stoning`, `state.is_slimed`, `state.is_strangled`, `state.condition_mask`.
-- **Messages & Screen Grids (21x79 & 24x80 Terminal)**:
-  - `state.message` (`str`): Current turn's game message(s).
-  - `state.chars` (`uint8[21, 79]`): ASCII character codes on screen:
-    * `.` : room floor, ice, or open doorway
-    * `#` : corridor or iron bars
-    * `+` : closed door (open with `Action.OPEN` or kick with `Action.KICK`)
-    * `\\` : open door or throne
-    * `>` : staircase down (descend with `Action.DOWN`)
-    * `<` : staircase up
-    * `{` : fountain or sink
-    * `_` : altar
-    * `^` : trap
-    * `)` : weapon on ground
-    * `[` : armor on ground
-    * `%` : food or corpse on ground
-    * `!` : potion on ground
-    * `?` : scroll on ground
-    * `/` : wand on ground
-    * `$` : gold on ground
-    * **CRITICAL MAP INVARIANT**: `'-'` (horizontal wall) and `'|'` (vertical wall) are SOLID, IMPASSABLE ROOM WALLS! NEVER mark `'-'` or `'|'` as passable! Bumping into `'-'` or `'|'` wastes turns and causes severe wall stalls!
-  - `state.char_at(y, x) -> str`: Single ASCII character at `(y, x)`.
-  - `state.glyphs` (`int32[21, 79]`), `state.colors` (`int8[21, 79]`), `state.specials` (`uint8[21, 79]`).
-  - `state.ascii_map() -> str`: Full 21x79 ASCII rendering of the screen.
-  - `state.tty_text -> str`: Complete 24-line terminal screen rendering.
-- **Semantic Terrain & Trap Queries (Direct from NetHack C Symbol Tables)**:
-  - `state.terrain_at(y, x) -> str`: Semantic name of terrain at `(y, x)` (e.g. `'closed door'`, `'open door'`, `'floor of a room'`, `'corridor'`, `'staircase down'`, `'staircase up'`, `'altar'`, `'fountain'`, `'sink'`).
-  - `state.trap_at(y, x) -> str | None`: Specific trap name at `(y, x)` (e.g. `'arrow trap'`, `'bear trap'`, `'pit'`) or `None`.
-  - `state.is_closed_door(y, x) -> bool`: True if tile is a closed door (`'+'`).
-  - `state.is_open_door(y, x) -> bool`: True if tile is an open door / doorway (`'\\'`, `'.'`).
-  - `state.is_stairs_down(y, x) -> bool`, `state.stairs_down_pos -> (y, x) | None`: Fast check and coordinates of downstairs `'>'`.
-- **Fast Vectorized NumPy & Numba Pathfinding Helpers**:
-  - `state.bfs_distances(passable_mask, start=(y, x), allow_diagonal=True) -> int32[21, 79]`: Shortest path step distances from `start` (`-1` if unreachable).
-  - `state.path_step(passable_mask, target=(ty, tx), start=(y, x), allow_diagonal=True) -> (dy, dx)`: Returns the first step delta `(dy, dx)` along the shortest path from `start` to `target` (`(0, 0)` if unreachable).
-  - **Generic Vectorized Pathfinding Usage**:
-    ```python
-    # Use the pre-computed passable mask or construct one:
-    passable = state.mem.passable_mask.copy()
-    # Exclude obstacles or hazardous positions:
-    for m in state.visible_monsters():
-        passable[m.y, m.x] = False
-    # Find next step towards target coordinate:
-    dy, dx = state.path_step(passable, target=(target_y, target_x))
-    if (dy, dx) != (0, 0):
-        return DIR_DELTAS[(dy, dx)]
-    ```
-
-#### 5. Deterministic Zero-Heuristic WorldMemory (`state.mem`)
-
-The harness automatically maintains deterministic, zero-heuristic spatial and episodic bookkeeping on `state.mem` across steps and replays:
-- `state.mem.visited`: `bool[21, 79]` mask of tiles the hero has physically visited on the current `(state.dungeon_num, state.level_num)` floor.
-- `state.mem.visit_count`: `int32[21, 79]` array of visit frequencies for each tile on the current floor.
-- `state.mem.remembered_chars`: `uint8[21, 79]` ASCII array of static terrain characters (walls, corridors, doors, stairs, altars, fountains) observed on the current floor, retaining them even when they leave current line-of-sight.
-- `state.mem.searched_counts`: `int16[21, 79]` count of how many times each tile has been searched via `Action.SEARCH` (crucial so the policy knows which walls or corridors have already been searched for secret doors).
-- `state.mem.stair_graph`: `dict[tuple[int, int, int, int], tuple[int, int, int, int]]` mapping `(dnum_from, dlvl_from, y_from, x_from) -> (dnum_to, dlvl_to, y_to, x_to)` bidirectional inter-floor transition graph recording stairs taken across dungeons (Dungeons of Doom, Gnomish Mines, Sokoban).
-- `state.mem.locked_doors`: `set[tuple[int, int]]` containing coordinates `(y, x)` on the current floor confirmed to be locked doors.
-- `state.mem.pos_history`: `deque[tuple[int, int, int, int]]` of the last 16 `(dungeon_num, level_num, y, x)` positions.
-- `state.mem.is_oscillating`: `bool`, `True` if <= 3 unique tiles were visited in the last 12 steps on the same floor.
-- `state.mem.get_floor(dnum, dlvl)`: returns the `FloorMemory` for any visited dungeon level.
+- Import routines from `skills.*`: `from skills.combat import melee_strike`.
+- In `WRITE`/`REFACTOR`, specify `skill_module: "mod_name"` or test via `dry_run_policy(code="<skill_code module='mod_name'>...</skill_code>...")`.
 """
+
+CORE_HARNESS_DOCS = r"""### 1-to-1 NetHack Harness & `GameState` Reference
+
+#### 1. Execution & Stall / Prompt Safety
+- **Zero-Turn Stalls (`state.turn_advanced`, `state.consecutive_stalls`)**: NetHack actions that do not consume a game turn (e.g. bumping walls/peacefuls/boulders, invalid diagonal doorway moves) keep `state.turn_advanced == False`. Never repeat a failed step; `>= 100` consecutive zero-turn steps aborts as `stalled_zero_turn`.
+- **Interactive Prompts & Menus**:
+  - `state.in_yn_prompt`: `[yn]`/`[ynq]` prompts — return `key('y')`/`key('n')`/`key('q')`.
+  - `state.in_text_prompt`: naming/text prompt — return `Action.ESC`.
+  - `state.in_menu`: active selection/pager menu (`Pick up what?`, `Inventory`, `(end)`) — inspect `state.tty_lines` and return item letters (`key('a')`), `Action.SPACE`, or `Action.ESC`.
+- **Supported Python**: Full Python 3.11+ with `math`, `collections` (`deque`, `defaultdict`, `Counter`), `heapq`, `itertools`, `functools`, `re`, `enum`, `dataclasses`, `numpy` (`np`), `random`, `copy`, `bisect`, and `self.param(name, default, min_val, max_val)`.
+
+#### 2. Core 1-to-1 Action Working Set (`Action`, `key`, `seq`, `DIR_DELTAS`)
+Everything returned from `step(state)` or an `ActionLeaf` maps 1-to-1 to native NLE keystrokes:
+- **Compass (`Action` or `DIR_DELTAS[(dy, dx)]`)**: `Action.N` (`(-1,0)`), `Action.S` (`(1,0)`), `Action.E` (`(0,1)`), `Action.W` (`(0,-1)`), `Action.NE` (`(-1,1)`), `Action.NW` (`(-1,-1)`), `Action.SE` (`(1,1)`), `Action.SW` (`(1,-1)`).
+- **Vertical & Wait**: `Action.UP` (`'<'`), `Action.DOWN` (`'>'`), `Action.WAIT` (`'.'`), `Action.MORE` (`'\r'`), `Action.ESC` (`'\x1b'`), `Action.SPACE` (`' '`).
+- **Interactions**: `Action.SEARCH` (`'s'`), `Action.OPEN` (`'o'`), `Action.CLOSE` (`'c'`), `Action.KICK` (`C('d')`), `Action.UNTRAP` (`M('u')`), `Action.EAT` (`'e'`), `Action.WIELD` (`'w'`), `Action.WEAR` (`'W'`), `Action.TAKEOFF` (`'T'`), `Action.PUTON` (`'P'`), `Action.REMOVE` (`'R'`), `Action.QUAFF` (`'q'`), `Action.READ` (`'r'`), `Action.ZAP` (`'z'`), `Action.FIRE` (`'f'`), `Action.THROW` (`'t'`), `Action.PICKUP` (`','`), `Action.DROP` (`'d'`), `Action.APPLY` (`'a'`), `Action.LOOT` (`M('l')`), `Action.PRAY` (`M('p')`), `Action.ENGRAVE` (`'E'`), `Action.OFFER` (`M('o')`), `Action.PAY` (`'p'`). *(Call `query_policy_docs("actions")` for full index.)*
+- **Multi-Keystroke Sequences (`seq(...)`) & Extended Commands (`extcmd`)**:
+  - Open/kick dir: `seq(Action.OPEN, DIR_DELTAS[(dy, dx)])`, `seq(Action.KICK, DIR_DELTAS[(dy, dx)])`
+  - Inventory slot action: `seq(Action.EAT, 'f')`, `seq(Action.WEAR, 'd')`, `seq(Action.WIELD, 'a')`, `seq(Action.PUTON, 'e')`, `seq(Action.QUAFF, 'h')`, `seq(Action.READ, 'g')`, `seq(Action.APPLY, 'k')`
+  - Directional throw/zap/untrap: `seq(Action.ZAP, 'i', DIR_DELTAS[(dy, dx)])`, `seq(Action.THROW, 'b', DIR_DELTAS[(dy, dx)])`
+  - Floor eat / pray / engrave: `seq(Action.EAT, 'y')`, `extcmd("pray", "y")`, `repeat(5, Action.SEARCH)`.
+
+#### 3. Querying `GameState` (`state`)
+- **Hero Vitals, Dungeon & Hunger**:
+  - `state.hp`, `state.max_hp`, `state.ac`, `state.energy`, `state.max_energy`, `state.xp_level`, `state.xp`, `state.score`, `state.gold`
+  - `state.y` (0..20), `state.x` (0..78), `state.pos` (`(y, x)`), `state.turn`, `state.step_count`
+  - `state.hunger_state` (`0`=Satiated .. `5`=Fainted), `state.internal_hunger` (`int` raw nutrition)
+  - `state.depth` (1..50), `state.dungeon_num` (`0`=Doom, `1`=Gehennom, `2`=Mines, `3`=Quest, `4`=Sokoban), `state.deepest_level_reached`, `state.is_on_stairs_down`
+  - `state.carrying_capacity` (`0`=Unencumbered .. `5`=Overloaded), `state.encumbrance_name`
+- **Inventory (`state.inventory -> list[InventoryItem]`)**:
+  - `item.letter`, `item.name`, `item.quantity`, `item.oclass`, `item.oclass_name`, `item.enchantment` (`int | None`)
+  - Flags: `is_weapon`, `is_armor`, `is_food`, `is_corpse`, `is_potion`, `is_scroll`, `is_wand`, `is_ring`, `is_amulet`, `is_tool`, `is_spellbook`, `is_coin`, `is_gem`
+  - Status: `is_worn`, `is_wielded`, `is_quivered`, `is_blessed`, `is_uncursed`, `is_cursed`, `is_for_sale`, `item.info` (`ObjectInfo`), `item.corpse_monster` (`MonsterInfo`)
+- **Monsters (`state.visible_monsters()`, `state.adjacent_monsters(exclude_pets=True)`)**:
+  - `m.y`, `m.x`, `m.name`, `m.char`, `m.color`, `m.is_adjacent_to(y, x)`, `m.is_pet`, `m.is_statue`, `m.is_invisible`
+  - `m.info` (`MonsterInfo`): `difficulty`, `ac`, `speed`, `level`, `mr`, `nutrition`, `weight`, `size`, `resistances_mask`, `conveys_mask`, `is_acidic`, `is_poisonous`, `is_undead`, `is_were`, `is_human`, `is_elf`, `is_dwarf`, `is_gnome`, `is_orc`, `is_demon`, `is_giant`, `is_domestic`, `conveys_poison_res`, `conveys_fire_res`, `conveys_cold_res`, `conveys_sleep_res`, `conveys_shock_res`
+  - Peaceful monsters trigger `Really attack <name>? [yn]` (`state.in_yn_prompt`).
+- **Floor Objects (`state.visible_objects()`, `state.objects_here()`)**:
+  - `o.y`, `o.x`, `o.name`, `o.char`, `o.is_corpse`, `o.is_food`, `o.is_weapon`, `o.is_armor`, `o.is_potion`, `o.is_scroll`, `o.is_wand`, `o.is_ring`, `o.is_amulet`, `o.is_tool`, `o.is_spellbook`, `o.is_coin`, `o.is_gem`, `o.is_boulder`, `o.info`, `o.corpse_monster`
+  - O(1) lookups: `state.monster_info_by_name(name)`, `state.object_info_by_name(name)`
+- **Condition Flags**: `is_blind`, `is_confused`, `is_stunned`, `is_hallucinating`, `is_levitating`, `is_food_poisoned`, `is_terminally_ill`, `is_stoning`, `is_slimed`, `is_strangled`, `condition_mask`.
+- **Map, Terrain, Traps & Multi-Stairs (`21x79` + `tty_text`)**:
+  - `state.message`, `state.chars` (`uint8[21,79]`), `state.glyphs` (`int16[21,79]`), `state.char_at(y, x)`, `state.ascii_map()`, `state.tty_text`, `state.tty_lines`
+  - **Passability Invariant**: `'-'` and `'|'` and `' '` (stone) are IMPASSABLE; `.` (room/ice/open door), `#` (corridor), `>` / `<` (stairs), `_` (altar), `{` (fountain), `\\` (open door/throne) are walkable.
+  - Semantic helpers: `state.terrain_at(y, x)`, `state.trap_at(y, x)` (remembers traps under monsters/objects), `state.is_trap(y, x)`, `state.trap_mask` (`bool[21,79]`), `state.is_closed_door(y, x)`, `state.is_open_door(y, x)`, `state.is_water(y, x)`, `state.is_lava(y, x)`, `state.is_ice(y, x)`, `state.is_iron_bars(y, x)`, `state.is_boulder(y, x)`, `state.boulder_positions`
+  - Feature coordinates: `state.stairs_down_pos`, `state.stairs_down_positions`, `state.stairs_up_pos`, `state.stairs_up_positions`, `state.altar_positions`, `state.fountain_positions`, `state.portal_positions`
+- **Vectorized Pathfinding (Native Rust/Numba with Doorway Diagonal Legalization)**:
+  - `state.bfs_distances(passable_mask, start=(y, x), allow_diagonal=True, no_diag=state.mem.door_mask)`
+  - `state.path_step(passable_mask, target=(ty, tx), start=(y, x), allow_diagonal=True, no_diag=state.mem.door_mask) -> (dy, dx)`
+  - Passing `no_diag=state.mem.door_mask` enforces NetHack's doorway diagonal-movement rule automatically without writing custom geometry guards!
+
+#### 4. Zero-Heuristic `WorldMemory` (`state.mem` & `state.kv`)
+- Floor state (`state.mem` -> current `FloorMemory`): `visited`, `visit_count`, `remembered_chars`, `passable_mask`, `door_mask`, `searched_counts`, `remembered_obj_glyphs`, `remembered_trap_glyphs`, `locked_doors`
+- Episode persistence: `state.stair_graph`, `state.pos_history`, `state.is_oscillating`, `state.recent_messages` (`list[(turn, dlvl, msg)]`), `state.kv` (`dict` persisted across floors and shard/frontier replays).
+"""
+
+POLICY_LANG_DOCS = f"{GENERATOR_POLICY_DOCS}\n{CORE_HARNESS_DOCS[len('### 1-to-1 NetHack Harness & `GameState` Reference') :]}"
 
 
 def build_system_prompt(
     db_path: str = "data/lox.duckdb", is_swarm: bool = False
 ) -> str:
-    schema_md = get_schema_markdown(db_path)
+    schema_md = get_schema_markdown(db_path, is_swarm=is_swarm)
     if is_swarm:
         return f"""You are a LOX Autonomous Synthesis Agent operating in the Hierarchical Behavior Tree Swarm.
 Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigation, combat, and resource management live in your modular Behavior Tree policy (`policy.py`) and skill packages (`skills/*.py`).**
 
 {BEHAVIOR_TREE_DOCS}
 
-{POLICY_LANG_DOCS}
+{CORE_HARNESS_DOCS}
 
 {schema_md}
 
@@ -229,7 +148,7 @@ Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stat
 
 1. **Cross-Generation Progression & Regression Check**:
    ```sql
-   SELECT generation, candidate_policy_id, avg_depth, p90_depth, max_depth, avg_score, avg_turns
+   SELECT generation, candidate_policy_id, avg_depth, p90_depth, max_depth, avg_score, avg_turns, hypothesis_passed
    FROM batches
    ORDER BY generation DESC LIMIT 10;
    ```
@@ -251,38 +170,29 @@ Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stat
    ```
    *(Note: Older `ticks` are periodically pruned; query `champion_ticks` for champion turn traces or `ticks` only for the `run_id`s returned by the latest completed `runs` generation. The current in-progress generation is NOT yet in `batches`/`runs`.)*
 
-4. **Expert Ascension Comparison**:
+4. **Expert Contrast (Vitals, AC & Action Frequencies)**:
    ```sql
-   SELECT depth, COUNT(DISTINCT run_id) AS expert_run_cnt, AVG(max_t - min_t) AS avg_turns_on_floor
-   FROM (
-       SELECT run_id, depth, MIN(turn) AS min_t, MAX(turn) AS max_t
-       FROM expert_ticks
-       GROUP BY run_id, depth
-   ) GROUP BY depth ORDER BY depth LIMIT 10;
+   SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth
+   FROM expert_runs;
    ```
 
 ### Available Investigation & Verification Tools
-1. `query_db(sql)`: Run read-only SQL queries on DuckDB (`batches`, `runs`, `ticks`, `function_stats`, `policies`, `expert_runs`, `expert_ticks`). Pass ONE `SELECT` statement per call.
-2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact game mechanics, monster properties, item effects, intrinsics, and dungeon branches.
-3. `query_monster(name)`: Query the exact C-level engine `permonst` struct for any monster (level, AC, speed, magic resistance, corpse weight, corpse nutrition, conveyed intrinsics, resistances).
-4. `query_item(name)`: Query the exact C-level engine `objclass` struct for any item (class, cost, weight, nutrition).
-5. `read_policy(policy_id)`: Read the stored `policy_code` and `skills_json` snapshot list for any historical `policy_id` in `policies`.
-6. `diff_policies(policy_id_a, policy_id_b)`: View unified diffs of `policy.py` and `skills/*.py` between any two stored `policy_id` snapshots.
-7. `read_skill(skill_name, policy_id="")`: Read the full Python source code of a skill module from the current workspace (`policy_id=""`) or from a historical policy snapshot (`policy_id="policy_swarm_g..."`).
-8. `query_policy_docs(topic="all")`: View the policy language specification, current `policy.py`, and available `skills/` modules.
-9. `query_theories(query, doc_type="", limit=6)`: Search LanceDB for prior peer `THEORY` notes (hypotheses & incubation outcomes), CRN tournament `META_SYNTHESIS` verdicts, `MODULAR_REFACTOR` summaries, and legacy `REFLECTION_REPORT`s / critic notes.
-10. `dry_run_policy(code, seed=42, max_turns=150, replay_run_id="", replay_steps=0, hypothesis="")`: Compile and empirically test candidate Behavior Tree subtrees or `class Policy` code in `NetHackHarness`.
+1. `query_db(sql)`: Run ONE read-only `SELECT` query per call on DuckDB.
+2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact mechanics (only when verifying an unknown rule not already covered in Recent Memory).
+3. `query_monster(name)` / `query_item(name)`: Query exact C-level `permonst` / `objclass` structs.
+4. `read_policy(policy_id)` / `diff_policies(policy_id_a, policy_id_b)` / `read_skill(skill_name, policy_id="")`: Inspect current or historical `policies` and `skills/*.py` snapshots.
+5. `query_theories(query, doc_type="", limit=6)`: Search LanceDB for prior peer `THEORY` notes and CRN tournament `META_SYNTHESIS` verdicts.
+6. `dry_run_policy(code, seed=42, max_turns=150, replay_run_id="", replay_steps=0, hypothesis="")`: Compile and empirically test candidate updates in `NetHackHarness`.
 
 ### Scientific Investigation Protocol (Swarm Behavior Trees)
-1. **Never Guess from Intuition**: Verify NetHack C mechanics via `query_wiki`, `query_monster`, and `query_item`, and verify empirical bottlenecks via `query_db`, `read_policy`, `diff_policies`, and `read_skill`.
+1. **Never Guess from Intuition**: Verify NetHack C mechanics via `query_wiki`, `query_monster`, and `query_item`, and verify empirical bottlenecks via `query_db`, `query_theories`, `diff_policies`, and `read_skill`.
 2. **Behavior Tree & Blackboard Discipline**:
-   - Subtrees (`SWARM_WORKER`) define `subtree = PrioritySelector([...])` / `ActionLeaf(...)` / `Sequence(...)` and coordinate state via `Blackboard` (`bb.get_var` / `bb.set_var`).
-   - Master Policies (`SWARM_META`, `SWARM_PEER`) define `class Policy:` with `self.blackboard = Blackboard()`, `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`, and `def step(self, state): return self.tree.tick(state) or Action.WAIT`.
-   - **Native Leaf Hysteresis & Clean Attribution**: NEVER wrap `self.tree.tick(state)` in post-step oscillation gates (`_osc_gate`) or generic `_attributed` wrappers—these mask per-leaf telemetry. Instead, use native `ActionLeaf(fn, name="...", min_commit=N)` or `PrioritySelector([...], hysteresis=N)` to eliminate step-to-step thrashing cleanly while keeping `ExecutionTracer` leaf attribution exact.
-   - **Dormancy & Consolidation**: Prefer refining existing `skills/*.py` modules and removing `0`-turn dormant branches over creating duplicate overlapping skill files.
-   - Every `ActionLeaf` must return `None` when its specific condition does not apply so `PrioritySelector` falls through cleanly to lower-priority branches without starving them.
+   - Compose `class Policy:` with `self.blackboard = Blackboard()`, `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`, and `def step(self, state): return self.tree.tick(state) or Action.WAIT`.
+   - **Native Leaf Hysteresis & Clean Attribution**: NEVER wrap `self.tree.tick(state)` in post-step oscillation gates (`_osc_gate`) or generic `_attributed` wrappers—these mask per-leaf telemetry. Instead, use native `ActionLeaf(fn, name="...", min_commit=N)` or `PrioritySelector([...], hysteresis=N)`.
+   - **Dormancy & Consolidation**: Prefer refining existing `skills/*.py` modules (or adding genuinely distinct orthogonal modules like equipment/consumables/branches) and removing `0`-turn dormant branches.
+   - Every `ActionLeaf` must return `None` when its condition does not apply so `PrioritySelector` falls through cleanly.
 3. **Passability & 8-Way Adjacency**:
-   - Never mark `ord('-')`, `ord('|')`, or `ord(' ')` (solid wall/stone) as passable; prefer `state.mem.passable_mask`.
+   - Never mark `ord('-')`, `ord('|')`, or `ord(' ')` as passable; prefer `state.mem.passable_mask` and pass `no_diag=state.mem.door_mask` to `state.path_step` / `state.bfs_distances`.
    - Remember NetHack adjacency is 8-way Chebyshev (`max(abs(dy), abs(dx)) == 1`).
 """
 
@@ -457,7 +367,7 @@ def _format_context_scoped_policy(current_policy: str, batch_digest: str = "") -
 ```
 
 ### Full Source of Key Active Methods ({names_included}):
-*(Policy exceeds 350 lines; showing outline and key methods. Call `query_policy_docs('policy')` to view full code if needed.)*
+*(Policy exceeds 1200 lines; showing outline and key methods. Call `query_policy_docs('policy')` to view full code if needed.)*
 ```python
 {joined_snippets}
 ```"""
@@ -471,10 +381,10 @@ BEHAVIOR_TREE_DOCS = """### Behavior Tree Primitives (`lox.lang.bt`)
 All Swarm subtrees and Master Policies compose reactive Behavior Trees using these exact primitives (already pre-loaded in scope, or importable via `from lox.lang.bt import ...` and `from lox.env.actions import Action, DIR_DELTAS, seq, key, repeat`):
 - **IMPORTANT IMPORT RULE**: NEVER import `macros`, `skills_common`, or unapproved modules. Only `lox.*`, `skills.*`, `numpy as np`, and allowed stdlib modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `random`, `bisect`, `copy`) are permitted.
 - `Blackboard`: `bb.get_var(key, default=None)`, `bb.set_var(key, val)`, `bb.has_var(key)` for cross-node state persistence (NEVER use raw `self.*` attributes inside shared subtrees; pass state through `bb`).
-- `ActionLeaf(fn, name="...")`: `fn(state, bb)` or `fn(state)` returns an `Action` / `seq(...)` (`NodeStatus.SUCCESS`) or `None` (`NodeStatus.FAILURE`, allowing `PrioritySelector` to fall through).
+- `ActionLeaf(fn, name="...", min_commit=0)`: `fn(state, bb)` or `fn(state)` returns an `Action` / `seq(...)` (`NodeStatus.SUCCESS`) or `None` (`NodeStatus.FAILURE`, allowing `PrioritySelector` to fall through). Set `min_commit=N` to commit to an active leaf for `N` turns unless it returns `None`.
 - `ConditionLeaf(cond_fn, name="...")`: `cond_fn(state, bb)` or `cond_fn(state)` returns `bool` (`True` -> `SUCCESS`, `False` -> `FAILURE`).
 - `Sequence([child_1, child_2, ...], name="...")`: ticks left-to-right, short-circuits on `FAILURE`.
-- `PrioritySelector([child_1, child_2, ...], name="...")`: ticks left-to-right, returns the first child that does not return `FAILURE`.
+- `PrioritySelector([child_1, child_2, ...], name="...", hysteresis=0)`: ticks left-to-right, returns the first child that does not return `FAILURE` (set `hysteresis=N` to hold active priority commitments cleanly without ad-hoc post-step gates).
 - `Inverter(child, name="...")`: inverts `SUCCESS` <-> `FAILURE`.
 - `BehaviorTree(root=root_node, blackboard=bb)`: ticks `root` and returns the resulting action (or `None`).
 """
@@ -632,22 +542,22 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 {BEHAVIOR_TREE_DOCS}
 
 ### Peer Author Protocol (Isolated Sandbox + CRN Tournament):
-1. **Focus on Your Claimed Empirical Deficit & Ground Mechanics First (No Guessing)**:
-   - Inspect your claimed failure cluster (`D_fail`) and protected high-Ochiai branches (`D_succ`) using `query_db` (`champion_runs`, `champion_ticks`, `champion_function_stats`, and `expert_runs`/`expert_ticks`), `read_policy`, `diff_policies`, and `read_skill`.
-   - **Mandatory Wiki Grounding:** Call `query_wiki(query=...)` at least once BEFORE your first `dry_run_policy(...)` call (along with `query_monster` / `query_item` when relevant) to verify NetHack 3.6.6 C mechanics for the failure mode instead of relying on zero-shot assumptions.
-   - Preserve high-Ochiai `D_succ` branches unless you have verified a strict improvement across both failure replays and `D_succ` guard runs.
-2. **Surgical Edits & Unified XML Bundle Format (Ditch the Monolith)**:
-   - **NEVER re-type 1,000+ lines of unchanged boilerplate when editing one subsystem**, and **never** emit comment placeholders like `"# Same full class Policy..."`.
-   - Use the **same XML tag bundle format** inside BOTH `dry_run_policy(code=...)` AND your final submission:
-     1. **Skill Module Updates (`<skill_code module="name"> ... </skill_code>`):** Put each added/updated skill inside its own `<skill_code module="name">...</skill_code>` block (inside `dry_run_policy(code=...)` AND your final output). Partial `def ...` / `# PATCH` updates to an existing module automatically splice into `skills/<name>.py` while preserving all untouched functions and exports (e.g., helpers in `shared`). Large monolith decomposition happens automatically between generations.
-     2. **Policy Updates (`<policy_code> ... </policy_code>`):** When modifying helpers/leaves inside `policy.py`, pass **only** the modified/new `def ...` functions (or full `class Policy:`) inside `<policy_code>...</policy_code>`. If modifying only skills, `<policy_code>` can be omitted.
-     3. **Clean Modular Architecture Advantage:** Keeping subsystems separated under `skills/*.py` eliminates syntax typos, cuts response latency dramatically, and allows `SwarmReferee` to automatically merge disjoint `skills/` wins from two different peers in the same generation!
-   - Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin so native leaf attribution remains exact, and use `ActionLeaf(..., min_commit=N)` for multi-step commitment instead of ad-hoc post-step gates.
-3. **Verify in Sandbox Before Submission**:
-   - Call `dry_run_policy(code="<skill_code module=...>...</skill_code>\n<policy_code>...</policy_code>")` to verify AST compilation, zero swallowed leaf errors, and mid-game frontier/failure replays.
-   - Your candidate will be incubated on an isolated paired shard + frontier checkpoints against the incumbent and must pass CRN evaluation without collapsing score to be promoted.
-4. **Output Format**:
-   - Output your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by any added/updated skill modules inside `<skill_code module="name"> ... </skill_code>` blocks, and either your surgical `def ...` patch or complete `class Policy:` inside `<policy_code> ... </policy_code>` (if you only updated skills, emit just `<skill_code module="name">...</skill_code>`).
+1. **Check Rejection Memory & Capability Gaps Before Editing (Anti-Recycling)**:
+   - **Never repeat or trivially tweak a mechanism shown as `REJECTED` in `Recent Experiment & Rejection Memory` above** (check `query_theories(query=...)` and `diff_policies(id_a, id_b)` to see why recent attempts lost instead of re-proposing the same patch).
+   - Compare `Incumbent Vital & Capability Telemetry` (`avg_ac`, `avg_xl`, `starved_with_food`, `unworn_armor_deaths`, `end_reason` histogram) against `expert_runs` / `expert_ticks` (`query_db`) to diagnose missing **high-leverage capabilities** (e.g., gear/armor/weapon management, consumables/identification, multi-floor/branch traversal, sustained subgoals) rather than tuning one constant repeatedly.
+   - **Targeted Grounding (No Redundant Searches):** Do NOT recycle identical `query_wiki` searches already covered in Recent Memory; call `query_wiki`, `query_monster`, or `query_item` only when verifying a **new** C mechanic, monster, or item class not yet verified.
+   - Preserve high-Ochiai `D_succ` branches unless you prove improvement across both failure replays and `D_succ` guard runs.
+2. **Function-Level Surgical Patches & Unified XML Bundle Format (Cut Bloat)**:
+   - **NEVER paste unchanged functions from `skills/*.py` or 1,000+ lines of boilerplate**, and **never** emit `<hypothesis>`/`<reflection>` tags inside `dry_run_policy(code=...)` arguments.
+   - Use the **same XML tag bundle format** inside BOTH `dry_run_policy(code=...)` AND your final answer:
+     1. **Skill Module Updates (`<skill_code module="name"> ... </skill_code>`):** When modifying an existing `skills/<name>.py`, emit **ONLY** the added/updated `def ...` functions (and any new imports/constants) inside `<skill_code module="name">...</skill_code>` — `merge_skill_module_update` automatically splices them while keeping untouched functions and exports intact. You may also add a new domain skill module cleanly (`skills.<name>`).
+     2. **Policy Updates (`<policy_code> ... </policy_code>`):** When modifying `policy.py`, pass **only** the modified/new `def ...` functions (omit `<policy_code>` if modifying only skills).
+     3. **Orthogonal Win Merging:** Disjoint `skills/*.py` edits from two peers in the same generation can be automatically combined by `SwarmReferee`.
+   - Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin and use `ActionLeaf(..., min_commit=N)` + `state.path_step(..., no_diag=state.mem.door_mask)` for clean multi-step commitments and doorway legality.
+3. **Verify in Sandbox (1–2 Focused Calls)**:
+   - One `dry_run_policy(code="<skill_code module=...>...</skill_code>\n<policy_code>...</policy_code>")` call automatically runs the smoke check plus recent failure replays and a deep frontier checkpoint together — pass only your edited functions, not full 30KB rewrites.
+4. **Final Output Format**:
+   - Emit your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by ONLY your added/modified `<skill_code module="name"> ... </skill_code>` blocks and `<policy_code> ... </policy_code>` (if `policy.py` changed).
 """
 
     if canon_mode == "SWARM_META":

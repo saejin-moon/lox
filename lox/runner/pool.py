@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import signal
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
@@ -36,7 +38,10 @@ _WORKER_HARNESS: EnvHarness | None = None
 _WORKER_ROLE: str = "val-hum-law-fem"
 _WORKER_MAX_STEPS: int = 5000
 _WORKER_BENCHMARK: str = "nethack"
-_WORKER_COMPILED_CACHE: tuple[tuple[int, int, int], CompiledPolicy] | None = None
+_WORKER_COMPILED_CACHE: OrderedDict[
+    tuple[str, str, tuple[tuple[str, str], ...]], CompiledPolicy
+] = OrderedDict()
+_WORKER_COMPILED_CACHE_MAX = 16
 
 
 def _init_worker(role: str, max_steps: int, benchmark: str = "nethack") -> None:
@@ -77,15 +82,16 @@ def _get_worker_harness(
 def _get_compiled_policy(
     policy_code: str, macros_code: str, skills: dict[str, str] | None = None
 ) -> CompiledPolicy:
-    global _WORKER_COMPILED_CACHE
-    h_pol = hash(policy_code)
-    h_mac = hash(macros_code)
-    h_skl = hash(tuple(sorted((skills or {}).items())))
-    key = (h_pol, h_mac, h_skl)
-    if _WORKER_COMPILED_CACHE is not None and _WORKER_COMPILED_CACHE[0] == key:
-        return _WORKER_COMPILED_CACHE[1]
+    skills_tuple = tuple(sorted((skills or {}).items()))
+    key = (policy_code, macros_code, skills_tuple)
+    cached = _WORKER_COMPILED_CACHE.get(key)
+    if cached is not None:
+        _WORKER_COMPILED_CACHE.move_to_end(key)
+        return cached
     compiled = compile_policy_package(policy_code, macros_code, skills=skills)
-    _WORKER_COMPILED_CACHE = (key, compiled)
+    _WORKER_COMPILED_CACHE[key] = compiled
+    while len(_WORKER_COMPILED_CACHE) > _WORKER_COMPILED_CACHE_MAX:
+        _WORKER_COMPILED_CACHE.popitem(last=False)
     return compiled
 
 
@@ -459,11 +465,17 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 getattr(it, "is_armor", False) or getattr(it, "oclass", None) == 3
                 for it in last_inv_items
             )
+            unworn_armor = any(
+                (getattr(it, "is_armor", False) or getattr(it, "oclass", None) == 3)
+                and not getattr(it, "is_worn", False)
+                and not getattr(it, "is_cursed", False)
+                for it in last_inv_items
+            )
             died_unarmored = bool(
                 not info.get("is_ascended") and last_ac >= 10 and has_armor
             )
         except Exception:
-            pass
+            unworn_armor = False
 
     from lox.lang.bt import extract_runner_leaf_errors
 
@@ -472,6 +484,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     if isinstance(milestones, dict):
         milestones["final_inventory"] = last_inv_summary
         milestones["final_ac_true"] = last_ac
+        milestones["unworn_armor_in_pack"] = bool(locals().get("unworn_armor", False))
         if dedup_leaf_errs:
             milestones["leaf_errors"] = dedup_leaf_errs
     if dedup_leaf_errs and "LeafErrors:" not in summary_digest:
@@ -569,20 +582,66 @@ class PersistentEvalPool:
         self.max_steps = max_steps
         self.benchmark = benchmark
         self._pool: mp.pool.Pool | None = None
+        self._pool_lock = threading.RLock()
 
     def _ensure_pool(self) -> mp.pool.Pool | None:
         if self.workers <= 1:
             return None
-        if self._pool is None:
-            ctx = mp.get_context("spawn")
-            self._pool = ctx.Pool(
-                processes=self.workers,
-                initializer=_init_worker,
-                initargs=(self.role, self.max_steps, self.benchmark),
-            )
-        return self._pool
+        with self._pool_lock:
+            if self._pool is None:
+                ctx = mp.get_context("spawn")
+                self._pool = ctx.Pool(
+                    processes=self.workers,
+                    initializer=_init_worker,
+                    initargs=(self.role, self.max_steps, self.benchmark),
+                )
+            return self._pool
 
     def evaluate_batch(
+        self,
+        batch_id: str,
+        policy_code: str,
+        macros_code: str = "",
+        target_episodes: int = 30,
+        target_functions: list[str] | None = None,
+        priority_seeds: list[int] | None = None,
+        unconditional_seeds: list[int] | set[int] | None = None,
+        seed_start: int = 10000,
+        max_raw_multiplier: int = 8,
+        param_overrides: dict[str, float] | None = None,
+        record_ticks: bool = True,
+        show_progress: bool = True,
+        early_stop_fn: Callable[[list[dict[str, Any]]], bool] | None = None,
+        unreachable_abort_after: int = 500,
+        shards: list[Any] | None = None,
+        skills: dict[str, str] | None = None,
+        benchmark: str = "nethack",
+        max_steps: int | None = None,
+    ) -> dict[str, Any]:
+        """Thread-safe entrypoint serializing concurrent pool access across peer threads."""
+        with self._pool_lock:
+            return self._evaluate_batch_unlocked(
+                batch_id=batch_id,
+                policy_code=policy_code,
+                macros_code=macros_code,
+                target_episodes=target_episodes,
+                target_functions=target_functions,
+                priority_seeds=priority_seeds,
+                unconditional_seeds=unconditional_seeds,
+                seed_start=seed_start,
+                max_raw_multiplier=max_raw_multiplier,
+                param_overrides=param_overrides,
+                record_ticks=record_ticks,
+                show_progress=show_progress,
+                early_stop_fn=early_stop_fn,
+                unreachable_abort_after=unreachable_abort_after,
+                shards=shards,
+                skills=skills,
+                benchmark=benchmark,
+                max_steps=max_steps,
+            )
+
+    def _evaluate_batch_unlocked(
         self,
         batch_id: str,
         policy_code: str,
@@ -854,9 +913,7 @@ class PersistentEvalPool:
                         or unreachable_abort
                         or early_stopped
                     ):
-                        if (
-                            unreachable_abort or early_stopped or raw_done < len(tasks)
-                        ) and self.workers > 1:
+                        if raw_done < len(tasks) and self.workers > 1:
                             self.close()
                         break
                 break
@@ -931,25 +988,22 @@ class PersistentEvalPool:
     ) -> list[dict[str, Any]]:
         """
         Executes an explicit list of tasks concurrently across persistent workers.
-        Useful for paired SPSA evaluations (theta+ and theta-) to maximize worker saturation.
+        Useful for paired SPSA evaluations and multi-candidate tournaments.
         """
         if not tasks:
             return []
-        pool = self._ensure_pool()
-        chunksize = 1
-        if pool is not None:
-            results_iter = pool.imap_unordered(
-                run_single_episode, tasks, chunksize=chunksize
-            )
-        else:
-            results_iter = (run_single_episode(tk) for tk in tasks)
-        return list(results_iter)
+        with self._pool_lock:
+            pool = self._ensure_pool()
+            if pool is not None:
+                return list(pool.imap_unordered(run_single_episode, tasks, chunksize=1))
+            return [run_single_episode(tk) for tk in tasks]
 
     def close(self) -> None:
-        if self._pool is not None:
-            try:
-                self._pool.terminate()
-                self._pool.join()
-            except Exception:
-                pass
-            self._pool = None
+        with self._pool_lock:
+            if self._pool is not None:
+                try:
+                    self._pool.terminate()
+                    self._pool.join()
+                except Exception:
+                    pass
+                self._pool = None

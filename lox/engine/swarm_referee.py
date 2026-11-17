@@ -19,7 +19,7 @@ from typing import Any
 
 from lox.author.swarm_meta import SwarmMetaAgent
 from lox.author.swarm_peer import PeerCandidate
-from lox.core.contracts import BatchEvaluation
+from lox.core.contracts import BatchEvaluation, split_full_and_shard_runs
 from lox.lang.compiler import _COMPILE_EXEC_LOCK, compile_policy_package
 from lox.lang.validator import is_ast_equivalent
 from lox.ui.console import ui
@@ -52,6 +52,73 @@ def _package_fingerprint(policy_code: str, skills: dict[str, str]) -> str:
         h.update(f"\n##{k}\n".encode("utf-8"))
         h.update(skills[k].strip().encode("utf-8", errors="replace"))
     return h.hexdigest()[:16]
+
+
+def _is_package_ast_equivalent(
+    pol_a: str,
+    skills_a: dict[str, str],
+    pol_b: str,
+    skills_b: dict[str, str],
+) -> bool:
+    if not pol_a.strip() or not pol_b.strip():
+        return False
+    if set(skills_a.keys()) != set(skills_b.keys()):
+        return False
+    if not is_ast_equivalent(pol_a, pol_b):
+        return False
+    return all(is_ast_equivalent(skills_a[k], skills_b[k]) for k in skills_a)
+
+
+def _clone_incumbent_eval(
+    inc_batch_eval: BatchEvaluation, generation: int
+) -> BatchEvaluation:
+    """Clones incumbent runs under a fresh generation-scoped `batch_id` so prior `batches`/`runs` rows are never overwritten."""
+    new_bid = f"batch_swarm_g{generation}_inc_retained_{int(time.time() * 1000)}"
+    cloned = dict(inc_batch_eval)
+    cloned["batch_id"] = new_bid
+    cloned_runs: list[dict[str, Any]] = []
+    for idx, r in enumerate(inc_batch_eval.get("runs", []) or []):
+        rc = dict(r)
+        rc["batch_id"] = new_bid
+        rc["run_id"] = f"{new_bid}_r{idx:05d}"
+        cloned_runs.append(rc)
+    cloned["runs"] = cloned_runs
+    full_runs, shard_runs = split_full_and_shard_runs(cloned_runs)
+    cloned["full_runs"] = full_runs
+    cloned["shard_runs"] = shard_runs
+    return BatchEvaluation(cloned)
+
+
+def _assemble_batch_eval(
+    batch_id: str,
+    runs: list[dict[str, Any]],
+) -> BatchEvaluation:
+    import numpy as np
+
+    full_runs, shard_runs = split_full_and_shard_runs(runs)
+    stat_runs = full_runs if full_runs else runs
+    depths = [int(r.get("max_depth", r.get("depth", 1)) or 1) for r in stat_runs]
+    scores = [float(r.get("score", 0.0) or 0.0) for r in stat_runs]
+    turns = [float(r.get("turns", 0.0) or 0.0) for r in stat_runs]
+    return BatchEvaluation(
+        {
+            "batch_id": batch_id,
+            "runs": runs,
+            "full_runs": full_runs,
+            "shard_runs": shard_runs,
+            "episodes_recorded": len(runs),
+            "episodes_discarded": 0,
+            "raw_episodes_run": len(runs),
+            "avg_depth": float(np.mean(depths)) if depths else 0.0,
+            "p90_depth": float(np.percentile(depths, 90)) if depths else 0.0,
+            "max_depth": int(max(r.get("max_depth", 1) for r in runs)) if runs else 0,
+            "avg_score": float(np.mean(scores)) if scores else 0.0,
+            "max_score": int(max(r.get("score", 0) for r in runs)) if runs else 0,
+            "avg_turns": float(np.mean(turns)) if turns else 0.0,
+            "early_stopped": False,
+            "unreachable_abort": False,
+        }
+    )
 
 
 def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str, Any]:
@@ -95,6 +162,7 @@ class SwarmReferee:
             tuple[int, str, tuple[int, ...], int],
             tuple[BatchEvaluation, dict[str, Any]],
         ] = {}
+        self._rejected_fingerprints: dict[str, set[str]] = {}
 
     def select_finalists(
         self,
@@ -102,7 +170,7 @@ class SwarmReferee:
         base_policy: str,
         base_skills: dict[str, str],
     ) -> list[PeerCandidate]:
-        """Filters to valid incubated candidates, removes duplicates, and ranks top-K."""
+        """Filters to valid novel incubated candidates, removes no-ops/repeats, and ranks top-K."""
         survivors = [
             c for c in candidates if c.sandbox_passed and c.policy_code.strip()
         ]
@@ -118,16 +186,25 @@ class SwarmReferee:
         ]
         pool = safe_survivors if safe_survivors else survivors
 
-        # Deduplicate identical policy+skills bundles (including identical-to-incumbent no-ops when alternatives exist)
         base_fp = (
             _package_fingerprint(base_policy, base_skills)
             if base_policy.strip()
             else ""
         )
+        rejected_fps = (
+            self._rejected_fingerprints.get(base_fp, set()) if base_fp else set()
+        )
         unique: dict[str, PeerCandidate] = {}
         for c in pool:
             fp = _package_fingerprint(c.policy_code, c.skills)
-            if fp == base_fp and len(pool) > 1:
+            if base_fp and (
+                fp == base_fp
+                or _is_package_ast_equivalent(
+                    c.policy_code, c.skills, base_policy, base_skills
+                )
+            ):
+                continue
+            if fp in rejected_fps:
                 continue
             if fp not in unique:
                 unique[fp] = c
@@ -136,6 +213,8 @@ class SwarmReferee:
             unique.values(),
             key=lambda c: (
                 float(c.sandbox_metrics.get("depth_delta", 0.0)),
+                float(c.sandbox_metrics.get("frontier_depth_delta", 0.0)),
+                int(c.sandbox_metrics.get("frontier_survived", 0)),
                 float(c.sandbox_metrics.get("score_delta", 0.0)),
                 -float(c.sandbox_metrics.get("wrapper_ratio", 0.0)),
                 -int(c.loc_total),
@@ -249,38 +328,52 @@ class SwarmReferee:
             else ""
         )
         inc_cache_key = (id(eval_pool), inc_fp, seeds_key, steps_key)
+        inc_cached_hit = False
         if base_policy.strip():
             cached_inc = self._incumbent_cache.get(inc_cache_key)
             if cached_inc is not None:
                 inc_batch_eval, inc_stats = cached_inc
-            else:
-                eval_kwargs: dict[str, Any] = (
-                    {"max_steps": int(max_steps)} if max_steps is not None else {}
-                )
-                inc_batch_eval = eval_pool.evaluate_batch(
-                    batch_id=f"batch_swarm_g{generation}_inc_{int(time.time())}",
-                    policy_code=base_policy,
-                    macros_code="",
-                    skills=base_skills,
-                    target_episodes=len(seeds),
-                    priority_seeds=list(seeds),
-                    record_ticks=False,
-                    **eval_kwargs,
-                )
-                inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
-                if len(self._incumbent_cache) >= 4:
-                    self._incumbent_cache.clear()
-                self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
+                inc_cached_hit = True
 
-        # If no incubated survivor exists, fall back cleanly to incumbent (or fail clearly if Gen 1 empty)
+        can_parallel_dispatch = (
+            hasattr(eval_pool, "evaluate_tasks")
+            and hasattr(eval_pool, "role")
+            and callable(eval_pool.evaluate_tasks)
+        )
+
+        if (
+            base_policy.strip()
+            and not inc_cached_hit
+            and not (can_parallel_dispatch and finalists)
+        ):
+            eval_kwargs: dict[str, Any] = (
+                {"max_steps": int(max_steps)} if max_steps is not None else {}
+            )
+            inc_batch_eval = eval_pool.evaluate_batch(
+                batch_id=f"batch_swarm_g{generation}_inc_{int(time.time())}",
+                policy_code=base_policy,
+                macros_code="",
+                skills=base_skills,
+                target_episodes=len(seeds),
+                priority_seeds=list(seeds),
+                record_ticks=False,
+                **eval_kwargs,
+            )
+            inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
+            if len(self._incumbent_cache) >= 4:
+                self._incumbent_cache.clear()
+            self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
+
+        # If no novel incubated survivor exists, fall back cleanly to cloned incumbent eval
         if not finalists:
             if inc_batch_eval is not None:
+                retained_eval = _clone_incumbent_eval(inc_batch_eval, generation)
                 return TournamentVerdict(
                     promoted=False,
                     winner_id="incumbent",
                     winner_policy_code=base_policy,
                     winner_skills=dict(base_skills),
-                    winner_batch_eval=inc_batch_eval,
+                    winner_batch_eval=retained_eval,
                     incumbent_avg_depth=inc_stats["avg_depth"],
                     incumbent_avg_score=inc_stats["avg_score"],
                     winner_avg_depth=inc_stats["avg_depth"],
@@ -288,7 +381,7 @@ class SwarmReferee:
                     scoreboard=[],
                     all_runner_up_batches=[],
                     incumbent_batch_eval=inc_batch_eval,
-                    reason="No peer passed isolated sandbox incubation; retained incumbent.",
+                    reason="No novel non-rejected peer passed isolated sandbox incubation; retained incumbent.",
                 )
             # Gen 1 bootstrap safety: pick first raw candidate if any compiled
             raise RuntimeError(
@@ -302,30 +395,107 @@ class SwarmReferee:
         fin_eval_kwargs: dict[str, Any] = (
             {"max_steps": int(max_steps)} if max_steps is not None else {}
         )
-        for cand in finalists:
-            b_eval = eval_pool.evaluate_batch(
-                batch_id=f"batch_swarm_g{generation}_{cand.peer_id}_{int(time.time())}",
-                policy_code=cand.policy_code,
-                macros_code="",
-                skills=cand.skills,
-                target_episodes=len(seeds),
-                priority_seeds=list(seeds),
-                record_ticks=True,
-                **fin_eval_kwargs,
+        if can_parallel_dispatch:
+            eff_steps = int(
+                max_steps
+                if max_steps is not None
+                else getattr(eval_pool, "max_steps", 25000)
             )
-            stats = _extract_eval_stats(b_eval, loc_total=cand.loc_total)
-            evaluated_entries.append((cand, b_eval, stats))
-            scoreboard.append(
-                {
-                    "peer_id": cand.peer_id,
-                    "deficit": cand.claimed_deficit_id,
-                    "avg_depth": round(stats["avg_depth"], 3),
-                    "max_depth": stats["max_depth"],
-                    "avg_score": round(stats["avg_score"], 1),
-                    "stalls": stats["stall_count"],
-                    "loc": stats["loc_total"],
-                }
-            )
+            pool_role = str(getattr(eval_pool, "role", "val-hum-law-fem"))
+            pool_bench = str(getattr(eval_pool, "benchmark", "nethack"))
+            ts_now = int(time.time())
+            all_tasks: list[dict[str, Any]] = []
+            batch_groups: list[
+                tuple[str, str, str, dict[str, str], PeerCandidate | None, bool]
+            ] = []
+            if base_policy.strip() and not inc_cached_hit:
+                inc_bid = f"batch_swarm_g{generation}_inc_{ts_now}"
+                batch_groups.append(
+                    ("inc", inc_bid, base_policy, base_skills, None, False)
+                )
+            for cand in finalists:
+                c_bid = f"batch_swarm_g{generation}_{cand.peer_id}_{ts_now}"
+                batch_groups.append(
+                    (cand.peer_id, c_bid, cand.policy_code, cand.skills, cand, True)
+                )
+            for _tag, bid, pol, skl, _cand, rec_ticks in batch_groups:
+                for idx, sd in enumerate(seeds, start=1):
+                    all_tasks.append(
+                        {
+                            "seed": int(sd),
+                            "run_id": f"{bid}_r{idx:05d}",
+                            "role": pool_role,
+                            "max_steps": eff_steps,
+                            "policy_code": pol,
+                            "macros_code": "",
+                            "target_functions": None,
+                            "param_overrides": None,
+                            "record_ticks": rec_ticks,
+                            "is_priority_seed": True,
+                            "enforce_trigger": False,
+                            "skills": skl,
+                            "benchmark": pool_bench,
+                        }
+                    )
+            raw_results = eval_pool.evaluate_tasks(all_tasks)
+            by_bid: dict[str, list[dict[str, Any]]] = {bg[1]: [] for bg in batch_groups}
+            for res in raw_results:
+                rid = str(res.get("run_id", ""))
+                prefix = rid.rsplit("_r", 1)[0] if "_r" in rid else ""
+                if prefix in by_bid:
+                    by_bid[prefix].append(res)
+            seed_rank = {int(s): i for i, s in enumerate(seeds)}
+            for tag, bid, _pol, _skl, cand, _rec in batch_groups:
+                runs_sorted = sorted(
+                    by_bid.get(bid, []),
+                    key=lambda r: seed_rank.get(int(r.get("seed", 0)), 999999),
+                )
+                b_eval = _assemble_batch_eval(bid, runs_sorted)
+                if tag == "inc":
+                    inc_batch_eval = b_eval
+                    inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
+                    if len(self._incumbent_cache) >= 4:
+                        self._incumbent_cache.clear()
+                    self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
+                elif cand is not None:
+                    stats = _extract_eval_stats(b_eval, loc_total=cand.loc_total)
+                    evaluated_entries.append((cand, b_eval, stats))
+                    scoreboard.append(
+                        {
+                            "peer_id": cand.peer_id,
+                            "deficit": cand.claimed_deficit_id,
+                            "avg_depth": round(stats["avg_depth"], 3),
+                            "max_depth": stats["max_depth"],
+                            "avg_score": round(stats["avg_score"], 1),
+                            "stalls": stats["stall_count"],
+                            "loc": stats["loc_total"],
+                        }
+                    )
+        else:
+            for cand in finalists:
+                b_eval = eval_pool.evaluate_batch(
+                    batch_id=f"batch_swarm_g{generation}_{cand.peer_id}_{int(time.time())}",
+                    policy_code=cand.policy_code,
+                    macros_code="",
+                    skills=cand.skills,
+                    target_episodes=len(seeds),
+                    priority_seeds=list(seeds),
+                    record_ticks=True,
+                    **fin_eval_kwargs,
+                )
+                stats = _extract_eval_stats(b_eval, loc_total=cand.loc_total)
+                evaluated_entries.append((cand, b_eval, stats))
+                scoreboard.append(
+                    {
+                        "peer_id": cand.peer_id,
+                        "deficit": cand.claimed_deficit_id,
+                        "avg_depth": round(stats["avg_depth"], 3),
+                        "max_depth": stats["max_depth"],
+                        "avg_score": round(stats["avg_score"], 1),
+                        "stalls": stats["stall_count"],
+                        "loc": stats["loc_total"],
+                    }
+                )
 
         def _passes_score_guard(cand_stats: dict[str, Any]) -> bool:
             """Prevents marginal depth ticks from overriding score collapses or new hard stalls."""
@@ -386,38 +556,44 @@ class SwarmReferee:
             {
                 "peer_id": c.peer_id,
                 "policy_code": c.policy_code,
+                "skills": dict(c.skills),
                 "metrics": st,
                 "batch_id": str(be.get("batch_id", "")),
             }
             for c, be, st in evaluated_entries
-            if c.peer_id != best_cand.peer_id
+            if c.peer_id != best_cand.peer_id or not beats_incumbent
         ]
 
         if not beats_incumbent and inc_batch_eval is not None:
+            if inc_fp:
+                rej_set = self._rejected_fingerprints.setdefault(inc_fp, set())
+                for c, _be, _st in evaluated_entries:
+                    rej_set.add(_package_fingerprint(c.policy_code, c.skills))
             reject_note = (
-                "score-collapse guard triggered (>30% score drop for <0.50 depth gain)"
+                "guard triggered (score collapse or hard-stall regression)"
                 if not guard_ok
                 else f"regressed vs Incumbent (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f})"
             )
             ui.warn(
                 f"Gen {generation}: Best peer `{best_cand.peer_id}` rejected ({reject_note}). Retaining Incumbent."
             )
+            retained_eval = _clone_incumbent_eval(inc_batch_eval, generation)
             return TournamentVerdict(
                 promoted=False,
                 winner_id="incumbent",
                 winner_policy_code=base_policy,
                 winner_skills=dict(base_skills),
-                winner_batch_eval=best_eval,  # Log empirical batch telemetry cleanly with is_promoted=False
+                winner_batch_eval=retained_eval,
                 incumbent_avg_depth=inc_stats["avg_depth"],
                 incumbent_avg_score=inc_stats["avg_score"],
-                winner_avg_depth=best_stats["avg_depth"],
-                winner_avg_score=best_stats["avg_score"],
+                winner_avg_depth=inc_stats["avg_depth"],
+                winner_avg_score=inc_stats["avg_score"],
                 target_functions=sorted(best_cand.touched_branches)
                 or [best_cand.claimed_deficit_id],
                 scoreboard=scoreboard,
                 all_runner_up_batches=runner_ups,
                 incumbent_batch_eval=inc_batch_eval,
-                reason=f"Rejected regression from `{best_cand.peer_id}` (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}); kept incumbent.",
+                reason=f"Rejected `{best_cand.peer_id}` (Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}); kept incumbent.",
             )
 
         self.cache_incumbent(

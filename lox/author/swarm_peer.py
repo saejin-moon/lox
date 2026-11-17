@@ -161,6 +161,7 @@ def _run_replay_probe(
     action_bytes: bytes,
     stop_at_byte_idx: int | None = None,
     live_steps: int = 80,
+    harness: NetHackHarness | None = None,
 ) -> tuple[bool, int, int, str]:
     """
     Fast-forwards a candidate policy into a recorded mid/late-game trajectory byte stream
@@ -169,7 +170,9 @@ def _run_replay_probe(
     buf = bytes(action_bytes or b"")
     if not buf:
         return True, 1, 1, ""
-    rh = NetHackHarness(max_steps=live_steps + 20)
+    own_harness = harness is None
+    rh = harness if harness is not None else NetHackHarness(max_steps=live_steps + 20)
+    rh.max_steps = live_steps + 20
     try:
         with _COMPILE_EXEC_LOCK:
             r_runner = compiled.create_runner()
@@ -207,7 +210,8 @@ def _run_replay_probe(
     except Exception as exc:
         return False, 1, 1, f"runtime error: {type(exc).__name__}: {exc}"
     finally:
-        rh.close()
+        if own_harness:
+            rh.close()
 
 
 def incubate_candidate(
@@ -246,84 +250,89 @@ def incubate_candidate(
         candidate.error = f"Compile/validation error: {type(exc).__name__}: {exc}"
         return candidate
 
-    # Fast local smoke + failure-fixture check (always runs, <50ms)
+    # Fast local smoke + failure-fixture + frontier check reusing a single harness
     smoke_harness = NetHackHarness(max_steps=60)
     try:
-        st = smoke_harness.reset(seed=42)
-        acts: list[str] = []
-        fn_turns: Counter[str] = Counter()
-        for _ in range(60):
-            act, active_fn = runner.next_action(st)
-            fn_turns[str(active_fn or "root")] += 1
-            st, done, info = smoke_harness.step(act)
-            acts.append(str(info.get("action_name", "")))
-            if done:
-                break
+        try:
+            st = smoke_harness.reset(seed=42)
+            acts: list[str] = []
+            fn_turns: Counter[str] = Counter()
+            for _ in range(60):
+                act, active_fn = runner.next_action(st)
+                fn_turns[str(active_fn or "root")] += 1
+                st, done, info = smoke_harness.step(act)
+                acts.append(str(info.get("action_name", "")))
+                if done:
+                    break
 
-        leaf_errs = extract_runner_leaf_errors(runner)
-        if leaf_errs:
-            candidate.sandbox_passed = False
-            candidate.error = (
-                f"Swallowed leaf error(s): {leaf_errs[0][0]} -> {leaf_errs[0][1]}"
+            leaf_errs = extract_runner_leaf_errors(runner)
+            if leaf_errs:
+                candidate.sandbox_passed = False
+                candidate.error = (
+                    f"Swallowed leaf error(s): {leaf_errs[0][0]} -> {leaf_errs[0][1]}"
+                )
+                return candidate
+
+            non_wait = [a for a in acts if a != "WAIT"]
+            if len(acts) >= 20 and not non_wait:
+                candidate.sandbox_passed = False
+                candidate.error = (
+                    "WAIT-only deadlock on smoke check (0 non-WAIT actions)."
+                )
+                return candidate
+
+            total_t = sum(fn_turns.values())
+            wrapper_t = sum(
+                fn_turns.get(w, 0) for w in ("root", "wrapped", "_osc_gate")
             )
-            return candidate
-
-        non_wait = [a for a in acts if a != "WAIT"]
-        if len(acts) >= 20 and not non_wait:
+            wrapper_ratio = float(wrapper_t / max(1, total_t))
+        except Exception as exc:
             candidate.sandbox_passed = False
-            candidate.error = "WAIT-only deadlock on smoke check (0 non-WAIT actions)."
+            candidate.error = f"Smoke runtime error: {type(exc).__name__}: {exc}"
             return candidate
 
-        total_t = sum(fn_turns.values())
-        wrapper_t = sum(fn_turns.get(w, 0) for w in ("root", "wrapped", "_osc_gate"))
-        wrapper_ratio = float(wrapper_t / max(1, total_t))
-    except Exception as exc:
-        candidate.sandbox_passed = False
-        candidate.error = f"Smoke runtime error: {type(exc).__name__}: {exc}"
-        return candidate
+        for fix in claimed_deficit.replay_fixtures[:2]:
+            r_bytes = bytes(fix.get("action_bytes") or b"")
+            if not r_bytes:
+                continue
+            stop_idx = int(fix.get("stop_at_byte_idx", max(1, len(r_bytes) - 25)))
+            _, _, _, err_msg = _run_replay_probe(
+                compiled,
+                seed=int(fix["seed"]),
+                action_bytes=r_bytes,
+                stop_at_byte_idx=stop_idx,
+                live_steps=80,
+                harness=smoke_harness,
+            )
+            if err_msg:
+                candidate.sandbox_passed = False
+                candidate.error = f"Failure-replay `{fix['run_id']}` {err_msg}"
+                return candidate
+
+        frontier_survived = 0
+        frontier_depth_deltas: list[int] = []
+        for cp in (frontier_checkpoints or [])[:2]:
+            cp_bytes = bytes(getattr(cp, "action_bytes", b"") or b"")
+            if not cp_bytes:
+                continue
+            f_surv, start_d, max_d, f_err = _run_replay_probe(
+                compiled,
+                seed=int(getattr(cp, "seed", 0)),
+                action_bytes=cp_bytes,
+                stop_at_byte_idx=None,
+                live_steps=100,
+                harness=smoke_harness,
+            )
+            if f_err:
+                cp_id = getattr(cp, "checkpoint_id", "frontier_cp")
+                candidate.sandbox_passed = False
+                candidate.error = f"Frontier `{cp_id}` {f_err}"
+                return candidate
+            if f_surv:
+                frontier_survived += 1
+            frontier_depth_deltas.append(max_d - start_d)
     finally:
         smoke_harness.close()
-
-    # Check failure-replay fixtures from claimed deficit
-    for fix in claimed_deficit.replay_fixtures[:2]:
-        r_bytes = bytes(fix.get("action_bytes") or b"")
-        if not r_bytes:
-            continue
-        stop_idx = int(fix.get("stop_at_byte_idx", max(1, len(r_bytes) - 25)))
-        _, _, _, err_msg = _run_replay_probe(
-            compiled,
-            seed=int(fix["seed"]),
-            action_bytes=r_bytes,
-            stop_at_byte_idx=stop_idx,
-            live_steps=80,
-        )
-        if err_msg:
-            candidate.sandbox_passed = False
-            candidate.error = f"Failure-replay `{fix['run_id']}` {err_msg}"
-            return candidate
-
-    # Check high-depth Go-Explore FrontierCheckpoints (~15ms fast-forward each)
-    frontier_survived = 0
-    frontier_depth_deltas: list[int] = []
-    for cp in (frontier_checkpoints or [])[:2]:
-        cp_bytes = bytes(getattr(cp, "action_bytes", b"") or b"")
-        if not cp_bytes:
-            continue
-        f_surv, start_d, max_d, f_err = _run_replay_probe(
-            compiled,
-            seed=int(getattr(cp, "seed", 0)),
-            action_bytes=cp_bytes,
-            stop_at_byte_idx=None,
-            live_steps=100,
-        )
-        if f_err:
-            cp_id = getattr(cp, "checkpoint_id", "frontier_cp")
-            candidate.sandbox_passed = False
-            candidate.error = f"Frontier `{cp_id}` {f_err}"
-            return candidate
-        if f_surv:
-            frontier_survived += 1
-        frontier_depth_deltas.append(max_d - start_d)
 
     metrics: dict[str, Any] = {
         "wrapper_ratio": round(wrapper_ratio, 4),

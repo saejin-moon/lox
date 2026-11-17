@@ -304,6 +304,7 @@ CREATE TABLE IF NOT EXISTS archive_policies (
     resource_bin INTEGER,
     fitness DOUBLE,
     policy_code TEXT,
+    skills_json TEXT DEFAULT '{}',
     batch_id VARCHAR,
     generation INTEGER,
     metrics_json VARCHAR,
@@ -525,6 +526,20 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                             )
                         except Exception:
                             pass
+            if "archive_policies" in tables:
+                cols_ap = [
+                    r[1]
+                    for r in con.execute(
+                        "PRAGMA table_info('archive_policies')"
+                    ).fetchall()
+                ]
+                if "skills_json" not in cols_ap:
+                    try:
+                        con.execute(
+                            "ALTER TABLE archive_policies ADD COLUMN skills_json TEXT DEFAULT '{}'"
+                        )
+                    except Exception:
+                        pass
         except Exception:
             pass
         con.execute(SCHEMA_SQL)
@@ -543,37 +558,37 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
         return con
 
 
-def get_schema_markdown(db_path: str = DEFAULT_DB_PATH) -> str:
+def get_schema_markdown(
+    db_path: str = DEFAULT_DB_PATH,
+    is_swarm: bool = False,
+) -> str:
     """Returns a concise, exact DuckDB schema reference for the Author Agent's system prompt."""
-    return """### DuckDB Database Schema (`query_db(sql)`):
+    core_schema = """### DuckDB Database Schema (`query_db(sql)`):
 - **Canonical Champion & Pilot Views**:
   - `champion_runs`: All episodes from the latest promoted policy batch (`hypothesis_passed = TRUE`).
   - `champion_function_stats`: Function stats from the latest promoted policy batch.
   - `champion_ticks`: Tick-by-tick logs linked to `champion_runs`.
-  - `latest_pilot_runs`: All episodes from the most recent pilot batch.
-  - `latest_pilot_ticks`: Tick-by-tick logs linked to `latest_pilot_runs`.
 - **`runs`** (Every evaluated episode):
-  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR), **`auto_esc_count` (INT: times harness forced auto-ESC for unhandled prompt)**, **`subgen_preemptions` (INT: generator subroutines aborted by emergency threat)**, **`policy_exceptions` (INT: non-fatal policy exceptions caught)**, **`unique_tiles` (INT: distinct floor tiles visited)**, **`pct_wait` (DOUBLE: % of steps spent waiting/resting)**, **`pct_search` (DOUBLE: % of steps spent searching 's')**, **`starved_with_food` (BOOLEAN: True if hero died of starvation while carrying food in pack)**, **`died_unarmored` (BOOLEAN: True if hero died with starting AC >= 10 despite carrying armor in pack)**, `is_shard` (BOOLEAN), `shard_id` (VARCHAR), `created_at` (TIMESTAMP). *(Note: `hunger_state` is on `ticks`, not `runs`; `stall_count` is inside `milestones_json`; `seed` is on `runs`, not `ticks`.)*
+  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR), **`auto_esc_count` (INT: times harness forced auto-ESC)**, **`subgen_preemptions` (INT)**, **`policy_exceptions` (INT)**, **`unique_tiles` (INT)**, **`pct_wait` (DOUBLE: 0..100)**, **`pct_search` (DOUBLE: 0..100)**, **`starved_with_food` (BOOLEAN)**, **`died_unarmored` (BOOLEAN)**, `is_shard` (BOOLEAN), `shard_id` (VARCHAR), `created_at` (TIMESTAMP). *(Note: `hunger_state` is on `ticks`, not `runs`; `stall_count` & `unworn_armor_in_pack` are inside `milestones_json`; `seed` is on `runs`, not `ticks`.)*
 - **`ticks`** (Granular tick-by-tick log linked via `run_id` for outlier good runs, exemplars, and sampled runs):
   `run_id` (VARCHAR), `turn` (INT), `step_idx` (INT), `depth` (INT), `dungeon_num` (INT), `hp` (INT), `max_hp` (INT), `energy` (INT), `ac` (INT), `xp_level` (INT), `hunger_state` (INT), `condition_mask` (INT), `y` (INT), `x` (INT), `action_name` (VARCHAR), `raw_key` (INT), `byte_offset` (INT), `active_function` (VARCHAR), `message` (VARCHAR), `visible_monsters` (VARCHAR), `inventory_summary` (VARCHAR).
 - **`batches`** (Per-generation batch overview):
   `batch_id`, `generation`, `mode`, `parent_policy_id`, `candidate_policy_id`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `seeds_evaluated` (INT), `is_early_stopped` (BOOLEAN), `pilot_best_delta` (DOUBLE), `total_cost_usd` (DOUBLE), `total_llm_tokens` (BIGINT), `created_at` (TIMESTAMP).
 - **`policies`** (Full source code & depth metrics for every generation's policy):
-  `policy_id` (VARCHAR), `generation` (INT), `mode` (VARCHAR), `policy_code` (TEXT), `macros_code` (TEXT), `skills_json` (TEXT: JSON map of `skills/*.py` modules), `params_json` (VARCHAR), `avg_depth` (DOUBLE), `max_depth` (INT), `is_promoted` (BOOLEAN), `created_at` (TIMESTAMP).
-- **`discoveries`** (Verified causal findings & binding constraints across generations):
-  `discovery_id` (VARCHAR), `generation` (INT), `batch_id` (VARCHAR), `mode` (VARCHAR), `target_functions` (VARCHAR), `binding_constraint` (VARCHAR), `verified_c_rule` (VARCHAR), `mechanism` (TEXT), `mean_delta` (DOUBLE), `avg_depth` (DOUBLE), `p90_depth` (DOUBLE), `max_depth` (INT), `created_at` (TIMESTAMP).
-- **`archive_policies`** (Quality-Diversity MAP-Elites Behavioral Archive - 80 niches):
-  `cell_id` (VARCHAR: e.g. 'cell_d1_c2_r0'), `depth_bin` (INT: 0-4), `caution_bin` (INT: 0-3), `resource_bin` (INT: 0-3), `fitness` (DOUBLE), `policy_code` (TEXT), `batch_id` (VARCHAR), `generation` (INT), `metrics_json` (VARCHAR), `updated_at` (TIMESTAMP).
+  `policy_id` (VARCHAR), `generation` (INT), `mode` (VARCHAR), `policy_code` (TEXT), `skills_json` (TEXT: JSON map of `skills/*.py` modules), `avg_depth` (DOUBLE), `max_depth` (INT), `is_promoted` (BOOLEAN), `created_at` (TIMESTAMP).
 - **`function_stats`** (Per-function execution & statistical debugging metrics per batch):
-  `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, **`ochiai_good_run_score` (DOUBLE: correlation with `is_outlier_good=TRUE`)**, **`liblit_failure_score` (DOUBLE: correlation with failure)**, **`stagnation_turns` (BIGINT: turns spent stalled after last progress)**, **`stagnation_share` (DOUBLE: fraction of all stagnant turns in batch consumed by this function)**, **`livelock_score` (DOUBLE: livelock sink severity)**.
-- **`experiments`** (Historical hypothesis outcomes):
-  `experiment_id`, `generation`, `mode`, `target_functions`, `observation_from_db`, `mechanism`, `passed`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`, `wins`, `losses`, `ties`, `seeds_evaluated` (INT), `is_early_stopped` (BOOLEAN), `pilot_best_delta` (DOUBLE), `verdict_reason`.
-- **`expert_runs`** (Consolidated successful human & championship-bot NetHack runs using the **same summary/log/stats columns as `runs`**):
-  `run_id`, `source` ('nao_human' | 'autoascend'), `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason` ('ascended' | 'deep_run'), **`summary_digest` (TEXT)**, **`game_log` (TEXT)**, `milestones_json` (VARCHAR), `dumplog_text` (TEXT).
-- **`expert_ticks`** (Tick-by-tick trajectories of expert runs linked via `run_id`):
-  `run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `message`, `screen_ascii`.
-- **`synthesis_logs`** (Turn-by-turn LLM reasoning tokens, candidate code, compiler/sandbox errors, and tool telemetry):
-  `log_id`, `generation`, `batch_id`, `mode`, `turn_index`, `turn_type`, `repair_idx`, `model`, `agent_role`, `thinking_content`, `message_content`, `tool_calls_json`, `tool_results_json`, `candidate_code`, `skill_name`, `skill_code`, `hypothesis_yaml`, `status`, `error_diagnostic`, `prompt_sent`, `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `cost_usd`, `wall_ms`, `created_at`.
-- **`llm_cost_rates`** (Model pricing table):
-  `model_pattern` (VARCHAR), `prompt_cost_per_1m` (DOUBLE), `completion_cost_per_1m` (DOUBLE), `updated_at` (TIMESTAMP).
+  `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, **`ochiai_good_run_score`**, **`liblit_failure_score`**, **`stagnation_turns`**, **`stagnation_share`**, **`livelock_score`**.
+- **`expert_runs`** (`run_id`, `source`, `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason`, `summary_digest`, `game_log`, `milestones_json`) & **`expert_ticks`** (`run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `message`, `screen_ascii`)."""
+    if is_swarm:
+        return core_schema
+    return (
+        core_schema
+        + """
+- **Pilot Views & Legacy/Archive Tables**:
+  - `latest_pilot_runs`, `latest_pilot_ticks`
+  - `discoveries` (`discovery_id`, `generation`, `batch_id`, `mode`, `target_functions`, `binding_constraint`, `verified_c_rule`, `mechanism`, `mean_delta`, `avg_depth`, `p90_depth`, `max_depth`, `created_at`)
+  - `experiments` (`experiment_id`, `generation`, `mode`, `target_functions`, `observation_from_db`, `mechanism`, `passed`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`, `wins`, `losses`, `ties`, `seeds_evaluated`, `is_early_stopped`, `pilot_best_delta`, `verdict_reason`)
+  - `archive_policies` (`cell_id`, `depth_bin`, `caution_bin`, `resource_bin`, `fitness`, `policy_code`, `skills_json`, `batch_id`, `generation`, `metrics_json`)
+  - `synthesis_logs`, `llm_cost_rates`
 """
+    )

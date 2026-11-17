@@ -870,14 +870,22 @@ def extract_module_outline(code: str, module_name: str = "") -> str:
     except Exception:
         return f"# Module: {module_name} (syntax error in source)"
 
-    lines = [f"# Module: {module_name}"] if module_name else []
+    mod_lines = len(code.splitlines())
+    lines = [f"# Module: {module_name} ({mod_lines} LOC)"] if module_name else []
     mod_doc = ast.get_docstring(tree)
     if mod_doc:
         first_line = mod_doc.strip().split("\n")[0]
         lines.append(f'"""{first_line}"""')
 
     for node in tree.body:
-        if isinstance(node, ast.ClassDef):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id.isupper():
+                    try:
+                        lines.append(f"{tgt.id} = {ast.unparse(node.value)[:80]}")
+                    except Exception:
+                        pass
+        elif isinstance(node, ast.ClassDef):
             lines.append(f"class {node.name}:")
             cls_doc = ast.get_docstring(node)
             if cls_doc:

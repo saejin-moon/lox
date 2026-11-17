@@ -173,6 +173,33 @@ class ExecutionTracer:
                 f"(>{self.max_loop_ticks} iterations without yielding an action)."
             )
 
+    def guarded_range(self, r: range) -> Any:
+        """Upfront watchdog guard for `range(...)` loops avoiding per-iteration Python calls."""
+        if isinstance(r, range):
+            n = len(r)
+            if n <= 4096:
+                self.loop_ticks += n
+                if self.loop_ticks > self.max_loop_ticks:
+                    raise PolicyLoopError(
+                        f"Infinite zero-yield loop detected in '{self.active_fn}' "
+                        f"(>{self.max_loop_ticks} iterations without yielding an action)."
+                    )
+                return r
+        return self._guarded_iter(r)
+
+    def _guarded_iter(self, r: Any) -> Any:
+        ticks = 0
+        for item in r:
+            ticks += 1
+            if (ticks & 63) == 0:
+                self.loop_ticks += 64
+                if self.loop_ticks > self.max_loop_ticks:
+                    raise PolicyLoopError(
+                        f"Infinite zero-yield loop detected in '{self.active_fn}' "
+                        f"(>{self.max_loop_ticks} iterations without yielding an action)."
+                    )
+            yield item
+
     def get_param(
         self,
         name: str,
@@ -331,19 +358,54 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
             )
         return node
 
+    @staticmethod
+    def _scan_fn_flags(node: ast.FunctionDef) -> tuple[bool, bool, bool]:
+        """Single shallow scan for yields, valued returns, and local `range` shadowing."""
+        is_gen = False
+        has_val_ret = False
+        shadows_range = any(
+            arg.arg == "range"
+            for arg in (
+                list(node.args.posonlyargs)
+                + list(node.args.args)
+                + list(node.args.kwonlyargs)
+                + ([node.args.vararg] if node.args.vararg else [])
+                + ([node.args.kwarg] if node.args.kwarg else [])
+            )
+        )
+        stack = list(node.body)
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, (ast.Yield, ast.YieldFrom)):
+                is_gen = True
+            elif (
+                isinstance(cur, ast.Return)
+                and cur.value is not None
+                and not (
+                    isinstance(cur.value, ast.Constant) and cur.value.value is None
+                )
+            ):
+                has_val_ret = True
+            elif (
+                isinstance(cur, ast.Name)
+                and isinstance(cur.ctx, ast.Store)
+                and cur.id == "range"
+            ):
+                shadows_range = True
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            for child in ast.iter_child_nodes(cur):
+                stack.append(child)
+        return is_gen, (not is_gen) and has_val_ret, shadows_range
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
         fn_name = node.name
-        is_gen = any(
-            isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in ast.walk(node)
-        )
-        has_val_ret = (not is_gen) and any(
-            isinstance(sub, ast.Return)
-            and sub.value is not None
-            and not (isinstance(sub.value, ast.Constant) and sub.value.value is None)
-            for sub in ast.walk(node)
-        )
+        is_gen, has_val_ret, shadows_range = self._scan_fn_flags(node)
         self._current_fn_stack.append(fn_name)
+        prev_shadow = getattr(self, "_range_shadowed", False)
+        self._range_shadowed = prev_shadow or shadows_range
         self.generic_visit(node)
+        self._range_shadowed = prev_shadow
         self._current_fn_stack.pop()
 
         if fn_name != "__init__":
@@ -383,5 +445,21 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
 
     def visit_For(self, node: ast.For) -> ast.For:
         self.generic_visit(node)
+        if (
+            not getattr(self, "_range_shadowed", False)
+            and isinstance(node.iter, ast.Call)
+            and isinstance(node.iter.func, ast.Name)
+            and node.iter.func.id == "range"
+        ):
+            node.iter = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
+                    attr="guarded_range",
+                    ctx=ast.Load(),
+                ),
+                args=[node.iter],
+                keywords=[],
+            )
+            return node
         node.body.insert(0, self._make_tick_stmt())
         return node

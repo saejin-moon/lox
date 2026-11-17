@@ -31,10 +31,15 @@ class BatchDatabaseLogger:
         db_path: str = DEFAULT_DB_PATH,
         max_tick_runs_per_batch: int = 1000,
     ):
+        import os
+
+        from lox.db.schema import _INITIALIZED_DBS
+
         self.db_path = db_path
         self.max_tick_runs_per_batch = max_tick_runs_per_batch
-        con = init_db(self.db_path)
-        con.close()
+        if os.path.abspath(db_path) not in _INITIALIZED_DBS:
+            con = init_db(self.db_path)
+            con.close()
 
     def save_batch(
         self,

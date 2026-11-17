@@ -294,8 +294,11 @@ class PolicyRunner:
             raise PolicyValidationError(
                 "Policy class must define `def run(self, state):` (generator) or `def step(self, state):`."
             )
+        self._blackboards_cache: tuple[Any, ...] | None = None
 
-    def _iter_instance_blackboards(self) -> list[Any]:
+    def _iter_instance_blackboards(self) -> tuple[Any, ...]:
+        if self._blackboards_cache is not None:
+            return self._blackboards_cache
         bbs: list[Any] = []
         for obj in (
             getattr(self.instance, "blackboard", None),
@@ -304,7 +307,8 @@ class PolicyRunner:
         ):
             if obj is not None and hasattr(obj, "last_active_leaf") and obj not in bbs:
                 bbs.append(obj)
-        return bbs
+        self._blackboards_cache = tuple(bbs)
+        return self._blackboards_cache
 
     def _clear_bt_last_active_leaf(self) -> None:
         for bb in self._iter_instance_blackboards():
@@ -459,8 +463,11 @@ def _topological_skill_order(skill_trees: dict[str, ast.AST]) -> list[str]:
     dependents: dict[str, list[str]] = {k: [] for k in known}
     in_degree: dict[str, int] = {}
 
-    for name, tree in skill_trees.items():
-        deps = _extract_skill_dependencies(tree, known) - {name}
+    for name, val in skill_trees.items():
+        if isinstance(val, set):
+            deps = (val & known) - {name}
+        else:
+            deps = _extract_skill_dependencies(val, known) - {name}
         deps_of[name] = deps
         in_degree[name] = len(deps)
         for d in deps:
@@ -493,6 +500,53 @@ def _topological_skill_order(skill_trees: dict[str, ast.AST]) -> list[str]:
     return order
 
 
+_SKILL_CACHE_LOCK = threading.RLock()
+_POLICY_CACHE_LOCK = threading.RLock()
+
+
+@functools.lru_cache(maxsize=128)
+def _compile_skill_unit_cached(
+    skill_name: str,
+    skill_code: str,
+    is_macro_module: bool,
+) -> tuple[Any, list[str], frozenset[str]]:
+    skill_tree = validate_python_code(skill_code, filename=f"skills/{skill_name}.py")
+    skill_tree = PolicyInstrumentTransformer(is_macro_module=is_macro_module).visit(
+        skill_tree
+    )
+    ast.fix_missing_locations(skill_tree)
+    code_obj = compile(skill_tree, filename=f"skills/{skill_name}.py", mode="exec")
+    fn_names = [
+        n.name
+        for n in ast.walk(skill_tree)
+        if isinstance(n, ast.FunctionDef) and n.name != "__init__"
+    ]
+    raw_deps: set[str] = set()
+    for node in ast.walk(skill_tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = str(alias.name or "")
+                if name.startswith("skills."):
+                    raw_deps.add(name.split(".", 1)[1].split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            mod = str(node.module or "")
+            if mod == "skills":
+                for alias in node.names:
+                    raw_deps.add(str(alias.name or "").split(".", 1)[0])
+            elif mod.startswith("skills."):
+                raw_deps.add(mod.split(".", 1)[1].split(".", 1)[0])
+    return code_obj, fn_names, frozenset(raw_deps)
+
+
+def _compile_skill_unit(
+    skill_name: str,
+    skill_code: str,
+    is_macro_module: bool = True,
+) -> tuple[Any, list[str], frozenset[str]]:
+    with _SKILL_CACHE_LOCK:
+        return _compile_skill_unit_cached(skill_name, skill_code, is_macro_module)
+
+
 class CompiledPolicy:
     """Compiled bytecode bundle for `macros.py` + `policy.py` + optional `skills/` package."""
 
@@ -511,29 +565,19 @@ class CompiledPolicy:
         self.skill_function_names: dict[str, list[str]] = {}
         self.macro_function_names: list[str] = []
 
-        # Parse, validate, and instrument skills package in dependency order
-        parsed_skill_trees: dict[str, ast.AST] = {}
+        # Parse, validate, and instrument skills package in dependency order (per-skill LRU cached)
+        raw_skill_deps: dict[str, set[str]] = {}
         raw_skill_code_objs: dict[str, Any] = {}
         for skill_name, skill_code in self.skills.items():
             if not skill_code or not skill_code.strip():
                 continue
-            skill_tree = validate_python_code(
-                skill_code, filename=f"skills/{skill_name}.py"
+            c_obj, fn_names, deps_fs = _compile_skill_unit(
+                skill_name, skill_code, is_macro_module=True
             )
-            skill_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(
-                skill_tree
-            )
-            ast.fix_missing_locations(skill_tree)
-            parsed_skill_trees[skill_name] = skill_tree
-            raw_skill_code_objs[skill_name] = compile(
-                skill_tree, filename=f"skills/{skill_name}.py", mode="exec"
-            )
-            self.skill_function_names[skill_name] = [
-                n.name
-                for n in ast.walk(skill_tree)
-                if isinstance(n, ast.FunctionDef) and n.name != "__init__"
-            ]
-        self._skill_order: list[str] = _topological_skill_order(parsed_skill_trees)
+            raw_skill_deps[skill_name] = set(deps_fs)
+            raw_skill_code_objs[skill_name] = c_obj
+            self.skill_function_names[skill_name] = list(fn_names)
+        self._skill_order: list[str] = _topological_skill_order(raw_skill_deps)
         for skill_name in self._skill_order:
             self._skill_code_objs[skill_name] = raw_skill_code_objs[skill_name]
 
@@ -657,13 +701,12 @@ class CompiledPolicy:
 
 
 @functools.lru_cache(maxsize=64)
-def compile_policy_and_macros(
+def _compile_policy_and_macros_cached(
     policy_code: str,
     macros_code: str = "",
     skills_tuple: tuple[tuple[str, str], ...] = (),
     max_loop_ticks: int = 250000,
 ) -> CompiledPolicy:
-    """Validates and compiles `policy_code`, `macros_code`, and skills into a reusable `CompiledPolicy`."""
     skills_dict = dict(skills_tuple) if skills_tuple else None
     return CompiledPolicy(
         policy_code=policy_code,
@@ -671,6 +714,19 @@ def compile_policy_and_macros(
         skills=skills_dict,
         max_loop_ticks=max_loop_ticks,
     )
+
+
+def compile_policy_and_macros(
+    policy_code: str,
+    macros_code: str = "",
+    skills_tuple: tuple[tuple[str, str], ...] = (),
+    max_loop_ticks: int = 250000,
+) -> CompiledPolicy:
+    """Validates and compiles `policy_code`, `macros_code`, and skills into a reusable `CompiledPolicy`."""
+    with _POLICY_CACHE_LOCK:
+        return _compile_policy_and_macros_cached(
+            policy_code, macros_code, skills_tuple, max_loop_ticks
+        )
 
 
 def compile_policy_package(
@@ -713,23 +769,21 @@ def compile_bt_subtree(
                 skills_pkg = types.ModuleType("skills")
                 sys.modules["skills"] = skills_pkg
             ns["skills"] = skills_pkg
-            bt_skill_trees: dict[str, ast.AST] = {}
+            bt_skill_deps: dict[str, set[str]] = {}
+            bt_skill_objs: dict[str, Any] = {}
             for s_name, s_code in skills.items():
                 if not s_code or not s_code.strip():
                     continue
-                s_tree = validate_python_code(s_code, filename=f"skills/{s_name}.py")
-                s_tree = PolicyInstrumentTransformer().visit(s_tree)
-                ast.fix_missing_locations(s_tree)
-                bt_skill_trees[s_name] = s_tree
-            for s_name in _topological_skill_order(bt_skill_trees):
-                s_tree = bt_skill_trees[s_name]
+                c_obj, _fns, deps_fs = _compile_skill_unit(
+                    s_name, s_code, is_macro_module=False
+                )
+                bt_skill_deps[s_name] = set(deps_fs)
+                bt_skill_objs[s_name] = c_obj
+            for s_name in _topological_skill_order(bt_skill_deps):
                 s_mod = types.ModuleType(f"skills.{s_name}")
                 s_mod.__dict__.update(ns)
                 s_mod.__name__ = f"skills.{s_name}"
-                exec(
-                    compile(s_tree, filename=f"skills/{s_name}.py", mode="exec"),
-                    s_mod.__dict__,
-                )
+                exec(bt_skill_objs[s_name], s_mod.__dict__)
                 sys.modules[f"skills.{s_name}"] = s_mod
                 setattr(skills_pkg, s_name, s_mod)
                 ns[s_name] = s_mod

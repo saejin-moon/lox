@@ -86,8 +86,8 @@ class SwarmCampaignOrchestrator:
             self.eval_workers = max(1, min(int(eval_workers), 32))
         else:
             cpu_cap = max(4, (os.cpu_count() or 8) - 2)
-            self.eval_workers = min(
-                16, max(self.num_workers, min(int(self.seeds_per_batch), cpu_cap))
+            self.eval_workers = max(
+                self.num_workers, min(int(self.seeds_per_batch), cpu_cap)
             )
         self.swarm_architecture = (
             str(swarm_architecture or "peer").strip().lower()
@@ -104,8 +104,16 @@ class SwarmCampaignOrchestrator:
         self.theories = TheoryDocumentStore(db_path=theories_path)
         self.frontier = FrontierArchive(frontier_dir=self.frontier_dir)
 
-        # Initialize MAP-Elites Diversity Archive
+        # Initialize MAP-Elites Diversity Archive and hydrate persisted elites/plateau state
         self.map_elites = MAPElitesArchive()
+        try:
+            _con_init = connect_db(self.db_path, read_only=True)
+            try:
+                self.map_elites.load_from_db(_con_init)
+            finally:
+                _con_init.close()
+        except Exception:
+            pass
 
         # Initialize Deficit Analyzer & Deterministic Referee (for peer mode)
         self.deficit_analyzer = DeficitAnalyzer(db_path=self.db_path)
@@ -113,7 +121,7 @@ class SwarmCampaignOrchestrator:
             max_tournament_peers=max(2, min(4, self.num_workers))
         )
         self.campaign_start_time = time.time()
-        self._plateau_streak: int = 0
+        self._plateau_streak: int = self._compute_depth_plateau_streak()
         self._attempted_ast_modular_fps: set[str] = set()
 
         # Legacy Meta-Agent & Two-Pass Advisory Critic (only used when swarm_architecture='legacy')
@@ -251,11 +259,14 @@ class SwarmCampaignOrchestrator:
 
         # 1. Deterministic Deficit Discovery + Adaptive Horizon (0 LLM calls)
         active_max_steps = self._compute_active_max_steps()
+        self._plateau_streak = self._compute_depth_plateau_streak()
         deficit_report = self.deficit_analyzer.analyze(
             generation=generation,
             current_policy=current_policy,
             skills=initial_skills,
         )
+        if self._plateau_streak >= 3 and deficit_report.regime != "BOOTSTRAP":
+            deficit_report.regime = "PLATEAU"
         if self._plateau_streak >= 3 and getattr(self.map_elites, "cells", None):
             top_elites = sorted(
                 self.map_elites.cells.values(),
@@ -273,11 +284,11 @@ class SwarmCampaignOrchestrator:
 
         ui.info(
             f"Gen {generation}: Regime={deficit_report.regime} "
-            f"(Δ={deficit_report.rolling_depth_delta:+.2f}) | Clusters={len(deficit_report.fail_clusters)} | "
-            f"Peers={active_peers} | MaxSteps={active_max_steps}"
+            f"(Δ={deficit_report.rolling_depth_delta:+.2f}, streak={self._plateau_streak}) | "
+            f"Clusters={len(deficit_report.fail_clusters)} | Peers={active_peers} | MaxSteps={active_max_steps}"
         )
 
-        # 2. Shared Incubation Micro-Shard Baseline (evaluated once for incumbent)
+        # 2. Shared Incubation Micro-Shard Baseline (reuse cached incumbent runs when available)
         raw_shard_seeds = list(
             dict.fromkeys(
                 deficit_report.d_succ_seeds[:2]
@@ -293,23 +304,42 @@ class SwarmCampaignOrchestrator:
         shard_seeds = raw_shard_seeds[:max_shard]
         incumbent_shard_runs: dict[int, dict[str, Any]] = {}
         if current_policy.strip() and shard_seeds:
-            inc_shard = self.eval_pool.evaluate_batch(
-                batch_id=f"incubate_inc_g{generation}_{int(time.time())}",
-                policy_code=current_policy,
-                macros_code="",
-                skills=initial_skills,
-                target_episodes=len(shard_seeds),
-                priority_seeds=shard_seeds,
-                max_steps=active_max_steps,
-                record_ticks=False,
+            full_seeds_key = tuple(1000 + i for i in range(self.seeds_per_batch))
+            inc_fp = _package_fingerprint(current_policy, initial_skills)
+            cache_k = (
+                id(self.eval_pool),
+                inc_fp,
+                full_seeds_key,
+                int(active_max_steps),
             )
-            for r in inc_shard.get("runs", []) or []:
-                incumbent_shard_runs[int(r.get("seed", 0))] = dict(r)
+            cached_pair = self.referee._incumbent_cache.get(cache_k)
+            if cached_pair is not None:
+                for r in cached_pair[0].get("runs", []) or []:
+                    sd_i = int(r.get("seed", 0))
+                    if sd_i in shard_seeds:
+                        incumbent_shard_runs[sd_i] = dict(r)
+            missing_shard_seeds = [
+                s for s in shard_seeds if s not in incumbent_shard_runs
+            ]
+            if missing_shard_seeds:
+                inc_shard = self.eval_pool.evaluate_batch(
+                    batch_id=f"incubate_inc_g{generation}_{int(time.time())}",
+                    policy_code=current_policy,
+                    macros_code="",
+                    skills=initial_skills,
+                    target_episodes=len(missing_shard_seeds),
+                    priority_seeds=missing_shard_seeds,
+                    max_steps=active_max_steps,
+                    record_ticks=False,
+                )
+                for r in inc_shard.get("runs", []) or []:
+                    incumbent_shard_runs[int(r.get("seed", 0))] = dict(r)
 
-        # 3. Concurrent Symmetric Peer Agents + Isolated Sandbox Incubation
+        # 3. Concurrent Symmetric Peer Agents + Isolated Sandbox Incubation (rotate clusters per gen)
         clusters = deficit_report.fail_clusters
         peer_assignments = [
-            (f"peer_{i + 1}", clusters[i % len(clusters)]) for i in range(active_peers)
+            (f"peer_{i + 1}", clusters[(generation + i) % len(clusters)])
+            for i in range(active_peers)
         ]
         peer_tool_turns = max(4, int(self.turns_per_worker) * 3)
         peer_candidates: list[PeerCandidate] = []
@@ -453,17 +483,19 @@ class SwarmCampaignOrchestrator:
             },
         )
 
-        # 5. Extract Frontier Checkpoints & Ingest into MAP-Elites Archive
+        # 5. Extract Frontier Checkpoints (from active/promoted policy only) & Ingest into MAP-Elites Archive
         new_cps = self._ingest_frontier_and_map_elites(
             generation=generation,
             runs=runs,
             batch_eval=batch_eval,
             policy_code=verdict.winner_policy_code,
+            skills=verdict.winner_skills,
             batch_id=batch_id,
             runner_ups=verdict.all_runner_up_batches,
+            allow_frontier=bool(verdict.promoted or generation <= 2),
         )
         self._sync_batch_cost(batch_id, generation)
-        self._plateau_streak = 0 if verdict.promoted else (self._plateau_streak + 1)
+        self._plateau_streak = self._compute_depth_plateau_streak()
 
         if self.theories is not None and hasattr(self.theories, "save_document"):
             try:
@@ -549,6 +581,48 @@ class SwarmCampaignOrchestrator:
             "scoreboard": verdict.scoreboard,
         }
 
+    def _compute_depth_plateau_streak(self) -> int:
+        """Counts consecutive recent generations without meaningful avg_depth (>=0.05) or max_depth progress."""
+        try:
+            con = connect_db(self.db_path, read_only=True)
+            try:
+                rows = con.execute(
+                    """
+                    SELECT generation, avg_depth, max_depth, hypothesis_passed
+                    FROM batches
+                    WHERE UPPER(mode) = 'SWARM'
+                    ORDER BY generation DESC, created_at DESC
+                    LIMIT 12
+                    """
+                ).fetchall()
+            finally:
+                con.close()
+            if len(rows) < 2:
+                return 0
+            # Chronological newest -> oldest: stop when we see a meaningful depth breakthrough
+            streak = 0
+            latest_avg = float(rows[0][1] or 1.0)
+            latest_max = int(rows[0][2] or 1)
+            for idx in range(len(rows) - 1):
+                cur_avg = float(rows[idx][1] or 1.0)
+                prev_avg = float(rows[idx + 1][1] or 1.0)
+                cur_max = int(rows[idx][2] or 1)
+                prev_max = int(rows[idx + 1][2] or 1)
+                if (cur_avg - prev_avg) >= 0.05 or cur_max > prev_max:
+                    break
+                streak += 1
+            if streak == 0 and len(rows) >= 3:
+                # Also detect oscillation back to identical max/avg within 3 gens
+                max_prev = max(int(r[2] or 1) for r in rows[1:4])
+                if (
+                    latest_max <= max_prev
+                    and latest_avg <= max(float(r[1] or 1.0) for r in rows[1:4]) + 0.02
+                ):
+                    streak = max(streak, sum(1 for r in rows[:4] if not r[3]))
+            return streak
+        except Exception:
+            return 0
+
     def _compute_active_max_steps(self) -> int:
         """Uses `compute_adaptive_max_steps` from recent promoted batches to lift the 5k horizon on deep runs."""
         try:
@@ -582,31 +656,47 @@ class SwarmCampaignOrchestrator:
         policy_code: str,
         batch_id: str,
         runner_ups: list[dict[str, Any]] | None = None,
+        skills: dict[str, str] | None = None,
+        allow_frontier: bool = True,
     ) -> int:
         new_cps = 0
-        for ep in runs:
-            ep_dict = dict(ep) if isinstance(ep, dict) else ep.__dict__
-            depth = max(int(ep_dict.get("depth", 1)), int(ep_dict.get("max_depth", 1)))
-            act_bytes = bytes(ep_dict.get("action_bytes") or b"")
-            if depth >= self.frontier_min_depth and len(act_bytes) > 0:
-                seed = int(ep_dict.get("seed", 0))
-                cp_id = f"fc_dlvl_{depth}_seed{seed}_g{generation}"
-                if cp_id not in self.frontier.checkpoints:
-                    prefix_bytes = (
-                        act_bytes[:-25]
-                        if len(act_bytes) > 35
-                        else (act_bytes[:-5] or act_bytes)
-                    )
-                    self.frontier.add_checkpoint(
-                        seed=seed,
-                        depth=depth,
-                        milestone=f"dlvl_{depth}",
-                        turns=int(ep_dict.get("turns", 0)),
-                        action_bytes=prefix_bytes,
-                        game_log=str(ep_dict.get("game_log", "")),
-                        checkpoint_id=cp_id,
-                    )
-                    new_cps += 1
+        if allow_frontier:
+            depth_tier_counts: dict[int, int] = {}
+            for cp in self.frontier.checkpoints.values():
+                depth_tier_counts[int(cp.depth)] = (
+                    depth_tier_counts.get(int(cp.depth), 0) + 1
+                )
+            for ep in runs:
+                ep_dict = dict(ep) if isinstance(ep, dict) else ep.__dict__
+                depth = max(
+                    int(ep_dict.get("depth", 1)), int(ep_dict.get("max_depth", 1))
+                )
+                act_bytes = bytes(ep_dict.get("action_bytes") or b"")
+                # Cap checkpoints per depth tier so deep mid-game states aren't diluted by Dlvl 2-3 noise
+                if (
+                    depth >= self.frontier_min_depth
+                    and len(act_bytes) > 0
+                    and depth_tier_counts.get(depth, 0) < 12
+                ):
+                    seed = int(ep_dict.get("seed", 0))
+                    cp_id = f"fc_dlvl_{depth}_seed{seed}_g{generation}"
+                    if cp_id not in self.frontier.checkpoints:
+                        prefix_bytes = (
+                            act_bytes[:-25]
+                            if len(act_bytes) > 35
+                            else (act_bytes[:-5] or act_bytes)
+                        )
+                        self.frontier.add_checkpoint(
+                            seed=seed,
+                            depth=depth,
+                            milestone=f"dlvl_{depth}",
+                            turns=int(ep_dict.get("turns", 0)),
+                            action_bytes=prefix_bytes,
+                            game_log=str(ep_dict.get("game_log", "")),
+                            checkpoint_id=cp_id,
+                        )
+                        depth_tier_counts[depth] = depth_tier_counts.get(depth, 0) + 1
+                        new_cps += 1
 
         metrics = {
             "avg_depth": float(batch_eval.get("avg_depth", 1.0)),
@@ -622,22 +712,35 @@ class SwarmCampaignOrchestrator:
             if runs
             else 100.0,
         }
-        self.map_elites.add_candidate(
-            policy_code=policy_code,
-            metrics=metrics,
-            batch_id=batch_id,
-            generation=generation,
-        )
-        for ru in runner_ups or []:
-            ru_code = str(ru.get("policy_code", "") or "")
-            ru_metrics = ru.get("metrics") or {}
-            if ru_code.strip() and ru_metrics:
-                self.map_elites.add_candidate(
-                    policy_code=ru_code,
-                    metrics=ru_metrics,
-                    batch_id=str(ru.get("batch_id", batch_id)),
-                    generation=generation,
-                )
+        con = None
+        try:
+            con = connect_db(self.db_path, read_only=False)
+            self.map_elites.add_candidate(
+                policy_code=policy_code,
+                metrics=metrics,
+                batch_id=batch_id,
+                generation=generation,
+                con=con,
+                skills=skills,
+            )
+            for ru in runner_ups or []:
+                ru_code = str(ru.get("policy_code", "") or "")
+                ru_metrics = ru.get("metrics") or {}
+                if ru_code.strip() and ru_metrics:
+                    self.map_elites.add_candidate(
+                        policy_code=ru_code,
+                        metrics=ru_metrics,
+                        batch_id=str(ru.get("batch_id", batch_id)),
+                        generation=generation,
+                        con=con,
+                        skills=ru.get("skills"),
+                    )
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
         return new_cps
 
     def _run_generation_legacy(self, generation: int) -> dict[str, Any]:

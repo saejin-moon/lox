@@ -35,6 +35,7 @@ class TheoryDocumentStore:
             Path(self.db_path).mkdir(parents=True, exist_ok=True)
             self.db = lancedb.connect(self.db_path)
             self._table = None
+            self._fts_dirty = False
             self._init_table()
 
     def _init_table(self) -> None:
@@ -107,6 +108,7 @@ class TheoryDocumentStore:
                 self._init_table()
             assert self._table is not None
             self._table.add([record])
+            self._fts_dirty = True
         return doc_id
 
     def search_theories(
@@ -127,6 +129,13 @@ class TheoryDocumentStore:
             clean_q = str(query).strip()
             if not clean_q:
                 return []
+
+            if getattr(self, "_fts_dirty", False):
+                try:
+                    self._table.create_index("content", config=FTS(), replace=True)
+                except Exception:
+                    pass
+                self._fts_dirty = False
 
             try:
                 builder = self._table.search(clean_q, query_type="fts")

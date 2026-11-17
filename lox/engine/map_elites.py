@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -29,6 +29,7 @@ class Elite:
     generation: int
     metrics: dict[str, Any]
     updated_at: float = 0.0
+    skills: dict[str, str] = field(default_factory=dict)
 
 
 class MAPElitesArchive:
@@ -40,7 +41,7 @@ class MAPElitesArchive:
     DEPTH_BINS = 5
     CAUTION_BINS = 4
     RESOURCE_BINS = 4
-    DEFAULT_DEPTH_THRESHOLDS = (1.5, 2.5, 3.5, 4.5)
+    DEFAULT_DEPTH_THRESHOLDS = (1.5, 3.5, 7.0, 12.0)
     DEFAULT_CAUTION_THRESHOLDS = (0.10, 0.25, 0.50)
     DEFAULT_DENSITY_THRESHOLDS = (0.20, 0.50, 1.00)
     DEFAULT_FITNESS_WEIGHTS = (1000.0, 250.0, 0.1, 0.05)
@@ -58,40 +59,32 @@ class MAPElitesArchive:
         self.density_thresholds = tuple(density_thresholds)
         self.fitness_weights = tuple(fitness_weights)
 
+    @staticmethod
+    def _bin_value(val: float, thresholds: tuple[float, ...]) -> int:
+        for idx, cut in enumerate(thresholds):
+            if val < cut:
+                return idx
+        return len(thresholds)
+
     @classmethod
     def compute_cell_id(cls, metrics: dict[str, Any]) -> tuple[str, int, int, int]:
         """
         Maps episode metrics to 3D discrete niche coordinates:
         (depth_bin, caution_bin, resource_bin).
         """
-        # 1. Depth Dimension (0 to 4)
+        # 1. Depth Dimension (0 to 4, scaled across mid/late dungeon tiers)
         avg_depth = float(metrics.get("avg_depth", metrics.get("mean_depth", 1.0)))
         max_depth = int(metrics.get("max_depth", 1))
-        # Use max depth if progressed, otherwise average
         d_val = max(avg_depth, float(max_depth))
-        if d_val < 1.5:
-            d_bin = 0
-        elif d_val < 2.5:
-            d_bin = 1
-        elif d_val < 3.5:
-            d_bin = 2
-        elif d_val < 4.5:
-            d_bin = 3
-        else:
-            d_bin = 4
+        d_bin = cls._bin_value(d_val, cls.DEFAULT_DEPTH_THRESHOLDS)
 
-        # 2. Caution Dimension (0 to 3)
+        # 2. Caution Dimension (0 to 3); normalize 0..100 percentages to 0..1 fraction
         pct_wait = float(metrics.get("pct_wait", 0.0))
         pct_search = float(metrics.get("pct_search", 0.0))
         caution_val = pct_wait + pct_search
-        if caution_val < 0.10:
-            c_bin = 0
-        elif caution_val < 0.25:
-            c_bin = 1
-        elif caution_val < 0.50:
-            c_bin = 2
-        else:
-            c_bin = 3
+        if caution_val > 1.0:
+            caution_val /= 100.0
+        c_bin = cls._bin_value(caution_val, cls.DEFAULT_CAUTION_THRESHOLDS)
 
         # 3. Resource Mastery Dimension (0 to 3)
         score = float(metrics.get("avg_score", metrics.get("mean_score", 0.0)))
@@ -99,14 +92,7 @@ class MAPElitesArchive:
             10.0, float(metrics.get("avg_turns", metrics.get("mean_turns", 100.0)))
         )
         density = score / turns
-        if density < 0.20:
-            r_bin = 0
-        elif density < 0.50:
-            r_bin = 1
-        elif density < 1.00:
-            r_bin = 2
-        else:
-            r_bin = 3
+        r_bin = cls._bin_value(density, cls.DEFAULT_DENSITY_THRESHOLDS)
 
         cell_id = f"cell_d{d_bin}_c{c_bin}_r{r_bin}"
         return cell_id, d_bin, c_bin, r_bin
@@ -136,6 +122,7 @@ class MAPElitesArchive:
         batch_id: str,
         generation: int,
         con: Any = None,
+        skills: dict[str, str] | None = None,
     ) -> tuple[bool, str, Elite]:
         """
         Evaluates candidate against its niche cell.
@@ -160,6 +147,7 @@ class MAPElitesArchive:
             generation=generation,
             metrics=metrics,
             updated_at=time.time(),
+            skills=dict(skills or {}),
         )
         self.cells[cell_id] = elite
 
@@ -171,12 +159,13 @@ class MAPElitesArchive:
     def _persist_elite(self, con: Any, elite: Elite) -> None:
         try:
             m_json = json.dumps(elite.metrics)
+            s_json = json.dumps(elite.skills or {})
             con.execute(
                 """
                 INSERT OR REPLACE INTO archive_policies (
                     cell_id, depth_bin, caution_bin, resource_bin, fitness,
-                    policy_code, batch_id, generation, metrics_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    policy_code, skills_json, batch_id, generation, metrics_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 [
                     elite.cell_id,
@@ -185,6 +174,7 @@ class MAPElitesArchive:
                     elite.resource_bin,
                     elite.fitness,
                     elite.policy_code,
+                    s_json,
                     elite.batch_id,
                     elite.generation,
                     m_json,
@@ -238,14 +228,15 @@ class MAPElitesArchive:
             rows = con.execute(
                 """
                 SELECT cell_id, depth_bin, caution_bin, resource_bin, fitness,
-                       policy_code, batch_id, generation, metrics_json
+                       policy_code, COALESCE(skills_json, '{}'), batch_id, generation, metrics_json
                 FROM archive_policies
                 """
             ).fetchall()
             loaded = 0
             for r in rows:
-                cid, db, cb, rb, fit, pcode, bid, gen, mjson = r
+                cid, db, cb, rb, fit, pcode, sjson, bid, gen, mjson = r
                 m_dict = json.loads(mjson) if mjson else {}
+                s_dict = json.loads(sjson) if sjson else {}
                 self.cells[cid] = Elite(
                     cell_id=cid,
                     depth_bin=int(db),
@@ -256,6 +247,7 @@ class MAPElitesArchive:
                     batch_id=str(bid),
                     generation=int(gen),
                     metrics=m_dict,
+                    skills=dict(s_dict) if isinstance(s_dict, dict) else {},
                 )
                 loaded += 1
             return loaded

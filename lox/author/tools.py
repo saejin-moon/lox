@@ -117,6 +117,16 @@ def _unpack_xml_bundle(raw_code: str) -> tuple[str, dict[str, str]]:
     if not text:
         return "", {}
 
+    # Strip accidental wrapper hypothesis/reflection XML tags from code payload
+    text = re.sub(
+        r"<(?P<tag>hypothesis|reflection)>.*?</(?P=tag)>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+    if not text:
+        return "", {}
+
     skills_found: dict[str, str] = {}
     skill_pat = re.compile(
         r"<(?P<tag>skill_code|skill)(?:\s+(?:module|name)=[\"'](?P<mod>[^\"']+)[\"'])?[^>]*>(?P<code>.*?)</(?P=tag)>",
@@ -235,6 +245,15 @@ class AuthorToolRegistry:
         self.swarm_replay_fixtures: list[dict[str, Any]] = []
         self.swarm_scaffold_code: str = ""
         self.swarm_experiments: list[dict[str, Any]] = []
+        self._reusable_harness: NetHackHarness | None = None
+
+    def _get_harness(self, max_steps: int) -> NetHackHarness:
+        steps = max(10, int(max_steps))
+        if self._reusable_harness is None:
+            self._reusable_harness = NetHackHarness(max_steps=steps)
+        else:
+            self._reusable_harness.max_steps = steps
+        return self._reusable_harness
 
     @property
     def last_passed_code(self) -> str:
@@ -1324,6 +1343,23 @@ class AuthorToolRegistry:
                 changed_fns = (
                     [] if self.mode in ("SWARM_META", "SWARM_PEER") else ["run"]
                 )
+            if (
+                self.mode == "SWARM_PEER"
+                and not smoke_only
+                and not has_replay
+                and self.current_policy_code.strip()
+                and is_ast_equivalent(spliced_policy, self.current_policy_code)
+                and set(cand_skills.keys()) == set(self.skills.keys())
+                and all(
+                    is_ast_equivalent(cand_skills[k], self.skills[k])
+                    for k in cand_skills
+                )
+            ):
+                return (
+                    "NOOP_DIFF: Your candidate code is AST-identical to the current incumbent policy and skills. "
+                    "Make a substantive behavioral modification before calling `dry_run_policy`.",
+                    "NOOP_DIFF",
+                )
             compiled = compile_policy_package(
                 spliced_policy, macros_code, skills=cand_skills
             )
@@ -1334,8 +1370,8 @@ class AuthorToolRegistry:
                 "COMPILE_ERROR",
             )
 
-        # Step 1: Single-Episode Smoke Check + Behavioral Critic (with optional prefix replay)
-        harness = NetHackHarness(max_steps=max(10, min(200, int(max_turns))))
+        # Step 1: Single-Episode Smoke Check + Behavioral Critic (reuse persistent harness)
+        harness = self._get_harness(max_turns)
         try:
             runner = compiled.create_runner()
             actions_taken: list[str] = []
@@ -2092,11 +2128,16 @@ class AuthorToolRegistry:
                     try:
                         fail_rows = con_rep.execute(
                             """
-                            SELECT run_id, seed, end_reason, action_bytes
-                            FROM runs
-                            WHERE octet_length(action_bytes) > 20
-                              AND end_reason NOT IN ('ascended', 'max_steps')
-                            ORDER BY generation DESC, turns DESC
+                            SELECT r.run_id, r.seed, r.end_reason, r.action_bytes
+                            FROM runs r
+                            WHERE octet_length(r.action_bytes) > 20
+                              AND r.end_reason NOT IN ('ascended', 'max_steps')
+                              AND (
+                                  NOT EXISTS (SELECT 1 FROM batches WHERE hypothesis_passed = TRUE OR batch_id LIKE '%_inc_%')
+                                  OR r.batch_id LIKE '%_inc_%'
+                                  OR EXISTS (SELECT 1 FROM batches b WHERE b.batch_id = r.batch_id AND b.hypothesis_passed = TRUE)
+                              )
+                            ORDER BY r.generation DESC, r.turns DESC
                             LIMIT 2
                             """
                         ).fetchall()
@@ -2111,48 +2152,44 @@ class AuthorToolRegistry:
                             if len(r_buf) > 60
                             else max(1, len(r_buf) - 10)
                         )
-                        rh = NetHackHarness(max_steps=120)
-                        try:
-                            r_runner = compiled.create_runner()
-                            r_st = rh.replay_bytes(
-                                seed=int(f_seed),
-                                recorded_bytes=r_buf,
-                                stop_at_byte_idx=cut_pt,
+                        rh = self._get_harness(120)
+                        r_runner = compiled.create_runner()
+                        r_st = rh.replay_bytes(
+                            seed=int(f_seed),
+                            recorded_bytes=r_buf,
+                            stop_at_byte_idx=cut_pt,
+                        )
+                        rh.step_count = 0
+                        r_acts: list[str] = []
+                        r_tiles: set[tuple[int, int]] = {(r_st.y, r_st.x)}
+                        for _ in range(120):
+                            ra, _ = r_runner.next_action(r_st)
+                            r_st, r_done, r_info = rh.step(ra)
+                            r_acts.append(str(r_info.get("action_name", "")))
+                            r_tiles.add((r_st.y, r_st.x))
+                            if r_done:
+                                break
+                        r_leaf_errs = extract_runner_leaf_errors(r_runner)
+                        if r_leaf_errs:
+                            err_lines = "\n".join(
+                                f"- Leaf `{n}` raised {e}" for n, e in r_leaf_errs[:5]
                             )
-                            rh.step_count = 0
-                            r_acts: list[str] = []
-                            r_tiles: set[tuple[int, int]] = {(r_st.y, r_st.x)}
-                            for _ in range(120):
-                                ra, _ = r_runner.next_action(r_st)
-                                r_st, r_done, r_info = rh.step(ra)
-                                r_acts.append(str(r_info.get("action_name", "")))
-                                r_tiles.add((r_st.y, r_st.x))
-                                if r_done:
-                                    break
-                            r_leaf_errs = extract_runner_leaf_errors(r_runner)
-                            if r_leaf_errs:
-                                err_lines = "\n".join(
-                                    f"- Leaf `{n}` raised {e}"
-                                    for n, e in r_leaf_errs[:5]
-                                )
-                                return (
-                                    f"Runtime Error in BehaviorTree leaf during failure-replay ({f_rid}):\n{err_lines}",
-                                    "RUNTIME_ERROR",
-                                )
-                            top_r_acts = ", ".join(
-                                f"{k}:{v}" for k, v in Counter(r_acts).most_common(4)
+                            return (
+                                f"Runtime Error in BehaviorTree leaf during failure-replay ({f_rid}):\n{err_lines}",
+                                "RUNTIME_ERROR",
                             )
-                            r_status = (
-                                f"ENDED({r_st.end_reason})"
-                                if rh.done
-                                else "SURVIVED(120 steps)"
-                            )
-                            replay_summaries.append(
-                                f"  * `{f_rid}` (prior `{f_end}`, rewound -50B): {r_status} | "
-                                f"Dlvl={r_st.depth} | HP={r_st.hp}/{r_st.max_hp} | Tiles={len(r_tiles)} | Acts=[{top_r_acts}]"
-                            )
-                        finally:
-                            rh.close()
+                        top_r_acts = ", ".join(
+                            f"{k}:{v}" for k, v in Counter(r_acts).most_common(4)
+                        )
+                        r_status = (
+                            f"ENDED({r_st.end_reason})"
+                            if rh.done
+                            else "SURVIVED(120 steps)"
+                        )
+                        replay_summaries.append(
+                            f"  * `{f_rid}` (prior `{f_end}`, rewound -50B): {r_status} | "
+                            f"Dlvl={r_st.depth} | HP={r_st.hp}/{r_st.max_hp} | Tiles={len(r_tiles)} | Acts=[{top_r_acts}]"
+                        )
                 except Exception:
                     pass
                 # Also replay 1 deep FrontierArchive checkpoint if available
@@ -2162,44 +2199,40 @@ class AuthorToolRegistry:
                     try:
                         f_cp = self.swarm_frontier.sample_checkpoint(min_depth=2)
                         if f_cp is not None and getattr(f_cp, "action_bytes", b""):
-                            fh = NetHackHarness(max_steps=120)
-                            try:
-                                f_runner = compiled.create_runner()
-                                f_st = self.swarm_frontier.replay_into(fh, f_cp)
-                                f_acts: list[str] = []
-                                f_tiles: set[tuple[int, int]] = {(f_st.y, f_st.x)}
-                                for _ in range(120):
-                                    fa, _ = f_runner.next_action(f_st)
-                                    f_st, f_done, f_info = fh.step(fa)
-                                    f_acts.append(str(f_info.get("action_name", "")))
-                                    f_tiles.add((f_st.y, f_st.x))
-                                    if f_done:
-                                        break
-                                f_leaf_errs = extract_runner_leaf_errors(f_runner)
-                                if f_leaf_errs:
-                                    err_lines = "\n".join(
-                                        f"- Leaf `{n}` raised {e}"
-                                        for n, e in f_leaf_errs[:5]
-                                    )
-                                    return (
-                                        f"Runtime Error in BehaviorTree leaf during frontier-replay ({f_cp.checkpoint_id}):\n{err_lines}",
-                                        "RUNTIME_ERROR",
-                                    )
-                                top_f_acts = ", ".join(
-                                    f"{k}:{v}"
-                                    for k, v in Counter(f_acts).most_common(4)
+                            fh = self._get_harness(120)
+                            f_runner = compiled.create_runner()
+                            f_st = self.swarm_frontier.replay_into(fh, f_cp)
+                            f_acts: list[str] = []
+                            f_tiles: set[tuple[int, int]] = {(f_st.y, f_st.x)}
+                            for _ in range(120):
+                                fa, _ = f_runner.next_action(f_st)
+                                f_st, f_done, f_info = fh.step(fa)
+                                f_acts.append(str(f_info.get("action_name", "")))
+                                f_tiles.add((f_st.y, f_st.x))
+                                if f_done:
+                                    break
+                            f_leaf_errs = extract_runner_leaf_errors(f_runner)
+                            if f_leaf_errs:
+                                err_lines = "\n".join(
+                                    f"- Leaf `{n}` raised {e}"
+                                    for n, e in f_leaf_errs[:5]
                                 )
-                                f_status = (
-                                    f"ENDED({f_st.end_reason})"
-                                    if fh.done
-                                    else "SURVIVED(120 steps)"
+                                return (
+                                    f"Runtime Error in BehaviorTree leaf during frontier-replay ({f_cp.checkpoint_id}):\n{err_lines}",
+                                    "RUNTIME_ERROR",
                                 )
-                                replay_summaries.append(
-                                    f"  * Frontier `{f_cp.checkpoint_id}` (Dlvl {f_cp.depth}, seed={f_cp.seed}): {f_status} | "
-                                    f"EndDlvl={f_st.depth} | HP={f_st.hp}/{f_st.max_hp} | Tiles={len(f_tiles)} | Acts=[{top_f_acts}]"
-                                )
-                            finally:
-                                fh.close()
+                            top_f_acts = ", ".join(
+                                f"{k}:{v}" for k, v in Counter(f_acts).most_common(4)
+                            )
+                            f_status = (
+                                f"ENDED({f_st.end_reason})"
+                                if fh.done
+                                else "SURVIVED(120 steps)"
+                            )
+                            replay_summaries.append(
+                                f"  * Frontier `{f_cp.checkpoint_id}` (Dlvl {f_cp.depth}, seed={f_cp.seed}): {f_status} | "
+                                f"EndDlvl={f_st.depth} | HP={f_st.hp}/{f_st.max_hp} | Tiles={len(f_tiles)} | Acts=[{top_f_acts}]"
+                            )
                     except Exception:
                         pass
                 if replay_summaries:
@@ -2253,8 +2286,6 @@ class AuthorToolRegistry:
                 f"Runtime Error during Dry-Run on seed {seed}:\n{type(exc).__name__}: {exc}\n{tb}{extra_hint}",
                 "RUNTIME_ERROR",
             )
-        finally:
-            harness.close()
 
 
 OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
@@ -2456,10 +2487,11 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
         "function": {
             "name": "dry_run_policy",
             "description": (
-                "Compile and test candidate Python policy or macro code. "
-                "Performs a 150-step smoke check and behavioral critic analysis, plus a 20-episode "
-                "parallel pilot batch on the worker pool (up to 5 pilot revisions per generation) "
-                "to compare against the current baseline and surface concrete failure logs."
+                "Compile and test candidate Python policy or skill edits in NetHackHarness. "
+                "Runs a smoke check + behavioral critic plus failure and deep-frontier replays "
+                "(and parallel pilot batch when configured). Pass ONLY new/modified functions inside "
+                "<skill_code module='name'>...</skill_code> / <policy_code>...</policy_code> — do NOT "
+                "re-paste unchanged skill functions or wrap in <hypothesis> tags."
             ),
             "parameters": {
                 "type": "object",
