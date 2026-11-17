@@ -34,11 +34,14 @@ from lox.lang.compiler import compile_policy_package
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.lang.validator import (
     audit_policy_ast_hygiene,
+    check_evolve_block_bounds,
     is_ast_equivalent,
     normalize_mode,
     prune_extracted_skill_functions,
+    run_pyright_on_package,
     smart_dedent,
     splice_functions_into_policy,
+    validate_cross_module_contracts,
 )
 
 
@@ -228,7 +231,10 @@ def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
     if rows_truncated:
         note += f"\n# NOTE: Showing {len(rows)} of {len(all_rows)} rows (cap={max_rows}). Use LIMIT/OFFSET or narrower WHERE."
     if truncated_fields:
-        note += f"\n# NOTE: {truncated_fields} long field(s) middle-truncated at {max_chars} chars (select 1-3 rows for up to 16000 chars)."
+        note += (
+            f"\n# NOTE: {truncated_fields} long field(s) middle-truncated at {max_chars} chars "
+            f"(select 1-3 rows for up to 16000 chars, or use SUBSTR(col, offset, 8000) to paginate)."
+        )
     return "```yaml\n" + "\n".join(lines) + "\n```" + note, len(rows)
 
 
@@ -277,6 +283,8 @@ class AuthorToolRegistry:
         self.wiki_queries_run: int = 0
         self.theories_queries_run: int = 0
         self.enforce_peer_research_gate: bool = False
+        self.claimed_deficit: Any = None
+        self.scenario_gate: str = "off"
 
     def _get_harness(self, max_steps: int) -> NetHackHarness:
         steps = max(10, int(max_steps))
@@ -356,6 +364,8 @@ class AuthorToolRegistry:
         swarm_frontier: Any = None,
         swarm_replay_fixtures: list[dict[str, Any]] | None = None,
         swarm_scaffold_code: str = "",
+        claimed_deficit: Any = None,
+        scenario_gate: str = "off",
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
         self.pool = pool
@@ -379,6 +389,8 @@ class AuthorToolRegistry:
         self.swarm_frontier = swarm_frontier
         self.swarm_replay_fixtures = list(swarm_replay_fixtures or [])
         self.swarm_scaffold_code = str(swarm_scaffold_code or "")
+        self.claimed_deficit = claimed_deficit
+        self.scenario_gate = str(scenario_gate or "off").strip().lower()
         self.swarm_experiments = []
         self.wiki_queries_run = 0
         self.theories_queries_run = 0
@@ -453,13 +465,18 @@ class AuthorToolRegistry:
             )
 
         auto_limited = "limit" not in low_no_literals
+        max_rows_cap = 40
         if auto_limited:
             clean += " LIMIT 30"
+        else:
+            m_lim = re.search(r"\blimit\s+(\d+)\b", low_no_literals)
+            if m_lim:
+                max_rows_cap = max(40, min(200, int(m_lim.group(1))))
 
         con = connect_db(self.db_path, read_only=True)
         try:
             cur = con.execute(clean)
-            text, count = _format_cursor_yaml(cur)
+            text, count = _format_cursor_yaml(cur, max_rows=max_rows_cap)
             if count == 0:
                 hint = self._build_zero_row_hint(con, clean, low_no_literals)
                 if hint:
@@ -715,8 +732,18 @@ class AuthorToolRegistry:
             "not_found",
         )
 
-    def read_policy(self, policy_id: str) -> tuple[str, str]:
-        """Reads the full stored `policy_code` and `skills_json` snapshot for a historical `policy_id`."""
+    def read_policy(self, policy_id: str = "") -> tuple[str, str]:
+        """Reads current `policy.py` (when empty/`current`) or a historical `policy_id` snapshot."""
+        pid = str(policy_id or "").strip()
+        if not pid or pid.lower() in ("current", "workspace", "incumbent", "policy.py"):
+            cur = str(self.current_policy_code or "")
+            if cur.strip():
+                return cur, f"{len(cur.splitlines())} lines (current)"
+            ws_pol = Path(self.macro_lib.path).parent / "policy.py"
+            if ws_pol.exists():
+                cur = ws_pol.read_text(encoding="utf-8")
+                return cur, f"{len(cur.splitlines())} lines (current)"
+            return "(Empty current policy.py)", "0 lines"
         if not os.path.exists(self.db_path):
             return "Database not found.", "not_found"
         con = connect_db(self.db_path, read_only=True)
@@ -724,12 +751,12 @@ class AuthorToolRegistry:
             try:
                 row = con.execute(
                     "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code, skills_json FROM policies WHERE policy_id = ?",
-                    [policy_id.strip()],
+                    [pid],
                 ).fetchone()
             except Exception:
                 row_legacy = con.execute(
                     "SELECT generation, mode, avg_depth, max_depth, is_promoted, policy_code FROM policies WHERE policy_id = ?",
-                    [policy_id.strip()],
+                    [pid],
                 ).fetchone()
                 row = (*row_legacy, "{}") if row_legacy else None
             if not row:
@@ -804,7 +831,13 @@ class AuthorToolRegistry:
                 )
             )
             if p_diff:
-                diffs.append("\n".join(p_diff[:250]))
+                if len(p_diff) > 500:
+                    diffs.append(
+                        "\n".join(p_diff[:500])
+                        + f"\n... [TRUNCATED {len(p_diff) - 500} diff lines] ..."
+                    )
+                else:
+                    diffs.append("\n".join(p_diff))
             try:
                 sk_a = json.loads(row_a[1] or "{}") or {}
                 sk_b = json.loads(row_b[1] or "{}") or {}
@@ -822,15 +855,274 @@ class AuthorToolRegistry:
                     )
                 )
                 if s_diff:
-                    diffs.append("\n".join(s_diff[:150]))
+                    if len(s_diff) > 300:
+                        diffs.append(
+                            "\n".join(s_diff[:300])
+                            + f"\n... [TRUNCATED {len(s_diff) - 300} diff lines] ..."
+                        )
+                    else:
+                        diffs.append("\n".join(s_diff))
             out = (
                 "\n\n".join(diffs)
                 if diffs
                 else "No differences between policy snapshots."
             )
-            return out[:14000], f"{len(diffs)} changed files"
+            if len(out) > 32000:
+                out = (
+                    out[:32000]
+                    + f"\n... [TRUNCATED {len(out) - 32000} chars; read individual files via read_policy/read_skill] ..."
+                )
+            return out, f"{len(diffs)} changed files"
         finally:
             con.close()
+
+    def _iter_workspace_sources(self) -> list[tuple[str, str]]:
+        """Returns `[(rel_path, source_text), ...]` for active `policy.py` and `skills/*.py`."""
+        files: list[tuple[str, str]] = []
+        pol = str(self.current_policy_code or "").strip()
+        if pol:
+            files.append(("policy.py", self.current_policy_code))
+        seen_sk: set[str] = set()
+        for k in sorted(self.skills.keys()):
+            src = str(self.skills.get(k) or "")
+            if src.strip():
+                files.append((f"skills/{k}.py", src))
+                seen_sk.add(k)
+        skills_dir = Path(self.macro_lib.path).parent / "skills"
+        if skills_dir.exists():
+            for p in sorted(skills_dir.glob("*.py")):
+                if p.stem != "__init__" and p.stem not in seen_sk:
+                    try:
+                        files.append(
+                            (f"skills/{p.stem}.py", p.read_text(encoding="utf-8"))
+                        )
+                    except Exception:
+                        pass
+        return files
+
+    def read_wiki_article(
+        self, title: str, section: str = "", offset: int = 0, max_chars: int = 0
+    ) -> tuple[str, str]:
+        """Reads full untruncated article or section from the offline NetHackWiki + Guidebook index."""
+        self.wiki_queries_run += 1
+        out = self.wiki.read_article(
+            title=title, section=section, offset=offset, max_chars=max_chars
+        )
+        return out, f"article:{title[:32]}"
+
+    def find_references(self, symbol: str) -> tuple[str, str]:
+        """Finds definitions, imports, and call/attribute sites for a symbol across `policy.py` and `skills/`."""
+        sym = str(symbol or "").strip()
+        if not sym:
+            return "Error: `symbol` must be non-empty.", "error"
+        pat = re.compile(rf"\b{re.escape(sym)}\b")
+        defs: list[str] = []
+        refs: list[str] = []
+        for rel_path, src in self._iter_workspace_sources():
+            for idx, ln in enumerate(src.splitlines(), start=1):
+                if not pat.search(ln):
+                    continue
+                stripped = ln.strip()
+                if re.match(
+                    rf"^(?:async\s+)?def\s+{re.escape(sym)}\b", stripped
+                ) or re.match(rf"^class\s+{re.escape(sym)}\b", stripped):
+                    defs.append(f"  [DEF] {rel_path}:{idx}: {stripped[:160]}")
+                else:
+                    refs.append(f"  {rel_path}:{idx}: {stripped[:160]}")
+        total = len(defs) + len(refs)
+        if total == 0:
+            return f"No references found for `{sym}` across policy/skills.", "0 refs"
+        out_lines = [
+            f"### References for `{sym}` ({len(defs)} defs, {len(refs)} uses):"
+        ]
+        out_lines.extend(defs[:20])
+        out_lines.extend(refs[:60])
+        if len(refs) > 60:
+            out_lines.append(f"  ... ({len(refs) - 60} more uses)")
+        return "\n".join(out_lines), f"{total} refs"
+
+    def grep_skills(self, pattern: str) -> tuple[str, str]:
+        """Searches regex/text pattern across `policy.py` and `skills/*.py`."""
+        pat_s = str(pattern or "").strip()
+        if not pat_s:
+            return "Error: `pattern` must be non-empty.", "error"
+        try:
+            rx = re.compile(pat_s, re.IGNORECASE)
+        except re.error:
+            rx = re.compile(re.escape(pat_s), re.IGNORECASE)
+        hits: list[str] = []
+        for rel_path, src in self._iter_workspace_sources():
+            for idx, ln in enumerate(src.splitlines(), start=1):
+                if rx.search(ln):
+                    hits.append(f"  {rel_path}:{idx}: {ln.strip()[:160]}")
+        if not hits:
+            return f"No matches for `{pat_s}` in policy/skills.", "0 matches"
+        shown = hits[:80]
+        if len(hits) > 80:
+            shown.append(f"  ... ({len(hits) - 80} more matches)")
+        return "\n".join(shown), f"{len(hits)} matches"
+
+    def blackboard_map(self) -> tuple[str, str]:
+        """Lists shared blackboard keys/attributes with writer and reader locations across `policy.py` and `skills/`."""
+        bb_keys: dict[str, dict[str, set[str]]] = {}
+        bb_names = {"bb", "blackboard"}
+
+        def _rec(key_name: str, kind: str, loc: str) -> None:
+            entry = bb_keys.setdefault(key_name, {"writers": set(), "readers": set()})
+            entry[kind].add(loc)
+
+        for rel_path, src in self._iter_workspace_sources():
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            parent_map: dict[int, ast.AST] = {}
+            for p in ast.walk(tree):
+                for ch in ast.iter_child_nodes(p):
+                    parent_map[id(ch)] = p
+            fn_scopes: list[tuple[int, int, str]] = []
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fn_scopes.append(
+                        (n.lineno, getattr(n, "end_lineno", n.lineno), n.name)
+                    )
+
+            def _scope_for(lineno: int) -> str:
+                best = "<module>"
+                best_span = 10**9
+                for s_l, e_l, fn_nm in fn_scopes:
+                    if s_l <= lineno <= e_l and (e_l - s_l) < best_span:
+                        best = fn_nm
+                        best_span = e_l - s_l
+                return f"{rel_path}::{best}"
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                    if (
+                        node.value.id in bb_names
+                        or node.value.id == "self"
+                        and node.attr == "blackboard"
+                    ):
+                        if node.attr.startswith("__"):
+                            continue
+                        is_write = isinstance(node.ctx, (ast.Store, ast.Del))
+                        kind = "writers" if is_write else "readers"
+                        if node.attr not in {"get", "set", "setdefault", "data"}:
+                            _rec(
+                                node.attr, kind, _scope_for(getattr(node, "lineno", 1))
+                            )
+                elif isinstance(node, ast.Subscript) and isinstance(
+                    node.value, ast.Name
+                ):
+                    if (
+                        node.value.id in bb_names
+                        and isinstance(node.slice, ast.Constant)
+                        and isinstance(node.slice.value, str)
+                    ):
+                        kind = (
+                            "writers"
+                            if isinstance(node.ctx, (ast.Store, ast.Del))
+                            else "readers"
+                        )
+                        _rec(
+                            node.slice.value,
+                            kind,
+                            _scope_for(getattr(node, "lineno", 1)),
+                        )
+                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    if node.func.id in ("setattr", "getattr") and len(node.args) >= 2:
+                        a0, a1 = node.args[0], node.args[1]
+                        if (
+                            isinstance(a0, ast.Name)
+                            and a0.id in bb_names
+                            and isinstance(a1, ast.Constant)
+                            and isinstance(a1.value, str)
+                        ):
+                            kind = "writers" if node.func.id == "setattr" else "readers"
+                            _rec(a1.value, kind, _scope_for(getattr(node, "lineno", 1)))
+        if not bb_keys:
+            return "No Blackboard attribute reads/writes detected yet.", "0 keys"
+        lines = [f"### Shared Blackboard Key Map ({len(bb_keys)} keys):"]
+        for k in sorted(bb_keys.keys())[:80]:
+            w = ", ".join(sorted(bb_keys[k]["writers"])[:4]) or "none"
+            r = ", ".join(sorted(bb_keys[k]["readers"])[:4]) or "none"
+            lines.append(f"  - `{k}` | writers=[{w}] | readers=[{r}]")
+        return "\n".join(lines), f"{len(bb_keys)} keys"
+
+    def benchmark_expert_parity(self, top_n: int = 10) -> tuple[str, str]:
+        """Compares champion `runs` vs `expert_runs` across progression, survival, and telemetry metrics."""
+        if not os.path.exists(self.db_path):
+            return "Database not found.", "not_found"
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            try:
+                champ = con.execute(
+                    """
+                    SELECT COUNT(*) AS n,
+                           ROUND(AVG(max_depth), 2) AS avg_depth,
+                           MAX(max_depth) AS max_depth,
+                           ROUND(AVG(turns), 1) AS avg_turns,
+                           ROUND(AVG(score), 1) AS avg_score,
+                           ROUND(AVG(final_ac), 2) AS avg_ac,
+                           ROUND(AVG(final_xp_level), 2) AS avg_xl,
+                           ROUND(AVG(worn_oprop_count), 2) AS avg_oprop,
+                           ROUND(AVG(dungeons_visited), 2) AS avg_branches,
+                           ROUND(AVG(unique_tiles), 1) AS avg_tiles
+                    FROM champion_runs
+                    """
+                ).fetchall()
+            except Exception:
+                champ = []
+            try:
+                exp = con.execute(
+                    """
+                    SELECT COUNT(*) AS n,
+                           ROUND(AVG(max_depth), 2) AS avg_depth,
+                           MAX(max_depth) AS max_depth,
+                           ROUND(AVG(turns), 1) AS avg_turns,
+                           ROUND(AVG(score), 1) AS avg_score
+                    FROM expert_runs
+                    """
+                ).fetchall()
+            except Exception:
+                exp = []
+            try:
+                lim = max(1, min(30, int(top_n or 10)))
+                early_expert = con.execute(
+                    f"""
+                    SELECT run_id, role, race, alignment, max_depth, turns, score, summary_digest
+                    FROM expert_runs
+                    ORDER BY turns DESC
+                    LIMIT {lim}
+                    """
+                ).fetchall()
+            except Exception:
+                early_expert = []
+        finally:
+            con.close()
+        out_parts = ["### Champion vs Expert Parity Snapshot"]
+        if champ and champ[0][0]:
+            r = champ[0]
+            out_parts.append(
+                f"- Champion (`n={r[0]}`): avg_depth={r[1]}, max_depth={r[2]}, avg_turns={r[3]}, "
+                f"avg_score={r[4]}, avg_ac={r[5]}, avg_xl={r[6]}, avg_oprop={r[7]}, "
+                f"avg_branches={r[8]}, avg_tiles={r[9]}"
+            )
+        else:
+            out_parts.append("- Champion: no `champion_runs` recorded yet.")
+        if exp and exp[0][0]:
+            er = exp[0]
+            out_parts.append(
+                f"- Human Experts (`n={er[0]}`): avg_depth={er[1]}, max_depth={er[2]}, avg_turns={er[3]}, avg_score={er[4]}"
+            )
+        if early_expert:
+            out_parts.append(f"- Top {len(early_expert)} Expert Reference Runs:")
+            for row in early_expert[:10]:
+                digest_line = str(row[7] or "").replace("\n", " ")[:180]
+                out_parts.append(
+                    f"  * `{row[0]}` ({row[1]}-{row[2]}-{row[3]}, Dlvl {row[4]}, turns={row[5]}, score={row[6]}): {digest_line}"
+                )
+        return "\n".join(out_parts), "parity ok"
 
     def _verify_macro_on_real_states(self, code: str) -> tuple[str, str]:
         """
@@ -885,16 +1177,19 @@ class AuthorToolRegistry:
         try:
             for s_seed in (42, 101, 202):
                 h = NetHackHarness(max_steps=50)
-                st = h.reset(seed=s_seed)
-                if s_seed == 101:
-                    for a in (Action.NORTH, Action.EAST, Action.SOUTH, Action.WEST):
-                        if not h.done:
-                            st, _, _ = h.step(a)
-                elif s_seed == 202:
-                    for a in (Action.SEARCH, Action.WAIT, Action.DOWN, Action.UP):
-                        if not h.done:
-                            st, _, _ = h.step(a)
-                test_states.append(st)
+                try:
+                    st = h.reset(seed=s_seed)
+                    if s_seed == 101:
+                        for a in (Action.NORTH, Action.EAST, Action.SOUTH, Action.WEST):
+                            if not h.done:
+                                st, _, _ = h.step(a)
+                    elif s_seed == 202:
+                        for a in (Action.SEARCH, Action.WAIT, Action.DOWN, Action.UP):
+                            if not h.done:
+                                st, _, _ = h.step(a)
+                    test_states.append(st)
+                finally:
+                    h.close()
         except Exception as exc:
             tb = traceback.format_exc(limit=4)
             return (
@@ -1414,9 +1709,28 @@ class AuthorToolRegistry:
                     "Make a substantive behavioral modification before calling `dry_run_policy`.",
                     "NOOP_DIFF",
                 )
+            scaffold_ref = self.swarm_scaffold_code or self.current_policy_code
+            if (
+                self.mode == "SWARM_PEER"
+                and scaffold_ref.strip()
+                and "#EVOLVE-BLOCK" in scaffold_ref.upper()
+            ):
+                eb_err = check_evolve_block_bounds(scaffold_ref, spliced_policy)
+                if eb_err:
+                    return (f"Evolve-Block Guard Error:\n{eb_err}", "COMPILE_ERROR")
+
             compiled = compile_policy_package(
                 spliced_policy, macros_code, skills=cand_skills
             )
+            validate_cross_module_contracts(spliced_policy, cand_skills)
+            pyright_errs = run_pyright_on_package(spliced_policy, cand_skills)
+            if pyright_errs:
+                self.last_dry_run_diag = "PYRIGHT: " + " | ".join(pyright_errs[:4])
+                return (
+                    "Type / Contract Validation Error (pyright):\n"
+                    + "\n".join(f"- {e}" for e in pyright_errs),
+                    "COMPILE_ERROR",
+                )
         except Exception as exc:
             self.last_dry_run_diag = f"{type(exc).__name__}: {exc}"
             return (
@@ -1431,8 +1745,8 @@ class AuthorToolRegistry:
             runner = compiled.create_runner()
             actions_taken: list[str] = []
             raw_act_names: list[str] = []
-            unique_positions: set[tuple[int, int]] = set()
-            positions_history: list[tuple[int, int]] = []
+            unique_positions: set[tuple[int, int, int, int]] = set()
+            positions_history: list[tuple[int, int, int]] = []
             oscillation_detected = False
             smoke_msg_counts: Counter[str] = Counter()
             prompt_repeat_count = 0
@@ -1467,7 +1781,7 @@ class AuthorToolRegistry:
             else:
                 state = harness.reset(seed=int(seed))
 
-            for _ in range(max(10, min(200, int(max_turns)))):
+            for _ in range(max(10, min(2000, int(max_turns)))):
                 raw_act, active_fn = runner.next_action(state)
                 state, done, info = harness.step(raw_act)
                 msg_l = (state.message or "").lower()
@@ -1489,9 +1803,17 @@ class AuthorToolRegistry:
                 msg_clean = (state.message or "").strip()
                 if msg_clean:
                     smoke_msg_counts[msg_clean] += 1
-                pos = (state.y, state.x)
-                unique_positions.add(pos)
-                positions_history.append(pos)
+                if not done and int(getattr(state, "depth", 0) or 0) > 0:
+                    d_now = int(getattr(state, "depth", 1) or 1)
+                    unique_positions.add(
+                        (
+                            int(getattr(state, "dungeon_num", 0) or 0),
+                            d_now,
+                            int(state.y),
+                            int(state.x),
+                        )
+                    )
+                    positions_history.append((d_now, int(state.y), int(state.x)))
                 if len(positions_history) >= 40:
                     if len(set(positions_history[-40:])) <= 3:
                         oscillation_detected = True
@@ -2240,12 +2562,25 @@ class AuthorToolRegistry:
                         )
                         rh.step_count = 0
                         r_acts: list[str] = []
-                        r_tiles: set[tuple[int, int]] = {(r_st.y, r_st.x)}
+                        r_tiles: set[tuple[int, int, int]] = {
+                            (
+                                max(1, int(getattr(r_st, "depth", 1) or 1)),
+                                int(r_st.y),
+                                int(r_st.x),
+                            )
+                        }
                         for _ in range(120):
                             ra, _ = r_runner.next_action(r_st)
                             r_st, r_done, r_info = rh.step(ra)
                             r_acts.append(str(r_info.get("action_name", "")))
-                            r_tiles.add((r_st.y, r_st.x))
+                            if not r_done and int(getattr(r_st, "depth", 0) or 0) > 0:
+                                r_tiles.add(
+                                    (
+                                        int(getattr(r_st, "depth", 1) or 1),
+                                        int(r_st.y),
+                                        int(r_st.x),
+                                    )
+                                )
                             if r_done:
                                 break
                         r_leaf_errs = extract_runner_leaf_errors(r_runner)
@@ -2260,10 +2595,15 @@ class AuthorToolRegistry:
                         top_r_acts = ", ".join(
                             f"{k}:{v}" for k, v in Counter(r_acts).most_common(4)
                         )
+                        r_end_s = (
+                            str(getattr(r_st, "end_reason", "") or "")
+                            or str(getattr(r_st, "message", "") or "").split(".")[0][
+                                :60
+                            ]
+                            or "ended"
+                        )
                         r_status = (
-                            f"ENDED({r_st.end_reason})"
-                            if rh.done
-                            else "SURVIVED(120 steps)"
+                            f"ENDED({r_end_s})" if rh.done else "SURVIVED(120 steps)"
                         )
                         replay_summaries.append(
                             f"  * `{f_rid}` (prior `{f_end}`, rewound -50B): {r_status} | "
@@ -2278,16 +2618,34 @@ class AuthorToolRegistry:
                     try:
                         f_cp = self.swarm_frontier.sample_checkpoint(min_depth=2)
                         if f_cp is not None and getattr(f_cp, "action_bytes", b""):
-                            fh = self._get_harness(120)
+                            fh = self._get_harness(len(f_cp.action_bytes) + 150)
                             f_runner = compiled.create_runner()
                             f_st = self.swarm_frontier.replay_into(fh, f_cp)
+                            fh.step_count = 0
+                            fh.max_steps = 120
                             f_acts: list[str] = []
-                            f_tiles: set[tuple[int, int]] = {(f_st.y, f_st.x)}
+                            f_tiles: set[tuple[int, int, int]] = {
+                                (
+                                    max(1, int(getattr(f_st, "depth", 1) or 1)),
+                                    int(f_st.y),
+                                    int(f_st.x),
+                                )
+                            }
                             for _ in range(120):
                                 fa, _ = f_runner.next_action(f_st)
                                 f_st, f_done, f_info = fh.step(fa)
                                 f_acts.append(str(f_info.get("action_name", "")))
-                                f_tiles.add((f_st.y, f_st.x))
+                                if (
+                                    not f_done
+                                    and int(getattr(f_st, "depth", 0) or 0) > 0
+                                ):
+                                    f_tiles.add(
+                                        (
+                                            int(getattr(f_st, "depth", 1) or 1),
+                                            int(f_st.y),
+                                            int(f_st.x),
+                                        )
+                                    )
                                 if f_done:
                                     break
                             f_leaf_errs = extract_runner_leaf_errors(f_runner)
@@ -2303,8 +2661,15 @@ class AuthorToolRegistry:
                             top_f_acts = ", ".join(
                                 f"{k}:{v}" for k, v in Counter(f_acts).most_common(4)
                             )
+                            f_end_s = (
+                                str(getattr(f_st, "end_reason", "") or "")
+                                or str(getattr(f_st, "message", "") or "").split(".")[
+                                    0
+                                ][:60]
+                                or "ended"
+                            )
                             f_status = (
-                                f"ENDED({f_st.end_reason})"
+                                f"ENDED({f_end_s})"
                                 if fh.done
                                 else "SURVIVED(120 steps)"
                             )
@@ -2319,6 +2684,97 @@ class AuthorToolRegistry:
                         "\n- Mid-Game Failure & Frontier-Replay Checks:\n"
                         + "\n".join(replay_summaries)
                     )
+
+            # In-turn TRIGGER_MISS check on claimed DeficitCluster replay fixtures
+            if (
+                not smoke_only
+                and self.mode == "SWARM_PEER"
+                and self.claimed_deficit is not None
+                and getattr(self.claimed_deficit, "replay_fixtures", None)
+            ):
+                edited_fns: set[str] = {
+                    str(fn).strip() for fn in (changed_fns or []) if str(fn).strip()
+                }
+                for sk_k, sk_src in cand_skills.items():
+                    base_sk = str(self.skills.get(sk_k, "") or "")
+                    if sk_src.strip() == base_sk.strip():
+                        continue
+                    try:
+                        c_ast = ast.parse(sk_src)
+                        b_ast = (
+                            ast.parse(base_sk)
+                            if base_sk.strip()
+                            else ast.Module(body=[], type_ignores=[])
+                        )
+                        b_dumps = {
+                            n.name: ast.dump(n)
+                            for n in ast.walk(b_ast)
+                            if isinstance(n, ast.FunctionDef)
+                            and not n.name.startswith("__")
+                        }
+                        for n in ast.walk(c_ast):
+                            if isinstance(n, ast.FunctionDef) and not n.name.startswith(
+                                "__"
+                            ):
+                                if b_dumps.get(n.name) != ast.dump(n):
+                                    edited_fns.add(n.name)
+                    except SyntaxError:
+                        pass
+                edited_fns.discard("run")
+                edited_fns.discard("__init__")
+                if edited_fns:
+                    fixture_calls: Counter[str] = Counter(runner.tracer.fn_calls)
+                    for fix in (self.claimed_deficit.replay_fixtures or [])[:2]:
+                        f_buf = bytes(fix.get("action_bytes") or b"")
+                        if not f_buf:
+                            continue
+                        try:
+                            fh = self._get_harness(100)
+                            f_runner = compiled.create_runner()
+                            f_st = fh.replay_bytes(
+                                seed=int(fix.get("seed", 1)),
+                                recorded_bytes=f_buf,
+                                stop_at_byte_idx=int(
+                                    fix.get("stop_at_byte_idx", max(1, len(f_buf) - 35))
+                                ),
+                            )
+                            fh.step_count = 0
+                            for _ in range(100):
+                                fa, _ = f_runner.next_action(f_st)
+                                f_st, f_done, _ = fh.step(fa)
+                                if f_done:
+                                    break
+                            fixture_calls.update(f_runner.tracer.fn_calls)
+                        except Exception:
+                            pass
+                    if sum(fixture_calls.get(fn, 0) for fn in edited_fns) == 0:
+                        warn_block += (
+                            f"\n- TRIGGER_MISS WARNING: Modified function(s) {sorted(edited_fns)} executed 0 times "
+                            "during smoke + claimed-deficit replay! Your change may be dead/unreachable on target states."
+                        )
+
+            if not smoke_only and self.scenario_gate in ("advisory", "strict"):
+                try:
+                    from lox.env.benchmarks.nethack_scenarios import run_scenario_gate
+
+                    sg = run_scenario_gate(
+                        spliced_policy,
+                        cand_skills,
+                        seed=int(seed),
+                        max_steps=40,
+                        include_archetypes=False,
+                        include_prompt_torture=True,
+                    )
+                    if sg.get("exceptions", 0) > 0 or sg.get("prompt_livelocks", 0) > 0:
+                        msg_sg = (
+                            f"Prompt-Torture Scenario Gate flagged issues: passed={sg['passed_count']}/{sg['total_count']}, "
+                            f"exc={sg['exceptions']}, livelocks={sg['prompt_livelocks']}."
+                        )
+                        if self.scenario_gate == "strict":
+                            return (msg_sg, "RUNTIME_ERROR")
+                        warn_block += f"\n- SCENARIO_GATE ADVISORY: {msg_sg}"
+                except Exception:
+                    pass
 
             self.last_passed_code = (
                 spliced_policy
@@ -2527,16 +2983,17 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_policy",
-            "description": "Read the stored `policy_code` and `skills_json` list for a historical `policy_id` from DuckDB.",
+            "description": "Read the current workspace `policy.py` (when `policy_id` is omitted or `'current'`) or a historical `policy_id` snapshot from DuckDB.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "policy_id": {
                         "type": "string",
-                        "description": "Policy ID from the `policies` table (e.g. 'policy_swarm_g12').",
+                        "description": "Optional policy ID from the `policies` table (e.g. 'policy_swarm_g12'), or omit/'current' to read active policy.py.",
+                        "default": "",
                     }
                 },
-                "required": ["policy_id"],
+                "required": [],
             },
         },
     },
@@ -2595,7 +3052,7 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     },
                     "max_turns": {
                         "type": "integer",
-                        "description": "Number of steps to simulate (10-200).",
+                        "description": "Number of steps to simulate (10-2000).",
                         "default": 150,
                     },
                     "replay_run_id": {
@@ -2626,4 +3083,132 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_wiki_article",
+            "description": (
+                "Reads full untruncated NetHackWiki or 3.6.6 Guidebook article/section (use after `query_wiki` "
+                "or when an article was partially shown). Pass optional `section` heading or `offset`."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Exact NetHackWiki article title.",
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "Optional section heading substring.",
+                        "default": "",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Character offset for pagination.",
+                        "default": 0,
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Optional character cap (0 = full article).",
+                        "default": 0,
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_references",
+            "description": "Lists definitions and all call/import sites for a symbol across `policy.py` and `skills/*.py`.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Identifier/function/attribute name to find.",
+                    }
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_skills",
+            "description": "Searches a regex or substring across `policy.py` and all `skills/*.py` modules.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Case-insensitive regex or text pattern.",
+                    }
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "blackboard_map",
+            "description": "Lists shared Blackboard keys/attributes with writer and reader locations across `policy.py` and `skills/*.py`.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "benchmark_expert_parity",
+            "description": "Compares champion `runs` vs human `expert_runs` across progression, AC, XL, intrinsics, and branches.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Number of expert reference digests to return (1-30).",
+                        "default": 10,
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
 ]
+
+
+def get_tool_specs(mode: str = "WRITE") -> list[dict[str, Any]]:
+    """
+    Returns mode-filtered OpenAI tool definitions.
+    In `SWARM_PEER` mode, removes redundant `query_policy_docs` and unused legacy
+    `dry_run_policy` properties (`is_macro`, `skill_name`, `skill_code`, `hypothesis`)
+    to trim schema tokens without losing capabilities.
+    """
+    canon = normalize_mode(mode)
+    if canon != "SWARM_PEER":
+        return OPENAI_TOOL_SPECS
+
+    import copy as _copy
+
+    filtered: list[dict[str, Any]] = []
+    for spec in OPENAI_TOOL_SPECS:
+        fn_name = str((spec.get("function") or {}).get("name", ""))
+        if fn_name == "query_policy_docs":
+            continue
+        if fn_name == "dry_run_policy":
+            s_copy = _copy.deepcopy(spec)
+            props = (
+                (s_copy.get("function") or {})
+                .get("parameters", {})
+                .get("properties", {})
+            )
+            for dead_key in ("is_macro", "skill_name", "skill_code", "hypothesis"):
+                props.pop(dead_key, None)
+            filtered.append(s_copy)
+        else:
+            filtered.append(spec)
+    return filtered

@@ -212,6 +212,12 @@ class BatchDatabaseLogger:
                     "died_unarmored": [
                         bool(r.get("died_unarmored", False)) for r in runs
                     ],
+                    "worn_oprop_count": [
+                        int(r.get("worn_oprop_count", 0) or 0) for r in runs
+                    ],
+                    "dungeons_visited": [
+                        max(1, int(r.get("dungeons_visited", 1) or 1)) for r in runs
+                    ],
                     "is_shard": [bool(r.get("is_shard", False)) for r in runs],
                     "shard_id": [str(r.get("shard_id", "")) for r in runs],
                     "created_at": [datetime.datetime.now()] * len(runs),
@@ -311,23 +317,24 @@ class BatchDatabaseLogger:
                     )
                     con.unregister("_temp_ticks")
 
-                    # Prune ticks from old, superseded non-champion, non-pilot, non-outlier batches
-                    # so `ticks` stays fast while preserving 100% full ticks for champion, recent, pilot, and outlier runs.
-                    con.execute(
-                        """
-                        DELETE FROM ticks
-                        WHERE run_id NOT IN (SELECT run_id FROM champion_runs)
-                          AND run_id NOT IN (SELECT run_id FROM latest_pilot_runs)
-                          AND run_id NOT IN (
-                              SELECT run_id FROM runs
-                              WHERE is_outlier_good = TRUE
-                                 OR batch_id IN (
-                                     SELECT batch_id FROM batches
-                                     ORDER BY created_at DESC LIMIT 4
-                                 )
-                          )
-                        """
-                    )
+                    # Prune ticks from old superseded batches every 5 generations so per-batch commits stay fast
+                    # while preserving 100% full ticks for champion, recent, pilot, and outlier runs.
+                    if int(generation) % 5 == 0:
+                        con.execute(
+                            """
+                            DELETE FROM ticks
+                            WHERE run_id NOT IN (SELECT run_id FROM champion_runs)
+                              AND run_id NOT IN (SELECT run_id FROM latest_pilot_runs)
+                              AND run_id NOT IN (
+                                  SELECT run_id FROM runs
+                                  WHERE is_outlier_good = TRUE
+                                     OR batch_id IN (
+                                         SELECT batch_id FROM batches
+                                         ORDER BY created_at DESC LIMIT 4
+                                     )
+                              )
+                            """
+                        )
 
             if fn_stats:
                 con.execute(
@@ -464,7 +471,8 @@ class BatchDatabaseLogger:
                        summary_digest, game_log, triggered_functions, last_active_function,
                        action_bytes, milestones_json, unique_tiles, pct_wait, pct_search,
                        starved_with_food, died_unarmored, auto_esc_count,
-                       subgen_preemptions, policy_exceptions
+                       subgen_preemptions, policy_exceptions,
+                       worn_oprop_count, dungeons_visited
                 FROM runs
                 WHERE batch_id = ? AND run_id NOT LIKE 'shard_%' AND (is_shard IS NULL OR is_shard = FALSE)
                 """,
@@ -997,46 +1005,74 @@ class BatchDatabaseLogger:
         con = connect_db(self.db_path, read_only=False)
         try:
             now = datetime.datetime.now()
-            con.execute("BEGIN TRANSACTION")
-            for a in attempts:
-                con.execute(
-                    """
-                    INSERT OR REPLACE INTO tournament_attempts (
-                        attempt_id, generation, peer_id, deficit_id, candidate_fp,
-                        promoted, sandbox_passed, sandbox_error, avg_depth, max_depth,
-                        avg_score, avg_ac, avg_xp_level, policy_exceptions,
-                        seeds_gained_json, seeds_lost_json, top_tracebacks_json,
-                        holdout_avg_depth, holdout_iqm_delta, holdout_rejected, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        str(a.get("attempt_id", "")),
-                        int(a.get("generation", 0) or 0),
-                        str(a.get("peer_id", "")),
-                        str(a.get("deficit_id", "")),
-                        str(a.get("candidate_fp", "")),
-                        bool(a.get("promoted", False)),
-                        bool(a.get("sandbox_passed", False)),
-                        str(a.get("sandbox_error", ""))[:2000],
-                        float(a.get("avg_depth", 0.0) or 0.0),
-                        int(a.get("max_depth", 0) or 0),
-                        float(a.get("avg_score", 0.0) or 0.0),
-                        float(a.get("avg_ac", 10.0) or 10.0),
-                        float(a.get("avg_xp_level", 1.0) or 1.0),
-                        int(a.get("policy_exceptions", 0) or 0),
-                        json.dumps(a.get("seeds_gained", [])),
-                        json.dumps(a.get("seeds_lost", [])),
-                        json.dumps(a.get("top_tracebacks", [])),
-                        float(a["holdout_avg_depth"])
-                        if a.get("holdout_avg_depth") is not None
-                        else None,
-                        float(a["holdout_iqm_delta"])
-                        if a.get("holdout_iqm_delta") is not None
-                        else None,
-                        bool(a.get("holdout_rejected", False)),
-                        now,
+            ta_tbl = pa.Table.from_pydict(
+                {
+                    "attempt_id": [str(a.get("attempt_id", "")) for a in attempts],
+                    "generation": [int(a.get("generation", 0) or 0) for a in attempts],
+                    "peer_id": [str(a.get("peer_id", "")) for a in attempts],
+                    "deficit_id": [str(a.get("deficit_id", "")) for a in attempts],
+                    "candidate_fp": [str(a.get("candidate_fp", "")) for a in attempts],
+                    "promoted": [bool(a.get("promoted", False)) for a in attempts],
+                    "sandbox_passed": [
+                        bool(a.get("sandbox_passed", False)) for a in attempts
                     ],
-                )
+                    "sandbox_error": [
+                        str(a.get("sandbox_error", ""))[:2000] for a in attempts
+                    ],
+                    "avg_depth": [
+                        float(a.get("avg_depth", 0.0) or 0.0) for a in attempts
+                    ],
+                    "max_depth": [int(a.get("max_depth", 0) or 0) for a in attempts],
+                    "avg_score": [
+                        float(a.get("avg_score", 0.0) or 0.0) for a in attempts
+                    ],
+                    "avg_ac": [float(a.get("avg_ac", 10.0) or 10.0) for a in attempts],
+                    "avg_xp_level": [
+                        float(a.get("avg_xp_level", 1.0) or 1.0) for a in attempts
+                    ],
+                    "policy_exceptions": [
+                        int(a.get("policy_exceptions", 0) or 0) for a in attempts
+                    ],
+                    "seeds_gained_json": [
+                        json.dumps(a.get("seeds_gained", [])) for a in attempts
+                    ],
+                    "seeds_lost_json": [
+                        json.dumps(a.get("seeds_lost", [])) for a in attempts
+                    ],
+                    "top_tracebacks_json": [
+                        json.dumps(a.get("top_tracebacks", [])) for a in attempts
+                    ],
+                    "holdout_avg_depth": pa.array(
+                        [
+                            float(a["holdout_avg_depth"])
+                            if a.get("holdout_avg_depth") is not None
+                            else None
+                            for a in attempts
+                        ],
+                        type=pa.float64(),
+                    ),
+                    "holdout_iqm_delta": pa.array(
+                        [
+                            float(a["holdout_iqm_delta"])
+                            if a.get("holdout_iqm_delta") is not None
+                            else None
+                            for a in attempts
+                        ],
+                        type=pa.float64(),
+                    ),
+                    "holdout_rejected": [
+                        bool(a.get("holdout_rejected", False)) for a in attempts
+                    ],
+                    "created_at": [now] * len(attempts),
+                }
+            )
+            cols_str = ", ".join(ta_tbl.column_names)
+            con.execute("BEGIN TRANSACTION")
+            con.register("_temp_ta", ta_tbl)
+            con.execute(
+                f"INSERT OR REPLACE INTO tournament_attempts ({cols_str}) SELECT {cols_str} FROM _temp_ta"
+            )
+            con.unregister("_temp_ta")
             con.execute("COMMIT")
         except Exception:
             try:

@@ -38,9 +38,11 @@ class NetHackAdapter(BenchmarkAdapter):
         raw_xl = run.get("xp_level")
         if raw_xl is None:
             raw_xl = run.get("final_xp_level", 1)
-        xl = max(0.0, min(float(raw_xl or 1), 30.0) - 1.0) * 0.12
+        xl = max(0.0, min(float(raw_xl or 1), 30.0) - 1.0) * 0.14
         ac_val = float(run.get("final_ac", 10))
-        ac_bonus = max(0.0, 10.0 - ac_val) * 0.04
+        ac_bonus = max(0.0, 10.0 - ac_val) * 0.06
+        oprop_bonus = max(0, min(6, int(run.get("worn_oprop_count", 0) or 0))) * 0.10
+        branch_bonus = max(0, int(run.get("dungeons_visited", 1) or 1) - 1) * 0.15
         sc = math.log1p(max(0.0, float(run.get("score", 0)))) * 0.06
 
         has_stairs = bool(
@@ -71,7 +73,15 @@ class NetHackAdapter(BenchmarkAdapter):
             else 0.0
         )
         return (
-            d + xl + ac_bonus + sc + stairs_bonus + tiles_bonus + shard_survival_bonus
+            d
+            + xl
+            + ac_bonus
+            + oprop_bonus
+            + branch_bonus
+            + sc
+            + stairs_bonus
+            + tiles_bonus
+            + shard_survival_bonus
         )
 
     def extract_milestones_and_stalls(

@@ -38,9 +38,20 @@ def main() -> None:
         help="Target LLM model identifier (default: z-ai/glm-5.3-flash:nitro)",
     )
     parser.add_argument(
+        "--refactor-model",
+        default=None,
+        help="Optional LLM model for REFACTOR generations (defaults to --model)",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        default="max",
+        choices=["low", "medium", "high", "max", "none"],
+        help="OpenRouter reasoning effort level (default: max)",
+    )
+    parser.add_argument(
         "--routing",
         default="nitro",
-        choices=["nitro", "floor", "default"],
+        choices=["nitro", "floor", "exacto", "default"],
         help="OpenRouter provider routing strategy (default: nitro)",
     )
     parser.add_argument(
@@ -172,6 +183,8 @@ def main() -> None:
         provider=args.provider,
         model=args.model,
         routing=args.routing,
+        refactor_model=args.refactor_model,
+        reasoning_effort=args.reasoning_effort,
         api_key=args.api_key,
         db_path=args.db_path,
         policy_path=args.policy_path,

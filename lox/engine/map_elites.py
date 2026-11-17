@@ -237,6 +237,8 @@ class MAPElitesArchive:
         elites = list(self.cells.values())
         if strategy == "best":
             return max(elites, key=lambda e: e.fitness)
+        if strategy == "caution":
+            return max(elites, key=lambda e: (int(e.caution_bin), float(e.fitness)))
         if strategy == "random" or len(elites) == 1:
             return random.choice(elites)
 

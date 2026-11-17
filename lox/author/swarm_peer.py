@@ -437,6 +437,13 @@ def incubate_candidate(
                                 )
                             except Exception:
                                 pass
+                        elif isinstance(r.get("milestones"), dict):
+                            mo = r["milestones"]
+                            exc_tbs.extend(
+                                mo.get("exception_tracebacks")
+                                or mo.get("leaf_errors")
+                                or []
+                            )
                         er = str(r.get("end_reason", ""))
                         dm = str(r.get("death_message", ""))
                         if er or dm:
@@ -464,6 +471,8 @@ def incubate_candidate(
                     guard_d_diffs: list[float] = []
                     d_succ_set = set(deficit_report.d_succ_seeds)
                     for r in c_runs:
+                        if r.get("is_shard"):
+                            continue
                         sd = int(r.get("seed", 0))
                         base_r = incumbent_shard_runs.get(sd)
                         if not base_r:
@@ -529,6 +538,9 @@ class SwarmPeerAgent:
         db_path: str = "data/lox.duckdb",
         theories_store: Any = None,
         max_tool_turns: int = 8,
+        reasoning_effort: str = "max",
+        routing: str = "nitro",
+        scenario_gate: str = "off",
     ) -> None:
         self.peer_id = str(peer_id)
         self.provider = provider
@@ -536,11 +548,16 @@ class SwarmPeerAgent:
         self.db_path = db_path
         self.theories = theories_store
         self.max_tool_turns = max_tool_turns
+        self.reasoning_effort = reasoning_effort
+        self.routing = routing
+        self.scenario_gate = str(scenario_gate or "off").strip().lower()
         self.author = AuthorAgent(
             provider=provider,
             model=model,
             db_path=db_path,
             agent_role=self.peer_id,
+            reasoning_effort=reasoning_effort,
+            routing=routing,
         )
         if theories_store is not None:
             self.author.tools.theories_store = theories_store
@@ -622,6 +639,8 @@ class SwarmPeerAgent:
             mode="SWARM_PEER",
             swarm_frontier=frontier,
             swarm_checkpoint=sampled_frontier[0] if sampled_frontier else None,
+            claimed_deficit=claimed_deficit,
+            scenario_gate=getattr(self, "scenario_gate", "off"),
         )
         self.author.tools.enforce_peer_research_gate = self.provider != "mock"
         self.author.tools.current_policy_code = str(current_policy or "")

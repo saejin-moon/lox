@@ -34,9 +34,13 @@ def progression_metric(run: dict[str, Any], benchmark: str | None = None) -> flo
     raw_xl = run.get("xp_level")
     if raw_xl is None:
         raw_xl = run.get("final_xp_level", 1)
-    xl = max(0.0, min(float(raw_xl or 1), 30.0) - 1.0) * 0.12
+    xl = max(0.0, min(float(raw_xl or 1), 30.0) - 1.0) * 0.14
     ac_val = float(run.get("final_ac", 10))
-    ac_bonus = max(0.0, 10.0 - ac_val) * 0.04
+    ac_bonus = max(0.0, 10.0 - ac_val) * 0.06
+    oprop_cnt = max(0, min(6, int(run.get("worn_oprop_count", 0) or 0)))
+    oprop_bonus = oprop_cnt * 0.10
+    branches_cnt = max(1, int(run.get("dungeons_visited", 1) or 1))
+    branch_bonus = max(0, branches_cnt - 1) * 0.15
     sc = math.log1p(max(0.0, float(run.get("score", 0)))) * 0.06
 
     # Intermediate exploration signals (critical on Dlvl 1 before descent)
@@ -88,6 +92,8 @@ def progression_metric(run: dict[str, Any], benchmark: str | None = None) -> flo
         d
         + xl
         + ac_bonus
+        + oprop_bonus
+        + branch_bonus
         + sc
         + stairs_bonus
         + tiles_bonus

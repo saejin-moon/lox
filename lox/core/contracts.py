@@ -63,6 +63,8 @@ KNOWN_EPISODE_KEYS: frozenset[str] = frozenset(
         "starved_with_food",
         "died_unarmored",
         "stairs_down_found",
+        "worn_oprop_count",
+        "dungeons_visited",
         "triggered_functions",
         "functions_triggered",
         "fn_turns",
@@ -177,6 +179,8 @@ class EpisodeRun(dict):
             ("starved_with_food", False),
             ("died_unarmored", False),
             ("is_outlier_good", False),
+            ("worn_oprop_count", 0),
+            ("dungeons_visited", 1),
         ):
             if super().get(k) is None:
                 super().__setitem__(k, default_val)

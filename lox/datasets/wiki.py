@@ -59,6 +59,8 @@ STOP_WORDS = {
 VARIANT_KEYWORDS = (
     "slash'em",
     "slashem",
+    "slashthem",
+    "splicehack",
     "dnethack",
     "unnethack",
     "fiqhack",
@@ -69,7 +71,25 @@ VARIANT_KEYWORDS = (
     "dynahack",
     "nh4",
     "fourk",
+    "nethack: the next generation",
+    "notdnethack",
+    "hack'em",
 )
+
+
+def _is_variant_title(title: str) -> bool:
+    tl = title.lower()
+    return any(v in tl for v in VARIANT_KEYWORDS)
+
+
+def _clean_wiki_markup(text: str) -> str:
+    txt = str(text or "").strip()
+    txt = (
+        txt.replace("BULLET::::-", "- ")
+        .replace("codice_1", "`...`")
+        .replace("codice_2", "`...`")
+    )
+    return txt.replace("{{", "").replace("}}", "")
 
 
 def ensure_wiki_ready(db_path: str = DEFAULT_WIKI_DB) -> bool:
@@ -133,70 +153,33 @@ class WikiEngine:
             return []
 
         con = sqlite3.connect(self.db_path)
-        cur = con.cursor()
         results: list[dict[str, Any]] = []
         seen_titles: set[str] = set()
+        try:
+            cur = con.cursor()
 
-        # 1. Exact title lookup or alias redirect
-        exact_hit = self.exact_title_lookup(cur, query.strip())
-        if exact_hit:
-            results.append(exact_hit)
-            seen_titles.add(exact_hit["title"].lower())
-            if len(results) >= top_k:
-                con.close()
+            # 1. Exact title lookup or alias redirect
+            exact_hit = self.exact_title_lookup(cur, query.strip())
+            if exact_hit:
+                results.append(exact_hit)
+                seen_titles.add(exact_hit["title"].lower())
+                if len(results) >= top_k:
+                    return results
+
+            # 2. Tokenize and filter low-information stopwords
+            raw_tokens = [re.sub(r"[^a-zA-Z0-9]", "", t) for t in query.split()]
+            tokens = [t for t in raw_tokens if len(t) >= 2]
+            content_tokens = [t for t in tokens if t.lower() not in STOP_WORDS]
+            if not content_tokens:
+                content_tokens = tokens
+            if not content_tokens:
                 return results
 
-        # 2. Tokenize and filter low-information stopwords
-        raw_tokens = [re.sub(r"[^a-zA-Z0-9]", "", t) for t in query.split()]
-        tokens = [t for t in raw_tokens if len(t) >= 2]
-        content_tokens = [t for t in tokens if t.lower() not in STOP_WORDS]
-        if not content_tokens:
-            content_tokens = tokens
-        if not content_tokens:
-            con.close()
-            return results
+            # Deduplicate content tokens while preserving order
+            unique_tokens = list(dict.fromkeys(content_tokens))
 
-        # Deduplicate content tokens while preserving order
-        unique_tokens = list(dict.fromkeys(content_tokens))
-
-        # Strategy A: Exact phrase match
-        clean_phrase = " ".join(content_tokens)
-        try:
-            cur.execute(
-                """
-                SELECT
-                    a.title,
-                    snippet(wiki_fts, 1, '«', '»', '...', 25) AS match_snippet,
-                    bm25(wiki_fts, 10.0, 1.0) AS score,
-                    substr(a.content, 1, 1400) AS preview
-                FROM wiki_fts
-                JOIN articles a ON a.id = wiki_fts.rowid
-                WHERE wiki_fts MATCH ?
-                  AND a.title NOT LIKE 'Forum:%'
-                  AND a.title NOT LIKE '%/%'
-                ORDER BY score ASC
-                LIMIT ?;
-                """,
-                (f'"{clean_phrase}"', top_k),
-            )
-            for r in cur.fetchall():
-                if r[0].lower() not in seen_titles:
-                    results.append(
-                        {
-                            "title": r[0],
-                            "snippet": r[1],
-                            "score": r[2],
-                            "preview": r[3],
-                            "is_exact": False,
-                        }
-                    )
-                    seen_titles.add(r[0].lower())
-        except sqlite3.OperationalError:
-            pass
-
-        # Strategy B: BM25 ranked OR search with prefix wildcards (scores by term relevance across all articles)
-        if len(results) < top_k and unique_tokens:
-            or_query = " OR ".join(f"{t}*" for t in unique_tokens)
+            # Strategy A: Exact phrase match
+            clean_phrase = " ".join(content_tokens)
             try:
                 cur.execute(
                     """
@@ -204,33 +187,32 @@ class WikiEngine:
                         a.title,
                         snippet(wiki_fts, 1, '«', '»', '...', 25) AS match_snippet,
                         bm25(wiki_fts, 10.0, 1.0) AS score,
-                        substr(a.content, 1, 1400) AS preview
+                        a.content AS full_text
                     FROM wiki_fts
                     JOIN articles a ON a.id = wiki_fts.rowid
                     WHERE wiki_fts MATCH ?
                       AND a.title NOT LIKE 'Forum:%'
-                      AND a.title NOT LIKE '%/%'
                     ORDER BY score ASC
                     LIMIT ?;
                     """,
-                    (or_query, top_k * 8),
+                    (f'"{clean_phrase}"', top_k * 6),
                 )
-                rows = cur.fetchall()
-                # Prioritize canonical vanilla articles over variant forks
-                rows.sort(
+                phrase_rows = cur.fetchall()
+                phrase_rows.sort(
                     key=lambda r: (
-                        1 if any(v in r[0].lower() for v in VARIANT_KEYWORDS) else 0,
+                        1 if _is_variant_title(r[0]) else 0,
+                        1 if r[0].lower().startswith("strategy:") else 0,
                         r[2],
                     )
                 )
-                for r in rows:
+                for r in phrase_rows:
                     if r[0].lower() not in seen_titles:
                         results.append(
                             {
                                 "title": r[0],
                                 "snippet": r[1],
                                 "score": r[2],
-                                "preview": r[3],
+                                "text": r[3],
                                 "is_exact": False,
                             }
                         )
@@ -240,8 +222,173 @@ class WikiEngine:
             except sqlite3.OperationalError:
                 pass
 
-        con.close()
+            # Strategy B: All-terms AND match with prefix wildcards
+            if len(results) < top_k and len(unique_tokens) > 1:
+                and_query = " AND ".join(f"{t}*" for t in unique_tokens)
+                try:
+                    cur.execute(
+                        """
+                        SELECT
+                            a.title,
+                            snippet(wiki_fts, 1, '«', '»', '...', 25) AS match_snippet,
+                            bm25(wiki_fts, 10.0, 1.0) AS score,
+                            a.content AS full_text
+                        FROM wiki_fts
+                        JOIN articles a ON a.id = wiki_fts.rowid
+                        WHERE wiki_fts MATCH ?
+                          AND a.title NOT LIKE 'Forum:%'
+                        ORDER BY score ASC
+                        LIMIT ?;
+                        """,
+                        (and_query, top_k * 8),
+                    )
+                    and_rows = cur.fetchall()
+                    and_rows.sort(
+                        key=lambda r: (
+                            1 if _is_variant_title(r[0]) else 0,
+                            1 if r[0].lower().startswith("strategy:") else 0,
+                            r[2],
+                        )
+                    )
+                    for r in and_rows:
+                        if r[0].lower() not in seen_titles:
+                            results.append(
+                                {
+                                    "title": r[0],
+                                    "snippet": r[1],
+                                    "score": r[2],
+                                    "text": r[3],
+                                    "is_exact": False,
+                                }
+                            )
+                            seen_titles.add(r[0].lower())
+                            if len(results) >= top_k:
+                                break
+                except sqlite3.OperationalError:
+                    pass
+
+            # Strategy C: BM25 ranked OR search with prefix wildcards
+            if len(results) < top_k and unique_tokens:
+                or_query = " OR ".join(f"{t}*" for t in unique_tokens)
+                try:
+                    cur.execute(
+                        """
+                        SELECT
+                            a.title,
+                            snippet(wiki_fts, 1, '«', '»', '...', 25) AS match_snippet,
+                            bm25(wiki_fts, 10.0, 1.0) AS score,
+                            a.content AS full_text
+                        FROM wiki_fts
+                        JOIN articles a ON a.id = wiki_fts.rowid
+                        WHERE wiki_fts MATCH ?
+                          AND a.title NOT LIKE 'Forum:%'
+                        ORDER BY score ASC
+                        LIMIT ?;
+                        """,
+                        (or_query, top_k * 8),
+                    )
+                    rows = cur.fetchall()
+                    # Prioritize canonical vanilla articles over variant forks
+                    rows.sort(
+                        key=lambda r: (
+                            1 if _is_variant_title(r[0]) else 0,
+                            1 if r[0].lower().startswith("strategy:") else 0,
+                            r[2],
+                        )
+                    )
+                    for r in rows:
+                        if r[0].lower() not in seen_titles:
+                            results.append(
+                                {
+                                    "title": r[0],
+                                    "snippet": r[1],
+                                    "score": r[2],
+                                    "text": r[3],
+                                    "is_exact": False,
+                                }
+                            )
+                            seen_titles.add(r[0].lower())
+                            if len(results) >= top_k:
+                                break
+                except sqlite3.OperationalError:
+                    pass
+        finally:
+            con.close()
         return results
+
+    def read_article(
+        self,
+        title: str,
+        section: str = "",
+        offset: int = 0,
+        max_chars: int = 0,
+    ) -> str:
+        """
+        Reads the full untruncated NetHack wiki/guidebook/spoiler article for `title`
+        (resolving redirects), with optional section filtering or offset/max_chars windowing.
+        """
+        if not os.path.exists(self.db_path):
+            return f"Wiki database not found at '{self.db_path}'."
+        con = sqlite3.connect(self.db_path)
+        try:
+            cur = con.cursor()
+            hit = self.exact_title_lookup(cur, title.strip())
+            if hit is None:
+                cur.execute(
+                    "SELECT title, content FROM articles WHERE title LIKE ? COLLATE NOCASE ORDER BY LENGTH(title) ASC LIMIT 1;",
+                    (f"%{title.strip()}%",),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return f"No NetHack wiki article found matching '{title}'."
+                hit = {"title": row[0], "text": row[1]}
+        finally:
+            con.close()
+
+        art_title = str(hit["title"])
+        body = _clean_wiki_markup(str(hit.get("text") or hit.get("preview") or ""))
+        if section.strip():
+            sec_l = section.strip().lower()
+            lines = body.splitlines()
+            start_idx = None
+            end_idx = len(lines)
+            sec_level = 0
+            for idx_l, ln in enumerate(lines):
+                s = ln.strip()
+                is_heading = False
+                lvl = 0
+                if s.startswith("==") and s.endswith("=="):
+                    lvl = len(s) - len(s.lstrip("="))
+                    hdr_txt = s.strip("= ").lower()
+                    is_heading = True
+                elif s.startswith("#"):
+                    lvl = len(s) - len(s.lstrip("#"))
+                    hdr_txt = s.lstrip("# ").lower()
+                    is_heading = True
+                else:
+                    hdr_txt = s.lower()
+                if start_idx is None:
+                    if (is_heading and sec_l in hdr_txt) or (
+                        not is_heading and sec_l == hdr_txt
+                    ):
+                        start_idx = idx_l
+                        sec_level = lvl or 2
+                elif is_heading and lvl <= sec_level:
+                    end_idx = idx_l
+                    break
+            if start_idx is not None:
+                body = "\n".join(lines[start_idx:end_idx]).strip()
+
+        off = max(0, int(offset or 0))
+        if off > 0:
+            body = body[off:]
+        limit = max(0, int(max_chars or 0))
+        if limit > 0 and len(body) > limit:
+            body = (
+                body[:limit]
+                + f"\n... [TRUNCATED: {len(body) - limit} chars remaining; call read_wiki_article(title='{art_title}', offset={off + limit})]"
+            )
+        return f"### {art_title}\n```text\n{body}\n```"
 
     def query(self, query_str: str, top_k: int = 3) -> str:
         hits = self.search_wiki(query_str, top_k=top_k)
@@ -258,8 +405,15 @@ class WikiEngine:
             lines.append(f"#### {idx}. {h['title']} {tag}")
             if h.get("snippet"):
                 lines.append(f"> {h['snippet']}")
-            preview_clean = (h.get("preview") or h.get("text") or "")[:1000].strip()
-            preview_clean = preview_clean.replace("{{", "").replace("}}", "")
-            lines.append(f"```text\n{preview_clean}\n```")
+            raw_body = h.get("text") or h.get("preview") or ""
+            cleaned = _clean_wiki_markup(raw_body)
+            # Deliver exact matches and primary (#1) hit completely untruncated;
+            # secondary hits preserve clean depth with explicit pointer to read_wiki_article.
+            if h.get("is_exact") or idx == 1 or len(cleaned) <= 4000:
+                lines.append(f"```text\n{cleaned}\n```")
+            else:
+                lines.append(
+                    f"```text\n{cleaned[:3000]}\n... [Showing 3000/{len(cleaned)} chars; call read_wiki_article('{h['title']}') for full article]\n```"
+                )
 
         return "\n".join(lines)

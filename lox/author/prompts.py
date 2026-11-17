@@ -71,59 +71,33 @@ GENERATOR_POLICY_DOCS = r"""### Policy Language & 1-to-1 Harness Reference
 - In `WRITE`/`REFACTOR`, specify `skill_module: "mod_name"` or test via `dry_run_policy(code="<skill_code module='mod_name'>...</skill_code>...")`.
 """
 
-CORE_HARNESS_DOCS = r"""### 1-to-1 NetHack Harness & `GameState` Reference
+CORE_HARNESS_DOCS = r"""### 1-to-1 NetHack API & `GameState`
 
-#### 1. Execution & Stall / Prompt Safety
-- **Zero-Turn Stalls (`state.turn_advanced`, `state.consecutive_stalls`)**: NetHack actions that do not consume a game turn (e.g. bumping walls/peacefuls/boulders, invalid diagonal doorway moves) keep `state.turn_advanced == False`. Never repeat a failed step; `>= 100` consecutive zero-turn steps aborts as `stalled_zero_turn`.
-- **Interactive Prompts & Menus**:
-  - `state.in_yn_prompt`: `[yn]`/`[ynq]` prompts — return `key('y')`/`key('n')`/`key('q')`.
-  - `state.in_text_prompt`: naming/text prompt — return `Action.ESC`.
-  - `state.in_menu`: active selection/pager menu (`Pick up what?`, `Inventory`, `(end)`) — inspect `state.tty_lines` and return item letters (`key('a')`), `Action.SPACE`, or `Action.ESC`.
-- **Supported Python**: Full Python 3.11+ with `math`, `collections` (`deque`, `defaultdict`, `Counter`), `heapq`, `itertools`, `functools`, `re`, `enum`, `dataclasses`, `numpy` (`np`), `random`, `copy`, `bisect`, and `self.param(name, default, min_val, max_val)`.
+#### 1. Execution & Prompts
+- Zero-turn stalls keep `state.turn_advanced == False`; avoid repeating stalled steps (`>=100` consecutive aborts as `stalled_zero_turn`).
+- `state.in_yn_prompt`: `[yn]`/`[ynq]` -> `key('y')`/`key('n')`/`key('q')`.
+- `state.in_text_prompt`: text/naming prompt -> `Action.ESC`.
+- `state.in_menu`: selection/pager (`tty_lines`) -> item `key('a')`, `Action.SPACE`, or `Action.ESC`.
+- Allowed modules: `lox.*`, `skills.*`, `numpy as np`, stdlib (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `enum`, `dataclasses`, `random`, `copy`, `bisect`).
 
-#### 2. Core 1-to-1 Action Working Set (`Action`, `key`, `seq`, `DIR_DELTAS`)
-Everything returned from `step(state)` or an `ActionLeaf` maps 1-to-1 to native NLE keystrokes:
-- **Compass (`Action` or `DIR_DELTAS[(dy, dx)]`)**: `Action.N` (`(-1,0)`), `Action.S` (`(1,0)`), `Action.E` (`(0,1)`), `Action.W` (`(0,-1)`), `Action.NE` (`(-1,1)`), `Action.NW` (`(-1,-1)`), `Action.SE` (`(1,1)`), `Action.SW` (`(1,-1)`).
-- **Vertical & Wait**: `Action.UP` (`'<'`), `Action.DOWN` (`'>'`), `Action.WAIT` (`'.'`), `Action.MORE` (`'\r'`), `Action.ESC` (`'\x1b'`), `Action.SPACE` (`' '`).
-- **Interactions**: `Action.SEARCH` (`'s'`), `Action.OPEN` (`'o'`), `Action.CLOSE` (`'c'`), `Action.KICK` (`C('d')`), `Action.UNTRAP` (`M('u')`), `Action.EAT` (`'e'`), `Action.WIELD` (`'w'`), `Action.WEAR` (`'W'`), `Action.TAKEOFF` (`'T'`), `Action.PUTON` (`'P'`), `Action.REMOVE` (`'R'`), `Action.QUAFF` (`'q'`), `Action.READ` (`'r'`), `Action.ZAP` (`'z'`), `Action.FIRE` (`'f'`), `Action.THROW` (`'t'`), `Action.PICKUP` (`','`), `Action.DROP` (`'d'`), `Action.APPLY` (`'a'`), `Action.LOOT` (`M('l')`), `Action.PRAY` (`M('p')`), `Action.ENGRAVE` (`'E'`), `Action.OFFER` (`M('o')`), `Action.PAY` (`'p'`). *(Call `query_policy_docs("actions")` for full index.)*
-- **Multi-Keystroke Sequences (`seq(...)`) & Extended Commands (`extcmd`)**:
-  - Open/kick dir: `seq(Action.OPEN, DIR_DELTAS[(dy, dx)])`, `seq(Action.KICK, DIR_DELTAS[(dy, dx)])`
-  - Inventory slot action: `seq(Action.EAT, 'f')`, `seq(Action.WEAR, 'd')`, `seq(Action.WIELD, 'a')`, `seq(Action.PUTON, 'e')`, `seq(Action.QUAFF, 'h')`, `seq(Action.READ, 'g')`, `seq(Action.APPLY, 'k')`
-  - Directional throw/zap/untrap: `seq(Action.ZAP, 'i', DIR_DELTAS[(dy, dx)])`, `seq(Action.THROW, 'b', DIR_DELTAS[(dy, dx)])`
-  - Floor eat / pray / engrave: `seq(Action.EAT, 'y')`, `extcmd("pray", "y")`, `repeat(5, Action.SEARCH)`.
+#### 2. 1-to-1 Actions (`Action`, `key`, `seq`, `repeat`, `extcmd`, `DIR_DELTAS`)
+- Compass (`DIR_DELTAS[(dy,dx)]`): `Action.N` `(-1,0)`, `Action.S` `(1,0)`, `Action.E` `(0,1)`, `Action.W` `(0,-1)`, `Action.NE` `(-1,1)`, `Action.NW` `(-1,-1)`, `Action.SE` `(1,1)`, `Action.SW` `(1,-1)`.
+- Vertical/Wait/Prompt: `Action.UP` `'<'`, `Action.DOWN` `'>'`, `Action.WAIT` `'.'`, `Action.MORE` `'\r'`, `Action.ESC` `'\x1b'`, `Action.SPACE` `' '`.
+- Commands: `Action.SEARCH` `'s'`, `Action.OPEN` `'o'`, `Action.CLOSE` `'c'`, `Action.KICK` `C('d')`, `Action.UNTRAP` `M('u')`, `Action.EAT` `'e'`, `Action.WIELD` `'w'`, `Action.WEAR` `'W'`, `Action.TAKEOFF` `'T'`, `Action.PUTON` `'P'`, `Action.REMOVE` `'R'`, `Action.QUAFF` `'q'`, `Action.READ` `'r'`, `Action.ZAP` `'z'`, `Action.FIRE` `'f'`, `Action.THROW` `'t'`, `Action.PICKUP` `','`, `Action.DROP` `'d'`, `Action.APPLY` `'a'`, `Action.LOOT` `M('l')`, `Action.PRAY` `M('p')`, `Action.ENGRAVE` `'E'`, `Action.OFFER` `M('o')`, `Action.PAY` `'p'`, `Action.NAME` `'C'`, `Action.DIP` `M('d')`, `Action.ENHANCE` `M('e')`, `Action.TWOWEAPON` `'X'`, `Action.SWAP` `'x'`, `Action.CAST` `'Z'`, `Action.LOOK` `';'`.
+- Sequences: `seq(Action.OPEN, DIR_DELTAS[(dy,dx)])`, `seq(Action.KICK, DIR_DELTAS[(dy,dx)])`, `seq(Action.EAT, 'f')`, `seq(Action.ZAP, 'i', dir_act)`, `extcmd("pray", "y")`, `repeat(5, Action.SEARCH)`.
 
-#### 3. Querying `GameState` (`state`)
-- **Hero Vitals, Dungeon & Hunger**:
-  - `state.hp`, `state.max_hp`, `state.ac`, `state.energy`, `state.max_energy`, `state.xp_level`, `state.xp`, `state.score`, `state.gold`
-  - `state.y` (0..20), `state.x` (0..78), `state.pos` (`(y, x)`), `state.turn`, `state.step_count`
-  - `state.hunger_state` (`0`=Satiated .. `5`=Fainted), `state.internal_hunger` (`int` raw nutrition)
-  - `state.depth` (1..50), `state.dungeon_num` (`0`=Doom, `1`=Gehennom, `2`=Mines, `3`=Quest, `4`=Sokoban), `state.deepest_level_reached`, `state.is_on_stairs_down`
-  - `state.carrying_capacity` (`0`=Unencumbered .. `5`=Overloaded), `state.encumbrance_name`
-- **Inventory (`state.inventory -> list[InventoryItem]`)**:
-  - `item.letter`, `item.name`, `item.quantity`, `item.oclass`, `item.oclass_name`, `item.enchantment` (`int | None`)
-  - Flags: `is_weapon`, `is_armor`, `is_food`, `is_corpse`, `is_potion`, `is_scroll`, `is_wand`, `is_ring`, `is_amulet`, `is_tool`, `is_spellbook`, `is_coin`, `is_gem`
-  - Status: `is_worn`, `is_wielded`, `is_quivered`, `is_blessed`, `is_uncursed`, `is_cursed`, `is_for_sale`, `item.info` (`ObjectInfo`), `item.corpse_monster` (`MonsterInfo`)
-- **Monsters (`state.visible_monsters()`, `state.adjacent_monsters(exclude_pets=True)`)**:
-  - `m.y`, `m.x`, `m.name`, `m.char`, `m.color`, `m.is_adjacent_to(y, x)`, `m.is_pet`, `m.is_statue`, `m.is_invisible`
-  - `m.info` (`MonsterInfo`): `difficulty`, `ac`, `speed`, `level`, `mr`, `nutrition`, `weight`, `size`, `resistances_mask`, `conveys_mask`, `is_acidic`, `is_poisonous`, `is_undead`, `is_were`, `is_human`, `is_elf`, `is_dwarf`, `is_gnome`, `is_orc`, `is_demon`, `is_giant`, `is_domestic`, `conveys_poison_res`, `conveys_fire_res`, `conveys_cold_res`, `conveys_sleep_res`, `conveys_shock_res`
-  - Peaceful monsters trigger `Really attack <name>? [yn]` (`state.in_yn_prompt`).
-- **Floor Objects (`state.visible_objects()`, `state.objects_here()`)**:
-  - `o.y`, `o.x`, `o.name`, `o.char`, `o.is_corpse`, `o.is_food`, `o.is_weapon`, `o.is_armor`, `o.is_potion`, `o.is_scroll`, `o.is_wand`, `o.is_ring`, `o.is_amulet`, `o.is_tool`, `o.is_spellbook`, `o.is_coin`, `o.is_gem`, `o.is_boulder`, `o.info`, `o.corpse_monster`
-  - O(1) lookups: `state.monster_info_by_name(name)`, `state.object_info_by_name(name)`
-- **Condition Flags**: `is_blind`, `is_confused`, `is_stunned`, `is_hallucinating`, `is_levitating`, `is_food_poisoned`, `is_terminally_ill`, `is_stoning`, `is_slimed`, `is_strangled`, `condition_mask`.
-- **Map, Terrain, Traps & Multi-Stairs (`21x79` + `tty_text`)**:
-  - `state.message`, `state.chars` (`uint8[21,79]`), `state.glyphs` (`int16[21,79]`), `state.char_at(y, x)`, `state.ascii_map()`, `state.tty_text`, `state.tty_lines`
-  - **Passability Invariant**: `'-'` and `'|'` and `' '` (stone) are IMPASSABLE; `.` (room/ice/open door), `#` (corridor), `>` / `<` (stairs), `_` (altar), `{` (fountain), `\\` (open door/throne) are walkable.
-  - Semantic helpers: `state.terrain_at(y, x)`, `state.trap_at(y, x)` (remembers traps under monsters/objects), `state.is_trap(y, x)`, `state.trap_mask` (`bool[21,79]`), `state.is_closed_door(y, x)`, `state.is_open_door(y, x)`, `state.is_water(y, x)`, `state.is_lava(y, x)`, `state.is_ice(y, x)`, `state.is_iron_bars(y, x)`, `state.is_boulder(y, x)`, `state.boulder_positions`
-  - Feature coordinates: `state.stairs_down_pos`, `state.stairs_down_positions`, `state.stairs_up_pos`, `state.stairs_up_positions`, `state.altar_positions`, `state.fountain_positions`, `state.portal_positions`
-- **Vectorized Pathfinding (Native Rust/Numba with Doorway Diagonal Legalization)**:
-  - `state.bfs_distances(passable_mask, start=(y, x), allow_diagonal=True, no_diag=state.mem.door_mask)`
-  - `state.path_step(passable_mask, target=(ty, tx), start=(y, x), allow_diagonal=True, no_diag=state.mem.door_mask) -> (dy, dx)`
-  - Passing `no_diag=state.mem.door_mask` enforces NetHack's doorway diagonal-movement rule automatically without writing custom geometry guards!
+#### 3. `GameState` (`state`)
+- Vitals/Dungeon: `hp`, `max_hp`, `ac`, `energy`, `max_energy`, `xp_level`, `xp`, `score`, `gold`, `y` (0..20), `x` (0..78), `pos`, `turn`, `step_count`, `hunger_state` (0=Satiated..5=Fainted), `internal_hunger`, `depth`, `dungeon_num` (0=Doom, 1=Gehennom, 2=Mines, 3=Quest, 4=Sokoban, 5=Ludios, 6=Vlad, 7=Planes), `level_num`, `deepest_level_reached`, `is_on_stairs_down`, `carrying_capacity` (0..5), `encumbrance_name`, `worn_oprop_mask`.
+- Inventory (`state.inventory -> list[InventoryItem]`): `letter`, `name`, `quantity`, `oclass`, `oclass_name`, `enchantment`, `is_weapon`/`is_armor`/`is_food`/`is_corpse`/`is_potion`/`is_scroll`/`is_wand`/`is_ring`/`is_amulet`/`is_tool`/`is_spellbook`/`is_coin`/`is_gem`, `is_worn`, `is_wielded`, `is_quivered`, `is_blessed`, `is_uncursed`, `is_cursed`, `is_for_sale`, `info` (`ObjectInfo`), `corpse_monster` (`MonsterInfo`).
+- Monsters (`visible_monsters()`, `adjacent_monsters(exclude_pets=True)`): `y`, `x`, `name`, `char`, `color`, `is_adjacent_to(y,x)`, `is_pet`, `is_statue`, `is_invisible`, `info` (`difficulty`, `ac`, `speed`, `level`, `mr`, `nutrition`, `weight`, `size`, `resistances_mask`, `conveys_mask`, `is_acidic`/`is_poisonous`/`is_undead`/`is_were`/`is_human`/`is_elf`/`is_dwarf`/`is_gnome`/`is_orc`/`is_demon`/`is_giant`/`is_domestic`, `conveys_poison_res`/`conveys_fire_res`/`conveys_cold_res`/`conveys_sleep_res`/`conveys_shock_res`).
+- Floor (`visible_objects()`, `objects_here()`): same item flags + `y`, `x`, `is_boulder`; C lookups `monster_info_by_name(name)`, `object_info_by_name(name)`.
+- Conditions: `is_blind`, `is_confused`, `is_stunned`, `is_hallucinating`, `is_levitating`, `is_food_poisoned`, `is_terminally_ill`, `is_stoning`, `is_slimed`, `is_strangled`, `condition_mask`.
+- Map/Terrain/Features: `message`, `chars` (`uint8[21,79]`), `glyphs` (`int16[21,79]`), `char_at(y,x)`, `ascii_map()`, `tty_text`, `tty_lines`, `terrain_at(y,x)`, `trap_at(y,x)`, `is_trap(y,x)`, `trap_mask`, `is_closed_door(y,x)`, `is_open_door(y,x)`, `adjacent_closed_doors()`, `unexplored_frontier_mask(passable_mask=None, include_doors=True)`, `is_water(y,x)`, `is_lava(y,x)`, `is_ice(y,x)`, `is_iron_bars(y,x)`, `is_boulder(y,x)`, `boulder_positions`, `stairs_down_pos`/`positions`, `stairs_up_pos`/`positions`, `altar_positions`, `fountain_positions`, `portal_positions`.
+- Pathfinding (8-way adjacency `max(abs(dy),abs(dx))==1`; `'-'`, `'|'`, `' '` walls IMPASSABLE): `bfs_distances(passable_mask, start=(y,x), allow_diagonal=True, no_diag=state.mem.door_mask)` & `path_step(passable_mask, target=(ty,tx), start=(y,x), allow_diagonal=True, no_diag=state.mem.door_mask) -> (dy,dx)`.
 
 #### 4. Zero-Heuristic `WorldMemory` (`state.mem` & `state.kv`)
-- Floor state (`state.mem` -> current `FloorMemory`): `visited`, `visit_count`, `remembered_chars`, `passable_mask`, `door_mask`, `searched_counts`, `remembered_obj_glyphs`, `remembered_trap_glyphs`, `locked_doors`
-- Episode persistence: `state.stair_graph`, `state.pos_history`, `state.is_oscillating`, `state.recent_messages` (`list[(turn, dlvl, msg)]`), `state.kv` (`dict` persisted across floors and shard/frontier replays).
+- Floor (`state.mem`): `visited`, `visit_count`, `remembered_chars`, `passable_mask`, `copy_passable_mask()`, `door_mask`, `searched_counts`, `remembered_obj_glyphs`, `remembered_trap_glyphs`, `locked_doors`.
+- Inter-Branch Graph & Persistence: `stair_graph` (`dict[(dnum, dlvl, y, x), (dnum2, dlvl2, y2, x2)]`), `level_exits` (`dict[(dnum, dlvl), dict[(y, x), glyph]]`), `pos_history`, `is_oscillating`, `recent_messages`, `kv` (persisted across floors & replays).
 """
 
 POLICY_LANG_DOCS = f"{GENERATOR_POLICY_DOCS}\n{CORE_HARNESS_DOCS[len('### 1-to-1 NetHack Harness & `GameState` Reference') :]}"
@@ -134,8 +108,8 @@ def build_system_prompt(
 ) -> str:
     schema_md = get_schema_markdown(db_path, is_swarm=is_swarm)
     if is_swarm:
-        return f"""You are a LOX Autonomous Synthesis Agent operating in the Hierarchical Behavior Tree Swarm.
-Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigation, combat, and resource management live in your modular Behavior Tree policy (`policy.py`) and skill packages (`skills/*.py`).**
+        return f"""LOX Autonomous Synthesis Agent (Hierarchical Behavior Tree Swarm).
+Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, combat live in `policy.py` + `skills/*.py`.**
 
 {BEHAVIOR_TREE_DOCS}
 
@@ -143,57 +117,18 @@ Motto: **"Hard Code Nothing" in the harness—all intelligence, memory, navigati
 
 {schema_md}
 
-### Empirical Differential Diagnostics (SQL Investigation Templates)
-Formulate SQL queries against DuckDB (`batches`, `runs`, `ticks`, `function_stats`, `policies`, `champion_runs`, `champion_ticks`, `champion_function_stats`, `expert_runs`, `expert_ticks`) to isolate empirical root causes:
+### SQL Templates (`query_db`)
+1. `SELECT generation, candidate_policy_id, avg_depth, p90_depth, max_depth, avg_score, avg_turns, hypothesis_passed FROM batches ORDER BY generation DESC LIMIT 10;`
+2. `SELECT function_name, episodes_triggered, total_calls, total_turns_active, stagnation_share, livelock_score, liblit_failure_score, ochiai_good_run_score FROM champion_function_stats ORDER BY total_turns_active DESC LIMIT 20;`
+3. `SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, unique_tiles, policy_exceptions, last_active_function, end_reason, summary_digest FROM champion_runs ORDER BY max_depth ASC, turns DESC LIMIT 8;`
+4. `SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth FROM expert_runs;`
 
-1. **Cross-Generation Progression & Regression Check**:
-   ```sql
-   SELECT generation, candidate_policy_id, avg_depth, p90_depth, max_depth, avg_score, avg_turns, hypothesis_passed
-   FROM batches
-   ORDER BY generation DESC LIMIT 10;
-   ```
-
-2. **Function Turn Share, Stagnation & Livelock Attribution**:
-   ```sql
-   SELECT function_name, episodes_triggered, total_calls, total_turns_active,
-          stagnation_share, livelock_score, liblit_failure_score, ochiai_good_run_score
-   FROM champion_function_stats
-   ORDER BY total_turns_active DESC LIMIT 20;
-   ```
-
-3. **Champion & Latest Run-Level Termination Inspection**:
-   ```sql
-   SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, unique_tiles,
-          policy_exceptions, last_active_function, end_reason, summary_digest
-   FROM champion_runs
-   ORDER BY max_depth ASC, turns DESC LIMIT 8;
-   ```
-   *(Note: Older `ticks` are periodically pruned; query `champion_ticks` for champion turn traces or `ticks` only for the `run_id`s returned by the latest completed `runs` generation. The current in-progress generation is NOT yet in `batches`/`runs`.)*
-
-4. **Expert Contrast (Vitals, AC & Action Frequencies)**:
-   ```sql
-   SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth
-   FROM expert_runs;
-   ```
-
-### Available Investigation & Verification Tools
-1. `query_db(sql)`: Run ONE read-only `SELECT` query per call on DuckDB.
-2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact game rules (armor/slots/curses, food/tins/illness, monsters, shop rules, prompts, altars, items).
-3. `query_monster(name)` / `query_item(name)`: Query exact C-level `permonst` / `objclass` structs.
-4. `read_policy(policy_id)` / `diff_policies(policy_id_a, policy_id_b)` / `read_skill(skill_name, policy_id="")`: Inspect current or historical `policies` and `skills/*.py` snapshots.
-5. `query_theories(query, doc_type="", limit=6)`: Search DuckDB `theories` for prior peer `THEORY` notes and CRN tournament `META_SYNTHESIS` verdicts.
-6. `dry_run_policy(code, seed=42, max_turns=150, replay_run_id="", replay_steps=0, hypothesis="")`: Compile and empirically test candidate updates in `NetHackHarness`.
-
-### Scientific Investigation Protocol (Swarm Behavior Trees)
-1. **Never Guess from Intuition**: Verify NetHack C mechanics via `query_wiki`, `query_monster`, and `query_item`, and verify empirical bottlenecks via `query_db`, `query_theories`, `diff_policies`, and `read_skill`.
-2. **Behavior Tree & Blackboard Discipline**:
-   - Compose `class Policy:` with `self.blackboard = Blackboard()`, `self.tree = BehaviorTree(root=..., blackboard=self.blackboard)`, and `def step(self, state): return self.tree.tick(state) or Action.WAIT`.
-   - **Native Leaf Hysteresis & Clean Attribution**: NEVER wrap `self.tree.tick(state)` in post-step oscillation gates (`_osc_gate`) or generic `_attributed` wrappers—these mask per-leaf telemetry. Instead, use native `ActionLeaf(fn, name="...", min_commit=N)` or `PrioritySelector([...], hysteresis=N)`.
-   - **Dormancy & Consolidation**: Prefer refining existing `skills/*.py` modules (or adding genuinely distinct orthogonal modules like equipment/consumables/branches) and removing `0`-turn dormant branches.
-   - Every `ActionLeaf` must return `None` when its condition does not apply so `PrioritySelector` falls through cleanly.
-3. **Passability & 8-Way Adjacency**:
-   - Never mark `ord('-')`, `ord('|')`, or `ord(' ')` as passable; prefer `state.mem.passable_mask` and pass `no_diag=state.mem.door_mask` to `state.path_step` / `state.bfs_distances`.
-   - Remember NetHack adjacency is 8-way Chebyshev (`max(abs(dy), abs(dx)) == 1`).
+### Swarm Peer Rules & Investigation Protocol
+- **Never Guess**: Check C rules via `query_wiki` / `read_wiki_article` / `query_monster` / `query_item` and trajectories via `query_db` / `query_theories` / `diff_policies` / `read_skill` / `find_references` / `grep_skills` / `blackboard_map` / `benchmark_expert_parity`.
+- **Anti-Recycling & Grounding**: Before first `dry_run_policy`, check `query_theories` + `query_wiki` (never tweak `REJECTED` mechanisms; protect high-Ochiai `D_succ` branches).
+- **Behavior Tree Rules**: Thin `Policy.step(state)` = `self.tree.tick(state) or Action.WAIT`; `ActionLeaf` returns `None` when inapplicable; use native `min_commit=N` / `preempt_if=...` / `hysteresis=N` (never post-step `_osc_gate` wrappers). Also supports composable `StrategyStack` (`from lox.lang.strategy import StrategyStack`) and frozen interfaces (`from lox.lang.contracts import ...`) / `#EVOLVE-BLOCK:<name>`.
+- **Surgical XML Patches**: Emit ONLY modified/new `def ...` functions in `<skill_code module="name">...</skill_code>` and `<policy_code>...</policy_code>` (in BOTH `dry_run_policy` and final answer). Never re-paste unchanged functions or put `<hypothesis>` inside `dry_run_policy(code=...)`.
+- **In-Turn Trigger Check**: `dry_run_policy` validates `pyright` types, cross-module signatures, claimed failure fixtures, and `prompt_torture`—if `TRIGGER_MISS` warns your edited function fired 0 times, fix preconditions before submitting.
 """
 
     return f"""You are the LOX Policy Author Agent.
@@ -378,15 +313,11 @@ def _format_context_scoped_policy(current_policy: str, batch_digest: str = "") -
 
 
 BEHAVIOR_TREE_DOCS = """### Behavior Tree Primitives (`lox.lang.bt`)
-All Swarm subtrees and Master Policies compose reactive Behavior Trees using these exact primitives (already pre-loaded in scope, or importable via `from lox.lang.bt import ...` and `from lox.env.actions import Action, DIR_DELTAS, seq, key, repeat`):
-- **IMPORTANT IMPORT RULE**: NEVER import `macros`, `skills_common`, or unapproved modules. Only `lox.*`, `skills.*`, `numpy as np`, and allowed stdlib modules (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `random`, `bisect`, `copy`) are permitted.
-- `Blackboard`: `bb.get_var(key, default=None)`, `bb.set_var(key, val)`, `bb.has_var(key)` for cross-node state persistence (NEVER use raw `self.*` attributes inside shared subtrees; pass state through `bb`).
-- `ActionLeaf(fn, name="...", min_commit=0)`: `fn(state, bb)` or `fn(state)` returns an `Action` / `seq(...)` (`NodeStatus.SUCCESS`) or `None` (`NodeStatus.FAILURE`, allowing `PrioritySelector` to fall through). Set `min_commit=N` to commit to an active leaf for `N` turns unless it returns `None`.
-- `ConditionLeaf(cond_fn, name="...")`: `cond_fn(state, bb)` or `cond_fn(state)` returns `bool` (`True` -> `SUCCESS`, `False` -> `FAILURE`).
-- `Sequence([child_1, child_2, ...], name="...")`: ticks left-to-right, short-circuits on `FAILURE`.
-- `PrioritySelector([child_1, child_2, ...], name="...", hysteresis=0)`: ticks left-to-right, returns the first child that does not return `FAILURE` (set `hysteresis=N` to hold active priority commitments cleanly without ad-hoc post-step gates).
-- `Inverter(child, name="...")`: inverts `SUCCESS` <-> `FAILURE`.
-- `BehaviorTree(root=root_node, blackboard=bb)`: ticks `root` and returns the resulting action (or `None`).
+Pre-loaded / importable via `from lox.lang.bt import ...`, `from lox.env.actions import Action, DIR_DELTAS, seq, key, repeat`:
+- Imports allowed: `lox.*`, `skills.*`, `numpy as np`, stdlib (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `random`, `bisect`, `copy`). NEVER import `macros` or `skills_common`.
+- `Blackboard`: `bb.get_var(k, default=None)`, `bb.set_var(k, v)`, `bb.floor_get(state, k, default=None)`, `bb.floor_set(state, k, v)`, `bb.floor_blacklist_add(state, pos, ttl=50)`, `bb.floor_is_blacklisted(state, pos)`. No `self.*` state in shared leaves.
+- `ActionLeaf(fn, name="...", min_commit=0)` (+ optional `preempt_if=fn`): `fn(state, bb)` -> `Action`/`seq(...)` (`SUCCESS`) or `None` (`FAILURE`, fall-through). `min_commit=N` commits N turns unless `preempt_if(state, bb)` returns `True` or `fn` returns `None`.
+- `ConditionLeaf(cond_fn, name="...")` / `Sequence([...], name="...")` / `PrioritySelector([...], name="...", hysteresis=0)` / `Inverter(child)` / `BehaviorTree(root=..., blackboard=bb)`.
 """
 
 
@@ -485,7 +416,7 @@ def build_user_prompt(
             mech = f.get("mechanism") or f.get("observation_from_db") or ""
             reason = f.get("verdict_reason") or ""
             fail_lines.append(
-                f"- [Gen {f.get('generation', 0)}] Target: `{tf_str}` | Hyp: {mech[:100]} | Rejection: *{reason[:100]}*"
+                f"- [Gen {f.get('generation', 0)}] Target: `{tf_str}` | Hyp: {str(mech)[:240]} | Rejection: *{str(reason)[:240]}*"
             )
         if fail_lines:
             failures_block = (
@@ -575,8 +506,7 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 
                 brs = extract_priority_selector_branches(current_policy)
                 br_str = ", ".join(
-                    f"#{b['priority']}:{b['leaf_name']}({b['fn_name']})"
-                    for b in brs[:20]
+                    f"#{b['priority']}:{b['leaf_name']}({b['fn_name']})" for b in brs
                 )
                 existing_policy_block = (
                     f"\n### Current `policy.py` Manifest ({len(pol_lines)} LOC):\n"
@@ -585,27 +515,12 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
                 )
             else:
                 existing_policy_block = f"\n### Current `policy.py` ({len(pol_lines)} LOC):\n```python\n{current_policy}\n```\n"
-        return f"""### Generation {generation} — Mode: `SWARM_PEER` (Symmetric Data-Driven Peer Synthesis)
+        return f"""### Gen {generation} — Mode: `SWARM_PEER`
 {digest_block}{existing_policy_block}{skills_block}
-
-### Peer Author Protocol (Isolated Sandbox + CRN Tournament):
-1. **Required Grounding Before Editing (`query_theories` + `query_wiki` + `query_db` — Anti-Recycling)**:
-   - **Never repeat or trivially tweak a mechanism shown as `REJECTED` in `Recent Experiment & Rejection Memory` above**. Before your first `dry_run_policy` call, you MUST call **both**:
-     1. `query_theories(query=...)` (plus `query_db` / `diff_policies` as needed) to see why past attempts lost or regressed; AND
-     2. At least **1 targeted `query_wiki(query=...)` search** on the exact NetHack mechanic you plan to touch (e.g. armor slots/weight/encumbrance/curses, shop rules, sickness/tins, monster attacks) — keep wiki calls focused (1–2 distinct queries; never repeat identical query strings).
-   - Compare `Incumbent Vital & Capability Telemetry` (`avg_ac`, `avg_xl`, `starved_with_food`, `unworn_armor_deaths`, `end_reason` histogram) against `expert_runs` / `expert_ticks` (`query_db`) to diagnose missing **high-leverage capabilities** (e.g., gear/armor/weapon management, consumables/identification, multi-floor/branch traversal, sustained subgoals) rather than tuning one constant repeatedly.
-   - Preserve high-Ochiai `D_succ` branches unless you prove improvement across both failure replays and `D_succ` guard runs.
-2. **Function-Level Surgical Patches & Unified XML Bundle Format (Cut Bloat)**:
-   - **NEVER paste unchanged functions from `skills/*.py` or 1,000+ lines of boilerplate**, and **never** emit `<hypothesis>`/`<reflection>` tags inside `dry_run_policy(code=...)` arguments.
-   - Use the **same XML tag bundle format** inside BOTH `dry_run_policy(code=...)` AND your final answer:
-     1. **Skill Module Updates (`<skill_code module="name"> ... </skill_code>`):** When modifying an existing `skills/<name>.py`, emit **ONLY** the added/updated `def ...` functions (and any new imports/constants) inside `<skill_code module="name">...</skill_code>` — `merge_skill_module_update` automatically splices them while keeping untouched functions and exports intact. You may also add a new domain skill module cleanly (`skills.<name>`).
-     2. **Policy Updates (`<policy_code> ... </policy_code>`):** When modifying `policy.py`, pass **only** the modified/new `def ...` functions (omit `<policy_code>` if modifying only skills).
-     3. **Orthogonal Win Merging:** Disjoint `skills/*.py` edits from two peers in the same generation can be automatically combined by `SwarmReferee`.
-   - Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin and use `ActionLeaf(..., min_commit=N)` + `state.path_step(..., no_diag=state.mem.door_mask)` for clean multi-step commitments and doorway legality.
-3. **Verify in Sandbox (1–2 Focused Calls)**:
-   - One `dry_run_policy(code="<skill_code module=...>...</skill_code>\n<policy_code>...</policy_code>")` call automatically runs the smoke check plus recent failure replays and a deep frontier checkpoint together — pass only your edited functions, not full 30KB rewrites.
-4. **Final Output Format**:
-   - Emit your brief ```yaml ... ``` hypothesis (optionally with `skills_to_prune: [...]`), followed by ONLY your added/modified `<skill_code module="name"> ... </skill_code>` blocks and `<policy_code> ... </policy_code>` (if `policy.py` changed).
+### Task (`SWARM_PEER`)
+- Research first (`query_theories`, `query_wiki`, `read_wiki_article`, `query_db`, `read_skill`, `find_references`, `blackboard_map`); never repeat rejected ideas from `Recent Experiment & Rejection Memory`.
+- Test surgical `<skill_code module="name">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions).
+- Output brief ```yaml``` hypothesis (plus optional `skills_to_prune: [...]`) and final `<skill_code module="name">` / `<policy_code>` XML blocks.
 """
 
     if canon_mode == "SWARM_META":

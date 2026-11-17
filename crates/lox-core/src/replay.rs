@@ -1,4 +1,4 @@
-use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray2, PyUntypedArrayMethods};
+use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 
 const F_CMAP: u16 = 1 << 0;
@@ -138,4 +138,116 @@ pub fn fast_replay_action_bytes(
         }
     }
     Ok(false)
+}
+
+/// Scans (H, W) `glyphs` using `exit_lut` and returns all `(y, x, glyph)` exit coordinates.
+#[pyfunction]
+pub fn fast_extract_exits(
+    glyphs: PyReadonlyArray2<i16>,
+    exit_lut: PyReadonlyArray1<bool>,
+) -> PyResult<Vec<(usize, usize, i16)>> {
+    let shape = glyphs.shape();
+    let h = shape[0];
+    let w = shape[1];
+    let g_sl = glyphs.as_slice()?;
+    let lut = exit_lut.as_slice()?;
+    let lut_len = lut.len();
+    let mut exits = Vec::new();
+    for y in 0..h {
+        let row_off = y * w;
+        for x in 0..w {
+            let g = g_sl[row_off + x];
+            if g >= 0 && (g as usize) < lut_len && lut[g as usize] {
+                exits.push((y, x, g));
+            }
+        }
+    }
+    Ok(exits)
+}
+
+/// Computes boolean (H, W) mask of known or currently visible traps in a single Rust pass.
+#[pyfunction]
+pub fn fast_trap_mask<'py>(
+    py: Python<'py>,
+    remembered_trap_glyphs: PyReadonlyArray2<'py, i32>,
+    glyphs: PyReadonlyArray2<'py, i16>,
+    is_trap_lut: PyReadonlyArray1<'py, bool>,
+) -> PyResult<Bound<'py, PyArray2<bool>>> {
+    let shape = glyphs.shape();
+    let h = shape[0];
+    let w = shape[1];
+    let n = h * w;
+    let py_arr = unsafe { PyArray2::new_bound(py, [h, w], false) };
+    let out = unsafe { py_arr.as_slice_mut()? };
+
+    let rt_sl = remembered_trap_glyphs.as_slice()?;
+    let g_sl = glyphs.as_slice()?;
+    let lut = is_trap_lut.as_slice()?;
+    let lut_len = lut.len();
+
+    if rt_sl.len() == n && g_sl.len() == n {
+        for i in 0..n {
+            let g = g_sl[i];
+            let vis_trap = g >= 0 && (g as usize) < lut_len && lut[g as usize];
+            out[i] = rt_sl[i] > 0 || vis_trap;
+        }
+    } else {
+        out.fill(false);
+    }
+    Ok(py_arr)
+}
+
+/// Computes boolean (H, W) mask of passable boundary tiles bordering unvisited walkable tiles
+/// (or closed doors `'+'` when `include_doors` is true).
+#[pyfunction]
+pub fn fast_unexplored_frontier_mask<'py>(
+    py: Python<'py>,
+    visited: PyReadonlyArray2<'py, bool>,
+    passable: PyReadonlyArray2<'py, bool>,
+    remembered_chars: PyReadonlyArray2<'py, u8>,
+    include_doors: bool,
+) -> PyResult<Bound<'py, PyArray2<bool>>> {
+    let shape = passable.shape();
+    let h = shape[0];
+    let w = shape[1];
+    let n = h * w;
+    let py_arr = unsafe { PyArray2::new_bound(py, [h, w], false) };
+    let out = unsafe { py_arr.as_slice_mut()? };
+    out.fill(false);
+
+    let vis = visited.as_slice()?;
+    let pass = passable.as_slice()?;
+    let rchars = remembered_chars.as_slice()?;
+    if vis.len() != n || pass.len() != n || rchars.len() != n {
+        return Ok(py_arr);
+    }
+
+    let dys: [isize; 8] = [-1, 1, 0, 0, -1, -1, 1, 1];
+    let dxs: [isize; 8] = [0, 0, -1, 1, -1, 1, -1, 1];
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            if !pass[idx] {
+                continue;
+            }
+            if !vis[idx] {
+                out[idx] = true;
+                continue;
+            }
+            for d in 0..8 {
+                let ny = y as isize + dys[d];
+                let nx = x as isize + dxs[d];
+                if ny >= 0 && (ny as usize) < h && nx >= 0 && (nx as usize) < w {
+                    let nidx = (ny as usize) * w + (nx as usize);
+                    if (pass[nidx] && !vis[nidx])
+                        || (include_doors && rchars[nidx] == b'+')
+                    {
+                        out[idx] = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(py_arr)
 }

@@ -305,7 +305,8 @@ def extract_shards_from_db(
             SELECT run_id, seed, depth, max_depth, end_reason, summary_digest, milestones_json, action_bytes, turns, steps
             FROM runs
             WHERE batch_id = ? AND action_bytes IS NOT NULL
-            LIMIT 150
+            ORDER BY max_depth DESC, COALESCE(outlier_z_score, 0.0) DESC, turns DESC
+            LIMIT 500
             """,
             (batch_id,),
         )

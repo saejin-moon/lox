@@ -65,10 +65,24 @@ from lox.lang.bt import (
     Sequence,
     bt_leaf,
 )
+from lox.lang.contracts import (
+    CapabilityScorer,
+    GoalIntent,
+    SafetyReport,
+    ThreatEvaluator,
+    WorldTracker,
+)
 from lox.lang.instrument import (
     ExecutionTracer,
     PolicyInstrumentTransformer,
     PolicyLoopError,
+)
+from lox.lang.strategy import (
+    StrategyFrame,
+    StrategyStack,
+    preempt_if,
+    until,
+    with_cleanup,
 )
 from lox.lang.validator import (
     PolicyValidationError,
@@ -250,6 +264,17 @@ def _build_base_namespace(tracer: ExecutionTracer) -> dict[str, Any]:
         "Blackboard": Blackboard,
         "NodeStatus": NodeStatus,
         "bt_leaf": bt_leaf,
+        # StrategyStack & Contracts
+        "StrategyStack": StrategyStack,
+        "StrategyFrame": StrategyFrame,
+        "preempt_if": preempt_if,
+        "until": until,
+        "with_cleanup": with_cleanup,
+        "GoalIntent": GoalIntent,
+        "SafetyReport": SafetyReport,
+        "WorldTracker": WorldTracker,
+        "CapabilityScorer": CapabilityScorer,
+        "ThreatEvaluator": ThreatEvaluator,
         # Decorator no-op for `@macro`
         "macro": lambda fn: fn,
         # Global parameter helper `param("name", default, min_val, max_val)`

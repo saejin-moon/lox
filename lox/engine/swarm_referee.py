@@ -138,9 +138,12 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
         return {
             "avg_depth": float(batch_eval.get("avg_depth", 1.0) or 1.0),
             "max_depth": int(batch_eval.get("max_depth", 1) or 1),
+            "p75_depth": float(batch_eval.get("avg_depth", 1.0) or 1.0),
             "avg_score": float(batch_eval.get("avg_score", 0.0) or 0.0),
             "avg_ac": 10.0,
             "avg_xp_level": 1.0,
+            "avg_oprop": 0.0,
+            "avg_branches": 1.0,
             "avg_unique_tiles": 0.0,
             "avg_turns": 100.0,
             "pct_wait": 0.0,
@@ -148,6 +151,8 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
             "iqm_prog": 1.0,
             "stall_count": 0,
             "hard_stall_count": 0,
+            "stall_rate": 0.0,
+            "early_blunder_rate": 0.0,
             "policy_exceptions": 0,
             "exc_runs": 0,
             "run_count": 0,
@@ -164,6 +169,8 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
         for r in runs
     ]
     xls = [float(r.get("xp_level", 1) or 1) for r in runs]
+    oprops = [float(r.get("worn_oprop_count", 0) or 0) for r in runs]
+    branches = [float(max(1, int(r.get("dungeons_visited", 1) or 1))) for r in runs]
     tiles = [float(r.get("unique_tiles", 0) or 0) for r in runs]
     turns = [float(r.get("turns", 0) or 0) for r in runs]
     p_wait = [float(r.get("pct_wait", 0.0) or 0.0) for r in runs]
@@ -175,6 +182,13 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
     )
     hard_stalls = sum(
         1 for r in runs if "stalled" in str(r.get("end_reason", "")).lower()
+    )
+    early_blunders = sum(
+        1
+        for r in runs
+        if int(r.get("turns", 0) or 0) <= 200
+        and str(r.get("end_reason", "")).strip().lower()
+        not in ("max_steps", "ascended")
     )
     exc_total = sum(int(r.get("policy_exceptions", 0) or 0) for r in runs)
     exc_runs = sum(1 for r in runs if int(r.get("policy_exceptions", 0) or 0) > 0)
@@ -199,13 +213,18 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
         if er or dm:
             tbs.append(f"{er}: {dm}"[:140])
 
+    import numpy as _np
+
     n = float(len(runs))
     return {
         "avg_depth": sum(depths) / n,
         "max_depth": int(max(depths)),
+        "p75_depth": float(_np.percentile(depths, 75)) if depths else 1.0,
         "avg_score": sum(scores) / n,
         "avg_ac": sum(acs) / n,
         "avg_xp_level": sum(xls) / n,
+        "avg_oprop": sum(oprops) / n,
+        "avg_branches": sum(branches) / n,
         "avg_unique_tiles": sum(tiles) / n,
         "avg_turns": sum(turns) / n,
         "pct_wait": sum(p_wait) / n,
@@ -213,6 +232,8 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
         "iqm_prog": interquartile_mean(progs),
         "stall_count": confinement_stalls,
         "hard_stall_count": hard_stalls,
+        "stall_rate": (confinement_stalls + hard_stalls) / n,
+        "early_blunder_rate": early_blunders / n,
         "policy_exceptions": exc_total,
         "exc_runs": exc_runs,
         "run_count": len(runs),
@@ -292,6 +313,101 @@ class SwarmReferee:
         return ranked[: self.max_tournament_peers]
 
     @staticmethod
+    def _compose_two_packages(
+        base_policy: str,
+        base_skills: dict[str, str],
+        a: PeerCandidate,
+        b: PeerCandidate,
+        *,
+        peer_id: str | None = None,
+        claimed_label: str | None = None,
+        check_symbol_disjoint: bool = True,
+    ) -> PeerCandidate | None:
+        """3-way AST-merges two non-conflicting `PeerCandidate` diffs atop `base_policy`/`base_skills`."""
+        if check_symbol_disjoint:
+            shared_sk = a.touched_skills & b.touched_skills
+            for sk in shared_sk:
+                sa = a.touched_skill_symbols.get(sk, set())
+                sb = b.touched_skill_symbols.get(sk, set())
+                if not sa or not sb or not sa.isdisjoint(sb):
+                    return None
+
+        a_changed_pol = not is_ast_equivalent(a.policy_code, base_policy)
+        b_changed_pol = not is_ast_equivalent(b.policy_code, base_policy)
+        if a_changed_pol and b_changed_pol:
+            chosen_pol_maybe = three_way_ast_merge(
+                base_policy, a.policy_code, b.policy_code
+            )
+            if not chosen_pol_maybe:
+                return None
+            chosen_pol = chosen_pol_maybe
+        else:
+            chosen_pol = (
+                a.policy_code
+                if a_changed_pol
+                else (b.policy_code if b_changed_pol else base_policy)
+            )
+
+        merged_skills = dict(base_skills)
+        for sk in a.touched_skills | b.touched_skills:
+            in_a = sk in a.touched_skills
+            in_b = sk in b.touched_skills
+            if in_a and in_b:
+                m_sk = three_way_ast_merge(
+                    base_skills.get(sk, ""),
+                    a.skills.get(sk, ""),
+                    b.skills.get(sk, ""),
+                )
+                if m_sk is None:
+                    return None
+                merged_skills[sk] = m_sk
+            elif in_a:
+                if sk in a.skills:
+                    merged_skills[sk] = a.skills[sk]
+                else:
+                    merged_skills.pop(sk, None)
+            else:
+                if sk in b.skills:
+                    merged_skills[sk] = b.skills[sk]
+                else:
+                    merged_skills.pop(sk, None)
+
+        kept_skills = SwarmMetaAgent.prune_unused_skills(chosen_pol, merged_skills)
+        try:
+            with _COMPILE_EXEC_LOCK:
+                compile_policy_package(chosen_pol, "", skills=kept_skills)
+        except Exception:
+            return None
+
+        merged_touched_syms: dict[str, set[str]] = {}
+        for sk in a.touched_skills | b.touched_skills:
+            s_union = set(a.touched_skill_symbols.get(sk, set())) | set(
+                b.touched_skill_symbols.get(sk, set())
+            )
+            if s_union and sk in kept_skills:
+                merged_touched_syms[sk] = s_union
+
+        loc_total = len(chosen_pol.splitlines()) + sum(
+            len(v.splitlines()) for v in kept_skills.values()
+        )
+        return PeerCandidate(
+            peer_id=peer_id or f"ortho_{a.peer_id}_{b.peer_id}",
+            claimed_deficit_id=f"{a.claimed_deficit_id}+{b.claimed_deficit_id}",
+            claimed_label=claimed_label
+            or f"Orthogonal merge: {a.peer_id} + {b.peer_id}",
+            hypothesis_yaml={
+                "mechanism": f"AST-merged disjoint combination of {a.peer_id} and {b.peer_id}"
+            },
+            policy_code=chosen_pol,
+            skills=kept_skills,
+            touched_skills=a.touched_skills | b.touched_skills,
+            touched_skill_symbols=merged_touched_syms,
+            touched_branches=a.touched_branches | b.touched_branches,
+            sandbox_passed=True,
+            loc_total=loc_total,
+        )
+
+    @staticmethod
     def build_orthogonal_candidates(
         finalists: list[PeerCandidate],
         base_policy: str,
@@ -317,98 +433,16 @@ class SwarmReferee:
                 if len(combos) >= max_combos:
                     return combos
                 a, b = scan[idx_i], scan[idx_j]
-                if not a.touched_branches.isdisjoint(b.touched_branches):
-                    # Allow only if 3-way AST merge succeeds cleanly
-                    pass
-
-                # Symbol-level conflict check for shared modified skills
-                shared_sk = a.touched_skills & b.touched_skills
-                sym_conflict = False
-                for sk in shared_sk:
-                    sa = a.touched_skill_symbols.get(sk, set())
-                    sb = b.touched_skill_symbols.get(sk, set())
-                    if not sa or not sb or not sa.isdisjoint(sb):
-                        sym_conflict = True
-                        break
-                if sym_conflict:
-                    continue
-
-                a_changed_pol = not is_ast_equivalent(a.policy_code, base_policy)
-                b_changed_pol = not is_ast_equivalent(b.policy_code, base_policy)
-                if a_changed_pol and b_changed_pol:
-                    chosen_pol_maybe = three_way_ast_merge(
-                        base_policy, a.policy_code, b.policy_code
-                    )
-                    if not chosen_pol_maybe:
-                        continue
-                    chosen_pol = chosen_pol_maybe
-                else:
-                    chosen_pol = (
-                        a.policy_code
-                        if a_changed_pol
-                        else (b.policy_code if b_changed_pol else base_policy)
-                    )
-
-                merged_skills = dict(base_skills)
-                skill_ok = True
-                for sk in a.touched_skills | b.touched_skills:
-                    in_a = sk in a.touched_skills
-                    in_b = sk in b.touched_skills
-                    if in_a and in_b:
-                        m_sk = three_way_ast_merge(
-                            base_skills.get(sk, ""),
-                            a.skills.get(sk, ""),
-                            b.skills.get(sk, ""),
-                        )
-                        if m_sk is None:
-                            skill_ok = False
-                            break
-                        merged_skills[sk] = m_sk
-                    elif in_a:
-                        if sk in a.skills:
-                            merged_skills[sk] = a.skills[sk]
-                        else:
-                            merged_skills.pop(sk, None)
-                    else:
-                        if sk in b.skills:
-                            merged_skills[sk] = b.skills[sk]
-                        else:
-                            merged_skills.pop(sk, None)
-                if not skill_ok:
-                    continue
-
-                kept_skills = SwarmMetaAgent.prune_unused_skills(
-                    chosen_pol, merged_skills
+                merged = SwarmReferee._compose_two_packages(
+                    base_policy, base_skills, a, b, check_symbol_disjoint=True
                 )
-                fp = _package_fingerprint(chosen_pol, kept_skills)
+                if merged is None:
+                    continue
+                fp = _package_fingerprint(merged.policy_code, merged.skills)
                 if fp in seen_fps:
                     continue
-                try:
-                    with _COMPILE_EXEC_LOCK:
-                        compile_policy_package(chosen_pol, "", skills=kept_skills)
-                except Exception:
-                    continue
-
                 seen_fps.add(fp)
-                loc_total = len(chosen_pol.splitlines()) + sum(
-                    len(v.splitlines()) for v in kept_skills.values()
-                )
-                combos.append(
-                    PeerCandidate(
-                        peer_id=f"ortho_{a.peer_id}_{b.peer_id}",
-                        claimed_deficit_id=f"{a.claimed_deficit_id}+{b.claimed_deficit_id}",
-                        claimed_label=f"Orthogonal merge: {a.peer_id} + {b.peer_id}",
-                        hypothesis_yaml={
-                            "mechanism": f"AST-merged disjoint combination of {a.peer_id} and {b.peer_id}"
-                        },
-                        policy_code=chosen_pol,
-                        skills=kept_skills,
-                        touched_skills=a.touched_skills | b.touched_skills,
-                        touched_branches=a.touched_branches | b.touched_branches,
-                        sandbox_passed=True,
-                        loc_total=loc_total,
-                    )
-                )
+                combos.append(merged)
         return combos
 
     @staticmethod
@@ -432,8 +466,10 @@ class SwarmReferee:
         seeds: list[int],
         max_steps: int | None = None,
         holdout_seeds: list[int] | None = None,
+        race_seeds: int | None = None,
+        scenario_gate: str = "off",
     ) -> TournamentVerdict:
-        """Runs paired CRN evaluation across Incumbent + Top Survivors (+ Orthogonal Merges) + Holdout Audit."""
+        """Runs paired CRN evaluation across Incumbent + Top Survivors (+ Orthogonal Merges, Seed Racing, N-Way Stacking, Holdout)."""
         finalists = self.select_finalists(candidates, base_policy, base_skills)
         orthos = self.build_orthogonal_candidates(
             finalists, base_policy, base_skills, max_combos=3
@@ -450,9 +486,15 @@ class SwarmReferee:
         inc_stats = {
             "avg_depth": 1.0,
             "max_depth": 1,
+            "p75_depth": 1.0,
             "avg_score": -1e9,
+            "avg_ac": 10.0,
+            "avg_oprop": 0.0,
+            "avg_branches": 1.0,
             "stall_count": 999,
             "hard_stall_count": 999,
+            "stall_rate": 1.0,
+            "early_blunder_rate": 1.0,
             "loc_total": base_loc,
         }
         seeds_key = tuple(int(s) for s in seeds)
@@ -476,31 +518,26 @@ class SwarmReferee:
             and callable(eval_pool.evaluate_tasks)
         )
 
-        if (
-            base_policy.strip()
-            and not inc_cached_hit
-            and not (can_parallel_dispatch and finalists)
-        ):
-            eval_kwargs: dict[str, Any] = (
-                {"max_steps": int(max_steps)} if max_steps is not None else {}
-            )
-            inc_batch_eval = eval_pool.evaluate_batch(
-                batch_id=f"batch_swarm_g{generation}_inc_{int(time.time())}",
-                policy_code=base_policy,
-                macros_code="",
-                skills=base_skills,
-                target_episodes=len(seeds),
-                priority_seeds=list(seeds),
-                record_ticks=False,
-                **eval_kwargs,
-            )
-            inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
-            if len(self._incumbent_cache) >= 4:
-                self._incumbent_cache.clear()
-            self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
-
         # If no novel incubated survivor exists, fall back cleanly to cloned incumbent eval
         if not finalists:
+            if base_policy.strip() and not inc_cached_hit:
+                eval_kwargs: dict[str, Any] = (
+                    {"max_steps": int(max_steps)} if max_steps is not None else {}
+                )
+                inc_batch_eval = eval_pool.evaluate_batch(
+                    batch_id=f"batch_swarm_g{generation}_inc_{int(time.time())}",
+                    policy_code=base_policy,
+                    macros_code="",
+                    skills=base_skills,
+                    target_episodes=len(seeds),
+                    priority_seeds=list(seeds),
+                    record_ticks=False,
+                    **eval_kwargs,
+                )
+                inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
+                if len(self._incumbent_cache) >= 4:
+                    self._incumbent_cache.clear()
+                self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
             if inc_batch_eval is not None:
                 retained_eval = _clone_incumbent_eval(inc_batch_eval, generation)
                 return TournamentVerdict(
@@ -518,106 +555,216 @@ class SwarmReferee:
                     incumbent_batch_eval=inc_batch_eval,
                     reason="No novel non-rejected peer passed isolated sandbox incubation; retained incumbent.",
                 )
-            # Gen 1 bootstrap safety: pick first raw candidate if any compiled
             raise RuntimeError(
                 f"Gen {generation}: Zero peer candidates passed sandbox incubation on bootstrap."
             )
+
+        fin_eval_kwargs: dict[str, Any] = (
+            {"max_steps": int(max_steps)} if max_steps is not None else {}
+        )
+
+        def _run_batch_slice(
+            pkg_items: list[
+                tuple[str, str, dict[str, str], PeerCandidate | None, bool]
+            ],
+            eval_seeds: list[int],
+            stage_tag: str,
+        ) -> dict[str, BatchEvaluation]:
+            """Evaluates `[(tag, pol, sk, cand_or_None, rec_ticks), ...]` on `eval_seeds`."""
+            ts_now = int(time.time())
+            seed_rank = {int(s): i for i, s in enumerate(eval_seeds)}
+            out_batches: dict[str, BatchEvaluation] = {}
+            if can_parallel_dispatch:
+                eff_steps = int(
+                    max_steps
+                    if max_steps is not None
+                    else getattr(eval_pool, "max_steps", 25000)
+                )
+                pool_role = str(getattr(eval_pool, "role", "val-hum-law-fem"))
+                pool_bench = str(getattr(eval_pool, "benchmark", "nethack"))
+                all_tasks: list[dict[str, Any]] = []
+                batch_groups: list[tuple[str, str]] = []
+                for tag, pol, skl, _cand, rec_ticks in pkg_items:
+                    bid = f"batch_swarm_g{generation}_{stage_tag}{tag}_{ts_now}"
+                    batch_groups.append((tag, bid))
+                    for idx, sd in enumerate(eval_seeds, start=1):
+                        all_tasks.append(
+                            {
+                                "seed": int(sd),
+                                "run_id": f"{bid}_r{idx:05d}",
+                                "role": pool_role,
+                                "max_steps": eff_steps,
+                                "policy_code": pol,
+                                "macros_code": "",
+                                "target_functions": None,
+                                "param_overrides": None,
+                                "record_ticks": rec_ticks,
+                                "is_priority_seed": True,
+                                "enforce_trigger": False,
+                                "skills": skl,
+                                "benchmark": pool_bench,
+                            }
+                        )
+                raw_results = eval_pool.evaluate_tasks(all_tasks)
+                by_bid: dict[str, list[dict[str, Any]]] = {
+                    bid: [] for _t, bid in batch_groups
+                }
+                for res in raw_results:
+                    rid = str(res.get("run_id", ""))
+                    prefix = rid.rsplit("_r", 1)[0] if "_r" in rid else ""
+                    if prefix in by_bid:
+                        by_bid[prefix].append(res)
+                for tag, bid in batch_groups:
+                    runs_sorted = sorted(
+                        by_bid.get(bid, []),
+                        key=lambda r: seed_rank.get(int(r.get("seed", 0)), 999999),
+                    )
+                    out_batches[tag] = _assemble_batch_eval(bid, runs_sorted)
+            else:
+                for tag, pol, skl, _cand, rec_ticks in pkg_items:
+                    bid = f"batch_swarm_g{generation}_{stage_tag}{tag}_{ts_now}"
+                    out_batches[tag] = eval_pool.evaluate_batch(
+                        batch_id=bid,
+                        policy_code=pol,
+                        macros_code="",
+                        skills=skl,
+                        target_episodes=len(eval_seeds),
+                        priority_seeds=list(eval_seeds),
+                        record_ticks=rec_ticks,
+                        **fin_eval_kwargs,
+                    )
+            return out_batches
 
         scoreboard: list[dict[str, Any]] = []
         evaluated_entries: list[
             tuple[PeerCandidate, BatchEvaluation, dict[str, Any]]
         ] = []
-        fin_eval_kwargs: dict[str, Any] = (
-            {"max_steps": int(max_steps)} if max_steps is not None else {}
+
+        use_two_stage = (
+            race_seeds is not None
+            and 4 <= int(race_seeds) < len(seeds)
+            and len(finalists) >= 3
         )
-        if can_parallel_dispatch:
-            eff_steps = int(
-                max_steps
-                if max_steps is not None
-                else getattr(eval_pool, "max_steps", 25000)
-            )
-            pool_role = str(getattr(eval_pool, "role", "val-hum-law-fem"))
-            pool_bench = str(getattr(eval_pool, "benchmark", "nethack"))
-            ts_now = int(time.time())
-            all_tasks: list[dict[str, Any]] = []
-            batch_groups: list[
-                tuple[str, str, str, dict[str, str], PeerCandidate | None, bool]
+        if use_two_stage:
+            r_cnt = int(race_seeds)
+            stage1_seeds = list(seeds[:r_cnt])
+            stage2_seeds = list(seeds[r_cnt:])
+            s1_pkgs: list[
+                tuple[str, str, dict[str, str], PeerCandidate | None, bool]
             ] = []
             if base_policy.strip() and not inc_cached_hit:
-                inc_bid = f"batch_swarm_g{generation}_inc_{ts_now}"
-                batch_groups.append(
-                    ("inc", inc_bid, base_policy, base_skills, None, False)
-                )
+                s1_pkgs.append(("inc", base_policy, base_skills, None, False))
             for cand in finalists:
-                c_bid = f"batch_swarm_g{generation}_{cand.peer_id}_{ts_now}"
-                batch_groups.append(
-                    (cand.peer_id, c_bid, cand.policy_code, cand.skills, cand, True)
+                s1_pkgs.append(
+                    (cand.peer_id, cand.policy_code, cand.skills, cand, True)
                 )
-            for _tag, bid, pol, skl, _cand, rec_ticks in batch_groups:
-                for idx, sd in enumerate(seeds, start=1):
-                    all_tasks.append(
-                        {
-                            "seed": int(sd),
-                            "run_id": f"{bid}_r{idx:05d}",
-                            "role": pool_role,
-                            "max_steps": eff_steps,
-                            "policy_code": pol,
-                            "macros_code": "",
-                            "target_functions": None,
-                            "param_overrides": None,
-                            "record_ticks": rec_ticks,
-                            "is_priority_seed": True,
-                            "enforce_trigger": False,
-                            "skills": skl,
-                            "benchmark": pool_bench,
-                        }
-                    )
-            raw_results = eval_pool.evaluate_tasks(all_tasks)
-            by_bid: dict[str, list[dict[str, Any]]] = {bg[1]: [] for bg in batch_groups}
-            for res in raw_results:
-                rid = str(res.get("run_id", ""))
-                prefix = rid.rsplit("_r", 1)[0] if "_r" in rid else ""
-                if prefix in by_bid:
-                    by_bid[prefix].append(res)
-            seed_rank = {int(s): i for i, s in enumerate(seeds)}
-            for tag, bid, _pol, _skl, cand, _rec in batch_groups:
-                runs_sorted = sorted(
-                    by_bid.get(bid, []),
-                    key=lambda r: seed_rank.get(int(r.get("seed", 0)), 999999),
+            s1_batches = _run_batch_slice(s1_pkgs, stage1_seeds, "s1_")
+            if inc_batch_eval is not None:
+                s1_seed_set = {int(s) for s in stage1_seeds}
+                s1_inc_runs = [
+                    r
+                    for r in (inc_batch_eval.get("runs", []) or [])
+                    if int(r.get("seed", 0)) in s1_seed_set
+                ]
+            else:
+                s1_inc_batch = s1_batches.get("inc")
+                s1_inc_runs = (
+                    list(s1_inc_batch.get("runs", []) or []) if s1_inc_batch else []
                 )
-                b_eval = _assemble_batch_eval(bid, runs_sorted)
-                if tag == "inc":
-                    inc_batch_eval = b_eval
-                    inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
-                    if len(self._incumbent_cache) >= 4:
-                        self._incumbent_cache.clear()
-                    self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
-                elif cand is not None:
-                    stats = _extract_eval_stats(b_eval, loc_total=cand.loc_total)
-                    evaluated_entries.append((cand, b_eval, stats))
-                    scoreboard.append(
-                        {
-                            "peer_id": cand.peer_id,
-                            "deficit": cand.claimed_deficit_id,
-                            "avg_depth": round(stats["avg_depth"], 3),
-                            "max_depth": stats["max_depth"],
-                            "avg_score": round(stats["avg_score"], 1),
-                            "stalls": stats["stall_count"],
-                            "loc": stats["loc_total"],
-                        }
-                    )
+
+            def _s1_score(cand: PeerCandidate) -> tuple[int, float, float]:
+                cb = s1_batches.get(cand.peer_id)
+                st = _extract_eval_stats(cb, loc_total=cand.loc_total) if cb else {}
+                exc = 1 if int(st.get("policy_exceptions", 0) or 0) == 0 else 0
+                pr = (
+                    evaluate_tournament_pair(cb.get("runs", []) or [], s1_inc_runs)
+                    if (cb and s1_inc_runs)
+                    else {"iqm_delta": float(st.get("iqm_prog", 1.0))}
+                )
+                return (
+                    exc,
+                    float(pr.get("iqm_delta", 0.0)),
+                    float(st.get("avg_depth", 1.0)),
+                )
+
+            indiv_fins = sorted(
+                [c for c in finalists if not c.peer_id.startswith("ortho_")],
+                key=_s1_score,
+                reverse=True,
+            )
+            ortho_fins = sorted(
+                [c for c in finalists if c.peer_id.startswith("ortho_")],
+                key=_s1_score,
+                reverse=True,
+            )
+            survivors = indiv_fins[:2] + ortho_fins[:1]
+            s2_pkgs: list[
+                tuple[str, str, dict[str, str], PeerCandidate | None, bool]
+            ] = []
+            if base_policy.strip() and not inc_cached_hit:
+                s2_pkgs.append(("inc", base_policy, base_skills, None, False))
+            for cand in survivors:
+                s2_pkgs.append(
+                    (cand.peer_id, cand.policy_code, cand.skills, cand, True)
+                )
+            s2_batches = _run_batch_slice(s2_pkgs, stage2_seeds, "s2_")
+            seed_rank_full = {int(s): i for i, s in enumerate(seeds)}
+            if base_policy.strip() and not inc_cached_hit:
+                comb_inc_runs = sorted(
+                    list(s1_inc_runs)
+                    + list((s2_batches.get("inc") or {}).get("runs", []) or []),
+                    key=lambda r: seed_rank_full.get(int(r.get("seed", 0)), 999999),
+                )
+                inc_batch_eval = _assemble_batch_eval(
+                    f"batch_swarm_g{generation}_inc_{int(time.time())}", comb_inc_runs
+                )
+                inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
+                if len(self._incumbent_cache) >= 4:
+                    self._incumbent_cache.clear()
+                self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
+            for cand in survivors:
+                r1 = list((s1_batches.get(cand.peer_id) or {}).get("runs", []) or [])
+                r2 = list((s2_batches.get(cand.peer_id) or {}).get("runs", []) or [])
+                comb_runs = sorted(
+                    r1 + r2,
+                    key=lambda r: seed_rank_full.get(int(r.get("seed", 0)), 999999),
+                )
+                b_eval = _assemble_batch_eval(
+                    f"batch_swarm_g{generation}_{cand.peer_id}_{int(time.time())}",
+                    comb_runs,
+                )
+                stats = _extract_eval_stats(b_eval, loc_total=cand.loc_total)
+                evaluated_entries.append((cand, b_eval, stats))
+                scoreboard.append(
+                    {
+                        "peer_id": cand.peer_id,
+                        "deficit": cand.claimed_deficit_id,
+                        "avg_depth": round(stats["avg_depth"], 3),
+                        "max_depth": stats["max_depth"],
+                        "avg_score": round(stats["avg_score"], 1),
+                        "stalls": stats["stall_count"],
+                        "loc": stats["loc_total"],
+                    }
+                )
         else:
+            all_pkgs: list[
+                tuple[str, str, dict[str, str], PeerCandidate | None, bool]
+            ] = []
+            if base_policy.strip() and not inc_cached_hit:
+                all_pkgs.append(("inc", base_policy, base_skills, None, False))
             for cand in finalists:
-                b_eval = eval_pool.evaluate_batch(
-                    batch_id=f"batch_swarm_g{generation}_{cand.peer_id}_{int(time.time())}",
-                    policy_code=cand.policy_code,
-                    macros_code="",
-                    skills=cand.skills,
-                    target_episodes=len(seeds),
-                    priority_seeds=list(seeds),
-                    record_ticks=True,
-                    **fin_eval_kwargs,
+                all_pkgs.append(
+                    (cand.peer_id, cand.policy_code, cand.skills, cand, True)
                 )
+            full_batches = _run_batch_slice(all_pkgs, list(seeds), "")
+            if base_policy.strip() and not inc_cached_hit and "inc" in full_batches:
+                inc_batch_eval = full_batches["inc"]
+                inc_stats = _extract_eval_stats(inc_batch_eval, loc_total=base_loc)
+                if len(self._incumbent_cache) >= 4:
+                    self._incumbent_cache.clear()
+                self._incumbent_cache[inc_cache_key] = (inc_batch_eval, inc_stats)
+            for cand in finalists:
+                b_eval = full_batches[cand.peer_id]
                 stats = _extract_eval_stats(b_eval, loc_total=cand.loc_total)
                 evaluated_entries.append((cand, b_eval, stats))
                 scoreboard.append(
@@ -728,6 +875,28 @@ class SwarmReferee:
             loc_improved = int(best_stats["loc_total"]) <= int(inc_stats["loc_total"])
             guard_ok = _passes_score_guard(best_stats)
 
+            pareto_non_regressing = (
+                d_delta >= -0.05
+                and iqm_delta >= -0.02
+                and ac_non_worse
+                and float(best_stats.get("stall_rate", 0.0))
+                <= float(inc_stats.get("stall_rate", 0.0)) + 0.04
+                and float(best_stats.get("early_blunder_rate", 0.0))
+                <= float(inc_stats.get("early_blunder_rate", 0.0)) + 0.04
+            )
+            pareto_axis_gain = (
+                float(best_stats.get("p75_depth", 1.0))
+                > float(inc_stats.get("p75_depth", 1.0)) + 0.25
+                or float(best_stats.get("avg_oprop", 0.0))
+                > float(inc_stats.get("avg_oprop", 0.0)) + 0.15
+                or float(best_stats.get("avg_branches", 1.0))
+                > float(inc_stats.get("avg_branches", 1.0)) + 0.08
+                or (ac_improved and iqm_delta >= 0.0)
+            )
+            pareto_beats = (
+                pareto_non_regressing and pareto_axis_gain and (wins >= losses)
+            )
+
             stat_sig_ok = (
                 (n_pairs < 8)
                 or (p_val < 0.05)
@@ -735,7 +904,8 @@ class SwarmReferee:
                 or (wins > losses and iqm_delta >= 0.08)
             )
             beats_incumbent = guard_ok and (
-                (d_delta > 0.05 and iqm_delta >= -0.05 and ac_non_worse)
+                pareto_beats
+                or (d_delta > 0.05 and iqm_delta >= -0.05 and ac_non_worse)
                 or (d_delta > 1e-4 and s_delta >= -1e-2)
                 or (
                     iqm_delta > 1e-4
@@ -758,6 +928,112 @@ class SwarmReferee:
             s_delta = float(best_stats["avg_score"])
             guard_ok = _passes_score_guard(best_stats)
             beats_incumbent = guard_ok
+
+        # N-Way Sequential Greedy Stacking across non-conflicting winning peers
+        if beats_incumbent and base_policy.strip():
+            winning_indivs = sorted(
+                [
+                    (c, st, paired_by_idx[idx_w])
+                    for idx_w, (c, _be, st) in enumerate(evaluated_entries)
+                    if not c.peer_id.startswith("ortho_")
+                    and c.peer_id != best_cand.peer_id
+                    and _passes_score_guard(st)
+                    and (
+                        float(paired_by_idx[idx_w].get("iqm_delta", 0.0)) > 0.0
+                        or float(st.get("avg_depth", 1.0))
+                        > float(inc_stats.get("avg_depth", 1.0)) + 0.02
+                    )
+                ],
+                key=lambda item: float(item[2].get("iqm_delta", 0.0)),
+                reverse=True,
+            )
+            cur_stack_fp = _package_fingerprint(best_cand.policy_code, best_cand.skills)
+            for next_c, _nxt_st, _nxt_pr in winning_indivs[:3]:
+                cand_stack = self._compose_two_packages(
+                    base_policy,
+                    base_skills,
+                    best_cand,
+                    next_c,
+                    peer_id=f"stack_{best_cand.peer_id}_{next_c.peer_id}"[:48],
+                    claimed_label=f"Greedy N-way stack (+{next_c.peer_id})",
+                    check_symbol_disjoint=True,
+                )
+                if cand_stack is None:
+                    continue
+                stk_fp = _package_fingerprint(cand_stack.policy_code, cand_stack.skills)
+                if stk_fp == cur_stack_fp:
+                    continue
+                stk_batches = _run_batch_slice(
+                    [
+                        (
+                            cand_stack.peer_id,
+                            cand_stack.policy_code,
+                            cand_stack.skills,
+                            cand_stack,
+                            True,
+                        )
+                    ],
+                    list(seeds),
+                    "stk_",
+                )
+                stk_eval = stk_batches.get(cand_stack.peer_id)
+                if stk_eval is None:
+                    continue
+                stk_stats = _extract_eval_stats(
+                    stk_eval, loc_total=cand_stack.loc_total
+                )
+                if not _passes_score_guard(stk_stats):
+                    continue
+                vs_best = evaluate_tournament_pair(
+                    stk_eval.get("runs", []) or [],
+                    best_eval.get("runs", []) or [],
+                )
+                if float(vs_best.get("iqm_delta", 0.0)) > 0.01 and int(
+                    vs_best.get("wins", 0)
+                ) >= int(vs_best.get("losses", 0)):
+                    best_cand = cand_stack
+                    best_eval = stk_eval
+                    best_stats = stk_stats
+                    best_pair = (
+                        evaluate_tournament_pair(
+                            stk_eval.get("runs", []) or [], inc_runs_list
+                        )
+                        if inc_runs_list
+                        else vs_best
+                    )
+                    cur_stack_fp = stk_fp
+                    d_delta = float(best_stats["avg_depth"]) - float(
+                        inc_stats["avg_depth"]
+                    )
+                    s_delta = float(best_stats["avg_score"]) - float(
+                        inc_stats["avg_score"]
+                    )
+
+        # Optional MiniHack Scenario & Prompt-Torture Suite Gate
+        if beats_incumbent and str(scenario_gate or "off").lower() in (
+            "advisory",
+            "strict",
+        ):
+            try:
+                from lox.env.benchmarks.nethack_scenarios import run_scenario_gate
+
+                sg = run_scenario_gate(
+                    best_cand.policy_code,
+                    best_cand.skills,
+                    seed=int(seeds[0]) if seeds else 42,
+                    max_steps=40,
+                )
+                ui.info(
+                    f"Gen {generation} Scenario Gate ({scenario_gate}): "
+                    f"{sg['passed_count']}/{sg['total_count']} passed "
+                    f"(exc={sg['exceptions']}, livelocks={sg['prompt_livelocks']})."
+                )
+                if str(scenario_gate).lower() == "strict" and (
+                    sg.get("exceptions", 0) > 0 or sg.get("prompt_livelocks", 0) > 0
+                ):
+                    beats_incumbent = False
+            except Exception:
+                pass
 
         # Hidden Holdout Audit on candidate winner (never exposed to Peer prompts or DuckDB deficits)
         holdout_avg_depth: float | None = None

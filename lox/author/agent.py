@@ -7,6 +7,7 @@ Gemini, OpenAI-compatible endpoints, and deterministic Mock mode for testing.
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.tools import (
     OPENAI_TOOL_SPECS,
     AuthorToolRegistry,
+    get_tool_specs,
     merge_skill_module_update,
 )
 from lox.db.logger import BatchDatabaseLogger
@@ -75,7 +77,7 @@ class AuthorAgent:
         db_path: str = DEFAULT_DB_PATH,
         macros_path: str = DEFAULT_MACROS_PATH,
         max_tokens: int = 16384,
-        reasoning_effort: str = "medium",
+        reasoning_effort: str = "max",
         routing: str = "nitro",
         max_repair_turns: int = 5,
         benchmark: str = "nethack",
@@ -135,7 +137,20 @@ class AuthorAgent:
                 "3. Do NOT wrap the subtree in monolithic `class Policy` with `def run(self, state): yield ...`.\n"
                 "4. Fix any syntax, indentation, or runtime errors and output the complete corrected subtree inside a single ```python ... ``` block."
             )
-        if canon_mode in ("SWARM_META", "SWARM_PEER"):
+        if canon_mode == "SWARM_PEER":
+            return (
+                f"{hdr}\n\n"
+                f"```\n{diag.strip()}\n```\n\n"
+                "PROBLEM: SWARM PEER PATCH FAILED VERIFICATION\n"
+                "REQUIRED FIX:\n"
+                "1. Emit surgical updates ONLY for touched functions/skills using "
+                '`<skill_code module="name">...</skill_code>` and/or `<policy_code>...</policy_code>` '
+                "(do NOT paste unchanged functions).\n"
+                "2. Check undefined symbols, imports (`from lox.env.actions import ...`, `from skills.<m> import ...`), "
+                "and call arities reported above.\n"
+                "3. Keep `def step(self, state): return self.tree.tick(state) or Action.WAIT` thin."
+            )
+        if canon_mode == "SWARM_META":
             return (
                 f"{hdr}\n\n"
                 f"```\n{diag.strip()}\n```\n\n"
@@ -517,7 +532,7 @@ class AuthorAgent:
         name: str,
         args: dict[str, Any],
         assistant_text: str = "",
-        latest_hyp: str = "",
+        latest_hyp: dict[str, Any] | None = None,
     ) -> str:
         t0 = time.perf_counter()
         if name == "query_db":
@@ -561,6 +576,30 @@ class AuthorAgent:
             lim = int(args.get("limit", 6) or 6)
             out, summary = self.tools.query_theories(query=q, doc_type=dt, limit=lim)
             arg_disp = q[:40]
+        elif name == "read_wiki_article":
+            title = str(args.get("title", ""))
+            sec = str(args.get("section", ""))
+            off = int(args.get("offset", 0) or 0)
+            mc = int(args.get("max_chars", 0) or 0)
+            out, summary = self.tools.read_wiki_article(
+                title=title, section=sec, offset=off, max_chars=mc
+            )
+            arg_disp = f"{title[:30]}@{sec}" if sec else title[:35]
+        elif name == "find_references":
+            sym = str(args.get("symbol", ""))
+            out, summary = self.tools.find_references(sym)
+            arg_disp = sym[:35]
+        elif name == "grep_skills":
+            pat = str(args.get("pattern", ""))
+            out, summary = self.tools.grep_skills(pat)
+            arg_disp = pat[:35]
+        elif name == "blackboard_map":
+            out, summary = self.tools.blackboard_map()
+            arg_disp = "all keys"
+        elif name == "benchmark_expert_parity":
+            tn = int(args.get("top_n", 10) or 10)
+            out, summary = self.tools.benchmark_expert_parity(top_n=tn)
+            arg_disp = f"top_n={tn}"
         elif name == "dry_run_policy":
             code = str(args.get("code", "")).strip()
             s_name = args.get("skill_name")
@@ -653,7 +692,7 @@ class AuthorAgent:
 
         model_id = self.model
         if self.provider == "openrouter" and ":" not in model_id:
-            if self.routing in ("nitro", "floor"):
+            if self.routing in ("nitro", "floor", "exacto"):
                 model_id = f"{model_id}:{self.routing}"
 
         api_messages = messages
@@ -691,8 +730,15 @@ class AuthorAgent:
             # Keep tool definitions static across turns so provider prefix caches match on wrap-up turns.
             payload["tools"] = active_tools
             payload["tool_choice"] = "auto" if allow_tools else "none"
-        if self.provider == "openrouter" and self.reasoning_effort:
-            payload["reasoning"] = {"effort": self.reasoning_effort}
+        if (
+            self.provider == "openrouter"
+            and self.reasoning_effort
+            and str(self.reasoning_effort).lower() != "none"
+        ):
+            eff = str(self.reasoning_effort).lower()
+            if "glm-5" in model_id.lower() and eff == "medium":
+                eff = "high"
+            payload["reasoning"] = {"effort": eff}
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -725,9 +771,14 @@ class AuthorAgent:
                             "(Check your OPENROUTER_API_KEY in `.env` or environment)"
                         )
                     if resp.status_code != 200 and "reasoning" in payload:
-                        # Retry without reasoning field if endpoint does not support it
-                        payload.pop("reasoning", None)
-                        resp = client.post(url, headers=headers, json=payload)
+                        cur_eff = str(payload["reasoning"].get("effort", "")).lower()
+                        if cur_eff == "max":
+                            payload["reasoning"] = {"effort": "high"}
+                            resp = client.post(url, headers=headers, json=payload)
+                        if resp.status_code != 200:
+                            # Retry without reasoning field if endpoint does not support it
+                            payload.pop("reasoning", None)
+                            resp = client.post(url, headers=headers, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
                     if isinstance(data, dict) and "error" in data:
@@ -961,6 +1012,31 @@ class AuthorAgent:
         self.tools.last_passed_code = ""
         self.tools.skills = dict(skills) if skills else {}
         self.tools.max_steps = max_steps
+        prev_swarm_frontier = (
+            getattr(self.tools, "swarm_frontier", None)
+            if canon_mode == "SWARM_PEER"
+            else None
+        )
+        prev_swarm_checkpoint = (
+            getattr(self.tools, "swarm_checkpoint", None)
+            if canon_mode == "SWARM_PEER"
+            else None
+        )
+        prev_claimed_deficit = (
+            getattr(self.tools, "claimed_deficit", None)
+            if canon_mode == "SWARM_PEER"
+            else None
+        )
+        prev_scenario_gate = (
+            getattr(self.tools, "scenario_gate", "off")
+            if canon_mode == "SWARM_PEER"
+            else "off"
+        )
+        prev_peer_research_gate = (
+            getattr(self.tools, "enforce_peer_research_gate", False)
+            if canon_mode == "SWARM_PEER"
+            else False
+        )
         self.tools.configure_generation(
             pool=pool,
             baseline_runs=baseline_runs,
@@ -970,7 +1046,13 @@ class AuthorAgent:
             generation=generation,
             benchmark=self.benchmark,
             mode=canon_mode,
+            swarm_frontier=prev_swarm_frontier,
+            swarm_checkpoint=prev_swarm_checkpoint,
+            claimed_deficit=prev_claimed_deficit,
+            scenario_gate=prev_scenario_gate,
         )
+        if canon_mode == "SWARM_PEER":
+            self.tools.enforce_peer_research_gate = prev_peer_research_gate
         if max_tool_turns is None:
             max_tool_turns = (
                 24 if canon_mode == "CREATE" else max(18, max_pilot_runs + 10)
@@ -1030,7 +1112,16 @@ class AuthorAgent:
                     f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
                 )
             t0_turn = time.perf_counter()
-            msg = self._call_llm_api(messages, allow_tools=allow_tools)
+            active_tool_specs = get_tool_specs(canon_mode)
+            if (
+                active_tool_specs is not OPENAI_TOOL_SPECS
+                and "tool_specs" in inspect.signature(self._call_llm_api).parameters
+            ):
+                msg = self._call_llm_api(
+                    messages, allow_tools=allow_tools, tool_specs=active_tool_specs
+                )
+            else:
+                msg = self._call_llm_api(messages, allow_tools=allow_tools)
             turn_ms = (time.perf_counter() - t0_turn) * 1000.0
             msg_text = msg.get("content") or ""
             reasoning_text = msg.get("_reasoning") or ""
@@ -1365,8 +1456,22 @@ class AuthorAgent:
                 total_tool_calls += 1
                 fn_Spec = tc.get("function") or {}
                 t_name = fn_Spec.get("name", "")
-                if t_name in ("query_db", "query_wiki", "query_monster", "query_item"):
+                if t_name in (
+                    "query_db",
+                    "query_wiki",
+                    "read_wiki_article",
+                    "query_monster",
+                    "query_item",
+                    "benchmark_expert_parity",
+                    "find_references",
+                    "grep_skills",
+                    "blackboard_map",
+                ):
                     research_tools_called.add(t_name)
+                    if t_name == "read_wiki_article":
+                        research_tools_called.add("query_wiki")
+                    if t_name == "benchmark_expert_parity":
+                        called_expert_query = True
                 raw_args = fn_Spec.get("arguments", "{}")
                 try:
                     t_args = (
@@ -1521,7 +1626,11 @@ class AuthorAgent:
                         message_content=abort_detail,
                         tool_calls_json="[]",
                         tool_results_json="[]",
-                        candidate_code=self.tools.last_attempted_pilot_code or "",
+                        candidate_code=getattr(
+                            self.tools, "last_attempted_pilot_code", ""
+                        )
+                        or self.tools.best_pilot_code
+                        or "",
                         skill_name=str((latest_hyp or {}).get("skill_module", "")),
                         skill_code=getattr(self.tools, "last_passed_skill_code", ""),
                         hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
@@ -1552,7 +1661,10 @@ class AuthorAgent:
                 )
 
         # Compiler-in-the-loop verification & sequential self-repair
+        diag = ""
         for repair_idx in range(self.max_repair_turns + 1):
+            s_name: str | None = None
+            s_code = ""
             hyp, code_patch = self.extract_yaml_and_python(final_content)
             if hyp:
                 latest_hyp = hyp
@@ -1570,8 +1682,9 @@ class AuthorAgent:
             for s_mod, s_src in (extracted_skills_map or {}).items():
                 clean_mod = str(s_mod or "").strip().removesuffix(".py")
                 if clean_mod and str(s_src or "").strip():
-                    existing_mod_src = merged_skills_map.get(
-                        clean_mod, base_skills.get(clean_mod, "")
+                    existing_mod_src = str(
+                        merged_skills_map.get(clean_mod, base_skills.get(clean_mod, ""))
+                        or ""
                     )
                     merged_skills_map[clean_mod] = merge_skill_module_update(
                         existing_mod_src, str(s_src)
@@ -1978,6 +2091,10 @@ class AuthorAgent:
                     abort_reason=f"MUTATION_SCOPE_EXCEEDED: modified {len(changed_fns)} functions ({changed_fns}), limit is 2",
                     pilot_best_delta=best_delta,
                 )
+            fallback_merged_skills = {
+                **(getattr(self.tools, "last_passed_skills", {}) or {}),
+                **(self.extract_all_skill_codes(final_content, latest_hyp) or {}),
+            }
             return SynthesisProposal(
                 mode=mode,
                 hypothesis=latest_hyp,
@@ -1987,7 +2104,7 @@ class AuthorAgent:
                 target_functions=list(changed_fns),
                 tool_calls_made=total_tool_calls,
                 skill_code=skill_code,
-                skill_modules=self.extract_all_skill_codes(final_content, latest_hyp),
+                skill_modules=fallback_merged_skills,
                 pilot_best_delta=best_delta,
             )
 
@@ -2375,7 +2492,18 @@ class AuthorAgent:
                     }
                 )
             t0_turn = time.perf_counter()
-            msg = self._call_llm_api(messages, allow_tools=allow_tools)
+            active_tool_specs = get_tool_specs(
+                getattr(self.tools, "mode", "SWARM_WORKER")
+            )
+            if (
+                active_tool_specs is not OPENAI_TOOL_SPECS
+                and "tool_specs" in inspect.signature(self._call_llm_api).parameters
+            ):
+                msg = self._call_llm_api(
+                    messages, allow_tools=allow_tools, tool_specs=active_tool_specs
+                )
+            else:
+                msg = self._call_llm_api(messages, allow_tools=allow_tools)
             turn_ms = (time.perf_counter() - t0_turn) * 1000.0
             msg_text = msg.get("content") or ""
             reasoning_text = msg.get("_reasoning") or ""

@@ -22,7 +22,7 @@ from lox.engine.swarm_orchestrator import (
 from lox.ui.console import ui
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="LOX Hierarchical Multi-Agent Swarm Campaign Entrypoint."
     )
@@ -55,8 +55,14 @@ def main() -> None:
     parser.add_argument(
         "--seeds",
         type=int,
-        default=8,
-        help="Number of seeds to evaluate per generation master batch (default: 8).",
+        default=64,
+        help="Full CRN tournament seeds per generation (default: 64, two-stage raced when --race-seeds < --seeds).",
+    )
+    parser.add_argument(
+        "--race-seeds",
+        type=int,
+        default=32,
+        help="Stage-1 CRN racing seed count before extending finalists to --seeds (default: 32).",
     )
     parser.add_argument(
         "--provider",
@@ -68,6 +74,29 @@ def main() -> None:
         "--model",
         default="z-ai/glm-5.3-flash:nitro",
         help="LLM model identifier (default: z-ai/glm-5.3-flash:nitro).",
+    )
+    parser.add_argument(
+        "--refactor-model",
+        default=None,
+        help="Optional stronger LLM model identifier for refactor/plateau slots (defaults to --model).",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=["low", "medium", "high", "max", "none"],
+        default="max",
+        help="OpenRouter reasoning effort parameter (default: max).",
+    )
+    parser.add_argument(
+        "--routing",
+        choices=["nitro", "floor", "exacto", "default"],
+        default="nitro",
+        help="OpenRouter provider routing strategy suffix (default: nitro).",
+    )
+    parser.add_argument(
+        "--scenario-gate",
+        choices=["off", "advisory", "strict"],
+        default="advisory",
+        help="Mid-game MiniHack scenario & prompt-torture curriculum gate mode (default: advisory).",
     )
     parser.add_argument(
         "--db-path",
@@ -109,7 +138,18 @@ def main() -> None:
         ),
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    args = build_parser().parse_args(argv)
+    if not getattr(args, "refactor_model", None):
+        args.refactor_model = args.model
+    return args
+
+
+def main() -> None:
+    args = parse_args()
     if not args.frontier_dir:
         args.frontier_dir = (
             os.path.join(args.workspace_dir, "checkpoints")
@@ -156,6 +196,11 @@ def main() -> None:
         role=args.role,
         swarm_architecture=args.swarm_architecture,
         eval_workers=args.eval_workers,
+        reasoning_effort=args.reasoning_effort,
+        routing=args.routing,
+        refactor_model=args.refactor_model,
+        race_seeds=args.race_seeds,
+        scenario_gate=args.scenario_gate,
     )
 
     try:

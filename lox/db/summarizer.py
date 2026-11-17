@@ -34,30 +34,29 @@ def _detect_confinement_stalls(
         return []
 
     raw_intervals: list[tuple[int, int]] = []
-    depth_prefix_seen: list[set[tuple[int, int]]] = []
-    running_depth_sets: dict[tuple[int, int], set[tuple[int, int]]] = {}
+    first_seen_by_depth: dict[tuple[int, int], dict[tuple[int, int], int]] = {}
+    tick_depths: list[tuple[int, int]] = []
+    tick_positions: list[tuple[int, int]] = []
 
-    for t in ticks:
+    for idx_t, t in enumerate(ticks):
         d_key = (int(t.get("dungeon_num", 0) or 0), int(t.get("depth", 1) or 1))
         pos = (int(t.get("y", 0) or 0), int(t.get("x", 0) or 0))
-        d_set = running_depth_sets.setdefault(d_key, set())
-        depth_prefix_seen.append(set(d_set))
-        d_set.add(pos)
+        tick_depths.append(d_key)
+        tick_positions.append(pos)
+        seen_map = first_seen_by_depth.setdefault(d_key, {})
+        if pos not in seen_map:
+            seen_map[pos] = idx_t
 
     for start_idx in range(0, n - window_size + 1, stride):
         end_idx = start_idx + window_size
-        sub = ticks[start_idx:end_idx]
-        depths_in_win = {
-            (int(s.get("dungeon_num", 0) or 0), int(s.get("depth", 1) or 1))
-            for s in sub
-        }
-        if len(depths_in_win) != 1:
+        base_d = tick_depths[start_idx]
+        if any(tick_depths[k] != base_d for k in range(start_idx + 1, end_idx)):
             continue
-        win_positions = {
-            (int(s.get("y", 0) or 0), int(s.get("x", 0) or 0)) for s in sub
-        }
-        prior_seen = depth_prefix_seen[start_idx]
-        new_tiles = len(win_positions - prior_seen)
+        seen_map = first_seen_by_depth[base_d]
+        win_positions = set(tick_positions[start_idx:end_idx])
+        new_tiles = sum(
+            1 for p in win_positions if seen_map.get(p, start_idx) >= start_idx
+        )
         if len(win_positions) <= 28 or (
             len(win_positions) <= 45 and new_tiles <= 4 and start_idx >= window_size
         ):
@@ -140,7 +139,7 @@ def summarize_episode_ticks(
     msg_repeat = 0
 
     # Domain-agnostic progress expansion & stagnation tracking
-    visited_positions: set[tuple[int, int]] = set()
+    visited_positions: set[tuple[int, int, int, int]] = set()
     max_composite_progress = -1.0
     last_progress_turn = 0
     action_counts: Counter[str] = Counter()
@@ -157,8 +156,8 @@ def summarize_episode_ticks(
         cur_max_hp = int(t.get("max_hp", 0))
         sc = float(t.get("score", 0))
         ach = float(t.get("achievements", 0))
-        pos = (int(t.get("y", 0)), int(t.get("x", 0)))
         dnum = int(t.get("dungeon_num", 0))
+        pos = (dnum, d, int(t.get("y", 0)), int(t.get("x", 0)))
         dungeons_seen.add(dnum)
 
         # Universal composite progress monotonic evaluation
@@ -247,12 +246,12 @@ def summarize_episode_ticks(
     if msg_repeat > 1 and log_lines:
         log_lines[-1] += f" (x{msg_repeat})"
 
-    # Keep first 25 and last 45 log messages so game_log never explodes context
-    if len(log_lines) > 70:
+    # Keep first 40 and last 80 log messages with explicit omission marker
+    if len(log_lines) > 120:
         game_log = "\n".join(
-            log_lines[:25]
-            + [f"... ({len(log_lines) - 70} intermediate messages omitted) ..."]
-            + log_lines[-45:]
+            log_lines[:40]
+            + [f"... ({len(log_lines) - 120} intermediate messages omitted) ..."]
+            + log_lines[-80:]
         )
     else:
         game_log = "\n".join(log_lines)
@@ -364,16 +363,16 @@ def summarize_episode_ticks(
             for s in sub
             if str(s.get("message", "")).strip()
         ]
-        msg_str = " / ".join(dict.fromkeys(msgs))[:120] or "no msg"
+        msg_str = " / ".join(dict.fromkeys(msgs))[:200] or "no msg"
         fns = "/".join(dict.fromkeys(str(s.get("active_function", "")) for s in sub))
         inflection_lines.append(
             f"  * T{t_start}..{t_end} (D{d0}->D{d1}, HP {hp0}->{hp1}, fn={fns}): {msg_str}"
         )
 
-    # Final 8 ticks before end
+    # Final 8 ticks before end (preserve full message text up to 160 chars)
     tail = ticks[-min(8, n) :]
     tail_str = " -> ".join(
-        f"T{s.get('turn', 0)}({s.get('active_function', '')}:{s.get('action_name', '')} HP={s.get('hp', 0)} '{str(s.get('message', ''))[:35]}')"
+        f"T{s.get('turn', 0)}({s.get('active_function', '')}:{s.get('action_name', '')} HP={s.get('hp', 0)} '{str(s.get('message', ''))[:160]}')"
         for s in tail
     )
 
@@ -458,7 +457,13 @@ def summarize_episode_ticks(
     # Recurrence rate and active function attribution over stagnation window
     stagnant_ticks = [t for t in ticks if int(t.get("turn", 0)) >= last_progress_turn]
     stagnation_positions = {
-        (int(t.get("y", 0)), int(t.get("x", 0))) for t in stagnant_ticks
+        (
+            int(t.get("dungeon_num", 0)),
+            int(t.get("depth", 1)),
+            int(t.get("y", 0)),
+            int(t.get("x", 0)),
+        )
+        for t in stagnant_ticks
     }
     if len(stagnant_ticks) >= 40:
         recurrence_rate = float(
@@ -967,9 +972,14 @@ def build_batch_contrast_digest(
         f"- **Step Truncation Rate**: {max_steps_rate * 100:.1f}% ({max_steps_runs}/{len(runs)} runs reached step limit without advancing past Dlvl {max_d})."
     )
     top_killers = Counter(
-        str(r.get("killer_name") or r.get("end_reason", "ended"))
+        str(
+            r.get("killer_name")
+            or r.get("death_message")
+            or r.get("end_reason", "ended")
+        )
         for r in runs
-        if r.get("end_reason") == "died"
+        if str(r.get("end_reason", "")).strip().lower()
+        not in ("max_steps", "ascended", "escaped", "ended", "")
     ).most_common(5)
     if top_killers:
         killer_items = [
@@ -1384,7 +1394,7 @@ def build_batch_contrast_digest(
                     f"XL={ex.get('final_xp_level', 1)}, HP={ex.get('final_hp', 0)}/{ex.get('final_max_hp', 0)}, "
                     f"AC={ex.get('final_ac', 10)}, ActiveFn=`{ex.get('last_active_function', 'root')}`, "
                     f"End=`{ex.get('end_reason', 'ended')}`):\n"
-                    f"  * **Terminal Inventory**: `{fin_inv[:180] if fin_inv else 'n/a'}`\n"
+                    f"  * **Terminal Inventory**: `{fin_inv[:800] if fin_inv else 'n/a'}`\n"
                     f"  * **Final 5 Game Log Messages**:\n```text\n{tail_log}\n```"
                 )
 
@@ -1417,7 +1427,7 @@ def build_batch_contrast_digest(
                 f"Turns={ex.get('turns', 0)}, Steps={ex.get('steps', 0)}, "
                 f"HP={ex.get('final_hp', 0)}/{ex.get('final_max_hp', 0)}, AC={ex.get('final_ac', 10)}, "
                 f"LastActiveFn=`{ex.get('last_active_function', 'root')}`, TopStalledFn=`{top_stag_fn}` ({stag_turns} turns), Downstairs={stairs_status}):\n"
-                f"  * **Terminal Inventory**: `{fin_inv[:180] if fin_inv else 'n/a'}`\n"
+                f"  * **Terminal Inventory**: `{fin_inv[:800] if fin_inv else 'n/a'}`\n"
                 f"  * **Final 8 Game Log Messages**:\n```text\n{tail_log}\n```"
             )
 

@@ -145,7 +145,7 @@ class TheoryDocumentStore:
             t
             for t in re.findall(r"[a-zA-Z0-9_]{2,}", clean_q.lower())
             if t not in {"the", "and", "for", "with", "from", "into", "that", "this"}
-        ][:8]
+        ][:20]
 
         where_parts: list[str] = []
         where_params: list[Any] = []

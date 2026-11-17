@@ -10,6 +10,7 @@ from lox.env.actions import (
     seq,
 )
 from lox.env.base import BenchmarkAdapter, EnvHarness
+from lox.env.benchmarks.nethack_scenarios import NetHackScenariosAdapter
 from lox.env.craftax import (
     CraftaxAction,
     CraftaxAdapter,
@@ -32,6 +33,7 @@ from lox.env.state import (
 
 _ADAPTERS: dict[str, type[BenchmarkAdapter]] = {
     "nethack": NetHackAdapter,
+    "nethack_scenarios": NetHackScenariosAdapter,
     "craftax": CraftaxAdapter,
 }
 
@@ -64,6 +66,7 @@ __all__ = [
     "MonsterInfo",
     "NetHackAdapter",
     "NetHackHarness",
+    "NetHackScenariosAdapter",
     "ObjectInfo",
     "RawAction",
     "VisibleMonster",

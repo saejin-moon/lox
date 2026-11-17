@@ -86,6 +86,32 @@ class Blackboard(dict[str, Any]):
     def has_var(self, key: str) -> bool:
         return key in self
 
+    def floor_blacklist_add(
+        self, state: Any, pos: tuple[int, int], ttl: int = 50
+    ) -> None:
+        """Marks `(y, x)` blacklisted on the current `(dungeon_num, level_num)` for `ttl` turns."""
+        turn_now = int(getattr(state, "turn", 0) or 0)
+        bl = self.floor_get(state, "__blacklist", None)
+        if not isinstance(bl, dict):
+            bl = {}
+            self.floor_set(state, "__blacklist", bl)
+        bl[(int(pos[0]), int(pos[1]))] = turn_now + max(1, int(ttl))
+
+    def floor_is_blacklisted(self, state: Any, pos: tuple[int, int]) -> bool:
+        """True if `(y, x)` has an active unexpired blacklist cooldown on the current floor."""
+        bl = self.floor_get(state, "__blacklist", None)
+        if not isinstance(bl, dict):
+            return False
+        key_p = (int(pos[0]), int(pos[1]))
+        exp = bl.get(key_p)
+        if exp is None:
+            return False
+        turn_now = int(getattr(state, "turn", 0) or 0)
+        if turn_now >= int(exp):
+            bl.pop(key_p, None)
+            return False
+        return True
+
     def clear_vars(self) -> None:
         self.clear()
         self.last_active_leaf = ""
@@ -128,6 +154,10 @@ class BehaviorNode:
         """Called when a higher-priority branch preempts or aborts this node."""
         return None
 
+    def should_preempt(self, state: Any, blackboard: Blackboard) -> bool:
+        """Optional predicate indicating an active `min_commit`/coroutine should abort early."""
+        return False
+
 
 def bt_leaf(
     priority: float = 0.0,
@@ -155,6 +185,28 @@ def bt_leaf(
     return _decorator
 
 
+def _callable_takes_two_args(fn: Any) -> bool:
+    """Safely checks if a function, bound method, or callable accepts `(state, blackboard)`."""
+    if fn is None or not callable(fn):
+        return False
+    try:
+        sig = inspect.signature(fn)
+        pos_cnt = 0
+        for p in sig.parameters.values():
+            if p.kind == inspect.Parameter.VAR_POSITIONAL:
+                return True
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                pos_cnt += 1
+        return pos_cnt >= 2
+    except Exception:
+        code = getattr(fn, "__code__", None)
+        offset = 1 if inspect.ismethod(fn) else 0
+        return bool(code and (code.co_argcount - offset) >= 2)
+
+
 class ActionLeaf(BehaviorNode):
     """
     Leaf node that executes an action function or multi-turn generator coroutine.
@@ -170,6 +222,7 @@ class ActionLeaf(BehaviorNode):
         priority: float = 0.0,
         before: str | None = None,
         after: str | None = None,
+        preempt_if: Callable[..., bool] | None = None,
     ) -> None:
         meta = getattr(action_fn, "_lox_bt_meta", None) or {}
         super().__init__(
@@ -183,8 +236,21 @@ class ActionLeaf(BehaviorNode):
         )
         self.action_fn = action_fn
         self.is_running = is_running
-        code = getattr(action_fn, "__code__", None)
-        self._takes_bb = bool(code and code.co_argcount >= 2)
+        self._takes_bb = _callable_takes_two_args(action_fn)
+        self.preempt_if = preempt_if
+        self._preempt_takes_bb = _callable_takes_two_args(preempt_if)
+
+    def should_preempt(self, state: Any, blackboard: Blackboard) -> bool:
+        if self.preempt_if is None:
+            return False
+        try:
+            return bool(
+                self.preempt_if(state, blackboard)
+                if self._preempt_takes_bb
+                else self.preempt_if(state)
+            )
+        except Exception:
+            return False
 
     def halt(self, blackboard: Blackboard) -> None:
         gens = getattr(blackboard, "_leaf_gens", None)
@@ -209,6 +275,9 @@ class ActionLeaf(BehaviorNode):
         leaf_id = id(self)
         try:
             active_gen = gens.get(leaf_id) if isinstance(gens, dict) else None
+            if active_gen is not None and self.should_preempt(state, blackboard):
+                self.halt(blackboard)
+                active_gen = None
             if active_gen is not None:
                 try:
                     yielded = active_gen.send(state)
@@ -326,8 +395,7 @@ class ConditionLeaf(BehaviorNode):
     ) -> None:
         super().__init__(name=name or getattr(cond_fn, "__name__", "ConditionLeaf"))
         self.cond_fn = cond_fn
-        code = getattr(cond_fn, "__code__", None)
-        self._takes_bb = bool(code and code.co_argcount >= 2)
+        self._takes_bb = _callable_takes_two_args(cond_fn)
 
     def tick(self, state: Any, blackboard: Blackboard) -> tuple[NodeStatus, Any]:
         try:
@@ -469,16 +537,23 @@ class PrioritySelector(BehaviorNode):
         if isinstance(commits, dict) and sel_id in commits:
             committed_idx, rem = commits[sel_id]
             if rem > 0 and 0 <= committed_idx < len(self.children):
-                status, act = self.children[committed_idx].tick(state, blackboard)
-                if status in (NodeStatus.SUCCESS, NodeStatus.RUNNING):
-                    if rem - 1 > 0:
-                        commits[sel_id] = (committed_idx, rem - 1)
-                    else:
-                        commits.pop(sel_id, None)
-                    if isinstance(actives, dict):
-                        actives[sel_id] = committed_idx
-                    return status, act
-            commits.pop(sel_id, None)
+                committed_child = self.children[committed_idx]
+                if committed_child.should_preempt(state, blackboard):
+                    committed_child.halt(blackboard)
+                    commits.pop(sel_id, None)
+                else:
+                    status, act = committed_child.tick(state, blackboard)
+                    if status in (NodeStatus.SUCCESS, NodeStatus.RUNNING):
+                        if rem - 1 > 0:
+                            commits[sel_id] = (committed_idx, rem - 1)
+                        else:
+                            commits.pop(sel_id, None)
+                        if isinstance(actives, dict):
+                            actives[sel_id] = committed_idx
+                        return status, act
+                    commits.pop(sel_id, None)
+            else:
+                commits.pop(sel_id, None)
 
         for idx, child in enumerate(self.children):
             status, act = child.tick(state, blackboard)

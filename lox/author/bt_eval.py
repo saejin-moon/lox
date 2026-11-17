@@ -263,7 +263,7 @@ def evaluate_bt_subtree(
 
             bb = Blackboard(strict_errors=True)
             action_counts: dict[str, int] = collections.defaultdict(int)
-            visited_tiles: set[tuple[int, int]] = set()
+            visited_tiles: set[tuple[int, int, int, int]] = set()
             rle_runs: list[dict[str, Any]] = []
             triggered_steps = 0
             eval_steps = 0
@@ -272,7 +272,14 @@ def evaluate_bt_subtree(
                 eval_steps += 1
                 pre_pos = (int(st.y), int(st.x))
                 pre_turn = int(st.turn)
-                visited_tiles.add(pre_pos)
+                visited_tiles.add(
+                    (
+                        int(getattr(st, "dungeon_num", 0) or 0),
+                        max(1, int(getattr(st, "depth", 1) or 1)),
+                        int(st.y),
+                        int(st.x),
+                    )
+                )
                 cand_act = _tick_node(node, st, bb)
                 if cand_act is not None:
                     triggered_steps += 1
@@ -327,15 +334,25 @@ def evaluate_bt_subtree(
                 f"{seg['start_pos']}->{seg['end_pos']} dt={seg['turn_adv']}]"
                 for seg in rle_runs
             ]
-            visited_tiles.add((st.y, st.x))
+            if not harness.done and int(getattr(st, "depth", 0) or 0) > 0:
+                visited_tiles.add(
+                    (
+                        int(getattr(st, "dungeon_num", 0) or 0),
+                        int(getattr(st, "depth", 1) or 1),
+                        int(st.y),
+                        int(st.x),
+                    )
+                )
+            end_msg_s = str(getattr(st, "end_reason", "") or "").strip()
+            if not end_msg_s and harness.done:
+                raw_msg = str(getattr(st, "message", "") or "").strip()
+                end_msg_s = raw_msg.split(".")[0][:60] if raw_msg else "death"
             obs = ObservationDigest(
                 survived=not harness.done,
                 steps_taken=harness.step_count,
                 triggered_steps=triggered_steps,
                 total_eval_steps=eval_steps,
-                end_reason=str(getattr(st, "end_reason", ""))
-                if harness.done
-                else "active",
+                end_reason=end_msg_s if harness.done else "active",
                 hp_start=start_hp,
                 hp_end=int(st.hp),
                 depth_start=start_depth,

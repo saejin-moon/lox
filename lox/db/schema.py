@@ -119,6 +119,8 @@ CREATE TABLE IF NOT EXISTS runs (
     pct_search DOUBLE DEFAULT 0.0,
     starved_with_food BOOLEAN DEFAULT FALSE,
     died_unarmored BOOLEAN DEFAULT FALSE,
+    worn_oprop_count INTEGER DEFAULT 0,
+    dungeons_visited INTEGER DEFAULT 1,
     is_shard BOOLEAN DEFAULT FALSE,
     shard_id VARCHAR DEFAULT '',
     created_at TIMESTAMP
@@ -440,6 +442,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
     """Initializes all DuckDB tables for LOX and automatically migrates outdated schemas."""
     abs_path = os.path.abspath(db_path)
     with _DB_INIT_LOCK:
+        if not os.path.exists(abs_path):
+            _INITIALIZED_DBS.discard(abs_path)
         con = connect_db(db_path, read_only=False)
         if abs_path in _INITIALIZED_DBS:
             return con
@@ -473,6 +477,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                     ("pct_search", "DOUBLE DEFAULT 0.0"),
                     ("starved_with_food", "BOOLEAN DEFAULT FALSE"),
                     ("died_unarmored", "BOOLEAN DEFAULT FALSE"),
+                    ("worn_oprop_count", "INTEGER DEFAULT 0"),
+                    ("dungeons_visited", "INTEGER DEFAULT 1"),
                     ("created_at", "TIMESTAMP"),
                 ]:
                     if c_name not in cols_runs:
@@ -625,14 +631,25 @@ def get_schema_markdown(
     db_path: str = DEFAULT_DB_PATH,
     is_swarm: bool = False,
 ) -> str:
-    """Returns a concise, exact DuckDB schema reference for the Author Agent's system prompt."""
+    """Returns a concise DuckDB schema reference for Author System Prompts (telegraphic format)."""
+    if is_swarm:
+        return """### DuckDB Schema (`query_db(sql)`)
+- Views: `champion_runs` / `champion_function_stats` / `champion_ticks` (latest promoted batch).
+- `runs`: `run_id`, `batch_id`, `generation`, `seed`, `role`, `depth`, `max_depth`, `score`, `turns`, `steps`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason`, `death_message`, `is_outlier_good`, `outlier_z_score`, `batch_percentile`, `summary_digest` (RLE+stalls), `game_log`, `milestones_json` (`stall_count`, `unworn_armor_in_pack`), `triggered_functions`, `last_active_function`, `auto_esc_count`, `subgen_preemptions`, `policy_exceptions`, `unique_tiles`, `pct_wait` (0..100), `pct_search` (0..100), `starved_with_food`, `died_unarmored`, `worn_oprop_count`, `dungeons_visited`, `is_shard`, `shard_id`, `created_at`. *(Note: `hunger_state` on `ticks`, `seed` on `runs`.)*
+- `ticks`: `run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `energy`, `ac`, `xp_level`, `hunger_state`, `condition_mask`, `y`, `x`, `action_name`, `raw_key`, `byte_offset`, `active_function`, `message`, `visible_monsters`, `inventory_summary`.
+- `batches`: `batch_id`, `generation`, `mode`, `parent_policy_id`, `candidate_policy_id`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `total_cost_usd`, `created_at`.
+- `policies`: `policy_id`, `generation`, `mode`, `policy_code`, `skills_json`, `avg_depth`, `max_depth`, `is_promoted`, `created_at`.
+- `function_stats`: `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, `ochiai_good_run_score`, `liblit_failure_score`, `stagnation_turns`, `stagnation_share`, `livelock_score`.
+- `theories`: `doc_id`, `generation`, `agent_role`, `doc_type`, `title`, `content`, `tags`, `verified_c_rule`, `metrics_json`, `created_at`.
+- `tournament_attempts`: `attempt_id`, `generation`, `peer_id`, `deficit_id`, `promoted`, `sandbox_passed`, `avg_depth`, `avg_ac`, `avg_xp_level`, `policy_exceptions`, `holdout_iqm_delta`, `holdout_rejected`, `seeds_gained_json`, `seeds_lost_json`, `top_tracebacks_json`.
+- `expert_runs` (`run_id`, `source`, `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason`, `summary_digest`, `game_log`, `milestones_json`) & `expert_ticks` (`run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `message`, `screen_ascii`)."""
     core_schema = """### DuckDB Database Schema (`query_db(sql)`):
 - **Canonical Champion & Pilot Views**:
   - `champion_runs`: All episodes from the latest promoted policy batch (`hypothesis_passed = TRUE`).
   - `champion_function_stats`: Function stats from the latest promoted policy batch.
   - `champion_ticks`: Tick-by-tick logs linked to `champion_runs`.
 - **`runs`** (Every evaluated episode):
-  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR), **`auto_esc_count` (INT: times harness forced auto-ESC)**, **`subgen_preemptions` (INT)**, **`policy_exceptions` (INT)**, **`unique_tiles` (INT)**, **`pct_wait` (DOUBLE: 0..100)**, **`pct_search` (DOUBLE: 0..100)**, **`starved_with_food` (BOOLEAN)**, **`died_unarmored` (BOOLEAN)**, `is_shard` (BOOLEAN), `shard_id` (VARCHAR), `created_at` (TIMESTAMP). *(Note: `hunger_state` is on `ticks`, not `runs`; `stall_count` & `unworn_armor_in_pack` are inside `milestones_json`; `seed` is on `runs`, not `ticks`.)*
+  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR), **`auto_esc_count` (INT: times harness forced auto-ESC)**, **`subgen_preemptions` (INT)**, **`policy_exceptions` (INT)**, **`unique_tiles` (INT)**, **`pct_wait` (DOUBLE: 0..100)**, **`pct_search` (DOUBLE: 0..100)**, **`starved_with_food` (BOOLEAN)**, **`died_unarmored` (BOOLEAN)**, `worn_oprop_count` (INT), `dungeons_visited` (INT), `is_shard` (BOOLEAN), `shard_id` (VARCHAR), `created_at` (TIMESTAMP). *(Note: `hunger_state` is on `ticks`, not `runs`; `stall_count` & `unworn_armor_in_pack` are inside `milestones_json`; `seed` is on `runs`, not `ticks`.)*
 - **`ticks`** (Granular tick-by-tick log linked via `run_id` for outlier good runs, exemplars, and sampled runs):
   `run_id` (VARCHAR), `turn` (INT), `step_idx` (INT), `depth` (INT), `dungeon_num` (INT), `hp` (INT), `max_hp` (INT), `energy` (INT), `ac` (INT), `xp_level` (INT), `hunger_state` (INT), `condition_mask` (INT), `y` (INT), `x` (INT), `action_name` (VARCHAR), `raw_key` (INT), `byte_offset` (INT), `active_function` (VARCHAR), `message` (VARCHAR), `visible_monsters` (VARCHAR), `inventory_summary` (VARCHAR).
 - **`batches`** (Per-generation batch overview):
@@ -645,8 +662,6 @@ def get_schema_markdown(
 - **`theories`** (`doc_id`, `generation`, `agent_role`, `doc_type`, `title`, `content`, `tags`, `verified_c_rule`, `metrics_json`, `created_at`)
 - **`tournament_attempts`** (`attempt_id`, `generation`, `peer_id`, `deficit_id`, `promoted`, `sandbox_passed`, `avg_depth`, `avg_ac`, `avg_xp_level`, `policy_exceptions`, `seeds_gained_json`, `seeds_lost_json`, `top_tracebacks_json`)
 - **`expert_runs`** (`run_id`, `source`, `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason`, `summary_digest`, `game_log`, `milestones_json`) & **`expert_ticks`** (`run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `message`, `screen_ascii`)."""
-    if is_swarm:
-        return core_schema
     return (
         core_schema
         + """

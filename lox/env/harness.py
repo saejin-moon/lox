@@ -39,10 +39,11 @@ DEFAULT_NETHACKOPTIONS: tuple[str, ...] = tuple(
     ]
 )
 
-# Pre-warm Numba JIT kernels once at module import
-_DUMMY_MASK = np.ones((4, 4), dtype=np.bool_)
-bfs_distance_grid(_DUMMY_MASK, 0, 0, True)
-astar_next_step(_DUMMY_MASK, 0, 0, 2, 2, True)
+if not _HAS_RUST_FLOOR_MEM:
+    # Pre-warm Numba JIT kernels once at module import only when Rust fallback is active
+    _DUMMY_MASK = np.ones((4, 4), dtype=np.bool_)
+    bfs_distance_grid(_DUMMY_MASK, 0, 0, True)
+    astar_next_step(_DUMMY_MASK, 0, 0, 2, 2, True)
 
 ALL_OBSERVATION_KEYS: tuple[str, ...] = (
     "glyphs",
@@ -591,7 +592,10 @@ class NetHackHarness:
                     self.mem.stair_graph[now] = prev
 
             in_moveloop = self._in_moveloop(obs_tuple)
-            if in_moveloop or floor_changed:
+            need_floor_mem = (
+                i >= limit - 48 or floor_changed or (in_moveloop and (i & 31) == 0)
+            )
+            if need_floor_mem and (in_moveloop or floor_changed):
                 glyphs = obs_tuple[glyphs_idx]
                 chars = obs_tuple[chars_idx]
                 colors = (

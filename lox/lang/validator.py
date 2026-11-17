@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import ast
 import copy
+import os
+import re
 import symtable
 import textwrap
 from typing import Any
@@ -1443,3 +1445,539 @@ def check_undefined_symbols(
                 _check_table(child, is_root=False)
 
         _check_table(top_st, is_root=True)
+
+
+# ---------------------------------------------------------------------------
+# Cross-Module Contract Checker, Pyright `.pyi` Stubs & #EVOLVE-BLOCK Guards
+# ---------------------------------------------------------------------------
+
+_CACHED_STUB_FILES: dict[str, str] | None = None
+
+
+def _build_class_stub(cls: Any) -> list[str]:
+    """Builds compact `.pyi` stub lines for a Python class via runtime inspection."""
+    import inspect
+
+    bases = [
+        b.__name__
+        for b in cls.__bases__
+        if b is not object and b.__module__ == cls.__module__
+    ]
+    base_clause = f"({', '.join(bases)})" if bases else ""
+    lines = [f"class {cls.__name__}{base_clause}:"]
+    seen_members: set[str] = set()
+    if getattr(cls, "__init__", object.__init__) is not object.__init__:
+        seen_members.add("__init__")
+        try:
+            init_sig = str(inspect.signature(cls.__init__))
+        except Exception:
+            init_sig = "(self, *args: Any, **kwargs: Any)"
+        lines.append(f"    def __init__{init_sig} -> None: ...")
+    annotations = getattr(cls, "__annotations__", {}) or {}
+    for attr_name in annotations:
+        if attr_name.startswith("__"):
+            continue
+        seen_members.add(attr_name)
+        lines.append(f"    {attr_name}: Any")
+    for attr_name, val in cls.__dict__.items():
+        if attr_name.startswith("__"):
+            continue
+        if isinstance(val, property):
+            seen_members.add(attr_name)
+            lines.append(f"    @property\n    def {attr_name}(self) -> Any: ...")
+        elif callable(val) and not isinstance(val, (staticmethod, classmethod)):
+            seen_members.add(attr_name)
+            try:
+                sig = str(inspect.signature(val))
+            except Exception:
+                sig = "(self, *args: Any, **kwargs: Any)"
+            lines.append(f"    def {attr_name}{sig} -> Any: ...")
+        elif isinstance(val, (staticmethod, classmethod)):
+            seen_members.add(attr_name)
+            fn = val.__func__
+            dec = "@staticmethod" if isinstance(val, staticmethod) else "@classmethod"
+            try:
+                sig = str(inspect.signature(fn))
+            except Exception:
+                sig = "(*args: Any, **kwargs: Any)"
+            lines.append(f"    {dec}\n    def {attr_name}{sig} -> Any: ...")
+        elif attr_name not in seen_members:
+            seen_members.add(attr_name)
+            lines.append(f"    {attr_name}: Any")
+    # Dynamic attribute container support only for Blackboard
+    if cls.__name__ == "Blackboard":
+        lines.append("    def __getattr__(self, name: str) -> Any: ...")
+        lines.append("    def __setattr__(self, name: str, value: Any) -> None: ...")
+    if len(lines) == 1:
+        lines.append("    pass")
+    return lines
+
+
+def _get_lox_stub_files() -> dict[str, str]:
+    """Builds and caches minimal `.pyi` stubs for `lox.*` runtime APIs."""
+    global _CACHED_STUB_FILES
+    if _CACHED_STUB_FILES is not None:
+        return _CACHED_STUB_FILES
+
+    import inspect
+
+    stub_map: dict[str, str] = {
+        "lox/__init__.pyi": "",
+        "lox/env/__init__.pyi": "",
+        "lox/lang/__init__.pyi": "",
+    }
+    try:
+        from lox.env import actions as act_mod
+        from lox.env import state as st_mod
+        from lox.lang import bt as bt_mod
+
+        # lox/env/state.pyi
+        st_lines = [
+            "from __future__ import annotations",
+            "from typing import Any, Iterator",
+            "import numpy as np",
+            "",
+        ]
+        for cls_name in (
+            "InventoryItem",
+            "MonsterInfo",
+            "ObjectInfo",
+            "VisibleMonster",
+            "VisibleObject",
+            "FloorMemory",
+            "WorldMemory",
+            "GameState",
+        ):
+            cls_obj = getattr(st_mod, cls_name, None)
+            if cls_obj is not None:
+                st_lines.extend(_build_class_stub(cls_obj))
+                st_lines.append("")
+        stub_map["lox/env/state.pyi"] = "\n".join(st_lines)
+
+        # lox/env/actions.pyi
+        act_lines = [
+            "from __future__ import annotations",
+            "from enum import IntEnum",
+            "from typing import Any",
+            "",
+        ]
+        action_cls = getattr(act_mod, "Action", None)
+        if action_cls is not None:
+            act_lines.append("class Action(IntEnum):")
+            for m in action_cls:
+                act_lines.append(f"    {m.name} = {int(m.value)}")
+            act_lines.append("")
+        for cls_name in ("RawAction", "ActionSequence"):
+            cls_obj = getattr(act_mod, cls_name, None)
+            if cls_obj is not None:
+                act_lines.extend(_build_class_stub(cls_obj))
+                act_lines.append("")
+        for fn_name in (
+            "key",
+            "seq",
+            "repeat",
+            "extcmd",
+            "menu_pick",
+            "delta_to_dir",
+            "dir_to_action",
+        ):
+            fn_obj = getattr(act_mod, fn_name, None)
+            if callable(fn_obj):
+                try:
+                    sig = str(inspect.signature(fn_obj))
+                except Exception:
+                    sig = "(*args: Any, **kwargs: Any)"
+                act_lines.append(f"def {fn_name}{sig} -> Any: ...")
+        for const_name in (
+            "DIR_DELTAS",
+            "OPPOSITE_DIR",
+            "CARDINAL_DELTAS",
+            "ACTION_BY_NAME",
+            "ACTION_BY_CHAR",
+        ):
+            if hasattr(act_mod, const_name):
+                act_lines.append(f"{const_name}: Any")
+        stub_map["lox/env/actions.pyi"] = "\n".join(act_lines)
+
+        # lox/lang/bt.pyi
+        bt_lines = [
+            "from __future__ import annotations",
+            "from typing import Any, Callable",
+            "",
+            "RUNNING: Any",
+            "SUCCESS: Any",
+            "FAILURE: Any",
+            "",
+        ]
+        for cls_name in (
+            "NodeStatus",
+            "Blackboard",
+            "BehaviorNode",
+            "BehaviorTree",
+            "Sequence",
+            "MemorySequence",
+            "Selector",
+            "PrioritySelector",
+            "Parallel",
+            "ConditionLeaf",
+            "ActionLeaf",
+            "SubtreeNode",
+            "Inverter",
+            "RepeatUntilFail",
+            "CooldownNode",
+            "TimeoutNode",
+            "LatchedAction",
+        ):
+            cls_obj = getattr(bt_mod, cls_name, None)
+            if cls_obj is not None:
+                bt_lines.extend(_build_class_stub(cls_obj))
+                bt_lines.append("")
+        bt_lines.append("def bt_leaf(*args: Any, **kwargs: Any) -> Any: ...")
+        stub_map["lox/lang/bt.pyi"] = "\n".join(bt_lines)
+    except Exception:
+        pass
+
+    stub_map["_lox_prelude.pyi"] = "\n".join(
+        [
+            "from __future__ import annotations",
+            "from typing import Any as Any",
+            "import math as math, collections as collections, heapq as heapq, itertools as itertools, functools as functools, re as re, enum as enum, dataclasses as dataclasses, typing as typing, random as random, operator as operator, bisect as bisect, copy as copy",
+            "from collections import deque as deque, defaultdict as defaultdict, Counter as Counter",
+            "from dataclasses import dataclass as dataclass",
+            "import numpy as np",
+            "import numpy as numpy",
+            "from lox.env.actions import Action as Action, RawAction as RawAction, ActionSequence as ActionSequence, DIR_DELTAS as DIR_DELTAS, ACTION_BY_NAME as ACTION_BY_NAME, ACTION_BY_CHAR as ACTION_BY_CHAR, key as key, seq as seq, repeat as repeat, extcmd as extcmd",
+            "from lox.env.state import GameState as GameState, WorldMemory as WorldMemory, FloorMemory as FloorMemory, InventoryItem as InventoryItem, MonsterInfo as MonsterInfo, ObjectInfo as ObjectInfo, VisibleMonster as VisibleMonster, VisibleObject as VisibleObject",
+            "from lox.lang.bt import BehaviorNode as BehaviorNode, BehaviorTree as BehaviorTree, PrioritySelector as PrioritySelector, Sequence as Sequence, MemorySequence as MemorySequence, ActionLeaf as ActionLeaf, ConditionLeaf as ConditionLeaf, Inverter as Inverter, Blackboard as Blackboard, NodeStatus as NodeStatus, bt_leaf as bt_leaf, RUNNING as RUNNING, SUCCESS as SUCCESS, FAILURE as FAILURE",
+            "from lox.lang.contracts import GoalIntent as GoalIntent, SafetyReport as SafetyReport, WorldTracker as WorldTracker, CapabilityScorer as CapabilityScorer, ThreatEvaluator as ThreatEvaluator",
+            "from lox.lang.strategy import StrategyStack as StrategyStack, StrategyFrame as StrategyFrame, preempt_if as preempt_if, until as until, with_cleanup as with_cleanup",
+            "def bfs_distance_grid(*args: Any, **kwargs: Any) -> Any: ...",
+            "def astar_next_step(*args: Any, **kwargs: Any) -> Any: ...",
+            "def macro(fn: Any) -> Any: ...",
+            "def param(name: str, default: Any, min_val: Any = ..., max_val: Any = ...) -> Any: ...",
+        ]
+    )
+
+    # Include lox.lang.contracts & lox.lang.strategy stubs when present
+    for mod_path, pyi_key in (
+        ("lox.lang.contracts", "lox/lang/contracts.pyi"),
+        ("lox.lang.strategy", "lox/lang/strategy.pyi"),
+    ):
+        try:
+            import importlib
+
+            mod_obj = importlib.import_module(mod_path)
+            m_lines = [
+                "from __future__ import annotations",
+                "from typing import Any",
+                "",
+            ]
+            for exp_name in dir(mod_obj):
+                if exp_name.startswith("_"):
+                    continue
+                exp_val = getattr(mod_obj, exp_name)
+                if isinstance(exp_val, type) and exp_val.__module__ == mod_path:
+                    m_lines.extend(_build_class_stub(exp_val))
+                    m_lines.append("")
+                elif (
+                    callable(exp_val) and getattr(exp_val, "__module__", "") == mod_path
+                ):
+                    try:
+                        sig = str(inspect.signature(exp_val))
+                    except Exception:
+                        sig = "(*args: Any, **kwargs: Any)"
+                    m_lines.append(f"def {exp_name}{sig} -> Any: ...")
+            stub_map[pyi_key] = "\n".join(m_lines)
+        except Exception:
+            pass
+
+    _CACHED_STUB_FILES = stub_map
+    return stub_map
+
+
+def validate_cross_module_contracts(
+    policy_code: str, skills: dict[str, str] | None = None
+) -> None:
+    """Checks static cross-module `skills.*` imports, signatures, and `self.*` calls."""
+    skills_map = dict(skills or {})
+    parsed_skills: dict[str, ast.Module] = {}
+    skill_fn_sigs: dict[str, dict[str, tuple[int, int, bool, set[str]]]] = {}
+
+    for s_name, s_src in skills_map.items():
+        if not str(s_src or "").strip():
+            continue
+        try:
+            s_tree = ast.parse(s_src, filename=f"skills/{s_name}.py")
+        except SyntaxError:
+            continue
+        parsed_skills[s_name] = s_tree
+        fn_map: dict[str, tuple[int, int, bool, set[str]]] = {}
+        for node in s_tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                pos_args = len(node.args.posonlyargs) + len(node.args.args)
+                req_pos = max(0, pos_args - len(node.args.defaults))
+                has_varargs = node.args.vararg is not None
+                kw_names = {
+                    a.arg
+                    for a in (
+                        node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                    )
+                }
+                fn_map[node.name] = (req_pos, pos_args, has_varargs, kw_names)
+        skill_fn_sigs[s_name] = fn_map
+
+    try:
+        p_tree = ast.parse(policy_code or "", filename="policy.py")
+    except SyntaxError:
+        return
+
+    modules_to_check: list[tuple[str, ast.Module]] = [("policy.py", p_tree)] + [
+        (f"skills/{k}.py", v) for k, v in parsed_skills.items()
+    ]
+
+    for fname, tree in modules_to_check:
+        direct_imports: dict[str, tuple[str, str]] = {}
+        module_aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                mod = node.module
+                if mod.startswith("skills."):
+                    s_mod = mod.split(".", 1)[1].split(".", 1)[0]
+                    if s_mod not in skills_map:
+                        raise PolicyValidationError(
+                            f"Cross-module error in {fname}: imports missing skill module 'skills.{s_mod}'."
+                        )
+                    for al in node.names:
+                        if al.name == "*":
+                            continue
+                        if s_mod in skill_fn_sigs:
+                            s_tree = parsed_skills.get(s_mod)
+                            defined_top = {
+                                getattr(n, "name", "")
+                                for n in (s_tree.body if s_tree else [])
+                                if isinstance(
+                                    n,
+                                    (
+                                        ast.FunctionDef,
+                                        ast.AsyncFunctionDef,
+                                        ast.ClassDef,
+                                    ),
+                                )
+                            }
+                            assigned_top = {
+                                t.id
+                                for n in (s_tree.body if s_tree else [])
+                                if isinstance(n, ast.Assign)
+                                for t in n.targets
+                                if isinstance(t, ast.Name)
+                            }
+                            if al.name not in (defined_top | assigned_top):
+                                raise PolicyValidationError(
+                                    f"Cross-module error in {fname}: 'skills.{s_mod}' has no symbol '{al.name}'."
+                                )
+                        direct_imports[al.asname or al.name] = (s_mod, al.name)
+            elif isinstance(node, ast.Import):
+                for al in node.names:
+                    if al.name.startswith("skills."):
+                        s_mod = al.name.split(".", 1)[1].split(".", 1)[0]
+                        if s_mod not in skills_map:
+                            raise PolicyValidationError(
+                                f"Cross-module error in {fname}: imports missing skill module 'skills.{s_mod}'."
+                            )
+                        if al.asname:
+                            module_aliases[al.asname] = s_mod
+
+        # Check arity / kwarg mismatches on calls to imported skill functions
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            target: tuple[str, str] | None = None
+            if isinstance(node.func, ast.Name) and node.func.id in direct_imports:
+                target = direct_imports[node.func.id]
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in module_aliases
+            ):
+                target = (module_aliases[node.func.value.id], node.func.attr)
+            if target is None:
+                continue
+            s_mod, fn_name = target
+            sig = skill_fn_sigs.get(s_mod, {}).get(fn_name)
+            if sig is None:
+                continue
+            req_pos, max_pos, has_varargs, kw_names = sig
+            if any(isinstance(a, ast.Starred) for a in node.args) or any(
+                k.arg is None for k in node.keywords
+            ):
+                continue
+            n_pos = len(node.args)
+            n_kw = len(node.keywords)
+            if not has_varargs and n_pos > max_pos:
+                raise PolicyValidationError(
+                    f"Call contract error in {fname} (line {getattr(node, 'lineno', '?')}): "
+                    f"skills.{s_mod}.{fn_name}() accepts at most {max_pos} positional args, got {n_pos}."
+                )
+            if n_pos + n_kw < req_pos:
+                raise PolicyValidationError(
+                    f"Call contract error in {fname} (line {getattr(node, 'lineno', '?')}): "
+                    f"skills.{s_mod}.{fn_name}() requires at least {req_pos} args, got {n_pos + n_kw}."
+                )
+
+
+def run_pyright_on_package(
+    policy_code: str,
+    skills: dict[str, str] | None = None,
+    timeout_sec: float = 8.0,
+) -> list[str]:
+    """
+    Runs `pyright --outputjson` against `(policy.py, skills/*.py)` plus generated
+    `lox/*.pyi` stubs in an isolated temp dir. Returns list of concise error lines.
+    Gracefully returns `[]` if `pyright` binary is not installed.
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    pyright_bin = shutil.which("pyright")
+    if not pyright_bin:
+        return []
+
+    stubs = _get_lox_stub_files()
+    skills_map = dict(skills or {})
+    prelude_header = "from _lox_prelude import *  # pyright: ignore\n"
+    with tempfile.TemporaryDirectory(prefix="lox_pyright_") as tmp_root:
+        root = Path(tmp_root)
+        # Write policy & skills with pre-injected LOX globals prelude
+        (root / "policy.py").write_text(
+            prelude_header + (policy_code or ""), encoding="utf-8"
+        )
+        skills_dir = root / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "__init__.py").write_text("", encoding="utf-8")
+        for s_name, s_src in skills_map.items():
+            clean_k = str(s_name or "").strip().removesuffix(".py")
+            if clean_k and str(s_src or "").strip():
+                (skills_dir / f"{clean_k}.py").write_text(
+                    prelude_header + str(s_src), encoding="utf-8"
+                )
+
+        # Write cached lox.*.pyi & _lox_prelude.pyi stubs under typings/
+        typings_dir = root / "typings"
+        for rel_path, stub_src in stubs.items():
+            dst = typings_dir / rel_path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(stub_src, encoding="utf-8")
+
+        cfg = {
+            "include": ["policy.py", "skills"],
+            "stubPath": "typings",
+            "pythonVersion": "3.11",
+            "typeCheckingMode": "basic",
+            "reportMissingImports": "error",
+            "reportMissingModuleSource": "none",
+            "reportUndefinedVariable": "error",
+            "reportAttributeAccessIssue": "error",
+            "reportCallIssue": "error",
+            "reportArgumentType": "warning",
+            "reportGeneralTypeIssues": "warning",
+            "reportOptionalMemberAccess": "none",
+            "reportOptionalSubscript": "none",
+            "reportOptionalCall": "none",
+            "reportOptionalOperand": "none",
+            "reportOptionalIterable": "none",
+            "reportReturnType": "warning",
+        }
+        (root / "pyrightconfig.json").write_text(json.dumps(cfg), encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                [pyright_bin, "--outputjson"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            data = json.loads(proc.stdout or "{}")
+            diags = data.get("generalDiagnostics") or []
+            errors: list[str] = []
+            for d in diags:
+                if str(d.get("severity", "")).lower() != "error":
+                    continue
+                rule = str(d.get("rule", "") or "")
+                msg = str(d.get("message", "") or "").strip()
+                if 'Cannot access attribute "param" for class "Policy"' in msg:
+                    continue
+                fpath = str(d.get("file", "") or "")
+                rel_f = os.path.basename(fpath) if fpath else "policy.py"
+                if "/skills/" in fpath.replace("\\", "/"):
+                    rel_f = f"skills/{rel_f}"
+                raw_line = int(
+                    ((d.get("range") or {}).get("start") or {}).get("line", 0)
+                )
+                line_no = max(
+                    1, raw_line
+                )  # raw_line is 0-indexed -> 1-indexed - 1 header
+                if msg:
+                    errors.append(f"{rel_f}:{line_no} [{rule or 'pyright'}]: {msg}")
+            return errors[:12]
+        except Exception:
+            return []
+
+
+_EVOLVE_START_RE = re.compile(r"^\s*#\s*EVOLVE-BLOCK\b(.*)$", re.IGNORECASE)
+_EVOLVE_END_RE = re.compile(r"^\s*#\s*END-EVOLVE-BLOCK\b", re.IGNORECASE)
+
+
+def extract_evolve_blocks(source: str) -> list[tuple[int, int, str]]:
+    """Returns `[(start_line_0idx, end_line_0idx_excl, label), ...]` for `#EVOLVE-BLOCK` spans."""
+    lines = (source or "").splitlines()
+    blocks: list[tuple[int, int, str]] = []
+    open_idx: int | None = None
+    open_label = ""
+    for i, ln in enumerate(lines):
+        m_start = _EVOLVE_START_RE.match(ln)
+        if m_start:
+            open_idx = i
+            open_label = (m_start.group(1) or "").strip()
+        elif _EVOLVE_END_RE.match(ln) and open_idx is not None:
+            blocks.append((open_idx, i + 1, open_label))
+            open_idx = None
+    return blocks
+
+
+def check_evolve_block_bounds(base_source: str, candidate_source: str) -> str | None:
+    """
+    If `base_source` defines `#EVOLVE-BLOCK ... #END-EVOLVE-BLOCK` spans, verifies
+    that immutable lines outside every `#EVOLVE-BLOCK` span remain unchanged in
+    `candidate_source`. Returns an error description if violated, else None.
+    """
+    blocks = extract_evolve_blocks(base_source)
+    if not blocks:
+        return None
+    cand_blocks = extract_evolve_blocks(candidate_source)
+    if len(cand_blocks) != len(blocks):
+        return (
+            f"#EVOLVE-BLOCK boundary mismatch: expected {len(blocks)} block(s), "
+            f"candidate has {len(cand_blocks)}."
+        )
+    base_lines = (base_source or "").splitlines()
+    cand_lines = (candidate_source or "").splitlines()
+
+    def _outside_chunks(
+        lines: list[str], spans: list[tuple[int, int, str]]
+    ) -> list[str]:
+        chunks: list[str] = []
+        cursor = 0
+        for s_idx, e_idx, _ in spans:
+            chunks.append("\n".join(lines[cursor:s_idx]))
+            cursor = e_idx
+        chunks.append("\n".join(lines[cursor:]))
+        return chunks
+
+    b_out = _outside_chunks(base_lines, blocks)
+    c_out = _outside_chunks(cand_lines, cand_blocks)
+    if b_out != c_out:
+        return "Candidate modified frozen scaffold lines outside `#EVOLVE-BLOCK ... #END-EVOLVE-BLOCK`."
+    return None

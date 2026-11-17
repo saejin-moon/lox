@@ -41,7 +41,11 @@ from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
 from lox.engine.map_elites import MAPElitesArchive
 from lox.engine.orchestrator import compute_adaptive_max_steps, write_status_report
-from lox.engine.swarm_referee import SwarmReferee, _package_fingerprint
+from lox.engine.swarm_referee import (
+    SwarmReferee,
+    _clone_incumbent_eval,
+    _package_fingerprint,
+)
 from lox.lang.modularize import maybe_auto_modularize
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
@@ -69,6 +73,11 @@ class SwarmCampaignOrchestrator:
         frontier_min_depth: int = 2,
         swarm_architecture: str = "peer",
         eval_workers: int | None = None,
+        reasoning_effort: str = "max",
+        routing: str = "nitro",
+        refactor_model: str | None = None,
+        race_seeds: int | None = None,
+        scenario_gate: str = "advisory",
     ) -> None:
         self.db_path = db_path
         self.workspace_dir = Path(workspace_dir)
@@ -76,6 +85,18 @@ class SwarmCampaignOrchestrator:
         self.frontier_dir = frontier_dir
         self.provider = provider
         self.model = model
+        self.reasoning_effort = str(reasoning_effort or "max")
+        self.routing = str(routing or "nitro")
+        self.refactor_model = (
+            str(refactor_model).strip() if refactor_model else str(model)
+        )
+        self.race_seeds = max(4, int(race_seeds)) if race_seeds is not None else None
+        self.scenario_gate = (
+            str(scenario_gate or "advisory").strip().lower()
+            if str(scenario_gate or "advisory").strip().lower()
+            in ("off", "advisory", "strict")
+            else "advisory"
+        )
         self.num_workers = num_workers
         self.turns_per_worker = turns_per_worker
         self.seeds_per_batch = seeds_per_batch
@@ -376,10 +397,18 @@ class SwarmCampaignOrchestrator:
             start_sk = initial_skills
             elite_cid: str | None = None
             if i < reseed_slots:
-                el = self.map_elites.sample_elite(strategy="ucb_curiosity")
+                pick_strat = (
+                    "caution"
+                    if (reseed_slots >= 2 and i == reseed_slots - 1)
+                    else "ucb_curiosity"
+                )
+                el = self.map_elites.sample_elite(strategy=pick_strat)
                 if el is not None and str(el.policy_code or "").strip():
                     start_pol = el.policy_code
-                    start_sk = dict(el.skills or initial_skills)
+                    start_sk = dict(
+                        el.skills
+                        or (initial_skills if "skills" in el.policy_code else {})
+                    )
                     elite_cid = el.cell_id
                     sampled_elite_ids.append(elite_cid)
             peer_assignments.append(
@@ -389,19 +418,40 @@ class SwarmCampaignOrchestrator:
         peer_tool_turns = max(6, int(self.turns_per_worker) * 3)
         peer_candidates: list[PeerCandidate] = []
 
+        use_refactor_model_for_p1 = bool(
+            self.refactor_model != self.model
+            and (
+                self._plateau_streak >= 3
+                or deficit_report.bloat_warning
+                or bool(deficit_report.skill_bloat_notes)
+            )
+        )
+        if use_refactor_model_for_p1:
+            ui.info(
+                f"Gen {generation}: Routing refactor/plateau slot `peer_1` to `--refactor-model` `{self.refactor_model}`."
+            )
+
         def _run_peer(
             peer_id: str,
             cluster: Any,
             p_policy: str,
             p_skills: dict[str, str],
         ) -> PeerCandidate:
+            peer_model = (
+                self.refactor_model
+                if (use_refactor_model_for_p1 and peer_id == "peer_1")
+                else self.model
+            )
             peer = SwarmPeerAgent(
                 peer_id=peer_id,
                 provider=self.provider,
-                model=self.model,
+                model=peer_model,
                 db_path=self.db_path,
                 theories_store=self.theories,
                 max_tool_turns=peer_tool_turns,
+                reasoning_effort=self.reasoning_effort,
+                routing=self.routing,
+                scenario_gate=self.scenario_gate,
             )
             return peer.run_cycle(
                 generation=generation,
@@ -479,6 +529,8 @@ class SwarmCampaignOrchestrator:
             seeds=seeds,
             max_steps=active_max_steps,
             holdout_seeds=holdout_seeds,
+            race_seeds=self.race_seeds,
+            scenario_gate=self.scenario_gate,
         )
 
         # 4b. Sparse Hysteresis Circuit Breaker: deterministic bit-identical AST modularization
@@ -507,7 +559,11 @@ class SwarmCampaignOrchestrator:
                 verdict.winner_policy_code = mod_pol
                 verdict.winner_skills = mod_skills
                 if active_eval is not None:
-                    verdict.winner_batch_eval = active_eval
+                    verdict.winner_batch_eval = (
+                        active_eval
+                        if verdict.promoted
+                        else _clone_incumbent_eval(active_eval, generation)
+                    )
                 verdict.promoted = True
                 verdict.reason = f"{verdict.reason} | {mod_msg}"
                 if active_eval is not None:

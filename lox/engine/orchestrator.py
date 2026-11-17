@@ -303,10 +303,16 @@ class CampaignOrchestrator:
         benchmark: str = "nethack",
         pilot_fallback: str = "best",
         workspace_dir: str | None = None,
+        refactor_model: str | None = None,
+        reasoning_effort: str = "max",
         **kwargs: Any,
     ):
         self.provider = provider
         self.model = model
+        self.refactor_model = (
+            str(refactor_model).strip() if refactor_model else str(model)
+        )
+        self.reasoning_effort = str(reasoning_effort or "max")
         self.routing = routing
         self.db_path = db_path
         self.policy_path = policy_path
@@ -340,6 +346,7 @@ class CampaignOrchestrator:
             provider=provider,
             model=model,
             routing=routing,
+            reasoning_effort=self.reasoning_effort,
             api_key=api_key,
             db_path=db_path,
             macros_path=macros_path,
@@ -427,7 +434,7 @@ class CampaignOrchestrator:
                 status = "PROMOTED" if passed else "REJECTED"
                 lines.append(
                     f"- **Gen {gen} ({mode} on {tf}) -> {status}**: "
-                    f"Δ={md:+.3f} (95% CS [{cil:+.3f}, {ciu:+.3f}], p={wp:.4f}) | {reason} | Mechanism: {str(mech)[:90]}"
+                    f"Δ={md:+.3f} (95% CS [{cil:+.3f}, {ciu:+.3f}], p={wp:.4f}) | {str(reason)[:240]} | Mechanism: {str(mech)[:240]}"
                 )
             return "\n".join(lines)
         except Exception:
@@ -813,6 +820,9 @@ class CampaignOrchestrator:
                                 break
 
                     try:
+                        self.author.model = (
+                            self.refactor_model if mode == "REFACTOR" else self.model
+                        )
                         proposal = self.author.synthesize(
                             mode=mode,
                             generation=gen,
@@ -1206,6 +1216,7 @@ class CampaignOrchestrator:
                             batch_id=batch_id,
                             generation=gen,
                             con=con_map,
+                            skills=candidate_skills,
                         )
                         if added:
                             ui.info(

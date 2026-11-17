@@ -12,6 +12,7 @@ Partitions recent rollout telemetry into:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -130,7 +131,7 @@ class DeficitReport:
         if self.fail_clusters:
             lines.append("- Domain-Agnostic Trajectory Slices (D_fail):")
             for c in self.fail_clusters:
-                r_ids = f", run_ids={c.sample_run_ids[:2]}" if c.sample_run_ids else ""
+                r_ids = f", run_ids={c.sample_run_ids[:1]}" if c.sample_run_ids else ""
                 lines.append(
                     f"  * [{c.cluster_id}] {c.label} (runs={c.run_count}, avg_depth={c.avg_depth:.2f}, avg_turns={c.avg_turns:.0f}, fns={c.dominant_fns[:3]}{r_ids}): {c.evidence}"
                 )
@@ -189,13 +190,17 @@ class DeficitAnalyzer:
             self._populate_recent_attempts(con, report)
             self._populate_d_succ_and_branches(con, report, raw_branches)
             self._populate_d_fail_clusters(con, report)
+            self._attach_premortem_and_wiki_context(con, report)
             try:
                 th_rows = con.execute(
                     """
                     SELECT generation, agent_role, title, verified_c_rule
                     FROM theories
                     WHERE doc_type != 'META_SYNTHESIS' OR generation > 0
-                    ORDER BY generation DESC, created_at DESC
+                    ORDER BY
+                        CASE WHEN UPPER(COALESCE(doc_type, '')) = 'THEORY' THEN 0 ELSE 1 END,
+                        generation DESC,
+                        created_at DESC
                     LIMIT 3
                     """
                 ).fetchall()
@@ -376,9 +381,9 @@ class DeficitAnalyzer:
                 if int(excs or 0) > 0:
                     extra.append(f"exc={excs}")
                 if tbs:
-                    extra.append(f"tb={str(tbs[0])[:80]}")
+                    extra.append(f"tb={str(tbs[0])[:240]}")
                 elif sb_err and not sb_ok:
-                    extra.append(f"err={str(sb_err)[:80]}")
+                    extra.append(f"err={str(sb_err)[:240]}")
                 ext_s = f" | {'; '.join(extra)}" if extra else ""
                 attempts.append(
                     f"Gen {gen_i} [{tag} | {pid}@{did} | D={ad} (Max={md}), AC={aac}]{ext_s}"
@@ -872,3 +877,74 @@ class DeficitAnalyzer:
             built = expanded
 
         report.fail_clusters = built[:6]
+
+    @staticmethod
+    def _attach_premortem_and_wiki_context(con: Any, report: DeficitReport) -> None:
+        """Attaches pre-mortem tick slices and dynamic Wiki excerpts to top failure clusters."""
+        if not report.fail_clusters:
+            return
+        wiki_engine = None
+        try:
+            from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
+
+            if os.path.exists(DEFAULT_WIKI_DB):
+                wiki_engine = WikiEngine(DEFAULT_WIKI_DB)
+        except Exception:
+            wiki_engine = None
+
+        for cl in report.fail_clusters[:2]:
+            extras: list[str] = []
+            if cl.sample_run_ids:
+                rid = str(cl.sample_run_ids[0])
+                try:
+                    t_rows = con.execute(
+                        """
+                        SELECT step_idx, depth, hp, max_hp, action_name, active_function, message
+                        FROM ticks
+                        WHERE run_id = ?
+                        ORDER BY step_idx DESC
+                        LIMIT 5
+                        """,
+                        [rid],
+                    ).fetchall()
+                    if t_rows:
+                        rev = list(reversed(t_rows))
+                        seq_str = " -> ".join(
+                            f"t{tr[0]}(D{tr[1]} HP{tr[2]}/{tr[3]} {tr[5]}:{tr[4]}"
+                            + (
+                                f" msg={str(tr[6])[:40]!r})"
+                                if str(tr[6] or "").strip()
+                                else ")"
+                            )
+                            for tr in rev
+                        )
+                        extras.append(f"pre_mortem=[{seq_str}]")
+                        if wiki_engine is not None:
+                            last_msg = next(
+                                (
+                                    str(tr[6] or "").strip()
+                                    for tr in t_rows
+                                    if str(tr[6] or "").strip()
+                                ),
+                                "",
+                            )
+                            if last_msg:
+                                hits = wiki_engine.search_wiki(last_msg, top_k=1)
+                                if hits:
+                                    snip = (
+                                        str(hits[0].get("content", "") or "")
+                                        .replace("\n", " ")[:180]
+                                        .strip()
+                                    )
+                                    if snip:
+                                        extras.append(
+                                            f"wiki[{hits[0].get('title', '')}]: {snip}"
+                                        )
+                except Exception:
+                    pass
+            if extras:
+                cl.evidence = (
+                    f"{cl.evidence}; " + "; ".join(extras)
+                    if cl.evidence
+                    else "; ".join(extras)
+                )

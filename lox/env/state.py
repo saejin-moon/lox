@@ -213,6 +213,12 @@ class _CallableList(list):
         return self
 
 
+_RE_BLESSED = re.compile(r"\bblessed\b")
+_RE_UNCURSED = re.compile(r"\buncursed\b")
+_RE_CURSED = re.compile(r"(?<!un)\bcursed\b")
+_RE_ENCHANT = re.compile(r"(?<!\w)([+-]\d+)\b")
+
+
 @dataclass(frozen=True, slots=True)
 class InventoryItem:
     """Single item in the player's current NetHack inventory."""
@@ -298,15 +304,15 @@ class InventoryItem:
 
     @property
     def is_blessed(self) -> bool:
-        return bool(re.search(r"\bblessed\b", self.name))
+        return "blessed" in self.name and bool(_RE_BLESSED.search(self.name))
 
     @property
     def is_uncursed(self) -> bool:
-        return bool(re.search(r"\buncursed\b", self.name))
+        return "uncursed" in self.name and bool(_RE_UNCURSED.search(self.name))
 
     @property
     def is_cursed(self) -> bool:
-        return bool(re.search(r"(?<!un)\bcursed\b", self.name))
+        return "cursed" in self.name and bool(_RE_CURSED.search(self.name))
 
     @property
     def is_for_sale(self) -> bool:
@@ -314,7 +320,9 @@ class InventoryItem:
 
     @property
     def enchantment(self) -> int | None:
-        m = re.search(r"(?<!\w)([+-]\d+)\b", self.name)
+        if "+" not in self.name and "-" not in self.name:
+            return None
+        m = _RE_ENCHANT.search(self.name)
         return int(m.group(1)) if m else None
 
     @property
@@ -722,25 +730,35 @@ class FloorMemory:
 
     @property
     def passable_mask(self) -> np.ndarray:
-        """Returns boolean mask of known walkable tiles (including discovered traps/ice/drawbridges)."""
+        """Returns read-only view of known walkable tiles (use `copy_passable_mask()` to mutate)."""
         if (
-            not self._passable_dirty
-            and self._passable_mask.shape == self.remembered_chars.shape
+            self._passable_dirty
+            or self._passable_mask.shape != self.remembered_chars.shape
         ):
-            return self._passable_mask.copy()
-        self._recompute_passability()
-        return self._passable_mask.copy()
+            self._recompute_passability()
+        v = self._passable_mask.view()
+        v.setflags(write=False)
+        return v
+
+    def copy_passable_mask(self) -> np.ndarray:
+        """Returns a mutable copy of `passable_mask`."""
+        return self.passable_mask.copy()
 
     @property
     def safe_passable_mask(self) -> np.ndarray:
-        """Returns boolean mask of known walkable tiles excluding remembered traps and terrain hazards."""
+        """Returns read-only view of known walkable tiles excluding remembered traps and terrain hazards."""
         if (
-            not self._passable_dirty
-            and self._safe_passable_mask.shape == self.remembered_chars.shape
+            self._passable_dirty
+            or self._safe_passable_mask.shape != self.remembered_chars.shape
         ):
-            return self._safe_passable_mask.copy()
-        self._recompute_passability()
-        return self._safe_passable_mask.copy()
+            self._recompute_passability()
+        v = self._safe_passable_mask.view()
+        v.setflags(write=False)
+        return v
+
+    def copy_safe_passable_mask(self) -> np.ndarray:
+        """Returns a mutable copy of `safe_passable_mask`."""
+        return self.safe_passable_mask.copy()
 
     def ensure_shape(self, min_h: int, min_w: int) -> None:
         """Dynamically resizes spatial grids if game coordinates exceed initial bounds (e.g. Craftax 48x48)."""
@@ -944,8 +962,8 @@ class WorldMemory:
 
         # Track in-game turn advancement (zero-turn action awareness)
         try:
-            curr_turn = int(getattr(state, "turns", getattr(state, "turn", 0)))
-            step_cnt = getattr(state, "step_count", 0)
+            curr_turn = int(state.turn)
+            step_cnt = state.step_count
             if self.prev_turn >= 0 and curr_turn == self.prev_turn and step_cnt > 0:
                 self.consecutive_stalls += 1
                 self.last_action_zero_turn = True
@@ -988,7 +1006,7 @@ class WorldMemory:
                 self.stair_graph[prev] = now
                 self.stair_graph[now] = prev
 
-        turn_now = int(getattr(state, "turns", getattr(state, "turn", 0)))
+        turn_now = int(getattr(state, "turn", getattr(state, "step_count", 0)) or 0)
         if messages:
             for m in messages:
                 m_str = str(m or "").strip()
@@ -1084,11 +1102,22 @@ class WorldMemory:
 
             # Record remembered exits (stairs/ladders/portals) for unvisited branch graph
             if isinstance(glyphs, np.ndarray) and glyphs.ndim == 2:
-                exit_ys, exit_xs = np.where(_IS_EXIT_CMAP_LUT[glyphs])
-                if len(exit_ys) > 0:
-                    f_exits = self.level_exits.setdefault((dnum, dlvl), {})
-                    for ey, ex in zip(exit_ys.tolist(), exit_xs.tolist()):
-                        f_exits[(ey, ex)] = int(glyphs[ey, ex])
+                if (
+                    _HAS_RUST_FLOOR_MEM
+                    and glyphs.dtype == np.int16
+                    and glyphs.flags.c_contiguous
+                ):
+                    exits_list = lox_core.fast_extract_exits(glyphs, _IS_EXIT_CMAP_LUT)
+                    if exits_list:
+                        f_exits = self.level_exits.setdefault((dnum, dlvl), {})
+                        for ey, ex, eg in exits_list:
+                            f_exits[(ey, ex)] = int(eg)
+                else:
+                    exit_ys, exit_xs = np.where(_IS_EXIT_CMAP_LUT[glyphs])
+                    if len(exit_ys) > 0:
+                        f_exits = self.level_exits.setdefault((dnum, dlvl), {})
+                        for ey, ex in zip(exit_ys.tolist(), exit_xs.tolist()):
+                            f_exits[(ey, ex)] = int(glyphs[ey, ex])
                 if on_down and 0 <= sy < glyphs.shape[0] and 0 <= sx < glyphs.shape[1]:
                     f_exits = self.level_exits.setdefault((dnum, dlvl), {})
                     f_exits.setdefault((sy, sx), int(glyphs[sy, sx]))
@@ -1102,6 +1131,34 @@ class WorldMemory:
                     c = state.chars[dy_door, dx_door]
                     if c != 0 and c != ord(" ") and c != ord("+"):
                         floor.locked_doors.discard((dy_door, dx_door))
+        except Exception:
+            pass
+
+        # Clear under-hero remembered object glyph when NLE explicitly reports tile cleared/eaten
+        try:
+            msg_candidates = list(messages or ()) or (
+                [state.message] if getattr(state, "message", "") else []
+            )
+            if (
+                0 <= sy < floor.remembered_obj_glyphs.shape[0]
+                and 0 <= sx < floor.remembered_obj_glyphs.shape[1]
+                and floor.remembered_obj_glyphs[sy, sx] > 0
+                and msg_candidates
+            ):
+                msg_join = " ".join(str(m or "").lower() for m in msg_candidates)
+                if any(
+                    p in msg_join
+                    for p in (
+                        "you see no objects here",
+                        "there is nothing here",
+                        "you finish eating",
+                        "you stop eating",
+                    )
+                ) and not any(
+                    p in msg_join
+                    for p in ("you see here", "objects here:", "things that are here:")
+                ):
+                    floor.remembered_obj_glyphs[sy, sx] = 0
         except Exception:
             pass
 
@@ -1531,17 +1588,15 @@ class GameState:
     # --- Screen & NLE C Table Queries ---
     def _glyph_int(self, y: int, x: int) -> int:
         gl = self._glyphs_list_cache
-        if gl is None:
-            gl = self.glyphs.tolist()
-            self._glyphs_list_cache = gl
-        return gl[y][x]
+        if gl is not None:
+            return gl[y][x]
+        return int(self.glyphs[y, x])
 
     def _char_int(self, y: int, x: int) -> int:
         cl = self._chars_list_cache
-        if cl is None:
-            cl = self.chars.tolist()
-            self._chars_list_cache = cl
-        return cl[y][x]
+        if cl is not None:
+            return cl[y][x]
+        return int(self.chars[y, x])
 
     def char_at(self, y: int, x: int) -> str:
         if 0 <= y < 21 and 0 <= x < 79:
@@ -1732,6 +1787,18 @@ class GameState:
     @property
     def trap_mask(self) -> np.ndarray:
         """Vectorized 21x79 boolean mask of visible or remembered traps on the current floor."""
+        if (
+            _HAS_RUST_FLOOR_MEM
+            and self.mem is not None
+            and self.mem.remembered_trap_glyphs.shape == self.glyphs.shape
+            and self.glyphs.dtype == np.int16
+            and self.glyphs.flags.c_contiguous
+            and self.mem.remembered_trap_glyphs.dtype == np.int32
+            and self.mem.remembered_trap_glyphs.flags.c_contiguous
+        ):
+            return lox_core.fast_trap_mask(
+                self.mem.remembered_trap_glyphs, self.glyphs, _IS_TRAP_LUT
+            )
         mask = _IS_TRAP_LUT[self.glyphs]
         if (
             self.mem is not None
@@ -1739,6 +1806,67 @@ class GameState:
         ):
             mask = mask | (self.mem.remembered_trap_glyphs > 0)
         return mask
+
+    def adjacent_closed_doors(self) -> list[tuple[int, int]]:
+        """Returns 8-way adjacent `(y, x)` coordinates currently displaying a closed door (`'+'`)."""
+        doors: list[tuple[int, int]] = []
+        y0, x0 = int(self.y), int(self.x)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                ny, nx = y0 + dy, x0 + dx
+                if 0 <= ny < 21 and 0 <= nx < 79 and self.is_closed_door(ny, nx):
+                    doors.append((ny, nx))
+        return doors
+
+    def unexplored_frontier_mask(
+        self,
+        passable_mask: np.ndarray | None = None,
+        include_doors: bool = True,
+    ) -> np.ndarray:
+        """
+        Returns boolean (H, W) mask of passable known tiles bordering unvisited walkable
+        tiles (or closed doors `'+'` when `include_doors=True`).
+        """
+        pm = passable_mask if passable_mask is not None else self.passable_mask
+        h, w = pm.shape
+        if self.mem is None or self.mem.current_floor.visited.shape != pm.shape:
+            return pm.copy()
+        fl = self.mem.current_floor
+        if (
+            _HAS_RUST_FLOOR_MEM
+            and fl.visited.flags.c_contiguous
+            and pm.dtype == np.bool_
+            and pm.flags.c_contiguous
+            and fl.remembered_chars.dtype == np.uint8
+            and fl.remembered_chars.flags.c_contiguous
+        ):
+            return lox_core.fast_unexplored_frontier_mask(
+                fl.visited, pm, fl.remembered_chars, bool(include_doors)
+            )
+        unvisited_walkable = pm & (~fl.visited)
+        boundary = unvisited_walkable.copy()
+        neighbor_targets = unvisited_walkable.copy()
+        if include_doors:
+            neighbor_targets |= fl.remembered_chars == ord("+")
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                src_y0 = max(0, -dy)
+                src_y1 = min(h, h - dy)
+                dst_y0 = max(0, dy)
+                dst_y1 = min(h, h + dy)
+                src_x0 = max(0, -dx)
+                src_x1 = min(w, w - dx)
+                dst_x0 = max(0, dx)
+                dst_x1 = min(w, w + dx)
+                boundary[dst_y0:dst_y1, dst_x0:dst_x1] |= (
+                    pm[dst_y0:dst_y1, dst_x0:dst_x1]
+                    & neighbor_targets[src_y0:src_y1, src_x0:src_x1]
+                )
+        return boundary
 
     def description_at(self, y: int, x: int) -> str:
         """Returns the full English tile description from NLE's C engine for (y, x)."""
@@ -2432,12 +2560,21 @@ class GameState:
         allow_diagonal: bool = True,
         no_diag: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Runs Numba-accelerated BFS distance calculation from `start` (defaults to `(self.y, self.x)`)."""
+        """Runs Rust-accelerated BFS distance calculation from `start` (defaults to `(self.y, self.x)`)."""
         sy, sx = start if start is not None else (self.y, self.x)
         p = (
             passable_mask
             if isinstance(passable_mask, np.ndarray) and passable_mask.dtype == np.bool_
             else np.asarray(passable_mask, dtype=np.bool_)
+        )
+        nd = (
+            None
+            if no_diag is None
+            else (
+                no_diag
+                if isinstance(no_diag, np.ndarray) and no_diag.dtype == np.bool_
+                else np.asarray(no_diag, dtype=np.bool_)
+            )
         )
 
         return bfs_distance_grid(
@@ -2445,7 +2582,7 @@ class GameState:
             int(sy),
             int(sx),
             bool(allow_diagonal),
-            no_diag=no_diag,
+            no_diag=nd,
         )
 
     def path_step(
@@ -2463,6 +2600,15 @@ class GameState:
             if isinstance(passable_mask, np.ndarray) and passable_mask.dtype == np.bool_
             else np.asarray(passable_mask, dtype=np.bool_)
         )
+        nd = (
+            None
+            if no_diag is None
+            else (
+                no_diag
+                if isinstance(no_diag, np.ndarray) and no_diag.dtype == np.bool_
+                else np.asarray(no_diag, dtype=np.bool_)
+            )
+        )
 
         return astar_next_step(
             p,
@@ -2471,5 +2617,5 @@ class GameState:
             int(target[0]),
             int(target[1]),
             bool(allow_diagonal),
-            no_diag=no_diag,
+            no_diag=nd,
         )

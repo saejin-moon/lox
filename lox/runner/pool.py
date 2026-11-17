@@ -40,19 +40,31 @@ _WORKER_HARNESS: EnvHarness | None = None
 _WORKER_ROLE: str = "val-hum-law-fem"
 _WORKER_MAX_STEPS: int = 5000
 _WORKER_BENCHMARK: str = "nethack"
+_WORKER_CANCEL_EPOCH: Any = None
 _WORKER_COMPILED_CACHE: OrderedDict[
     tuple[str, str, tuple[tuple[str, str], ...]], CompiledPolicy
 ] = OrderedDict()
 _WORKER_COMPILED_CACHE_MAX = 16
 
 
-def _init_worker(role: str, max_steps: int, benchmark: str = "nethack") -> None:
+def _init_worker(
+    role: str,
+    max_steps: int,
+    benchmark: str = "nethack",
+    cancel_epoch: Any = None,
+) -> None:
     # Ignore SIGINT in worker processes so Ctrl+C in the terminal is handled cleanly by the main process
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    global _WORKER_HARNESS, _WORKER_ROLE, _WORKER_MAX_STEPS, _WORKER_BENCHMARK
+    global \
+        _WORKER_HARNESS, \
+        _WORKER_ROLE, \
+        _WORKER_MAX_STEPS, \
+        _WORKER_BENCHMARK, \
+        _WORKER_CANCEL_EPOCH
     _WORKER_ROLE = role
     _WORKER_MAX_STEPS = max_steps
     _WORKER_BENCHMARK = benchmark
+    _WORKER_CANCEL_EPOCH = cancel_epoch
     _WORKER_HARNESS = get_adapter(benchmark).create_harness(
         role=role, max_steps=max_steps
     )
@@ -106,6 +118,13 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     """
     t0 = time.perf_counter()
     seed = int(task["seed"])
+    task_epoch = task.get("_cancel_epoch")
+    if (
+        task_epoch is not None
+        and _WORKER_CANCEL_EPOCH is not None
+        and int(task_epoch) != int(_WORKER_CANCEL_EPOCH.value)
+    ):
+        return {"triggered": False, "cancelled": True, "seed": seed, "steps": 0}
     run_id = str(task["run_id"])
     role = str(task.get("role", "val-hum-law-fem"))
     max_steps = int(task.get("max_steps", 25000))
@@ -146,6 +165,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 "score": getattr(state, "score", 0),
                 "gold": getattr(state, "gold", 0),
                 "max_depth": getattr(state, "depth", 1),
+                "depth": getattr(state, "depth", 1),
                 "hp": getattr(state, "hp", 0),
                 "max_hp": getattr(state, "max_hp", 0),
                 "ac": getattr(state, "ac", 10),
@@ -161,6 +181,8 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 "pct_search": 0.0,
                 "starved_with_food": False,
                 "died_unarmored": False,
+                "worn_oprop_count": 0,
+                "dungeons_visited": 1,
                 "ticks": [],
                 "function_stats": {},
                 "registered_params": {},
@@ -187,7 +209,21 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     last_active_fn = "root"
     end_reason = "ended"
     death_msg = ""
-    visited_positions = {(state.y, state.x)}
+    visited_positions = {
+        (
+            int(getattr(state, "dungeon_num", 0) or 0),
+            int(curr_d),
+            int(state.y),
+            int(state.x),
+        )
+    }
+    visited_dungeons: set[int] = {int(getattr(state, "dungeon_num", 0) or 0)}
+    try:
+        last_worn_oprop_count = int(
+            getattr(state, "worn_oprop_mask", 0) or 0
+        ).bit_count()
+    except Exception:
+        last_worn_oprop_count = 0
     wait_count = 0
     search_count = 0
     stairs_down_found = bool(
@@ -211,7 +247,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 return [], ""
             items_list = list(raw_inv)
             parts: list[str] = []
-            for it in items_list[:12]:
+            for it in items_list:
                 ltr = getattr(it, "letter", "?")
                 nm = getattr(it, "name", "") or getattr(it, "char", "?")
                 tags = []
@@ -231,8 +267,21 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
 
     last_inv_items, last_inv_summary = _summarize_inv(state)
     exception_tracebacks: list[str] = []
+    info: dict[str, Any] = {}
 
     for step_idx in range(1, max_steps + 1):
+        if (
+            task_epoch is not None
+            and _WORKER_CANCEL_EPOCH is not None
+            and (step_idx & 127) == 0
+            and int(task_epoch) != int(_WORKER_CANCEL_EPOCH.value)
+        ):
+            return {
+                "triggered": False,
+                "cancelled": True,
+                "seed": seed,
+                "steps": step_idx - 1,
+            }
         try:
             raw_act, active_fn = runner.next_action(state)
         except PolicyLoopError as loop_err:
@@ -281,10 +330,18 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         prev_d = getattr(state, "depth", 1)
         next_state, done, info = harness.step(raw_act)
 
-        visited_positions.add((next_state.y, next_state.x))
         next_d = getattr(
             next_state, "depth", len(getattr(next_state, "achievements", ())) + 1
         )
+        if not done and next_d > 0:
+            visited_positions.add(
+                (
+                    int(getattr(next_state, "dungeon_num", 0) or 0),
+                    int(next_d),
+                    int(next_state.y),
+                    int(next_state.x),
+                )
+            )
         if not stairs_down_found and (
             getattr(next_state, "stairs_down_pos", None) is not None
             or (
@@ -307,6 +364,14 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         if not done and next_d > 0:
             last_gold = getattr(next_state, "gold", last_gold)
             last_ac = getattr(next_state, "ac", last_ac)
+            visited_dungeons.add(int(getattr(next_state, "dungeon_num", 0) or 0))
+            if step_idx == 1 or (step_idx & 15) == 0 or next_d != prev_d:
+                try:
+                    last_worn_oprop_count = int(
+                        getattr(next_state, "worn_oprop_mask", 0) or 0
+                    ).bit_count()
+                except Exception:
+                    pass
         next_xl = getattr(next_state, "xp_level", 1)
         if next_xl > 0:
             last_xl = next_xl
@@ -339,8 +404,13 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                 if not mons and done and hasattr(state, "visible_monsters"):
                     mons = state.visible_monsters()
                 if mons:
+                    py0, px0 = int(next_state.y), int(next_state.x)
+                    mons_sorted = sorted(
+                        mons,
+                        key=lambda m: max(abs(int(m.y) - py0), abs(int(m.x) - px0)),
+                    )
                     mon_parts = []
-                    for m in mons[:5]:
+                    for m in mons_sorted[:12]:
                         pet_tag = "pet," if getattr(m, "is_pet", False) else ""
                         m_info = getattr(m, "info", None)
                         diff = getattr(m_info, "difficulty", None) if m_info else None
@@ -557,6 +627,8 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             "starved_with_food": starved_with_food,
             "died_unarmored": died_unarmored,
             "stairs_down_found": stairs_down_found,
+            "worn_oprop_count": int(last_worn_oprop_count),
+            "dungeons_visited": max(1, len(visited_dungeons)),
             "triggered_functions": dict(runner.tracer.fn_calls),
             "functions_triggered": dict(runner.tracer.fn_calls),
             "fn_turns": dict(runner.tracer.fn_turns),
@@ -603,6 +675,7 @@ class PersistentEvalPool:
         self.benchmark = benchmark
         self._pool: mp.pool.Pool | None = None
         self._pool_lock = threading.RLock()
+        self._cancel_epoch = mp.get_context("spawn").Value("i", 0)
 
     def _ensure_pool(self) -> mp.pool.Pool | None:
         if self.workers <= 1:
@@ -613,7 +686,12 @@ class PersistentEvalPool:
                 self._pool = ctx.Pool(
                     processes=self.workers,
                     initializer=_init_worker,
-                    initargs=(self.role, self.max_steps, self.benchmark),
+                    initargs=(
+                        self.role,
+                        self.max_steps,
+                        self.benchmark,
+                        self._cancel_epoch,
+                    ),
                 )
             return self._pool
 
@@ -836,11 +914,13 @@ class PersistentEvalPool:
                                     "enforce_trigger": not is_pri and bool(target_fns),
                                     "skills": skills,
                                     "benchmark": bench,
+                                    "_cancel_epoch": int(self._cancel_epoch.value),
                                 }
                             )
 
                     # Use chunksize=1 so each episode is an independent work-stealing unit,
                     # eliminating tail-chunk serialization where 15 workers sit idle.
+                    cur_epoch = int(self._cancel_epoch.value)
                     chunksize = 1
                     if pool is not None:
                         results_iter = pool.imap_unordered(
@@ -850,7 +930,11 @@ class PersistentEvalPool:
                         results_iter = (run_single_episode(tk) for tk in tasks)
 
                     last_prog_time = t0
+                    iter_consumed = 0
                     for res in results_iter:
+                        iter_consumed += 1
+                        if res.get("cancelled"):
+                            continue
                         raw_done += 1
                         total_steps += int(res.get("steps", 0))
                         if res.get("registered_params") and not registered_params:
@@ -933,8 +1017,10 @@ class PersistentEvalPool:
                         or unreachable_abort
                         or early_stopped
                     ):
-                        if raw_done < len(tasks) and self.workers > 1:
-                            self.close()
+                        if iter_consumed < len(tasks) and pool is not None:
+                            self._cancel_epoch.value = cur_epoch + 1
+                            for _ in results_iter:
+                                pass
                         break
                 break
             except Exception as pool_exc:
@@ -947,6 +1033,7 @@ class PersistentEvalPool:
                     self._pool = None
                     pool = self._ensure_pool()
                     triggered_runs.clear()
+                    discarded_count = 0
                     raw_done = 0
                     total_steps = 0
                     target_fns_called_count = 0

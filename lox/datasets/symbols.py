@@ -79,6 +79,12 @@ class NetHackSymbolRegistry:
                 mname = str(pm.mname).strip().lower()
                 if not mname or mname in self._monsters_by_name:
                     continue
+                mlet_raw = getattr(pm, "mlet", 0)
+                mlet_val = (
+                    ord(mlet_raw[0])
+                    if isinstance(mlet_raw, str) and mlet_raw
+                    else int(mlet_raw or 0)
+                )
                 self._monsters_by_name[mname] = {
                     "id": i,
                     "name": mname,
@@ -92,6 +98,12 @@ class NetHackSymbolRegistry:
                     "resists": _decode_resistances(int(pm.mresists)),
                     "difficulty": int(getattr(pm, "difficulty", pm.mlevel)),
                     "size": int(getattr(pm, "msize", 0)),
+                    "mlet": mlet_val,
+                    "geno": int(getattr(pm, "geno", 0)),
+                    "msound": int(getattr(pm, "msound", 0)),
+                    "flags1": hex(int(getattr(pm, "mflags1", 0))),
+                    "flags2": hex(int(getattr(pm, "mflags2", 0))),
+                    "flags3": hex(int(getattr(pm, "mflags3", 0))),
                 }
             except Exception:
                 break
@@ -104,6 +116,7 @@ class NetHackSymbolRegistry:
                 raw_name = str(nh.OBJ_NAME(oc)).strip().lower()
                 if not raw_name:
                     continue
+                oc_descr = str(nh.OBJ_DESCR(oc) or "").strip().lower()
                 oc_class_int = (
                     int(oc.oc_class)
                     if isinstance(oc.oc_class, int)
@@ -116,10 +129,13 @@ class NetHackSymbolRegistry:
                     "id": i,
                     "name": full_name,
                     "raw_name": raw_name,
+                    "descr": oc_descr,
                     "class": cls_name,
                     "cost": int(oc.oc_cost),
                     "weight": int(oc.oc_weight),
-                    "nutrition": int(getattr(oc, "oc_nutrition", 0)),
+                    "delay": int(getattr(oc, "oc_delay", 0)),
+                    "prob": int(getattr(oc, "oc_prob", 0)),
+                    "oprop": int(getattr(oc, "oc_oprop", 0)),
                 }
                 if full_name not in self._objects_by_name:
                     self._objects_by_name[full_name] = obj_data
