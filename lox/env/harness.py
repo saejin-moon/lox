@@ -80,6 +80,17 @@ ASCII_CR = ord("\r")
 ASCII_N = ord("n")
 
 
+def policy_handles_menus(
+    policy_code: str = "", skills: dict[str, str] | None = None
+) -> bool:
+    """True when policy or any skill module explicitly references `in_menu`."""
+    if "in_menu" in (policy_code or ""):
+        return True
+    if skills:
+        return any("in_menu" in str(src or "") for src in skills.values())
+    return False
+
+
 class NetHackHarness:
     """
     Direct, high-throughput NLE harness.
@@ -95,10 +106,12 @@ class NetHackHarness:
         auto_dismiss_more: bool = True,
         lean_obs: bool = True,
         max_zero_turn_stalls: int = 100,
+        allow_menu_linger: bool = True,
     ):
         self.role = role
         self.max_steps = max_steps
         self.auto_dismiss_more = auto_dismiss_more
+        self.allow_menu_linger = allow_menu_linger
         self.lean_obs = lean_obs
         self.max_zero_turn_stalls = max_zero_turn_stalls
         self.options = options if options is not None else nh.NETHACKOPTIONS
@@ -166,6 +179,17 @@ class NetHackHarness:
     def _in_getlin(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
         return bool(obs_tuple[self._internal_idx][2] == 1)
 
+    def _has_more_banner(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
+        """True when row 0 of `tty_chars` currently shows `--More--`."""
+        tty_idx = self._idx_map.get("tty_chars")
+        if tty_idx is None or tty_idx >= len(obs_tuple):
+            return False
+        tty_chars = obs_tuple[tty_idx]
+        if tty_chars is None or len(tty_chars) == 0:
+            return False
+        row0 = bytes(tty_chars[0]).decode("latin1", errors="ignore").lower()
+        return "--more--" in row0
+
     def _in_menu(self, obs_tuple: tuple[np.ndarray, ...]) -> bool:
         """True when NetHack pauses for an interactive menu/pager rather than a plain `--More--` prompt."""
         if not self._waiting_for_space(obs_tuple):
@@ -211,20 +235,23 @@ class NetHackHarness:
             and safety < 64
         ):
             safety += 1
+            menu_linger = self.allow_menu_linger and self._in_menu(obs_tuple)
             if self._is_game_over(obs_tuple):
                 b = ASCII_SPACE
-            elif (
-                self._in_yn(obs_tuple)
-                or self._in_getlin(obs_tuple)
-                or self._in_menu(obs_tuple)
+            elif self._waiting_for_space(obs_tuple) and self._has_more_banner(
+                obs_tuple
             ):
+                # Clear `--More--` before checking `in_yn` because NLE can keep
+                # internal[1] (in_yn) set while waiting on a `--More--` pager.
+                b = ASCII_SPACE
+            elif self._in_yn(obs_tuple) or self._in_getlin(obs_tuple) or menu_linger:
                 # Allow interactive prompt/menu to be returned to policy for resolution
                 if self.prompt_linger_steps < self.max_prompt_linger:
                     self.prompt_linger_steps += 1
                     break
                 b = (
                     ASCII_ESC
-                    if (self._in_getlin(obs_tuple) or self._in_menu(obs_tuple))
+                    if (self._in_getlin(obs_tuple) or menu_linger)
                     else ASCII_N
                 )
                 self.prompt_aborts += 1
@@ -349,7 +376,7 @@ class NetHackHarness:
             self._in_moveloop(obs_tuple)
             and not self._in_yn(obs_tuple)
             and not self._in_getlin(obs_tuple)
-            and not self._in_menu(obs_tuple)
+            and not (self.allow_menu_linger and self._in_menu(obs_tuple))
         ):
             self.prompt_linger_steps = 0
 

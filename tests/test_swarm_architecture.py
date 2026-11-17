@@ -2427,3 +2427,66 @@ def test_gamestate_cursed_bug_traps_menu_and_guarded_range():
         raise AssertionError("Expected PolicyLoopError")
     except PolicyLoopError:
         pass
+
+
+def test_more_yn_collision_opt_in_menu_linger_and_hypothesis_summary(tmp_path):
+    import numpy as np
+
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.env.actions import Action
+    from lox.env.harness import NetHackHarness, policy_handles_menus
+    from lox.env.state import GameState
+
+    # 1. Opt-in menu linger detection
+    assert policy_handles_menus("def step(self, s): return Action.WAIT", {}) is False
+    assert policy_handles_menus("def step(self, s): return s.in_menu", {}) is True
+    assert (
+        policy_handles_menus("class Policy: pass", {"m": "if s.in_menu: pass"}) is True
+    )
+
+    h = NetHackHarness(max_steps=20, allow_menu_linger=False)
+    try:
+        st0 = h.reset(42)
+        raw = list(h._last_raw_tuple)
+        obs_keys = list(h._obs_keys)
+        idx_map = dict(h._idx_map)
+        assert st0.depth == 1
+        st1, done1, _ = h.step(Action.INVENTORY)
+        assert not done1
+        # Unhandled menus are cleanly auto-dismissed when allow_menu_linger=False
+        assert st1.in_menu is False
+    finally:
+        h.close()
+
+    # 2. in_yn_prompt must yield False when `--More--` is on row 0 while waiting_for_space
+    idx_int = idx_map["internal"]
+    idx_tty = idx_map["tty_chars"]
+    raw[idx_int] = raw[idx_int].copy()
+    raw[idx_int][1] = 1
+    raw[idx_int][3] = 1
+    raw[idx_tty] = raw[idx_tty].copy()
+    banner = b"You open the tin. It smells like orcs.--More--"
+    raw[idx_tty][0, :] = ord(" ")
+    raw[idx_tty][0, : len(banner)] = np.frombuffer(banner, dtype=np.uint8)
+    collided = GameState(tuple(raw), obs_keys=obs_keys, obs_idx_map=idx_map)
+    assert collided.in_yn_prompt is False
+
+    # 3. DeficitAnalyzer._populate_recent_attempts surfaces hypothesis/cluster over binding_constraint
+    dbp = str(tmp_path / "rec.duckdb")
+    con = init_db(dbp)
+    con.execute(
+        "INSERT INTO policies (policy_id, generation, mode, policy_code, avg_depth, max_depth, is_promoted) VALUES ('p1', 1, 'SWARM', 'class Policy: pass', 4.5, 9, TRUE)"
+    )
+    con.execute(
+        "INSERT INTO batches (batch_id, generation, mode, parent_policy_id, candidate_policy_id, episodes_recorded, episodes_discarded, avg_depth, max_depth, avg_score, hypothesis_passed) VALUES ('b1', 2, 'SWARM', 'p1', 'p2', 24, 0, 4.75, 11, 700.0, TRUE)"
+    )
+    con.execute(
+        "INSERT INTO synthesis_logs (log_id, generation, agent_role, turn_index, turn_type, hypothesis_yaml) VALUES ('s1', 2, 'peer_1', 3, 'SMOKE_CHECK', 'binding_constraint: long boilerplate\ncluster: slice_stalled\nhypothesis: H-fix-more-yn-loop')"
+    )
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=3, current_policy="class Policy: pass"
+    )
+    con.close()
+    assert rep.recent_attempts
+    assert "H-fix-more-yn-loop" in rep.recent_attempts[0]
+    assert "binding_constraint" not in rep.recent_attempts[0]

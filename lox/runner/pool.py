@@ -29,6 +29,7 @@ from lox.db.summarizer import summarize_episode_ticks
 from lox.env import get_adapter
 from lox.env.actions import Action
 from lox.env.base import EnvHarness
+from lox.env.harness import policy_handles_menus
 from lox.lang.compiler import CompiledPolicy, compile_policy_package
 from lox.lang.instrument import PolicyLoopError
 from lox.ui.console import ui
@@ -116,6 +117,8 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     skills = task.get("skills")
 
     harness = _get_worker_harness(role, max_steps, benchmark=benchmark)
+    if hasattr(harness, "allow_menu_linger"):
+        harness.allow_menu_linger = policy_handles_menus(policy_code, skills)
     compiled = _get_compiled_policy(policy_code, macros_code, skills=skills)
     runner = compiled.create_runner(param_overrides=param_overrides)
 

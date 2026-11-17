@@ -29,7 +29,7 @@ from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db
 from lox.db.shards import extract_shards_from_runs
 from lox.env.actions import Action
-from lox.env.harness import NetHackHarness
+from lox.env.harness import NetHackHarness, policy_handles_menus
 from lox.lang.compiler import compile_policy_package
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.lang.validator import (
@@ -1372,6 +1372,7 @@ class AuthorToolRegistry:
 
         # Step 1: Single-Episode Smoke Check + Behavioral Critic (reuse persistent harness)
         harness = self._get_harness(max_turns)
+        harness.allow_menu_linger = policy_handles_menus(spliced_policy, cand_skills)
         try:
             runner = compiled.create_runner()
             actions_taken: list[str] = []

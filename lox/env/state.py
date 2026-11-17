@@ -1833,8 +1833,26 @@ class GameState:
             return bool(self.program_state[1])
         return False
 
+    def _has_more_on_topline(self) -> bool:
+        """True when row 0 of `tty_chars` currently shows a `--More--` pager."""
+        tty_c = self.tty_chars
+        if tty_c is not None and len(tty_c) > 0:
+            row0 = bytes(tty_c[0]).decode("latin1", errors="ignore").lower()
+            if "--more--" in row0:
+                return True
+        return "--more--" in self.message.lower()
+
     @property
     def in_yn_prompt(self) -> bool:
+        if (
+            self.internal is not None
+            and len(self.internal) > 3
+            and bool(self.internal[3])
+            and self._has_more_on_topline()
+        ):
+            # NLE can keep internal[1] (in_yn) set while waiting on a `--More--` banner;
+            # pressing y/n does not dismiss `--More--`, only Space/Enter/ESC does.
+            return False
         if self.internal is not None and len(self.internal) > 1:
             return bool(self.internal[1])
         if self.is_in_yn:

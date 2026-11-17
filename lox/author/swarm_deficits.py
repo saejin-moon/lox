@@ -321,15 +321,39 @@ class DeficitAnalyzer:
                     WHERE generation >= ? AND generation < ?
                       AND turn_type = 'SMOKE_CHECK'
                       AND LENGTH(COALESCE(hypothesis_yaml, '')) > 5
-                    ORDER BY generation DESC, agent_role
+                    ORDER BY generation DESC, agent_role, turn_index DESC
                     """,
                     [min_g, int(report.generation)],
                 ).fetchall()
+                seen_role_gen: set[tuple[int, str]] = set()
                 for sg, srole, shyp in s_rows:
-                    flat = " ".join(str(shyp or "").split())
-                    if len(flat) > 95:
-                        flat = flat[:92] + "..."
-                    syn_by_gen.setdefault(int(sg), []).append(f"{srole}: {flat}")
+                    key = (int(sg), str(srole))
+                    if key in seen_role_gen:
+                        continue
+                    seen_role_gen.add(key)
+                    raw_h = str(shyp or "")
+                    summary = ""
+                    try:
+                        import yaml
+
+                        parsed = yaml.safe_load(raw_h)
+                        if isinstance(parsed, dict):
+                            cl = str(parsed.get("cluster", "") or "").strip()
+                            hy = str(
+                                parsed.get("hypothesis")
+                                or parsed.get("mechanism")
+                                or parsed.get("expected_effect")
+                                or ""
+                            ).strip()
+                            prefix = f"[{cl}] " if cl else ""
+                            summary = f"{prefix}{hy}".strip()
+                    except Exception:
+                        summary = ""
+                    if not summary:
+                        summary = " ".join(raw_h.split())
+                    if len(summary) > 110:
+                        summary = summary[:107] + "..."
+                    syn_by_gen.setdefault(int(sg), []).append(f"{srole}: {summary}")
             except Exception:
                 pass
             attempts: list[str] = []

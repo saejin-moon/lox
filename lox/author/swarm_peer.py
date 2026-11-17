@@ -23,7 +23,7 @@ from lox.author.swarm_critic import extract_priority_selector_branches
 from lox.author.swarm_deficits import DeficitCluster, DeficitReport
 from lox.author.swarm_meta import SwarmMetaAgent
 from lox.author.tools import merge_skill_module_update
-from lox.env.harness import NetHackHarness
+from lox.env.harness import NetHackHarness, policy_handles_menus
 from lox.lang.bt import extract_runner_leaf_errors
 from lox.lang.compiler import _COMPILE_EXEC_LOCK, compile_policy_package
 from lox.ui.console import ui
@@ -251,7 +251,10 @@ def incubate_candidate(
         return candidate
 
     # Fast local smoke + failure-fixture + frontier check reusing a single harness
-    smoke_harness = NetHackHarness(max_steps=60)
+    smoke_harness = NetHackHarness(
+        max_steps=60,
+        allow_menu_linger=policy_handles_menus(code, skills),
+    )
     try:
         try:
             st = smoke_harness.reset(seed=42)
