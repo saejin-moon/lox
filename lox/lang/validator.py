@@ -1726,6 +1726,61 @@ def validate_cross_module_contracts(
                 fn_map[node.name] = (req_pos, pos_args, has_varargs, kw_names)
         skill_fn_sigs[s_name] = fn_map
 
+    skill_exports_cache: dict[str, set[str]] = {}
+
+    def _collect_skill_exports(
+        mod_name: str, _visited: set[str] | None = None
+    ) -> set[str]:
+        if mod_name in skill_exports_cache:
+            return skill_exports_cache[mod_name]
+        visited = set(_visited or set())
+        if mod_name in visited:
+            return set()
+        visited.add(mod_name)
+        s_tree = parsed_skills.get(mod_name)
+        if s_tree is None:
+            return set()
+        exports: set[str] = set()
+        sig_map = skill_fn_sigs.setdefault(mod_name, {})
+        for node in s_tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                exports.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        exports.add(tgt.id)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                exports.add(node.target.id)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                src_mod = str(node.module)
+                if src_mod.startswith("skills."):
+                    dep_mod = src_mod.split(".", 1)[1].split(".", 1)[0]
+                    dep_exports = _collect_skill_exports(dep_mod, visited)
+                    dep_sigs = skill_fn_sigs.get(dep_mod, {})
+                    for al in node.names:
+                        if al.name == "*":
+                            exports |= dep_exports
+                            for k_fn, v_sig in dep_sigs.items():
+                                sig_map.setdefault(k_fn, v_sig)
+                        else:
+                            bound = al.asname or al.name
+                            if al.name in dep_exports:
+                                exports.add(bound)
+                            if al.name in dep_sigs:
+                                sig_map.setdefault(bound, dep_sigs[al.name])
+                else:
+                    for al in node.names:
+                        if al.name != "*":
+                            exports.add(al.asname or al.name)
+            elif isinstance(node, ast.Import):
+                for al in node.names:
+                    exports.add(al.asname or al.name.split(".")[0])
+        skill_exports_cache[mod_name] = exports
+        return exports
+
+    for mod_k in list(parsed_skills.keys()):
+        _collect_skill_exports(mod_k)
+
     try:
         p_tree = ast.parse(policy_code or "", filename="policy.py")
     except SyntaxError:
@@ -1747,34 +1802,18 @@ def validate_cross_module_contracts(
                         raise PolicyValidationError(
                             f"Cross-module error in {fname}: imports missing skill module 'skills.{s_mod}'."
                         )
+                    mod_exports = (
+                        _collect_skill_exports(s_mod)
+                        if s_mod in parsed_skills
+                        else None
+                    )
                     for al in node.names:
                         if al.name == "*":
                             continue
-                        if s_mod in skill_fn_sigs:
-                            s_tree = parsed_skills.get(s_mod)
-                            defined_top = {
-                                getattr(n, "name", "")
-                                for n in (s_tree.body if s_tree else [])
-                                if isinstance(
-                                    n,
-                                    (
-                                        ast.FunctionDef,
-                                        ast.AsyncFunctionDef,
-                                        ast.ClassDef,
-                                    ),
-                                )
-                            }
-                            assigned_top = {
-                                t.id
-                                for n in (s_tree.body if s_tree else [])
-                                if isinstance(n, ast.Assign)
-                                for t in n.targets
-                                if isinstance(t, ast.Name)
-                            }
-                            if al.name not in (defined_top | assigned_top):
-                                raise PolicyValidationError(
-                                    f"Cross-module error in {fname}: 'skills.{s_mod}' has no symbol '{al.name}'."
-                                )
+                        if mod_exports is not None and al.name not in mod_exports:
+                            raise PolicyValidationError(
+                                f"Cross-module error in {fname}: 'skills.{s_mod}' has no symbol '{al.name}'."
+                            )
                         direct_imports[al.asname or al.name] = (s_mod, al.name)
             elif isinstance(node, ast.Import):
                 for al in node.names:

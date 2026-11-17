@@ -3679,3 +3679,48 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
             con.close()
     finally:
         orch.close()
+
+    # 6. validate_cross_module_contracts & dry_run_policy accept facade re-exports (e.g. from split skills)
+    from lox.author.tools import AuthorToolRegistry
+    from lox.lang.validator import (
+        PolicyValidationError,
+        validate_cross_module_contracts,
+    )
+
+    facade_skills = {
+        **new_skills,
+        "combat": (
+            "from skills.exploration import search_step\n"
+            "def _can_fight():\n"
+            "    return True\n"
+            "def attack_or_search(state):\n"
+            "    return search_step(state) if _can_fight() else None\n"
+        ),
+    }
+    validate_cross_module_contracts(skill_pol, facade_skills)
+
+    # Arity check still fires transitively through the facade
+    bad_arity_skills = {
+        **new_skills,
+        "combat": (
+            "from skills.exploration import search_step\n"
+            "def attack_or_search(state):\n"
+            "    return search_step(state, 123)\n"
+        ),
+    }
+    try:
+        validate_cross_module_contracts(skill_pol, bad_arity_skills)
+        raise AssertionError("Expected transitive arity PolicyValidationError")
+    except PolicyValidationError as exc:
+        assert "search_step" in str(exc)
+
+    reg = AuthorToolRegistry(db_path=dbp)
+    reg.configure_generation(generation=16, mode="SWARM_PEER", skills=facade_skills)
+    reg.current_policy_code = skill_pol
+    reg.enforce_peer_research_gate = False
+    _out_f, st_f = reg.dry_run_policy(
+        '<skill_code module="combat">\ndef attack_or_search(state):\n    return search_step(state) if (_can_fight() and state.hp > 0) else None\n</skill_code>',
+        seed=42,
+        max_turns=20,
+    )
+    assert "PASSED" in st_f or st_f == "PASSED"
