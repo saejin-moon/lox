@@ -1127,6 +1127,41 @@ class BatchDatabaseLogger:
                     "holdout_rejected": [
                         bool(a.get("holdout_rejected", False)) for a in attempts
                     ],
+                    "iqm_delta": pa.array(
+                        [
+                            float(a["iqm_delta"])
+                            if a.get("iqm_delta") is not None
+                            else None
+                            for a in attempts
+                        ],
+                        type=pa.float64(),
+                    ),
+                    "wilcoxon_p": pa.array(
+                        [
+                            float(a["wilcoxon_p"])
+                            if a.get("wilcoxon_p") is not None
+                            else None
+                            for a in attempts
+                        ],
+                        type=pa.float64(),
+                    ),
+                    "wins": pa.array(
+                        [
+                            int(a["wins"]) if a.get("wins") is not None else None
+                            for a in attempts
+                        ],
+                        type=pa.int64(),
+                    ),
+                    "losses": pa.array(
+                        [
+                            int(a["losses"]) if a.get("losses") is not None else None
+                            for a in attempts
+                        ],
+                        type=pa.int64(),
+                    ),
+                    "reject_reason": [
+                        str(a.get("reject_reason", "") or "")[:500] for a in attempts
+                    ],
                     "created_at": [now] * len(attempts),
                 }
             )

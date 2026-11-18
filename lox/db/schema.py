@@ -362,6 +362,11 @@ CREATE TABLE IF NOT EXISTS tournament_attempts (
     holdout_avg_depth DOUBLE,
     holdout_iqm_delta DOUBLE,
     holdout_rejected BOOLEAN DEFAULT FALSE,
+    iqm_delta DOUBLE,
+    wilcoxon_p DOUBLE,
+    wins INTEGER,
+    losses INTEGER,
+    reject_reason TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -617,6 +622,11 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                     ("holdout_avg_depth", "DOUBLE"),
                     ("holdout_iqm_delta", "DOUBLE"),
                     ("holdout_rejected", "BOOLEAN DEFAULT FALSE"),
+                    ("iqm_delta", "DOUBLE"),
+                    ("wilcoxon_p", "DOUBLE"),
+                    ("wins", "INTEGER"),
+                    ("losses", "INTEGER"),
+                    ("reject_reason", "TEXT"),
                 ]:
                     if c_name not in cols_ta:
                         try:

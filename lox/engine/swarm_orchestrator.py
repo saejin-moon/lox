@@ -354,23 +354,22 @@ class SwarmCampaignOrchestrator:
                 f"gained={len(nm['seeds_gained'])}, lost={len(nm['seeds_lost'])}, touched={sorted(nm['touched_skills'])[:3]})"
                 for nm in self._near_misses[:3]
             ]
-        if deficit_report.regime == "CLIMBING":
-            active_peers = max(1, min(self.num_workers, max(2, self.num_workers // 2)))
-        else:
-            active_peers = max(1, int(self.num_workers))
-
-        # Select orthogonal clusters with disjoint dominant_fns when possible
+        # Select orthogonal failure clusters by distinct objective outcome cohorts (cluster_id)
         clusters = deficit_report.fail_clusters
         orthogonal_clusters: list[Any] = []
-        used_dom_fns: set[str] = set()
+        seen_cids: set[str] = set()
         for cl in clusters:
-            dom = str((cl.dominant_fns or [""])[0] or "").strip()
-            if not dom or dom not in used_dom_fns:
+            cid = str(getattr(cl, "cluster_id", "") or "").strip()
+            if not cid or cid not in seen_cids:
                 orthogonal_clusters.append(cl)
-                if dom:
-                    used_dom_fns.add(dom)
+                if cid:
+                    seen_cids.add(cid)
         if not orthogonal_clusters:
             orthogonal_clusters = list(clusters)
+
+        # Keep enough peers for orthogonal slices + best-of-N/crossover diversity even while CLIMBING
+        target_peers = max(min(4, int(self.num_workers)), len(orthogonal_clusters))
+        active_peers = max(1, min(int(self.num_workers), target_peers))
 
         # Keep eval_pool step horizon synchronized with active_max_steps so incubation and tournament agree
         self.eval_pool.max_steps = int(active_max_steps)

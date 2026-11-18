@@ -677,7 +677,7 @@ class SwarmPeerAgent:
             f"- Description: {claimed_deficit.label}\n"
             f"- Evidence: {claimed_deficit.evidence}\n"
             f"- Target Sample Seeds: {claimed_deficit.sample_seeds}\n"
-            f"- Dominant Functions Observed: {claimed_deficit.dominant_fns}"
+            f"- Diagnosis Note: Inspect `champion_ticks` / `ticks` and workspace `skills/` directly to locate the true root cause across module boundaries."
             f"{frontier_block}\n"
         )
 

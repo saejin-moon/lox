@@ -936,10 +936,17 @@ class SwarmReferee:
                 > float(inc_stats.get("avg_branches", 1.0)) + 0.08
                 or (ac_improved and iqm_delta >= 0.0)
             )
+            pareto_win_margin = (
+                wins > losses
+                if n_pairs < 16
+                else (wins >= losses + max(3, n_pairs // 16))
+            )
+            pareto_sig_ok = (n_pairs < 16) or (p_val < 0.15) or (iqm_delta >= 0.05)
             pareto_beats = (
                 pareto_non_regressing
                 and pareto_axis_gain
-                and (wins > losses)
+                and pareto_win_margin
+                and pareto_sig_ok
                 and d_delta >= 0.02
                 and s_delta >= 0.0
             )
@@ -1240,10 +1247,17 @@ class SwarmReferee:
         holdout_avg_depth: float | None = None
         holdout_iqm_delta: float | None = None
         holdout_rejected = False
+        holdout_avg_by_id: dict[str, float | None] = {}
+        holdout_iqm_by_id: dict[str, float | None] = {}
+        holdout_rejected_ids: set[str] = set()
         if beats_incumbent:
             gate_ok, holdout_avg_depth, holdout_iqm_delta, holdout_rejected = (
                 _run_post_crn_gates(best_cand)
             )
+            holdout_avg_by_id[best_cand.peer_id] = holdout_avg_depth
+            holdout_iqm_by_id[best_cand.peer_id] = holdout_iqm_delta
+            if holdout_rejected:
+                holdout_rejected_ids.add(best_cand.peer_id)
             if not gate_ok:
                 beats_incumbent = False
                 for fb_idx in ranked_indices:
@@ -1254,6 +1268,10 @@ class SwarmReferee:
                     if fb_cand.peer_id == best_cand.peer_id:
                         continue
                     fb_ok, fb_hd, fb_hiqm, fb_hrej = _run_post_crn_gates(fb_cand)
+                    holdout_avg_by_id[fb_cand.peer_id] = fb_hd
+                    holdout_iqm_by_id[fb_cand.peer_id] = fb_hiqm
+                    if fb_hrej:
+                        holdout_rejected_ids.add(fb_cand.peer_id)
                     if fb_ok:
                         best_cand = fb_cand
                         best_eval = fb_eval
@@ -1273,7 +1291,22 @@ class SwarmReferee:
         attempts_summary: list[dict[str, Any]] = []
         for idx_e, (c, _be, st) in enumerate(evaluated_entries):
             pr = paired_by_idx[idx_e]
+            c_beats, _c_dd, _c_sd, c_guard = eligibility_by_idx[idx_e]
             is_best = c.peer_id == best_cand.peer_id
+            is_promoted_c = bool(beats_incumbent and is_best)
+            c_hold_rej = c.peer_id in holdout_rejected_ids
+            if is_promoted_c:
+                rej_reason = "promoted"
+            elif c_hold_rej:
+                rej_reason = "holdout_rejected"
+            elif not c_guard:
+                rej_reason = "guard_failed"
+            elif not c_beats:
+                rej_reason = "below_sig_or_pareto_gate"
+            elif beats_incumbent:
+                rej_reason = f"outcompeted_by_{best_cand.peer_id}"
+            else:
+                rej_reason = "rejected"
             attempts_summary.append(
                 {
                     "attempt_id": f"att_g{generation}_{c.peer_id}_{int(time.time() * 1000)}",
@@ -1281,7 +1314,7 @@ class SwarmReferee:
                     "peer_id": c.peer_id,
                     "deficit_id": c.claimed_deficit_id,
                     "candidate_fp": _package_fingerprint(c.policy_code, c.skills),
-                    "promoted": bool(beats_incumbent and is_best),
+                    "promoted": is_promoted_c,
                     "sandbox_passed": bool(c.sandbox_passed),
                     "sandbox_error": str(c.error or ""),
                     "avg_depth": float(st.get("avg_depth", 1.0)),
@@ -1293,9 +1326,20 @@ class SwarmReferee:
                     "seeds_gained": list(pr.get("seeds_gained", [])),
                     "seeds_lost": list(pr.get("seeds_lost", [])),
                     "top_tracebacks": list(st.get("top_tracebacks", [])),
-                    "holdout_avg_depth": holdout_avg_depth if is_best else None,
-                    "holdout_iqm_delta": holdout_iqm_delta if is_best else None,
-                    "holdout_rejected": bool(holdout_rejected and is_best),
+                    "holdout_avg_depth": holdout_avg_by_id.get(
+                        c.peer_id, holdout_avg_depth if is_best else None
+                    ),
+                    "holdout_iqm_delta": holdout_iqm_by_id.get(
+                        c.peer_id, holdout_iqm_delta if is_best else None
+                    ),
+                    "holdout_rejected": bool(
+                        c_hold_rej or (holdout_rejected and is_best)
+                    ),
+                    "iqm_delta": float(pr.get("iqm_delta", 0.0)),
+                    "wilcoxon_p": float(pr.get("wilcoxon_p", 1.0)),
+                    "wins": int(pr.get("wins", 0) or 0),
+                    "losses": int(pr.get("losses", 0) or 0),
+                    "reject_reason": rej_reason,
                 }
             )
         if best_cand.peer_id not in evaluated_ids and best_cand.peer_id != "incumbent":
@@ -1324,6 +1368,13 @@ class SwarmReferee:
                     "holdout_avg_depth": holdout_avg_depth,
                     "holdout_iqm_delta": holdout_iqm_delta,
                     "holdout_rejected": bool(holdout_rejected),
+                    "iqm_delta": float(best_pair.get("iqm_delta", 0.0)),
+                    "wilcoxon_p": float(best_pair.get("wilcoxon_p", 1.0)),
+                    "wins": int(best_pair.get("wins", 0) or 0),
+                    "losses": int(best_pair.get("losses", 0) or 0),
+                    "reject_reason": "promoted"
+                    if beats_incumbent
+                    else ("holdout_rejected" if holdout_rejected else "rejected"),
                 }
             )
         for c in candidates:
@@ -1352,6 +1403,11 @@ class SwarmReferee:
                         "seeds_gained": list(s1_pr.get("seeds_gained", [])),
                         "seeds_lost": list(s1_pr.get("seeds_lost", [])),
                         "top_tracebacks": list(s1_st.get("top_tracebacks", [])),
+                        "iqm_delta": float(s1_pr.get("iqm_delta", 0.0)),
+                        "wilcoxon_p": float(s1_pr.get("wilcoxon_p", 1.0)),
+                        "wins": int(s1_pr.get("wins", 0) or 0),
+                        "losses": int(s1_pr.get("losses", 0) or 0),
+                        "reject_reason": "cut_in_stage1_racing",
                     }
                 )
                 continue
@@ -1378,6 +1434,7 @@ class SwarmReferee:
                     "seeds_gained": [],
                     "seeds_lost": [],
                     "top_tracebacks": [c.error[:180]] if c.error else [],
+                    "reject_reason": "incubation_or_filter_failed",
                 }
             )
 

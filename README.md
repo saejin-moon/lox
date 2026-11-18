@@ -2,173 +2,259 @@
 
 **Autonomous empirical policy synthesis under one invariant: _Hard Code Nothing_.**
 
-LOX designs, compiles, statically type-checks, instruments, and evolves Python 3.11+ Behavior Tree policies and modular `skills/*.py` packages for long-horizon stochastic environments with permadeath—primarily the **NetHack Learning Environment (NLE)**, with benchmark support for **MiniHack scenarios** and **Craftax**.
+LOX is a neurosymbolic program-policy synthesis engine for long-horizon, partially observable permadeath environments—primarily **NetHack 3.6.6** via the **NetHack Learning Environment (NLE)**, with **MiniHack** scenario regression gates and pluggable **Craftax** benchmark support.
 
-Instead of spending LLM tokens per action step or millions of shaped RL frames, LOX **separates synthesis from runtime execution**. Between generations, symmetric peer agents query DuckDB episode traces, human ascension logs, C symbol tables, and an untruncated offline NetHackWiki + 3.6.6 Guidebook index to synthesize Python code that executes directly against NLE C bindings at CPU speed.
+Instead of spending LLM tokens at every step or training monolithic neural policies on millions of shaped frames, LOX **separates synthesis from runtime execution**:
+
+- **Between generations**, stateless LLM peer agents investigate DuckDB episode/tick telemetry, human ascension traces, C monster/object symbol tables, and an untruncated offline NetHackWiki + NetHack 3.6.6 Guidebook index to propose targeted edits to `policy.py` and modular `skills/` packages.
+- **During evaluation**, policies compile into sandboxed, AST-instrumented Python modules backed by a native Rust PyO3 core (`lox_core`) and Numba kernels, executing directly against NLE C bindings at CPU speed under paired Common Random Numbers (CRN) racing and hidden holdout verification.
 
 ---
 
 ## Contents
 
-1. [Core Invariant: Hard Code Nothing](#1-core-invariant-hard-code-nothing)
-2. [Peer Swarm Architecture & Tournament Pipeline](#2-peer-swarm-architecture--tournament-pipeline)
-3. [Policy Language, StrategyStack, Type Checking & Contracts](#3-policy-language-strategystack-type-checking--contracts)
-4. [Environment Harness, Scenarios & Rust Core](#4-environment-harness-scenarios--rust-core)
-5. [DuckDB Warehouse, Quality-Diversity & Offline Wiki](#5-duckdb-warehouse-quality-diversity--offline-wiki)
+1. [Core Architectural Invariant: Hard Code Nothing](#1-core-architectural-invariant-hard-code-nothing)
+2. [Peer Swarm Architecture & E3 Hybrid Evolution](#2-peer-swarm-architecture--e3-hybrid-evolution)
+3. [Option-A Policy Architecture, Language Runtime & Safety Gates](#3-option-a-policy-architecture-language-runtime--safety-gates)
+4. [Environment Harness, Rust Core (`lox_core`), Scenarios & Craftax](#4-environment-harness-rust-core-lox_core-scenarios--craftax)
+5. [DuckDB Telemetry Warehouse, QD Archives & Research Tools](#5-duckdb-telemetry-warehouse-qd-archives--research-tools)
 6. [Single-Agent & Legacy Swarm Modes](#6-single-agent--legacy-swarm-modes)
 7. [Repository Layout](#7-repository-layout)
-8. [Setup, Verification & CLI Workflows](#8-setup-verification--cli-workflows)
+8. [Installation, Verification & CLI Workflows](#8-installation-verification--cli-workflows)
 
 ---
 
-## 1. Core Invariant: Hard Code Nothing
+## 1. Core Architectural Invariant: Hard Code Nothing
 
-The harness, Rust extension, compiler, deficit analyzer, and tournament referee ([`lox/env/`](lox/env/), [`crates/lox-core/`](crates/lox-core/), [`lox/lang/`](lox/lang/), [`lox/engine/`](lox/engine/)) contain **zero** game strategy heuristics, **zero** hardcoded monster/corpse/item lists, and **zero** hidden tactical adapters. All domain intelligence lives strictly inside generated `policy.py` and `skills/*.py`.
+The harness, Rust extension, AST compiler, deficit analyzer, and tournament referee ([`lox/env/`](lox/env/), [`crates/lox-core/`](crates/lox-core/), [`lox/lang/`](lox/lang/), [`lox/engine/`](lox/engine/)) contain **zero** game heuristics, **zero** hardcoded monster/corpse/item lists, and **zero** hidden macro adapters. Domain knowledge is discovered empirically by synthesized policies inside `data/workspace/policy.py` and `data/workspace/skills/`.
 
-| Boundary Layer | Responsibility | Implementation |
+| Layer | Responsibility | Key Files |
 | :--- | :--- | :--- |
-| **1-to-1 Action Map** | Direct mapping from policy outputs to NLE C keystrokes (`Action`, `key(ch)`, `seq(...)`, `repeat(...)`, `extcmd(...)`, `DIR_DELTAS`). | [`lox/env/actions.py`](lox/env/actions.py) |
-| **Lazy State & WorldMemory** | Zero-copy `GameState` over `blstats`, `BL_MASK_*`, `worn_oprop_mask`, 21×79 `chars`/`glyphs`/`colors`, multi-floor `FloorMemory` (read-only `passable_mask`, trap-avoiding `safe_passable_mask`, `level_exits`, under-hero object occlusion clearing), and prompt flags (`in_getobj_prompt`, `in_getdir_prompt`, `in_yn_prompt`, `in_text_prompt`, `in_menu`). | [`lox/env/state.py`](lox/env/state.py) |
-| **C Symbol Ground Truth** | Direct queries over NLE `permonst` (`level`, `speed`, `ac`, `mr`, `nutrition`, `cwt`, `conveys`, `resists`, `mflags1`–`3`) and `objclass` (`class`, `cost`, `weight`, `delay`, `prob`, `oprop`, `descr`). | [`lox/datasets/symbols.py`](lox/datasets/symbols.py) |
-| **Safe Harness I/O** | Enforces `noautopickup` (`DEFAULT_NETHACKOPTIONS`), auto-clears `--More--` pagers, aborts broken `seq(...)` chains in 0 turns (`seq_aborted`), dismisses hung prompts, and truncates zero-turn stalls (`stalled_zero_turn`). | [`lox/env/harness.py`](lox/env/harness.py) |
+| **1-to-1 NLE Action Interface** | Exact mapping between policy yields and native NLE C keystrokes (`Action` enum, `key(ch)`, `seq(...)`, `repeat(...)`, `extcmd(...)`, `DIR_DELTAS`). | [`lox/env/actions.py`](lox/env/actions.py) |
+| **Zero-Copy `GameState` & `WorldMemory`** | Exposes `blstats`, `BL_MASK_*`, `worn_oprop_mask`, 21×79 `chars`/`glyphs`/`colors`, per-floor `FloorMemory` (`passable_mask`, `safe_passable_mask`, `door_mask`, `level_exits`, under-hero occlusion clearing), and UI prompt state (`in_getobj_prompt`, `in_getdir_prompt`, `in_yn_prompt`, `in_text_prompt`, `in_menu`). | [`lox/env/state.py`](lox/env/state.py) |
+| **NLE C Symbol Ground Truth** | Direct queries over NLE `permonst` (`level`, `speed`, `ac`, `mr`, `nutrition`, `cwt`, `conveys`, `resists`, `mflags1`–`3`) and `objclass` (`class`, `cost`, `weight`, `delay`, `prob`, `oprop`, `descr`). | [`lox/datasets/symbols.py`](lox/datasets/symbols.py) |
+| **Safe Harness I/O** | Enforces `noautopickup` (`DEFAULT_NETHACKOPTIONS`), auto-clears `--More--` pagers, aborts invalid `seq(...)` chains in 0 turns (`seq_aborted`), prevents text/menu prompt hangs (`auto_esc_count`), and breaks zero-turn stalls (`stalled_zero_turn`). | [`lox/env/harness.py`](lox/env/harness.py) |
 
 ---
 
-## 2. Peer Swarm Architecture & Tournament Pipeline
+## 2. Peer Swarm Architecture & E3 Hybrid Evolution
 
-The default swarm (`--swarm-architecture peer` in [`scripts/run_swarm.py`](scripts/run_swarm.py) and [`SwarmCampaignOrchestrator`](lox/engine/swarm_orchestrator.py)) runs a deterministic data-partition + parallel peer + CRN tournament loop:
+The default synthesis pipeline ([`scripts/run_swarm.py`](scripts/run_swarm.py) with `--swarm-architecture peer`, orchestrated by [`SwarmCampaignOrchestrator`](lox/engine/swarm_orchestrator.py)) runs a symmetric peer-swarm and deterministic CRN tournament loop:
 
 ```mermaid
 flowchart TB
-    DB[(Unified DuckDB Warehouse)] --> DEF["1. DeficitAnalyzer & Organic Scenario Miner (0 LLM calls)\nAdaptive step horizon (5k -> 50k via compute_adaptive_max_steps)\nScoped Ochiai D_succ protection + orthogonal D_fail slices\nMined PrefixShards + pre-mortem tick traces + MAP-Elites stepping stones"]
+    DB[(Unified 14-Table DuckDB Warehouse)] --> DEF["1. DeficitAnalyzer & Organic Miner (0 LLM calls)\nAdaptive horizon via compute_adaptive_max_steps (5k -> 50k)\nScoped Ochiai D_succ protection + disjoint D_fail slices\nMined PrefixShards + pre-mortem ticks + MAP-Elites stepping stones"]
 
-    DEF -->|"Plateau >= 2: branches half of peers from MAP-Elites v2 elites\n--refactor-model handles peer_1 during bloat or streak >= 3"| PEERS
+    DEF -->|"Plateau reseeding (MAP-Elites v2)\n--refactor-model escalation on bloat/plateau"| PEERS
 
-    subgraph PEERS["2. Symmetric Peer Agents & Incubation (tau_iso)"]
+    subgraph PEERS["2. Symmetric SwarmPeerAgents & Sandbox Incubation"]
         direction LR
-        P1["Peer 1..K\n64k max_tokens | Reasoning effort control\nResearch gate (Wiki + Theories + DB) before coding\nStatic Pyright + symtable + TRIGGER_MISS + Prompt-Torture"]
+        P["Peers 1..K (AuthorAgent, 64k output cap)\nAutonomous D_fail deficit claims\nResearch gate before coding\nStatic Pyright + symtable + dry_run_policy\nIsolated PrefixShard / micro-seed incubation"]
     end
 
-    PEERS -->|"Incubation Gate:\n0 swallowed leaf errors, non-WAIT movement check,\nD_succ guard shards + mined organic scenarios"| REF
+    PEERS -->|"Incubation gate:\n0 leaf/runtime errors, non-WAIT movement,\nD_succ guard shards & depth non-regression"| REF
 
     subgraph REF["3. SwarmReferee (Deterministic Python, 0 LLM calls)"]
         FLT["Protected-Branch & AST-Equivalence Filter"]
-        ORTHO["3-Way AST Composition (three_way_ast_merge)\nCombines disjoint skills, intra-module symbols & Selector branches"]
-        RACE["Two-Stage Paired CRN Seed Racing (32 -> 64 fresh seeds S_g)\nIQM + Pareto AC/XL/oprop/branches/p75 non-regression + N-way stacking"]
-        GATE["MiniHack Scenario Gate (advisory/strict) + Hidden Holdout (seeds >= 100k)"]
+        ORTHO["3-Way AST Composition (three_way_ast_merge)\nMerges disjoint skills, module symbols & Goal/BT branches"]
+        RACE["Two-Stage Paired CRN Seed Racing (e.g. 32 -> 64 fresh seeds)\nIQM + Pareto AC/XL/oprop/branches/p75 checks + N-way stacking"]
+        GATE["MiniHack Scenario Gate + Hidden Holdout Audit (seeds >= 100k)"]
         FLT --> ORTHO --> RACE --> GATE
     end
 
-    GATE -->|"Promoted"| WS["data/workspace/policy.py + skills/*.py + STATUS.md"]
-    GATE -->|"All attempts, tracebacks & gained/lost seeds"| DB
+    GATE -->|"Promoted"| WS["data/workspace/policy.py + skills/**/*.py + STATUS.md"]
+    GATE -->|"All attempts, diffs & per-seed wins/losses"| DB
     RACE --> ARCH["FrontierArchive + MAP-Elites v2 (5x4x4) + AST Auto-Modularizer"]
     ARCH --> DEF
 ```
 
-### Key Safeguards Against Stalls, Bloat & Goodharting
+### How E3 Hybrid Evolution Works
 
-1. **Fresh Paired CRN Racing + Hidden Holdout ([`swarm_referee.py`](lox/engine/swarm_referee.py))**:
-   - Generation `g` evaluates Incumbent and finalists on fresh shared seeds `S_g = [10_000 + g*100 + i]`. With default `--seeds 64 --race-seeds 32`, stage 1 races finalists on `32` seeds and extends top individual + orthogonal contenders to the full `64` seeds.
-   - Promotion requires passing exception/score/hard-stall guards plus progression gain (`avg_depth`, `iqm_delta`, or Pareto non-regression across `p75_depth`, `avg_ac`, `worn_oprop_count`, and `dungeons_visited`).
-   - Top non-conflicting winning peers undergo **N-Way Sequential Greedy Stacking** before facing the optional `--scenario-gate` (`advisory` by default) and the **Hidden Holdout Audit** (`seeds >= 100,000`, never visible to peers).
-2. **Pre-Rollout Peer Gates ([`agent.py`](lox/author/agent.py), [`tools.py`](lox/author/tools.py), [`swarm_peer.py`](lox/author/swarm_peer.py))**:
-   - Mandatory research gate (`query_theories` + `query_wiki`) before first `dry_run_policy`, with automatic turn refunds so exploration never starves coding turns.
-   - `AuthorAgent` defaults to `65536` `max_tokens` (`64k`) and rejects empty responses when internal reasoning exhausts tokens rather than parsing `<think>` text as code.
-   - `dry_run_policy` checks cross-module signatures, `pyright` types against `.pyi` prelude stubs, `#EVOLVE-BLOCK` bounds, `TRIGGER_MISS` reachability on claimed failure fixtures, and `prompt_torture` checks; `incubate_candidate` rejects `WAIT`-dominant (`<= 10%` non-`WAIT`) deadlocks and runtime exceptions.
-3. **Recency-Scoped Spectrum Attribution & Plateau Handling ([`summarizer.py`](lox/db/summarizer.py), [`swarm_deficits.py`](lox/author/swarm_deficits.py))**:
-   - Weights `ochiai_good_run_score` by `(1 - min(0.85, stagnation_share))` and scopes `D_succ` branch protection to the latest 1–3 promoted champion batches (`< 0.35` stagnation).
-   - `--refactor-model` optionally routes `peer_1` to a stronger reasoning model during bloat warnings or plateau streaks (`>= 3`).
-
----
-
-## 3. Policy Language, StrategyStack, Type Checking & Contracts
-
-- **Interruptible Behavior Trees & Stateful Plans ([`lox/lang/bt.py`](lox/lang/bt.py), [`lox/lang/strategy.py`](lox/lang/strategy.py))**:
-  - `PrioritySelector`, `Sequence`, `MemorySequence`, `Inverter`, `ConditionLeaf`, `ActionLeaf` (`min_commit`, `preempt_if`, generator coroutine yields + `.halt()` cleanup), `@bt_leaf` declarative ordering, and `Blackboard.floor_get` / `floor_set` scoped to `(dungeon_num, level_num)`.
-  - `StrategyStack` / `StrategyFrame` / `until` / `with_cleanup` support multi-turn stateful plans with automatic hazard preemption cleanly pre-loaded into the policy runtime.
-- **Frozen Cross-Module Contracts ([`lox/lang/contracts.py`](lox/lang/contracts.py))**:
-  - Typed runtime data contracts (`GoalIntent`, `SafetyReport`, `WorldTracker`, `CapabilityScorer`, `ThreatEvaluator`) + `#EVOLVE-BLOCK:<name>` bounds checking keep multi-skill interfaces stable across edits.
-- **Static & AST Tooling ([`lox/lang/validator.py`](lox/lang/validator.py), [`lox/lang/compiler.py`](lox/lang/compiler.py))**:
-  - Dynamic `.pyi` stubs (`_lox_prelude.pyi`) + `run_pyright_on_package`, `<2ms` CPython `symtable` undefined-symbol gate, topological `skills/*` compilation, `three_way_ast_merge`, AST security sandbox, and `<1 us` per-function instrumentation with loop watchdogs ([`lox/lang/instrument.py`](lox/lang/instrument.py)).
+1. **Data-Assigned Orthogonal Claims ([`swarm_deficits.py`](lox/author/swarm_deficits.py))**:
+   - Without spending LLM calls, `DeficitAnalyzer` clusters failing episodes into orthogonal `DeficitCluster` targets (`slice_stalled`, `slice_unequipped_progression`, branch-specific stalls, or `bootstrap_survival` / `bootstrap_exploration` at Gen 1), scores functions via recency-weighted **Ochiai Good-Run Similarity** and **Liblit Failure Importance**, and extracts pre-mortem tick traces + `PrefixShard` checkpoints.
+2. **Symmetric Peers with Isolated Workspaces ([`swarm_peer.py`](lox/author/swarm_peer.py), [`agent.py`](lox/author/agent.py))**:
+   - Every `SwarmPeerAgent` shares identical full-stack access to `policy.py`, 1-level and 2-level `skills/` packages, DuckDB, C symbol tables, `TheoryDocumentStore`, and offline NetHackWiki.
+   - Before coding, a **research gate** ensures the agent grounds its hypothesis in telemetry and domain facts (with tool-turn refunds so exploration does not starve coding turns).
+   - Every candidate must pass static checks (`pyright` against dynamic `.pyi` stubs + CPython `symtable` + `#EVOLVE-BLOCK` bounds) and **isolated sandbox incubation** (`incubate_candidate`) before entering the tournament.
+3. **Deterministic CRN Tournament & 3-Way AST Merging ([`swarm_referee.py`](lox/engine/swarm_referee.py), [`validator.py`](lox/lang/validator.py))**:
+   - Candidates are deduplicated by AST equivalence and filtered against `D_succ` protected-branch clobbering.
+   - Top AST/skill-disjoint survivors are combined via **`three_way_ast_merge`** into composite contenders, raced head-to-head against the current incumbent on fresh paired CRN seeds (Stage 1 `--race-seeds` → Stage 2 full `--seeds`), greedily N-way stacked when non-conflicting, and validated against an optional MiniHack `--scenario-gate` (`off`/`advisory`/`strict`) plus a **Hidden Holdout** (`seeds >= 100,000`).
+4. **Telemetry & Horizon Discipline ([`orchestrator.py`](lox/engine/orchestrator.py), [`contracts.py`](lox/core/contracts.py))**:
+   - `compute_adaptive_max_steps` scales episode horizons upward from `5,000` as promoted `p90_depth` grows.
+   - Pre-gen and post-gen AST cohesion modularization ([`lox/lang/modularize.py`](lox/lang/modularize.py)) splits oversized files while asserting bit-identical `action_bytes` replay against NetHack seeds.
 
 ---
 
-## 4. Environment Harness, Scenarios & Rust Core
+## 3. Option-A Policy Architecture, Language Runtime & Safety Gates
 
-- **MiniHack Scenario & Prompt-Torture Gate ([`lox/env/benchmarks/nethack_scenarios.py`](lox/env/benchmarks/nethack_scenarios.py))**:
-  - Runs 7 procedural `.des` curriculum archetypes (locked doors/boulders/kicking, water/lava hazards, corpse/food handling, shopkeeping/altar/shop doors, blind/confused/faint recovery) plus 4 NLE C prompt-torture suites (`--More--` collisions, text naming prompts, `[ynq]` traps, inventory/menu pagers) via `run_scenario_gate`.
-- **Native Rust Core ([`crates/lox-core/src/`](crates/lox-core/src/))**:
-  - Release PyO3 extension `lox_core` accelerates `FloorMemory` updates (`fast_update_floor_memory`), frontier & exit extraction (`fast_unexplored_frontier_mask`, `fast_extract_exits`, `fast_trap_mask`), 21×79 BFS/A* (`fast_bfs_distance_grid`, `fast_astar_next_step`), and byte-stream replay (`fast_replay_action_bytes`), with Python/Numba fallbacks in [`lox/env/grid_utils.py`](lox/env/grid_utils.py).
+### Option-A Gen-0 Starter ([`lox/lang/starter.py`](lox/lang/starter.py))
+
+When starting fresh, LOX bootstraps a minimal, domain-neutral **Option-A (`WorldState` + `GoalRunner`)** workspace with zero hardcoded gameplay heuristics:
+
+- `data/workspace/policy.py` — thin turn loop (`WorldState.observe(state)` → `prompts.handle_prompts` → `survival.check_interrupt` → `combat.check_threat` → `GoalRunner.tick` → `goals.fallback_step`).
+- `data/workspace/skills/world.py` — typed `WorldState` & per-`(dungeon_num, level_num)` `FloorCache` (zero-turn obstruction blacklisting + single-pass `passable_mask` / `safe_passable_mask` / `no_diag_mask` caching) plus `ws.domain(name, factory)` state isolation.
+- `data/workspace/skills/prompts.py`, `survival/core.py`, `combat/core.py`, `navigation/core.py`, `goals/core.py` — minimal extensible scaffolds using 1-to-1 `Action` bindings and NLE C masks (`no_diag_mask`).
+
+### Policy Language, Compiler & SSOT Bundling
+
+- **Bundle Single Source of Truth ([`lox/lang/bundle.py`](lox/lang/bundle.py))**: Canonical parser/writer for XML `<policy_code>` / `<skill_code>` and `### skill:` responses, supporting both 1-level (`skills/prompts.py`) and 2-level (`skills/combat/core.py`) packages and AST skill-import dependency scanning.
+- **Behavior Trees, StrategyStack & Contracts ([`bt.py`](lox/lang/bt.py), [`strategy.py`](lox/lang/strategy.py), [`contracts.py`](lox/lang/contracts.py))**:
+  - `PrioritySelector`, `Sequence`, `MemorySequence`, `Inverter`, `ConditionLeaf`, `ActionLeaf` (generator coroutines, `min_commit`, `preempt_if`, `.halt()`), `@bt_leaf`, and floor-scoped `Blackboard`.
+  - `StrategyStack` / `StrategyFrame` / `until` / `with_cleanup` for multi-turn plans with hazard preemption.
+  - Typed runtime contracts (`GoalIntent`, `SafetyReport`, `WorldTracker`, `CapabilityScorer`, `ThreatEvaluator`) + `#EVOLVE-BLOCK:<name>` guard rails.
+- **AST Validation, Sandboxing & Instrumentation ([`validator.py`](lox/lang/validator.py), [`compiler.py`](lox/lang/compiler.py), [`instrument.py`](lox/lang/instrument.py))**:
+  - Generates `_lox_prelude.pyi` and runs `pyright` + CPython `symtable` checks pre-rollout.
+  - Topological compilation of `skills/` + `macros.py` + `policy.py`, AST import/builtin sandboxing, loop watchdogs (`PolicyLoopError`), tunable parameter hooks (`self.param(...)`), and `<1 µs` per-function turn/call attribution via `ExecutionTracer`.
 
 ---
 
-## 5. DuckDB Warehouse, Quality-Diversity & Offline Wiki
+## 4. Environment Harness, Rust Core (`lox_core`), Scenarios & Craftax
 
-| Store | Engine & Location | Role | Access / Tools |
-| :--- | :--- | :--- | :--- |
-| **Unified Telemetry & Theory Store** | Embedded DuckDB ([`schema.py`](lox/db/schema.py), [`theories.py`](lox/db/theories.py), `data/lox.duckdb`) | `batches`, `runs` (incl. `worn_oprop_count`, `dungeons_visited`, `unique_tiles` keyed per floor), `ticks`, `function_stats`, `policies`, `theories`, `tournament_attempts`, `experiments`, `discoveries`, `synthesis_logs`, `archive_policies`, `expert_runs` / `expert_ticks`. | `query_db`, `query_theories`, `benchmark_expert_parity` |
-| **Go-Explore Frontier Archive** | Byte checkpoints ([`frontier.py`](lox/engine/frontier.py), `data/frontier/`) | Records deep trajectories (Dlvl 2+) and samples under-visited states via `depth / sqrt(visit_count + 1)`. | Replay probes & `mine_organic_scenarios` |
-| **MAP-Elites v2 Archive** | 5×4×4 80-cell QD grid ([`map_elites.py`](lox/engine/map_elites.py)) | Non-aliasing `(avg_depth, vitals [AC/XL/branches], spatial tempo)` archive supporting `"ucb_curiosity"` and `"caution"` branching. | Plateau reseeding |
-| **Offline Wiki + 3.6.6 Guidebook** | SQLite FTS5 BM25 ([`wiki.py`](lox/datasets/wiki.py), [`build_wiki_db.py`](scripts/build_wiki_db.py), `data/wiki_index.db`) | Built from official NetHackWiki XML dump (`4,964` articles, `7,937` redirects, variant namespaces excluded) + NetHack 3.6.6 `Guidebook.html`, with `AND`-tier matching, query sanitization, and untruncated section reads. | `query_wiki`, `read_wiki_article` |
-| **Code Navigation Tools** | AST & Workspace Search ([`tools.py`](lox/author/tools.py)) | Inspect current or historical snapshots and cross-skill symbol usage without loading every skill blindly. | `read_policy`, `read_skill`, `diff_policies`, `find_references`, `grep_skills`, `blackboard_map` |
+- **Native Rust PyO3 Core ([`crates/lox-core/src/`](crates/lox-core/src/))**:
+  - `lib.rs`, `path.rs`, `replay.rs`, `bt.rs`, `blackboard.rs` compile into the `lox_core` extension, exposing `PyBehaviorTree`, `PyBlackboard`, `fast_bfs_distance_grid`, `fast_astar_next_step`, `fast_replay_action_bytes`, `fast_update_floor_memory`, `fast_extract_exits`, `fast_trap_mask`, and `fast_unexplored_frontier_mask`, with Python/Numba fallbacks in [`lox/env/grid_utils.py`](lox/env/grid_utils.py).
+- **MiniHack Scenarios & Prompt-Torture Suites ([`lox/env/benchmarks/nethack_scenarios.py`](lox/env/benchmarks/nethack_scenarios.py))**:
+  - Procedural `.des` curriculum archetypes (locked doors, kicking, boulders, water/lava hazards, food/corpse mechanics, shops/altars, blind/confused/faint recovery) plus 4 NLE C prompt-torture suites (`--More--` collisions, text naming prompts, `[ynq]` traps, menu pagers).
+- **Benchmark Abstraction ([`lox/env/base.py`](lox/env/base.py), [`lox/env/nethack/`](lox/env/nethack/adapter.py), [`lox/env/craftax/`](lox/env/craftax/adapter.py))**:
+  - `EnvHarness` protocol and `BenchmarkAdapter` registry supporting both `nethack` (`NetHackAdapter`) and `craftax` (`CraftaxAdapter`) via `--benchmark`.
+- **Multi-Core Worker Pool ([`lox/runner/pool.py`](lox/runner/pool.py))**:
+  - Persistent worker pool with cancellation epochs, leaf-error traceback capture, CRN seed batching, and conditional function-trigger filtering.
+
+---
+
+## 5. DuckDB Telemetry Warehouse, QD Archives & Research Tools
+
+### 14-Table DuckDB Schema ([`lox/db/schema.py`](lox/db/schema.py))
+
+All campaign runs, rollouts, diagnostics, and human reference trajectories live in one DuckDB database (default: `data/lox.duckdb`):
+
+| Group | Tables |
+| :--- | :--- |
+| **Evaluation & Traces** | `batches`, `runs`, `ticks`, `function_stats` (Ochiai & Liblit scores, `auto_esc_count`, `policy_exceptions`, `worn_oprop_count`, `dungeons_visited`, `unique_tiles`, `pct_wait`, `pct_search`) |
+| **Lineage & Discoveries** | `policies`, `experiments`, `discoveries`, `tournament_attempts` (includes hidden holdout results & gained/lost seed sets) |
+| **QD & Agent Memory** | `archive_policies` (5×4×4 MAP-Elites v2 cells), `theories` (`TheoryDocumentStore`), `synthesis_logs`, `llm_cost_rates` |
+| **Human Reference Corpus** | `expert_runs`, `expert_ticks` (NAO ascensions + dumplogs/ttyrecs compiled into matching schema) |
+
+### Agent Research Toolset ([`lox/author/tools.py`](lox/author/tools.py))
+
+During synthesis turns, peers query the environment empirically through read-only inspection and validation tools:
+
+- **Empirical Telemetry**: `query_db`, `query_theories`, `benchmark_expert_parity`
+- **Domain Reference (Non-Spoiler)**: `query_wiki`, `read_wiki_article`, `query_monster`, `query_item`, `query_policy_docs`
+- **Code & Architecture Navigation**: `architecture_map`, `blackboard_map`, `read_policy`, `read_skill`, `read_symbol`, `diff_policies`, `find_references`, `grep_skills`
+- **Pre-Rollout Sandbox**: `dry_run_policy` (syntax, `pyright`, `symtable`, `TRIGGER_MISS`, and prompt-torture verification)
+
+### Frontiers & Archives
+
+- **Go-Explore Frontier Archive ([`lox/engine/frontier.py`](lox/engine/frontier.py))**: Stores byte-stream state checkpoints (`action_bytes`) on Dlvl 2+ and samples under-visited frontiers via `depth / sqrt(visit_count + 1)`.
+- **MAP-Elites v2 ([`lox/engine/map_elites.py`](lox/engine/map_elites.py))**: Maintains a 5×4×4 diversity grid across `(depth_bin, caution_bin, resource_bin)` for plateau reseeding.
+- **Offline Wiki ([`lox/datasets/wiki.py`](lox/datasets/wiki.py))**: SQLite FTS5 BM25 index (`data/wiki_index.db`) built from NetHackWiki XML dumps + NetHack 3.6.6 `Guidebook.html` ([`scripts/build_wiki_db.py`](scripts/build_wiki_db.py)).
 
 ---
 
 ## 6. Single-Agent & Legacy Swarm Modes
 
-- **Single-Agent Mode ([`scripts/run_lox.py`](scripts/run_lox.py), [`orchestrator.py`](lox/engine/orchestrator.py))**: Cycles `CREATE`, `WRITE` (`<= 2` functions), and `REFACTOR` (`--refactor-model` supported) using [`ModeScheduler`](lox/engine/scheduler.py), paired pilots (`--pilot-revisions 4`), CRN-SPSA parameter tuning ([`modes.py`](lox/engine/modes.py)), Confidence Sequences, Paired Wilcoxon tests, and Sequential Futility Early Stopping ([`hypothesis.py`](lox/engine/hypothesis.py)).
-- **Legacy Hierarchical Swarm**: Earlier Critic/Meta/Worker topology remains available via `--swarm-architecture legacy`.
+- **Single-Agent Campaign ([`scripts/run_lox.py`](scripts/run_lox.py), [`lox/engine/orchestrator.py`](lox/engine/orchestrator.py))**: Cycles `CREATE`, `WRITE`, and `REFACTOR` using [`ModeScheduler`](lox/engine/scheduler.py), pilot revisions (`--pilot-revisions 4`), **CRN-SPSA** parameter tuning ([`modes.py`](lox/engine/modes.py)), **Empirical Bernstein Confidence Sequences**, **One-Sided Paired Wilcoxon** tests, and **Sequential Futility Early Stopping** ([`hypothesis.py`](lox/engine/hypothesis.py)).
+- **Legacy Hierarchical Swarm**: Earlier Critic/Meta/Worker topology remains selectable on [`scripts/run_swarm.py`](scripts/run_swarm.py) via `--swarm-architecture legacy`.
 
 ---
 
 ## 7. Repository Layout
 
 ```text
-crates/lox-core/src/           # PyO3 Rust core (BFS/A*, FloorMemory, frontier/exit/trap masks, byte replay, BT)
+crates/lox-core/src/           # Rust PyO3 extension (BFS/A*, FloorMemory, frontier/exits/traps, replay, BT)
 lox/
 ├── core/contracts.py          # Typed EpisodeRun, BatchEvaluation, CandidatePackage invariant guards
-├── env/                       # 1-to-1 actions, lazy GameState, WorldMemory, NLE harness, MiniHack scenarios, Craftax
-├── lang/                      # BehaviorTree/StrategyStack/contracts, AST validator & 3-way merge, pyright/.pyi stubs, compiler
-├── db/                        # DuckDB schema/logger, TheoryDocumentStore, RLE/Ochiai summarizer, PrefixShards
-├── datasets/                  # Offline NetHackWiki + Guidebook FTS5, C symbol LUTs, expert downloader, frontier bootstrap
-├── runner/pool.py             # Persistent multi-core worker pool with cancellation epochs & leaf error capture
-├── author/                    # AuthorAgent, DeficitAnalyzer, SwarmPeerAgent, tools, prompts, bt_eval
-├── engine/                    # SwarmCampaignOrchestrator, SwarmReferee, MAP-Elites v2, Frontier, Hypothesis
-└── ui/console.py              # ANSI console progress & summary tables
-scripts/                       # run_swarm.py, run_lox.py, status_lox.py, build_wiki_db.py, download_experts.py, calibrate_pilot.py, modularize_policy.py, reset_clean.py, build_core.sh
-tests/                         # 158 automated unit & integration tests
+├── env/
+│   ├── actions.py             # 1-to-1 NLE Action IntEnum, key(), seq(), repeat(), extcmd(), DIR_DELTAS
+│   ├── base.py                # EnvHarness protocol & BenchmarkAdapter ABC
+│   ├── state.py               # Lazy zero-copy GameState, NLE C masks, FloorMemory
+│   ├── harness.py             # Direct C++ NLE harness & deterministic byte replay
+│   ├── grid_utils.py          # Numba/Rust BFS & A* pathfinding kernels
+│   ├── benchmarks/            # MiniHack procedural .des scenarios & NLE prompt-torture suites
+│   ├── nethack/               # NetHackAdapter
+│   └── craftax/               # Craftax actions, harness, state, adapter
+├── lang/
+│   ├── bt.py / strategy.py    # Behavior Tree primitives, Blackboard, StrategyStack
+│   ├── contracts.py           # Cross-module typed contracts & #EVOLVE-BLOCK enforcement
+│   ├── starter.py             # Bare Option-A Gen-0 WorldState + GoalRunner workspace generator
+│   ├── bundle.py              # SSOT parser/writer/AST scanner for workspace packages
+│   ├── validator.py           # AST sandbox, symtable check, pyright/.pyi stubs, 3-way AST merge
+│   ├── modularize.py          # Bit-identical AST policy splitter & skill cohesion refactorer
+│   ├── instrument.py          # <1 µs ExecutionTracer, loop watchdog, TunableParam hooks
+│   ├── macros.py              # Optional persistent macro library helper
+│   └── compiler.py            # Compiles workspace skills + macros + policy into PolicyRunner
+├── db/
+│   ├── schema.py              # 14-table DuckDB warehouse schema & migrations
+│   ├── logger.py              # Thread-safe DuckDB batch/tick logger & tail sampling
+│   ├── summarizer.py          # RLE trace digest, Z/IQR outlier detection, Ochiai/Liblit attribution
+│   ├── shards.py              # PrefixShard extraction from recorded trajectories
+│   └── theories.py            # DuckDB TheoryDocumentStore with BM25/tag search
+├── datasets/
+│   ├── wiki.py                # Offline NetHackWiki + Guidebook 3.6.6 SQLite FTS5 search
+│   ├── symbols.py             # NLE C permonst & objclass table lookups
+│   ├── download_experts.py    # NAO xlogfile/dumplog/ttyrec ingestion into expert_runs/expert_ticks
+│   └── bootstrap_frontier.py  # Frontier checkpoint seeding helpers
+├── runner/pool.py             # Multi-core persistent rollout & tournament worker pool
+├── author/
+│   ├── agent.py               # Stateless ReAct AuthorAgent (64k cap, OpenRouter/OpenAI/mock)
+│   ├── prompts.py             # Cacheable static system prompts & workspace guidance
+│   ├── tools.py               # AuthorToolRegistry (DB, Wiki, C symbols, code nav, dry_run_policy)
+│   ├── swarm_deficits.py      # Orthogonal D_fail deficit slicing & D_succ protection
+│   ├── swarm_peer.py          # Symmetric SwarmPeerAgent & isolated sandbox incubation
+│   └── bt_eval.py / swarm_*   # Leaf diagnostics, meta-synthesis & legacy critic/worker modules
+├── engine/
+│   ├── swarm_orchestrator.py  # Peer Swarm Campaign Orchestrator
+│   ├── swarm_referee.py       # Deterministic CRN tournament referee, 3-way AST merge & holdout audit
+│   ├── orchestrator.py        # Single-agent CampaignOrchestrator & adaptive max_steps
+│   ├── hypothesis.py          # Confidence sequences, paired Wilcoxon, IQM, futility early stop
+│   ├── frontier.py            # Go-Explore byte-replay frontier archive
+│   ├── map_elites.py          # 5x4x4 MAP-Elites v2 QD archive
+│   ├── modes.py               # CRN-SPSA numeric parameter optimizer
+│   └── scheduler.py           # Hybrid mode scheduler
+└── ui/console.py              # ANSI terminal status & tournament tables
+scripts/
+├── run_swarm.py               # Primary Peer Swarm CLI entrypoint
+├── run_lox.py                 # Single-agent synthesis CLI entrypoint
+├── status_lox.py              # Read-only DuckDB campaign & cost dashboard
+├── build_wiki_db.py           # Builds data/wiki_index.db from XML dump + Guidebook 3.6.6
+├── download_experts.py        # Populates expert_runs / expert_ticks in DuckDB
+├── calibrate_pilot.py         # Calibrates pilot budget from DuckDB history
+├── modularize_policy.py       # Standalone AST policy modularizer CLI
+├── reset_clean.py             # Resets campaign tables & workspace while preserving wiki/experts
+└── build_core.sh              # Builds & installs lox-core via maturin --release
+tests/                         # 180 automated unit & integration tests
 ```
 
 ---
 
-## 8. Setup, Verification & CLI Workflows
+## 8. Installation, Verification & CLI Workflows
 
-### 1. Install, Build Rust Extension & Run Tests
+### 1. Environment, Rust Core & Test Suite
 
 ```bash
 uv sync
-./scripts/build_core.sh          # builds & installs lox-core via maturin --release
+./scripts/build_core.sh          # compiles & installs lox_core (PyO3 release wheel)
 uv run ruff check .
 uv run ruff format --check .
-uv run pytest -v                 # 158 tests
+uv run pytest -v                 # 180 tests
 ```
 
-### 2. Build Untruncated Offline Wiki & Expert Corpus
+### 2. Build Offline Wiki & Human Expert Corpus (One-Time Setup)
 
 ```bash
 # Downloads NetHackWiki XML + NetHack 3.6.6 Guidebook and builds data/wiki_index.db
 uv run python scripts/build_wiki_db.py --download-xml
 
-# Ingest real human ascensions into DuckDB expert_runs / expert_ticks
+# Ingest real NAO human ascensions into DuckDB expert_runs / expert_ticks
 uv run python scripts/download_experts.py --max-ascensions 1000 --fetch-dumplogs 25
 ```
 
-### 3. Run Peer Swarm Campaigns
+### 3. Run Peer Swarm Synthesis Campaigns
+
+Put `OPENROUTER_API_KEY="sk-or-v1-..."` in `.env` (or export it in your shell):
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
-
-# Fresh campaign (--clean resets workspace & campaign DuckDB tables, preserving expert_runs & wiki)
+# Fresh campaign (--clean resets workspace & campaign DuckDB tables while keeping wiki & expert_runs)
 uv run python scripts/run_swarm.py \
   --clean \
   --provider openrouter \
@@ -179,7 +265,7 @@ uv run python scripts/run_swarm.py \
   --turns-per-worker 3 \
   --seeds 64 \
   --race-seeds 32 \
-  --scenario-gate advisory \
+  --scenario-gate off \
   --generations 50
 
 # Resume an existing campaign (omit --clean)
@@ -189,13 +275,21 @@ uv run python scripts/run_swarm.py \
   --generations 50
 ```
 
-### 4. Offline Smoke Testing & Monitoring
+> **Note:** On `scripts/run_swarm.py`, `--generations` defaults to `5` and `--scenario-gate` defaults to `off` (`off` / `advisory` / `strict`). Override `--generations` explicitly for long runs.
+
+### 4. Offline Smoke Checks & Monitoring
 
 ```bash
-# Mock end-to-end swarm check (zero API calls)
-uv run python scripts/run_swarm.py --provider mock --generations 2 --workers 2 --turns-per-worker 1 --seeds 4 --race-seeds 2
+# End-to-end mock swarm sanity check (zero LLM API calls)
+uv run python scripts/run_swarm.py \
+  --provider mock \
+  --generations 2 \
+  --workers 2 \
+  --turns-per-worker 1 \
+  --seeds 4 \
+  --race-seeds 2
 
-# Read-only status dashboard, pilot calibration, and workspace summary
+# Read-only campaign metrics, token spend & workspace summary
 uv run python scripts/status_lox.py --since-hours 12
 uv run python scripts/calibrate_pilot.py --db-path data/lox.duckdb
 cat data/workspace/STATUS.md

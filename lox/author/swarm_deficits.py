@@ -129,11 +129,11 @@ class DeficitReport:
             for rt in self.recent_theories[:3]:
                 lines.append(f"  * {rt}")
         if self.fail_clusters:
-            lines.append("- Domain-Agnostic Trajectory Slices (D_fail):")
+            lines.append("- Objective Trajectory Outcome Slices (D_fail):")
             for c in self.fail_clusters:
                 r_ids = f", run_ids={c.sample_run_ids[:1]}" if c.sample_run_ids else ""
                 lines.append(
-                    f"  * [{c.cluster_id}] {c.label} (runs={c.run_count}, avg_depth={c.avg_depth:.2f}, avg_turns={c.avg_turns:.0f}, fns={c.dominant_fns[:3]}{r_ids}): {c.evidence}"
+                    f"  * [{c.cluster_id}] {c.label} (runs={c.run_count}, avg_depth={c.avg_depth:.2f}, avg_turns={c.avg_turns:.0f}{r_ids}): {c.evidence}"
                 )
         return "\n".join(lines)
 
@@ -346,7 +346,8 @@ class DeficitAnalyzer:
                        ROUND(avg_depth, 2), max_depth, ROUND(avg_ac, 1),
                        policy_exceptions, seeds_gained_json, seeds_lost_json,
                        top_tracebacks_json, sandbox_error,
-                       COALESCE(holdout_rejected, FALSE), holdout_iqm_delta
+                       COALESCE(holdout_rejected, FALSE), holdout_iqm_delta,
+                       COALESCE(reject_reason, ''), wins, losses
                 FROM tournament_attempts
                 WHERE generation >= ? AND generation < ?
                 ORDER BY generation DESC, promoted DESC, avg_depth DESC
@@ -370,6 +371,9 @@ class DeficitAnalyzer:
                 sb_err,
                 holdout_rej,
                 holdout_iqm,
+                rej_reason,
+                wins_i,
+                losses_i,
             ) in ta_rows:
                 tag = (
                     "PROMOTED"
@@ -384,6 +388,10 @@ class DeficitAnalyzer:
                 lost = json.loads(sl_json) if sl_json else []
                 tbs = json.loads(tb_json) if tb_json else []
                 extra = []
+                if rej_reason and not promoted:
+                    extra.append(f"reason={rej_reason}")
+                if wins_i is not None and losses_i is not None:
+                    extra.append(f"W/L={int(wins_i)}/{int(losses_i)}")
                 if holdout_iqm is not None:
                     extra.append(f"holdout_iqm={float(holdout_iqm):+.2f}")
                 if gained:
@@ -861,8 +869,38 @@ class DeficitAnalyzer:
                     data["notes"],
                 )
             )
-        # Sub-split oversized failure clusters (> 8 runs) or narrow cluster pools by `last_active_function`
-        # so concurrent peers always claim genuinely orthogonal cohorts.
+
+        # Sub-split oversized failure clusters (> 8 runs) or narrow cluster pools by objective
+        # outcome signature (`end_reason` / stall / depth band) rather than `last_active_function`
+        # to avoid blaming symptom dispatchers (e.g. combat vs prompt handoff bugs).
+        def _outcome_subbucket(row: tuple[Any, ...]) -> tuple[str, str]:
+            end_s = str(row[5] or "unknown").strip().lower()
+            max_d = int(row[3] or 1)
+            auto_e = int(row[11] or 0)
+            excs = int(row[12] or 0)
+            gl_tail = str(row[17] or "").lower()
+            if excs > 0:
+                return "exceptions", "runtime exceptions"
+            if (
+                auto_e > 0
+                or "[" in end_s
+                or "]" in end_s
+                or "?" in end_s
+                or "[yn" in gl_tail
+            ):
+                return "prompt_interaction", "interactive prompt/direction loop"
+            if "stalled" in end_s:
+                band = "dlvl1" if max_d <= 1 else "dlvl2plus"
+                return (
+                    f"zero_turn_{band}",
+                    f"zero-turn stall (Dlvl {'>=2' if max_d > 1 else '1'})",
+                )
+            if "max_steps" in end_s:
+                return "step_horizon", "step horizon exhaustion"
+            if max_d <= 1:
+                return "early_dlvl1", "early Dlvl-1 termination"
+            return "deep_dlvl2plus", "Dlvl-2+ termination"
+
         if built:
             expanded: list[DeficitCluster] = list(built)
             split_targets = [c for c in built if c.run_count > 8] or (
@@ -874,18 +912,22 @@ class DeficitAnalyzer:
                 cid_src = target_c.cluster_id
                 if cid_src not in clusters:
                     continue
-                by_fn: dict[str, list[tuple[Any, ...]]] = {}
+                by_outcome: dict[str, tuple[str, list[tuple[Any, ...]]]] = {}
                 for r in clusters[cid_src]["rows"]:
-                    fn_key = str(r[13] or "unknown").strip() or "unknown"
-                    by_fn.setdefault(fn_key, []).append(r)
-                if len(by_fn) >= 2:
-                    ordered_fns = sorted(
-                        by_fn.items(), key=lambda kv: len(kv[1]), reverse=True
+                    o_key, o_desc = _outcome_subbucket(r)
+                    if o_key not in by_outcome:
+                        by_outcome[o_key] = (o_desc, [])
+                    by_outcome[o_key][1].append(r)
+                if len(by_outcome) >= 2:
+                    ordered_outcomes = sorted(
+                        by_outcome.items(),
+                        key=lambda kv: len(kv[1][1]),
+                        reverse=True,
                     )
-                    for fn_key, sub_rows in ordered_fns[1:]:
+                    for o_key, (o_desc, sub_rows) in ordered_outcomes[1:]:
                         if len(expanded) >= 6 or len(sub_rows) < 2:
                             break
-                        sub_cid = f"{cid_src}_{fn_key}"
+                        sub_cid = f"{cid_src}__{o_key}"
                         if any(ec.cluster_id == sub_cid for ec in expanded):
                             continue
                         sub_notes = list(
@@ -897,10 +939,10 @@ class DeficitAnalyzer:
                         expanded.append(
                             _build_cluster(
                                 sub_cid,
-                                clusters[cid_src]["kind"],
-                                f"{clusters[cid_src]['label']} [{fn_key}]",
+                                f"{clusters[cid_src]['kind']}:{o_key}",
+                                f"{clusters[cid_src]['label']} — {o_desc}",
                                 sub_rows,
-                                [fn_key],
+                                [],
                                 sub_notes,
                             )
                         )

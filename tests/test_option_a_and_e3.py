@@ -504,3 +504,239 @@ def test_read_symbol_resolves_skills_dotted_class_method(tmp_path):
     txt3, tag3 = reg.read_symbol("skills.navigation.core.step_toward")
     assert tag3 != "not_found"
     assert "def step_toward(" in txt3
+
+
+def test_outcome_clustering_strips_fn_blame_and_pareto_gate_blocks_one_seed_noise(
+    tmp_path,
+):
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.swarm_referee import SwarmReferee
+
+    dbp = str(tmp_path / "outcome_split.duckdb")
+    init_db(dbp).close()
+    con = connect_db(dbp, read_only=False)
+    try:
+        con.execute(
+            "INSERT INTO batches (batch_id, generation, mode, hypothesis_passed) VALUES ('b_g5', 5, 'SWARM', TRUE)"
+        )
+        # All stalls share diverse last_active_function values, but genuinely split on objective outcome:
+        # prompt_interaction vs zero_turn_dlvl2plus vs zero_turn_dlvl1
+        for i in range(16):
+            fn = ("combat_threat", "handle_prompts", "survival_interrupt")[i % 3]
+            if i < 6:
+                er, md = "Really attack the dwarf? [yn] (n)", 2
+            elif i < 11:
+                er, md = "stalled_zero_turn", 3
+            else:
+                er, md = "stalled_zero_turn", 1
+            con.execute(
+                """
+                INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, end_reason, last_active_function)
+                VALUES (?, 'b_g5', 5, ?, ?, ?, 150, 500, 500, ?, ?)
+                """,
+                [f"r_{i}", 10500 + i, md, md, er, fn],
+            )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(dbp).analyze(generation=6)
+    cids = {c.cluster_id for c in rep.fail_clusters}
+    # Must sub-split by objective outcome signature, NOT by last_active_function
+    assert not any(
+        cid.endswith(("_combat_threat", "_handle_prompts", "_survival_interrupt"))
+        for cid in cids
+    ), cids
+    assert any("__" in cid for cid in cids), cids
+    brief = rep.format_brief()
+    assert ", fns=" not in brief
+
+    # 2. pareto_beats on 64 seeds must NOT promote a 33W-31L (+2 net) noisy AC sidegrade,
+    #    and must persist iqm_delta / wilcoxon_p / wins / losses / reject_reason + preserve holdout_rejected
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s): return Action.N\n"
+    )
+    seeds64 = [21000 + i for i in range(64)]
+
+    class _NoisyParetoPool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 400,
+                            "turns": 1500,
+                            "final_ac": 5,
+                            "xp_level": 3,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            # Exact G10-like noisy Pareto scenario:
+            # 14 big wins (d=5, ac=4, sc=410) + 14 tiny wins (d=3, ac=4, sc=401) = 28 wins,
+            # 14 big losses (d=2, ac=5, sc=390) + 13 med losses (d=2, ac=4, sc=405) = 27 losses, 9 ties (d=3, ac=5, sc=400)
+            # -> avg_depth=3.016, avg_score=401.2 (>400), avg_ac=4.36 (improved!), wins=28, losses=27 (margin 1 < 4), p > 0.20
+            runs = []
+            for idx, s in enumerate(s_list):
+                if idx < 14:
+                    d, ac, sc = 5, 4, 410
+                elif idx < 28:
+                    d, ac, sc = 3, 4, 401
+                elif idx < 42:
+                    d, ac, sc = 2, 5, 390
+                elif idx < 55:
+                    d, ac, sc = 2, 4, 405
+                else:
+                    d, ac, sc = 3, 5, 400
+                runs.append(
+                    {
+                        "run_id": f"p_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 1500,
+                        "final_ac": ac,
+                        "xp_level": 3,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    c_noisy = PeerCandidate(
+        peer_id="peer_noisy_pareto",
+        claimed_deficit_id="slice_stalled",
+        claimed_label="noisy",
+        policy_code=base_pol + "\n_X = 1\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    v_noise = SwarmReferee().evaluate_tournament(
+        generation=11,
+        candidates=[c_noisy],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_NoisyParetoPool(),
+        seeds=seeds64,
+    )
+    assert v_noise.promoted is False
+    att = v_noise.attempts_summary[0]
+    assert att["wins"] > att["losses"] and (att["wins"] - att["losses"]) < 4
+    assert att["reject_reason"] == "below_sig_or_pareto_gate"
+    BatchDatabaseLogger(db_path=dbp).save_tournament_attempts(v_noise.attempts_summary)
+    con2 = connect_db(dbp, read_only=True)
+    try:
+        row = con2.execute(
+            "SELECT wins, losses, reject_reason FROM tournament_attempts WHERE peer_id='peer_noisy_pareto'"
+        ).fetchone()
+        assert row == (att["wins"], att["losses"], "below_sig_or_pareto_gate")
+    finally:
+        con2.close()
+
+
+def test_climbing_regime_does_not_throttle_peers_to_two(tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.db.schema import init_db
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+
+    dbp = str(tmp_path / "climb.duckdb")
+    init_db(dbp).close()
+    ws = tmp_path / "ws"
+    fr = tmp_path / "fr"
+    orch = SwarmCampaignOrchestrator(
+        db_path=dbp,
+        workspace_dir=str(ws),
+        frontier_dir=str(fr),
+        provider="mock",
+        num_workers=4,
+        seeds_per_batch=4,
+        race_seeds=2,
+    )
+    seen_peers: list[str] = []
+
+    class _FakePool:
+        benchmark = "nethack"
+        max_steps = 100
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"{batch_id}_{s}",
+                        "seed": s,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 100,
+                        "turns": 100,
+                        "final_ac": 6,
+                        "xp_level": 2,
+                        "end_reason": "killed",
+                    }
+                    for s in (priority_seeds or [1])
+                ],
+            }
+
+        def close(self):
+            pass
+
+    orch.eval_pool = _FakePool()
+
+    def _fake_analyze(self, generation, current_policy="", skills=None):
+        return DeficitReport(
+            generation=generation,
+            regime="CLIMBING",
+            fail_clusters=[
+                DeficitCluster("c1", "k1", "l1", run_count=5, sample_seeds=[100]),
+                DeficitCluster("c2", "k2", "l2", run_count=5, sample_seeds=[101]),
+            ],
+        )
+
+    def _fake_synth(
+        self,
+        generation,
+        current_policy,
+        current_skills,
+        deficit_report,
+        claimed_deficit,
+        **kwargs,
+    ):
+        seen_peers.append(self.peer_id)
+        return PeerCandidate(
+            peer_id=self.peer_id,
+            claimed_deficit_id=claimed_deficit.cluster_id,
+            claimed_label=claimed_deficit.label,
+            policy_code=current_policy,
+            skills=dict(current_skills),
+            sandbox_passed=False,
+            error="stop",
+        )
+
+    try:
+        with (
+            patch("lox.author.swarm_deficits.DeficitAnalyzer.analyze", _fake_analyze),
+            patch(
+                "lox.author.swarm_peer.SwarmPeerAgent.run_cycle",
+                _fake_synth,
+            ),
+        ):
+            orch.run_generation(6)
+    finally:
+        orch.close()
+
+    assert len(seen_peers) == 4, seen_peers
