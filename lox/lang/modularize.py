@@ -15,9 +15,15 @@ from __future__ import annotations
 import ast
 import re
 from collections import defaultdict
+from typing import Any, Callable
 
 from lox.env.harness import NetHackHarness
 from lox.lang.compiler import _COMPILE_EXEC_LOCK, compile_policy_package
+from lox.lang.validator import (
+    normalize_skill_key,
+    skill_key_to_module,
+    validate_cross_module_contracts,
+)
 
 
 def _extract_names_used(node: ast.AST) -> set[str]:
@@ -842,4 +848,565 @@ def maybe_auto_modularize(
         new_pol,
         new_skills,
         f"AST-Modularized: {', '.join(notes)} ({len(new_skills)} skills, {len(seeds)}-seed bit-identical)",
+    )
+
+
+def build_module_symbol_outline(skill_src: str) -> list[dict[str, Any]]:
+    """Builds a compact AST outline (`name`, `kind`, `loc`, `calls`, `callers`) for cohesive split planning."""
+    try:
+        tree = ast.parse(skill_src or "")
+    except SyntaxError:
+        return []
+
+    defs: list[tuple[str, str, ast.AST, int]] = []
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            kind = "class" if isinstance(stmt, ast.ClassDef) else "fn"
+            loc = max(
+                1,
+                int(getattr(stmt, "end_lineno", stmt.lineno) or stmt.lineno)
+                - int(stmt.lineno)
+                + 1,
+            )
+            defs.append((stmt.name, kind, stmt, loc))
+
+    def_names = {d[0] for d in defs}
+    calls_by: dict[str, set[str]] = {name: set() for name, _, _, _ in defs}
+    callers_by: dict[str, set[str]] = {name: set() for name, _, _, _ in defs}
+    for name, _, node, _ in defs:
+        used = (_extract_names_used(node) & def_names) - {name}
+        calls_by[name] = used
+        for target in used:
+            callers_by[target].add(name)
+
+    return [
+        {
+            "name": name,
+            "kind": kind,
+            "loc": loc,
+            "calls": sorted(calls_by[name]),
+            "callers": sorted(callers_by[name]),
+        }
+        for name, kind, _, loc in defs
+    ]
+
+
+def _pick_deterministic_split_symbols(
+    outline: list[dict[str, Any]],
+) -> tuple[str, list[str]] | None:
+    """Finds a coherent subset of top-level definitions (~25–55% LOC) with zero mutual cycles."""
+    if len(outline) < 4:
+        return None
+    by_name = {d["name"]: d for d in outline}
+    total_loc = sum(int(d["loc"]) for d in outline)
+
+    # Try each public non-underscored entrypoint as a seed and gather its private closure
+    candidates: list[tuple[int, str, list[str]]] = []
+    for item in outline:
+        root_nm = item["name"]
+        if root_nm.startswith("_"):
+            continue
+        # BFS down internal calls that are NOT called by anything outside the seed closure
+        closure: set[str] = {root_nm}
+        frontier = [root_nm]
+        while frontier:
+            cur = frontier.pop()
+            for dep in by_name[cur]["calls"]:
+                if dep in closure:
+                    continue
+                # Include private helpers or items whose callers stay inside closure
+                ext_callers = set(by_name[dep]["callers"]) - closure
+                if not ext_callers:
+                    closure.add(dep)
+                    frontier.append(dep)
+        # Verify nothing outside `closure` calls `closure` (or keep public root only if no internal cycle)
+        move_loc = sum(int(by_name[n]["loc"]) for n in closure)
+        if 40 <= move_loc <= max(60, int(total_loc * 0.70)):
+            slug = re.sub(r"_(?:step|goal|handler|check)$", "", root_nm).strip("_")
+            slug = re.sub(r"[^a-z0-9_]+", "_", slug.lower()).strip("_") or "extra"
+            candidates.append((abs(move_loc - total_loc // 2), slug, sorted(closure)))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0])
+    _, slug, syms = candidates[0]
+    return slug, syms
+
+
+def _rewrite_symbol_imports_in_source(
+    source: str,
+    src_mod_dotted: str,
+    dst_mod_dotted: str,
+    moved_symbols: set[str],
+    *,
+    src_renamed_to: str | None = None,
+    ensure_dst_imported: bool = False,
+) -> str:
+    """Rewrites imports and module-attribute references cleanly in callers without facade shims."""
+    if not source or not source.strip():
+        return source
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    lines = source.splitlines()
+    old_aliases: set[str] = set()
+    used_dst_alias = dst_mod_dotted.rsplit(".", 1)[-1]
+    alias_collisions = _extract_names_used(tree)
+    if used_dst_alias in alias_collisions:
+        used_dst_alias = f"_{dst_mod_dotted.split('.')[-2]}_{used_dst_alias}"
+
+    need_dst_import = False
+    new_body: list[ast.stmt] = []
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ImportFrom) and stmt.module == src_mod_dotted:
+            kept: list[ast.alias] = []
+            moved_als: list[ast.alias] = []
+            for al in stmt.names:
+                if al.name in moved_symbols:
+                    moved_als.append(al)
+                else:
+                    kept.append(al)
+            if kept:
+                mod_out = src_renamed_to or src_mod_dotted
+                new_body.append(
+                    ast.ImportFrom(module=mod_out, names=kept, level=stmt.level)
+                )
+            elif src_renamed_to and not moved_als:
+                new_body.append(
+                    ast.ImportFrom(
+                        module=src_renamed_to, names=stmt.names, level=stmt.level
+                    )
+                )
+            if moved_als:
+                new_body.append(
+                    ast.ImportFrom(
+                        module=dst_mod_dotted, names=moved_als, level=stmt.level
+                    )
+                )
+        elif isinstance(stmt, ast.Import):
+            new_names: list[ast.alias] = []
+            for al in stmt.names:
+                if al.name == src_mod_dotted:
+                    alias_id = al.asname or src_mod_dotted
+                    old_aliases.add(alias_id)
+                    new_names.append(
+                        ast.alias(
+                            name=src_renamed_to or src_mod_dotted, asname=al.asname
+                        )
+                    )
+                else:
+                    new_names.append(al)
+            if new_names:
+                new_body.append(ast.Import(names=new_names))
+        else:
+            new_body.append(stmt)
+
+    # Check if any attribute accesses `<alias>.<moved_sym>` or `skills.<...>.<moved_sym>` exist
+    class _AttrRewriter(ast.NodeTransformer):
+        def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+            nonlocal need_dst_import
+            self.generic_visit(node)
+            if node.attr in moved_symbols and isinstance(node.value, ast.Name):
+                if node.value.id in old_aliases:
+                    need_dst_import = True
+                    return ast.Attribute(
+                        value=ast.Name(id=used_dst_alias, ctx=ast.Load()),
+                        attr=node.attr,
+                        ctx=node.ctx,
+                    )
+            return node
+
+    tree.body = new_body
+    tree = _AttrRewriter().visit(tree)
+
+    if need_dst_import or ensure_dst_imported:
+        already_imported = any(
+            (
+                isinstance(st, ast.Import)
+                and any(al.name == dst_mod_dotted for al in st.names)
+            )
+            or (isinstance(st, ast.ImportFrom) and st.module == dst_mod_dotted)
+            for st in tree.body
+        )
+        if not already_imported:
+            imp_stmt = (
+                ast.Import(
+                    names=[ast.alias(name=dst_mod_dotted, asname=used_dst_alias)]
+                )
+                if need_dst_import
+                else ast.Import(names=[ast.alias(name=dst_mod_dotted, asname=None)])
+            )
+            insert_at = 0
+            if (
+                tree.body
+                and isinstance(tree.body[0], ast.Expr)
+                and isinstance(tree.body[0].value, ast.Constant)
+                and isinstance(tree.body[0].value.value, str)
+            ):
+                insert_at = 1
+            tree.body.insert(insert_at, imp_stmt)
+
+    ast.fix_missing_locations(tree)
+    _ = lines
+    return ast.unparse(tree)
+
+
+def _split_module_ast_verbatim(
+    src_key: str,
+    dst_key: str,
+    move_symbols: set[str],
+    policy_code: str,
+    skills_map: dict[str, str],
+) -> tuple[str, dict[str, str]] | None:
+    """Deterministically splits `move_symbols` from `src_key` into `dst_key` without facade shims."""
+    src_code = skills_map.get(src_key, "")
+    if not src_code.strip() or not move_symbols:
+        return None
+    try:
+        src_tree = ast.parse(src_code)
+    except SyntaxError:
+        return None
+
+    lines = src_code.splitlines()
+    imports: list[ast.stmt] = []
+    kept_stmts: list[ast.stmt] = []
+    moved_stmts: list[ast.stmt] = []
+    src_exports: set[str] = set()
+    kept_names: set[str] = set()
+    moved_names: set[str] = set()
+
+    def _stmt_segment(stmt: ast.stmt) -> str:
+        s_line = max(1, int(stmt.lineno) - 1)
+        e_line = int(getattr(stmt, "end_lineno", stmt.lineno) or stmt.lineno)
+        return "\n".join(lines[s_line:e_line])
+
+    def _top_name(stmt: ast.stmt) -> str:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return stmt.name
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            return stmt.targets[0].id
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            return stmt.target.id
+        return ""
+
+    doc_line = ""
+    body_stmts = list(src_tree.body)
+    if (
+        body_stmts
+        and isinstance(body_stmts[0], ast.Expr)
+        and isinstance(body_stmts[0].value, ast.Constant)
+        and isinstance(body_stmts[0].value.value, str)
+    ):
+        doc_line = _stmt_segment(body_stmts[0])
+        body_stmts = body_stmts[1:]
+
+    for stmt in body_stmts:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            imports.append(stmt)
+            continue
+        nm = _top_name(stmt)
+        if nm:
+            src_exports.add(nm)
+        if nm and nm in move_symbols:
+            moved_stmts.append(stmt)
+            moved_names.add(nm)
+        else:
+            kept_stmts.append(stmt)
+            if nm:
+                kept_names.add(nm)
+
+    if not moved_stmts or not kept_stmts:
+        return None
+
+    # Acyclicity check: items remaining in `src_key` MUST NOT reference `moved_names`
+    kept_refs: set[str] = set()
+    for st in kept_stmts:
+        kept_refs |= _extract_names_used(st)
+    if kept_refs & moved_names:
+        return None
+
+    moved_refs: set[str] = set()
+    for st in moved_stmts:
+        moved_refs |= _extract_names_used(st)
+
+    # Determine whether flat `src_key` must relocate to `<src_key>/core` to avoid Python shadowing
+    final_src_key = src_key
+    src_renamed_to: str | None = None
+    if "/" not in src_key and dst_key.startswith(f"{src_key}/"):
+        final_src_key = f"{src_key}/core"
+        src_renamed_to = skill_key_to_module(final_src_key)
+
+    src_mod_dotted = skill_key_to_module(src_key)
+    final_src_dotted = skill_key_to_module(final_src_key)
+    dst_mod_dotted = skill_key_to_module(dst_key)
+
+    # Filter imports needed by kept vs moved statements
+    def _imports_for(used: set[str]) -> list[str]:
+        out: list[str] = []
+        for imp in imports:
+            if isinstance(imp, ast.Import):
+                kept_als = [
+                    al
+                    for al in imp.names
+                    if (al.asname or al.name.split(".")[0]) in used
+                ]
+                if kept_als:
+                    out.append(ast.unparse(ast.Import(names=kept_als)))
+            elif isinstance(imp, ast.ImportFrom):
+                if any(al.name == "*" for al in imp.names):
+                    out.append(_stmt_segment(imp))
+                else:
+                    kept_als = [
+                        al for al in imp.names if (al.asname or al.name) in used
+                    ]
+                    if kept_als:
+                        out.append(
+                            ast.unparse(
+                                ast.ImportFrom(
+                                    module=imp.module, names=kept_als, level=imp.level
+                                )
+                            )
+                        )
+        return out
+
+    needed_from_src = sorted(moved_refs & kept_names)
+    dst_lines: list[str] = [
+        f'"""Cohesive submodule `{dst_key}` split from `{src_key}`."""',
+        "",
+    ]
+    dst_lines.extend(_imports_for(moved_refs))
+    if needed_from_src:
+        dst_lines.append(f"from {final_src_dotted} import {', '.join(needed_from_src)}")
+    dst_lines.append("")
+    for st in moved_stmts:
+        dst_lines.append(_stmt_segment(st))
+        dst_lines.append("")
+    dst_src = "\n".join(dst_lines).strip() + "\n"
+
+    src_lines: list[str] = []
+    if doc_line:
+        src_lines.extend([doc_line, ""])
+    src_lines.extend(_imports_for(kept_refs))
+    src_lines.append("")
+    for st in kept_stmts:
+        src_lines.append(_stmt_segment(st))
+        src_lines.append("")
+    new_src_code = "\n".join(src_lines).strip() + "\n"
+
+    new_skills = dict(skills_map)
+    if final_src_key != src_key:
+        new_skills.pop(src_key, None)
+    new_skills[final_src_key] = new_src_code
+    new_skills[dst_key] = dst_src
+
+    # Rewrite imports directly in policy.py and all other skills (0 facades!)
+    new_policy = _rewrite_symbol_imports_in_source(
+        policy_code,
+        src_mod_dotted,
+        dst_mod_dotted,
+        moved_names,
+        src_renamed_to=src_renamed_to,
+        ensure_dst_imported=False,
+    )
+    for ok_k in list(new_skills.keys()):
+        if ok_k in (final_src_key, dst_key):
+            continue
+        new_skills[ok_k] = _rewrite_symbol_imports_in_source(
+            new_skills[ok_k],
+            src_mod_dotted,
+            dst_mod_dotted,
+            moved_names,
+            src_renamed_to=src_renamed_to,
+            ensure_dst_imported=False,
+        )
+
+    return new_policy, new_skills
+
+
+def run_side_cohesion_refactor(
+    policy_code: str,
+    skills: dict[str, str] | None = None,
+    *,
+    max_loc: int = 500,
+    split_plan_fn: Callable[
+        [str, list[dict[str, Any]], set[str]], dict[str, Any] | None
+    ]
+    | None = None,
+    llm_decompose_fn: Callable[[str, str], str | None] | None = None,
+    verify_seeds: list[int] | None = None,
+    verify_steps: int = 300,
+) -> tuple[bool, str, dict[str, str], str]:
+    """
+    Ungated hybrid AST + LLM side-channel refactor pass.
+
+    Runs outside tournament promotion whenever any module exceeds `max_loc` (default 500):
+    - Case A (`>= 4` top-level defs): AST builds symbol/call outline, LLM selects semantic split
+      manifest (or deterministic cluster fallback), and AST executes lossless extraction + direct
+      caller import rewriting (0 facade shims).
+    - Case B (`1-3` oversized defs): calls `llm_decompose_fn` if supplied to break monoliths into
+      helpers inside the same module before Case A splitting.
+
+    Enforces compile, cross-module contract, and `verify_bit_identical` parity before returning.
+    """
+    orig_skills = {
+        normalize_skill_key(k): v
+        for k, v in (skills or {}).items()
+        if normalize_skill_key(k) and str(v or "").strip()
+    }
+    if not (policy_code or "").strip():
+        return False, policy_code, orig_skills, "Skipped: empty package."
+
+    pol_loc = len((policy_code or "").splitlines())
+    needs_pol_split = (not orig_skills and pol_loc >= 200) or pol_loc >= int(max_loc)
+    bloated = [
+        sk
+        for sk, src in sorted(orig_skills.items())
+        if len(src.splitlines()) >= int(max_loc)
+    ]
+    if not needs_pol_split and not bloated:
+        return (
+            False,
+            policy_code,
+            orig_skills,
+            f"Skipped: all modules < {max_loc} LOC.",
+        )
+
+    cur_pol = policy_code
+    cur_skills = dict(orig_skills)
+    notes: list[str] = []
+
+    if needs_pol_split:
+        try:
+            split_pol, split_skills = modularize_policy_source(
+                cur_pol, num_modules=4, existing_skills=cur_skills
+            )
+            loc_after = len(split_pol.splitlines())
+            if loc_after <= pol_loc - 30 and len(split_skills) > len(cur_skills):
+                cur_pol = split_pol
+                cur_skills = {
+                    normalize_skill_key(k): v
+                    for k, v in split_skills.items()
+                    if normalize_skill_key(k) and str(v or "").strip()
+                }
+                notes.append(f"policy.py {pol_loc}->{loc_after} LOC")
+                bloated = [
+                    sk
+                    for sk, src in sorted(cur_skills.items())
+                    if len(src.splitlines()) >= int(max_loc)
+                ]
+        except Exception:
+            pass
+
+    if not cur_skills:
+        return (
+            False,
+            policy_code,
+            orig_skills,
+            f"Skipped: no skills to split ({pol_loc} LOC).",
+        )
+
+    for sk in bloated:
+        src = cur_skills.get(sk, "")
+        if len(src.splitlines()) < int(max_loc):
+            continue
+        outline = build_module_symbol_outline(src)
+
+        # Case B: oversized monolith inside 1-3 functions
+        if len(outline) < 4 and llm_decompose_fn is not None:
+            try:
+                decomposed = llm_decompose_fn(sk, src)
+                if (
+                    decomposed
+                    and decomposed.strip()
+                    and decomposed.strip() != src.strip()
+                ):
+                    test_skills = dict(cur_skills)
+                    test_skills[sk] = decomposed.strip() + "\n"
+                    validate_cross_module_contracts(cur_pol, test_skills)
+                    cur_skills = test_skills
+                    src = cur_skills[sk]
+                    outline = build_module_symbol_outline(src)
+                    notes.append(f"{sk}: decomposed monolith")
+            except Exception:
+                pass
+
+        # Case A: >= 4 top-level defs -> LLM split plan + deterministic AST extraction
+        if len(outline) < 4:
+            continue
+
+        domain = sk.split("/", 1)[0]
+        move_syms: set[str] = set()
+        dst_key = ""
+
+        if split_plan_fn is not None:
+            try:
+                plan = split_plan_fn(sk, outline, set(cur_skills.keys()))
+                if isinstance(plan, dict):
+                    raw_target = str(plan.get("target_submodule", "") or "").strip()
+                    if raw_target:
+                        nk_t = normalize_skill_key(raw_target)
+                        if "/" not in nk_t:
+                            nk_t = f"{domain}/{nk_t}"
+                        if nk_t not in cur_skills and nk_t != sk:
+                            dst_key = nk_t
+                    raw_syms = plan.get("move_symbols") or []
+                    if isinstance(raw_syms, list):
+                        move_syms = {str(s).strip() for s in raw_syms if str(s).strip()}
+            except Exception:
+                dst_key = ""
+                move_syms = set()
+
+        if not dst_key or not move_syms:
+            det = _pick_deterministic_split_symbols(outline)
+            if det is None:
+                continue
+            slug, det_syms = det
+            base_dst = f"{domain}/{slug}"
+            cand_dst = base_dst
+            idx = 2
+            while cand_dst in cur_skills or cand_dst == sk:
+                cand_dst = f"{base_dst}_{idx}"
+                idx += 1
+            dst_key = cand_dst
+            move_syms = set(det_syms)
+
+        res = _split_module_ast_verbatim(sk, dst_key, move_syms, cur_pol, cur_skills)
+        if res is None:
+            continue
+        cand_pol, cand_skills = res
+        try:
+            validate_cross_module_contracts(cand_pol, cand_skills)
+            compile_policy_package(cand_pol, "", skills=cand_skills)
+        except Exception:
+            continue
+        cur_pol, cur_skills = cand_pol, cand_skills
+        notes.append(f"{sk} -> +{dst_key} ({len(move_syms)} symbols)")
+
+    if not notes:
+        return False, policy_code, orig_skills, "Skipped: no cohesive split found."
+
+    seeds = list(verify_seeds) if verify_seeds else [1000 + i for i in range(6)]
+    try:
+        verify_bit_identical(
+            policy_code,
+            orig_skills,
+            cur_pol,
+            cur_skills,
+            seeds=seeds,
+            steps=max(50, int(verify_steps)),
+        )
+    except Exception as exc:
+        return False, policy_code, orig_skills, f"Refactor parity check failed: {exc}"
+
+    return (
+        True,
+        cur_pol,
+        cur_skills,
+        f"Side Cohesion Refactor: {', '.join(notes)} ({len(seeds)}-seed bit-identical)",
     )

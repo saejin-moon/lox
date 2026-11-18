@@ -266,6 +266,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             return [], ""
 
     last_inv_items, last_inv_summary = _summarize_inv(state)
+    last_depth = max(1, int(getattr(state, "depth", 1) or 1))
     exception_tracebacks: list[str] = []
     info: dict[str, Any] = {}
 
@@ -376,6 +377,8 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         if next_xl > 0:
             last_xl = next_xl
         last_hp = getattr(next_state, "hp", 0)
+        if not done and next_d > 0:
+            last_depth = next_d
         next_max_hp = getattr(next_state, "max_hp", 0)
         if next_max_hp > 0:
             last_max_hp = next_max_hp
@@ -597,7 +600,9 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             "run_id": run_id,
             "seed": seed,
             "role": role,
-            "depth": state.depth,
+            "depth": int(
+                locals().get("last_depth", state.depth or 1) or state.depth or 1
+            ),
             "max_depth": max_depth,
             "score": last_score,
             "achievements": len(getattr(state, "achievements", ()))

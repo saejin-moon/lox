@@ -124,10 +124,13 @@ Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, comb
 4. `SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth FROM expert_runs;`
 
 ### Swarm Peer Rules & Investigation Protocol
-- **Never Guess**: Check C rules via `query_wiki` / `read_wiki_article` / `query_monster` / `query_item` and trajectories via `query_db` / `query_theories` / `diff_policies` / `read_skill` / `find_references` / `grep_skills` / `blackboard_map` / `benchmark_expert_parity`.
-- **Anti-Recycling & Grounding**: Before first `dry_run_policy`, check `query_theories` + `query_wiki` (never tweak `REJECTED` mechanisms; protect high-Ochiai `D_succ` branches).
-- **Behavior Tree Rules**: Thin `Policy.step(state)` = `self.tree.tick(state) or Action.WAIT`; `ActionLeaf` returns `None` when inapplicable; use native `min_commit=N` / `preempt_if=...` / `hysteresis=N` (never post-step `_osc_gate` wrappers). Also supports composable `StrategyStack` (`from lox.lang.strategy import StrategyStack`) and frozen interfaces (`from lox.lang.contracts import ...`) / `#EVOLVE-BLOCK:<name>`.
-- **Surgical XML Patches**: Emit ONLY modified/new `def ...` functions in `<skill_code module="name">...</skill_code>` and `<policy_code>...</policy_code>` (in BOTH `dry_run_policy` and final answer). Never re-paste unchanged functions or put `<hypothesis>` inside `dry_run_policy(code=...)`.
+- **Never Guess**: Check C rules via `query_wiki` / `read_wiki_article` / `query_monster` / `query_item` and inspect code/data via `query_db` / `query_theories` / `diff_policies` / `read_skill(name, start_line, end_line)` / `read_symbol` / `find_references` / `grep_skills` / `architecture_map` / `benchmark_expert_parity`.
+- **Anti-Recycling & Grounding**: Before first `dry_run_policy`, check `query_theories` + `query_wiki` (never tweak `REJECTED` mechanisms; protect high-Ochiai `D_succ` goals/functions).
+- **Option-A Goal & Domain Architecture**:
+  - `Policy.step(state)` observes `self.ws = WorldState()`, checks prompts/survival/combat interrupts, and ticks/preempts committed goals in `GoalRunner` (`skills/goals/core.py`). Never fall through silently to `Action.WAIT`.
+  - Keep state typed via `ws.domain("name", MyDataclass)` inside the owning domain module (zero untyped `Blackboard` string keys).
+  - Organize code cleanly under **2-level packages** `skills/<domain>/<module>.py` (e.g. `skills/survival/prayer.py`, `skills/goals/explore.py`; max depth 2; zero 5-LOC re-export facades). Add new goals via `register_goal(...)` in a goal module rather than bloating `policy.py`.
+- **Surgical XML Patches**: Emit ONLY modified/new `def`/`class`/goal blocks in `<skill_code module="domain/submodule">...</skill_code>` and `<policy_code>...</policy_code>` (in BOTH `dry_run_policy` and final answer). Never re-paste unchanged functions or put `<hypothesis>` inside `dry_run_policy(code=...)`.
 - **In-Turn Trigger Check**: `dry_run_policy` validates `pyright` types, cross-module signatures, claimed failure fixtures, and `prompt_torture`—if `TRIGGER_MISS` warns your edited function fired 0 times, fix preconditions before submitting.
 """
 
@@ -341,39 +344,42 @@ def build_user_prompt(
     skills_block = ""
     if skills:
         if canon_mode == "SWARM_PEER":
-            manifest_lines: list[str] = []
+            by_domain: dict[str, list[str]] = {}
             for s_name, s_src in sorted(skills.items()):
                 loc_cnt = len(s_src.splitlines())
                 exports: list[str] = []
-                consts: list[str] = []
+                doc_line = ""
                 try:
                     st_tree = ast.parse(s_src)
+                    doc_raw = ast.get_docstring(st_tree) or ""
+                    doc_line = doc_raw.splitlines()[0].strip()[:90] if doc_raw else ""
                     for nd in st_tree.body:
                         if isinstance(
                             nd, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                        ):
+                        ) and not nd.name.startswith("_"):
                             exports.append(nd.name)
-                        elif isinstance(nd, ast.Assign):
-                            for tgt in nd.targets:
-                                if isinstance(tgt, ast.Name):
-                                    consts.append(tgt.id)
-                        elif isinstance(nd, ast.AnnAssign) and isinstance(
-                            nd.target, ast.Name
-                        ):
-                            consts.append(nd.target.id)
                 except Exception:
                     pass
-                all_syms = exports + [c for c in consts if c not in exports]
-                exp_str = ", ".join(all_syms[:28]) + (
-                    f" (+{len(all_syms) - 28})" if len(all_syms) > 28 else ""
+                dom = s_name.split("/", 1)[0]
+                exp_str = ", ".join(exports[:6]) + (
+                    f" (+{len(exports) - 6})" if len(exports) > 6 else ""
                 )
+                summary_part = f" — {doc_line}" if doc_line else ""
+                by_domain.setdefault(dom, []).append(
+                    f"  - `skills/{s_name}.py` ({loc_cnt} LOC){summary_part}"
+                    + (f" | exports: {exp_str}" if exp_str else "")
+                )
+            manifest_lines: list[str] = []
+            for dom in sorted(by_domain.keys()):
+                mods = by_domain[dom]
                 manifest_lines.append(
-                    f"- `skills/{s_name}.py` ({loc_cnt} LOC) | symbols: {exp_str or '(script)'}"
+                    f"- **{dom}/** ({len(mods)} file{'s' if len(mods) != 1 else ''}):"
                 )
+                manifest_lines.extend(mods)
             skills_block = (
-                "\n### Hierarchical Skill Manifest (Lazy Read):\n"
+                "\n### Domain Skill Tree (Lazy Read):\n"
                 + "\n".join(manifest_lines)
-                + "\n*(Call `read_skill(skill_name)` to inspect any module source before editing; private `_` helpers stay internal unless exported.)*\n"
+                + "\n*(Inspect via `read_skill(name, start_line, end_line)`, `read_symbol(qualified_name)`, or `architecture_map()`.)*\n"
             )
         else:
             outlines = [
@@ -501,26 +507,19 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
         existing_policy_block = ""
         if current_policy.strip():
             pol_lines = current_policy.splitlines()
-            if len(pol_lines) > 40:
-                from lox.author.swarm_critic import extract_priority_selector_branches
-
-                brs = extract_priority_selector_branches(current_policy)
-                br_str = ", ".join(
-                    f"#{b['priority']}:{b['leaf_name']}({b['fn_name']})" for b in brs
-                )
+            if len(pol_lines) > 65:
                 existing_policy_block = (
-                    f"\n### Current `policy.py` Manifest ({len(pol_lines)} LOC):\n"
-                    + (f"- PrioritySelector branches: {br_str}\n" if br_str else "")
-                    + "*(Call `read_policy()` to inspect full `policy.py` source if modifying coordinator.)*\n"
+                    f"\n### Current `policy.py` ({len(pol_lines)} LOC)\n"
+                    "*(Call `read_policy()` or `architecture_map()` to inspect coordinator & registered Goals.)*\n"
                 )
             else:
                 existing_policy_block = f"\n### Current `policy.py` ({len(pol_lines)} LOC):\n```python\n{current_policy}\n```\n"
         return f"""### Gen {generation} — Mode: `SWARM_PEER`
 {digest_block}{existing_policy_block}{skills_block}
 ### Task (`SWARM_PEER`)
-- Research first (`query_theories`, `query_wiki`, `read_wiki_article`, `query_db`, `read_skill`, `find_references`, `blackboard_map`); never repeat rejected ideas from `Recent Experiment & Rejection Memory`.
-- Test surgical `<skill_code module="name">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions).
-- Output brief ```yaml``` hypothesis (plus optional `skills_to_prune: [...]`) and final `<skill_code module="name">` / `<policy_code>` XML blocks.
+- Research first (`query_theories`, `query_wiki`, `read_wiki_article`, `query_db`, `read_skill`, `read_symbol`, `architecture_map`); never repeat rejected ideas from `Recent Experiment & Rejection Memory`.
+- Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions).
+- Output brief ```yaml``` hypothesis (plus optional `skills_to_prune: [...]`) and final `<skill_code module="...">` / `<policy_code>` XML blocks.
 """
 
     if canon_mode == "SWARM_META":

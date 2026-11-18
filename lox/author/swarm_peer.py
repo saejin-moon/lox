@@ -75,12 +75,17 @@ def parse_peer_output(
                 explicit_prunes.append(s_name)
 
     skill_blocks = re.findall(
-        r"###\s*skill:\s*([A-Za-z0-9_]+)\s*\n+```(?:python)?\s*\n(.*?)```",
+        r"###\s*skill:\s*([A-Za-z0-9_./-]+)\s*\n+```(?:python)?\s*\n(.*?)```",
         raw_text or "",
         flags=re.DOTALL,
     )
+    from lox.lang.validator import normalize_skill_key
+
     for s_name, s_src in skill_blocks:
-        clean_name = s_name.strip().removesuffix(".py")
+        try:
+            clean_name = normalize_skill_key(s_name)
+        except Exception:
+            clean_name = s_name.strip().removesuffix(".py")
         if clean_name and s_src.strip():
             updated_skills[clean_name] = s_src.strip()
 
@@ -454,14 +459,16 @@ def incubate_candidate(
                 )
                 return candidate
             if c_runs:
+                stat_runs = [r for r in c_runs if not r.get("is_shard")] or c_runs
                 c_depths = [
                     float(max(int(r.get("depth", 1)), int(r.get("max_depth", 1))))
-                    for r in c_runs
+                    for r in stat_runs
                 ]
-                c_scores = [float(r.get("score", 0.0)) for r in c_runs]
+                c_scores = [float(r.get("score", 0.0)) for r in stat_runs]
                 c_avg_d = sum(c_depths) / len(c_depths)
                 c_avg_s = sum(c_scores) / len(c_scores)
                 metrics["avg_depth"] = round(c_avg_d, 4)
+                metrics["max_depth"] = max((int(d) for d in c_depths), default=1)
                 metrics["avg_score"] = round(c_avg_s, 2)
 
                 # Compare against cached incumbent shard runs
@@ -504,7 +511,6 @@ def incubate_candidate(
                     if guard_d_diffs:
                         g_delta = sum(guard_d_diffs) / len(guard_d_diffs)
                         metrics["guard_depth_delta"] = round(g_delta, 4)
-                        # Require >=2 paired guard seeds AND meaningful regression before incubation veto
                         if (
                             len(guard_d_diffs) >= 2
                             and g_delta <= -1.5
@@ -517,6 +523,18 @@ def incubate_candidate(
                                 f"shard depth_delta={metrics['depth_delta']:+.2f}"
                             )
                             return candidate
+                    # Unconditional severe regression veto (prevents broken/stale elites entering 64-seed CRN)
+                    if metrics["depth_delta"] <= -0.25 or (
+                        metrics["depth_delta"] <= 0.0
+                        and metrics["score_delta"] <= -150.0
+                    ):
+                        candidate.sandbox_metrics = metrics
+                        candidate.sandbox_passed = False
+                        candidate.error = (
+                            f"Incubation regression veto: depth_delta={metrics['depth_delta']:+.2f}, "
+                            f"score_delta={metrics['score_delta']:+.1f}"
+                        )
+                        return candidate
         except Exception as exc:
             candidate.sandbox_passed = False
             candidate.error = f"Incubation shard failed: {type(exc).__name__}: {exc}"
@@ -594,6 +612,10 @@ class SwarmPeerAgent:
 
         if self.provider == "mock":
             mock_code = self._build_mock_peer_policy(current_policy)
+            if not current_policy.strip() and not skills_copy:
+                from lox.lang.starter import build_clean_option_a_starter
+
+                mock_code, skills_copy = build_clean_option_a_starter()
             touched_skills, touched_branches, clobbers = compute_candidate_footprint(
                 mock_code,
                 skills_copy,
@@ -703,7 +725,12 @@ class SwarmPeerAgent:
 
         updated_skills = dict(skills_copy)
         for s_name, s_src in (getattr(proposal, "skill_modules", {}) or {}).items():
-            clean_s = str(s_name or "").strip().removesuffix(".py")
+            from lox.lang.validator import normalize_skill_key
+
+            try:
+                clean_s = normalize_skill_key(str(s_name or ""))
+            except Exception:
+                clean_s = str(s_name or "").strip().removesuffix(".py")
             if clean_s and str(s_src or "").strip():
                 updated_skills[clean_s] = merge_skill_module_update(
                     updated_skills.get(clean_s, ""), str(s_src)
@@ -819,20 +846,7 @@ class SwarmPeerAgent:
     def _build_mock_peer_policy(current_policy: str) -> str:
         if current_policy.strip() and "class Policy" in current_policy:
             return current_policy
-        return (
-            "from lox.env.actions import Action\n"
-            "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector\n\n"
-            "def _explore_step(state, bb):\n"
-            "    return Action.SEARCH\n\n"
-            "class Policy:\n"
-            "    def __init__(self):\n"
-            "        self.blackboard = Blackboard()\n"
-            "        self.tree = BehaviorTree(\n"
-            "            root=PrioritySelector([\n"
-            "                ActionLeaf(_explore_step, name='explore_step', min_commit=2),\n"
-            "            ]),\n"
-            "            blackboard=self.blackboard,\n"
-            "        )\n\n"
-            "    def step(self, state):\n"
-            "        return self.tree.tick(state) or Action.WAIT\n"
-        )
+        from lox.lang.starter import build_clean_option_a_starter
+
+        pol, _ = build_clean_option_a_starter()
+        return pol

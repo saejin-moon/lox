@@ -1084,7 +1084,7 @@ def test_phase3_unified_duckdb_prefix_cache_tier1_and_multiseed_smoke(tmp_path):
             "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector",
             "class Policy:",
         ]
-        + [f"    def helper_{i}(self, s): return None" for i in range(60)]
+        + [f"    def helper_{i}(self, s): return None" for i in range(70)]
     )
     large_skills = {
         "combat": "\n".join([f"def fight_{i}(s, bb): return None" for i in range(40)]),
@@ -1098,7 +1098,7 @@ def test_phase3_unified_duckdb_prefix_cache_tier1_and_multiseed_smoke(tmp_path):
         skills=large_skills,
     )
     assert "### Behavior Tree Primitives" not in peer_prompt
-    assert "Hierarchical Skill Manifest" in peer_prompt
+    assert "Domain Skill Tree" in peer_prompt
     assert "`skills/combat.py` (40 LOC)" in peer_prompt
     assert "def fight_39" not in peer_prompt
     assert "def helper_59" not in peer_prompt

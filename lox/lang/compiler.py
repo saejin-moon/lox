@@ -331,21 +331,36 @@ class PolicyRunner:
             return self._blackboards_cache
         bbs: list[Any] = []
         for obj in (
+            self.instance,
+            getattr(self.instance, "ws", None),
+            getattr(self.instance, "world_state", None),
             getattr(self.instance, "blackboard", None),
             getattr(self.instance, "bb", None),
             getattr(getattr(self.instance, "tree", None), "blackboard", None),
         ):
-            if obj is not None and hasattr(obj, "last_active_leaf") and obj not in bbs:
+            if (
+                obj is not None
+                and (
+                    hasattr(obj, "last_active_leaf") or hasattr(obj, "last_active_goal")
+                )
+                and obj not in bbs
+            ):
                 bbs.append(obj)
         self._blackboards_cache = tuple(bbs)
         return self._blackboards_cache
 
     def _clear_bt_last_active_leaf(self) -> None:
         for bb in self._iter_instance_blackboards():
-            bb.last_active_leaf = ""
+            if hasattr(bb, "last_active_leaf"):
+                bb.last_active_leaf = ""
+            if hasattr(bb, "last_active_goal"):
+                bb.last_active_goal = ""
 
     def _get_bt_last_active_leaf(self) -> str:
         for bb in self._iter_instance_blackboards():
+            goal = str(getattr(bb, "last_active_goal", "") or "").strip()
+            if goal:
+                return goal
             leaf = str(getattr(bb, "last_active_leaf", "") or "").strip()
             if leaf:
                 return leaf
@@ -456,14 +471,17 @@ class PolicyRunner:
 
 
 def _extract_skill_dependencies(tree: ast.AST, known_skills: set[str]) -> set[str]:
-    """Extracts intra-package `skills.<name>` module dependencies from an AST."""
+    """Extracts intra-package `skills.<name>` or `skills.<domain>.<name>` dependencies."""
+    from lox.lang.validator import resolve_skill_import
+
     deps: set[str] = set()
+    pkg_names = {k.split("/", 1)[0] for k in known_skills if "/" in k}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 name = str(alias.name or "")
                 if name.startswith("skills."):
-                    dep = name.split(".", 1)[1].split(".", 1)[0]
+                    dep = resolve_skill_import(name, known_skills)
                     if dep in known_skills:
                         deps.add(dep)
         elif isinstance(node, ast.ImportFrom):
@@ -474,7 +492,13 @@ def _extract_skill_dependencies(tree: ast.AST, known_skills: set[str]) -> set[st
                     if dep in known_skills:
                         deps.add(dep)
             elif mod.startswith("skills."):
-                dep = mod.split(".", 1)[1].split(".", 1)[0]
+                tail = mod[len("skills.") :]
+                if tail in pkg_names and tail not in known_skills:
+                    for alias in node.names:
+                        sub_k = f"{tail}/{alias.name}"
+                        if sub_k in known_skills:
+                            deps.add(sub_k)
+                dep = resolve_skill_import(mod, known_skills)
                 if dep in known_skills:
                     deps.add(dep)
     return deps
@@ -540,12 +564,16 @@ def _compile_skill_unit_cached(
     skill_code: str,
     is_macro_module: bool,
 ) -> tuple[Any, list[str], frozenset[str]]:
-    skill_tree = validate_python_code(skill_code, filename=f"skills/{skill_name}.py")
+    from lox.lang.validator import normalize_skill_key, skill_key_to_relpath
+
+    norm_name = normalize_skill_key(skill_name)
+    rel_fn = skill_key_to_relpath(norm_name)
+    skill_tree = validate_python_code(skill_code, filename=rel_fn)
     skill_tree = PolicyInstrumentTransformer(is_macro_module=is_macro_module).visit(
         skill_tree
     )
     ast.fix_missing_locations(skill_tree)
-    code_obj = compile(skill_tree, filename=f"skills/{skill_name}.py", mode="exec")
+    code_obj = compile(skill_tree, filename=rel_fn, mode="exec")
     fn_names = [
         n.name
         for n in ast.walk(skill_tree)
@@ -557,14 +585,21 @@ def _compile_skill_unit_cached(
             for alias in node.names:
                 name = str(alias.name or "")
                 if name.startswith("skills."):
-                    raw_deps.add(name.split(".", 1)[1].split(".", 1)[0])
+                    tail = name[len("skills.") :].replace(".", "/")
+                    raw_deps.add(tail)
+                    raw_deps.add(tail.split("/", 1)[0])
         elif isinstance(node, ast.ImportFrom):
             mod = str(node.module or "")
             if mod == "skills":
                 for alias in node.names:
                     raw_deps.add(str(alias.name or "").split(".", 1)[0])
             elif mod.startswith("skills."):
-                raw_deps.add(mod.split(".", 1)[1].split(".", 1)[0])
+                tail = mod[len("skills.") :].replace(".", "/")
+                raw_deps.add(tail)
+                raw_deps.add(tail.split("/", 1)[0])
+                for alias in node.names:
+                    if alias.name != "*":
+                        raw_deps.add(f"{tail}/{alias.name}")
     return code_obj, fn_names, frozenset(raw_deps)
 
 
@@ -587,10 +622,17 @@ class CompiledPolicy:
         skills: dict[str, str] | None = None,
         max_loop_ticks: int = 250000,
     ):
+        from lox.lang.validator import normalize_skill_key
+
         self.policy_code = policy_code
         self.macros_code = macros_code
         self.max_loop_ticks = max_loop_ticks
-        self.skills = dict(skills) if skills else {}
+        norm_skills: dict[str, str] = {}
+        for rk, rv in (skills or {}).items():
+            nk = normalize_skill_key(rk)
+            if nk:
+                norm_skills[nk] = rv
+        self.skills = norm_skills
         self._skill_code_objs: dict[str, Any] = {}
         self.skill_function_names: dict[str, list[str]] = {}
         self.macro_function_names: list[str] = []
@@ -598,13 +640,14 @@ class CompiledPolicy:
         # Parse, validate, and instrument skills package in dependency order (per-skill LRU cached)
         raw_skill_deps: dict[str, set[str]] = {}
         raw_skill_code_objs: dict[str, Any] = {}
+        known_skill_keys = {k for k, v in self.skills.items() if v and v.strip()}
         for skill_name, skill_code in self.skills.items():
             if not skill_code or not skill_code.strip():
                 continue
             c_obj, fn_names, deps_fs = _compile_skill_unit(
                 skill_name, skill_code, is_macro_module=True
             )
-            raw_skill_deps[skill_name] = set(deps_fs)
+            raw_skill_deps[skill_name] = {d for d in deps_fs if d in known_skill_keys}
             raw_skill_code_objs[skill_name] = c_obj
             self.skill_function_names[skill_name] = list(fn_names)
         self._skill_order: list[str] = _topological_skill_order(raw_skill_deps)
@@ -683,19 +726,37 @@ class CompiledPolicy:
                 if mod_key == "skills" or mod_key.startswith("skills."):
                     sys.modules.pop(mod_key, None)
 
-            # Register and execute skills modules
+            # Register and execute skills modules (supports both `skills.<mod>` and 2-level `skills.<domain>.<mod>`)
             skills_pkg = types.ModuleType("skills")
+            skills_pkg.__path__ = []
             sys.modules["skills"] = skills_pkg
             ns["skills"] = skills_pkg
 
             for s_name, s_code_obj in self._skill_code_objs.items():
-                s_mod = types.ModuleType(f"skills.{s_name}")
+                parts = [p for p in str(s_name).split("/") if p]
+                mod_full = f"skills.{'.'.join(parts)}"
+                if len(parts) == 2:
+                    pkg_full = f"skills.{parts[0]}"
+                    pkg_mod = sys.modules.get(pkg_full)
+                    if pkg_mod is None:
+                        pkg_mod = types.ModuleType(pkg_full)
+                        pkg_mod.__path__ = []
+                        sys.modules[pkg_full] = pkg_mod
+                        setattr(skills_pkg, parts[0], pkg_mod)
+                s_mod = types.ModuleType(mod_full)
                 s_mod.__dict__.update(ns)
-                s_mod.__name__ = f"skills.{s_name}"
+                s_mod.__name__ = mod_full
+                s_mod.__package__ = (
+                    f"skills.{parts[0]}" if len(parts) == 2 else "skills"
+                )
+                sys.modules[mod_full] = s_mod
                 exec(s_code_obj, s_mod.__dict__)
-                sys.modules[f"skills.{s_name}"] = s_mod
-                setattr(skills_pkg, s_name, s_mod)
-                ns[s_name] = s_mod
+                if len(parts) == 2:
+                    setattr(sys.modules[f"skills.{parts[0]}"], parts[1], s_mod)
+                    ns[f"{parts[0]}_{parts[1]}"] = s_mod
+                else:
+                    setattr(skills_pkg, parts[0], s_mod)
+                    ns[parts[0]] = s_mod
 
             exec(self._policy_code_obj, ns)
             mod_obj.__dict__.update(ns)

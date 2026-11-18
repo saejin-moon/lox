@@ -589,20 +589,29 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         skills_dir: str | Path | None = None,
     ) -> dict[str, str]:
         """
-        Finds the exact transitive set of `skills.<name>` modules imported by `policy_code`
-        (including skill-to-skill imports) and removes orphaned `.py` files from `skills_dir`
-        and `skills` so workspace prompts and `sys.modules` stay lean across generations.
+        Finds the exact transitive set of `skills.<name>` / `skills.<domain>.<name>` modules
+        imported by `policy_code` and removes orphaned `.py` files from `skills_dir` and `skills`.
         """
-        if not skills:
+        from lox.lang.validator import normalize_skill_key, resolve_skill_import
+
+        norm_skills = {
+            normalize_skill_key(k): v
+            for k, v in (skills or {}).items()
+            if normalize_skill_key(k)
+        }
+        known_keys = set(norm_skills.keys())
+        pkg_names = {k.split("/", 1)[0] for k in known_keys if "/" in k}
+
+        if not norm_skills:
             if skills_dir is not None:
                 s_dir = Path(skills_dir)
                 if s_dir.exists():
                     removed_disk = []
-                    for p in sorted(s_dir.glob("*.py")):
-                        if p.stem != "__init__":
+                    for p in sorted(s_dir.rglob("*.py")):
+                        if p.name != "__init__.py":
                             try:
                                 p.unlink()
-                                removed_disk.append(p.stem)
+                                removed_disk.append(str(p.relative_to(s_dir)))
                             except Exception:
                                 pass
                     if removed_disk:
@@ -623,31 +632,49 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
                 if isinstance(node, ast.ImportFrom) and node.module:
                     if node.module == "skills":
                         for alias in node.names:
-                            refs.add(alias.name.split(".")[0])
+                            cand = normalize_skill_key(alias.name)
+                            if cand in known_keys:
+                                refs.add(cand)
                     elif node.module.startswith("skills."):
-                        refs.add(node.module.split(".")[1])
+                        tail = node.module[len("skills.") :]
+                        if tail in pkg_names and tail not in known_keys:
+                            for alias in node.names:
+                                sub_k = f"{tail}/{alias.name}"
+                                if sub_k in known_keys:
+                                    refs.add(sub_k)
+                        else:
+                            resolved = resolve_skill_import(node.module, known_keys)
+                            if resolved in known_keys:
+                                refs.add(resolved)
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
                         if alias.name.startswith("skills."):
-                            refs.add(alias.name.split(".")[1])
+                            resolved = resolve_skill_import(alias.name, known_keys)
+                            if resolved in known_keys:
+                                refs.add(resolved)
             return refs
 
         keep: set[str] = set()
         queue = list(_extract_skill_imports(policy_code))
         while queue:
             s_name = queue.pop(0)
-            if s_name in keep or s_name not in skills:
+            if s_name in keep or s_name not in norm_skills:
                 continue
             keep.add(s_name)
-            queue.extend(_extract_skill_imports(skills[s_name]))
+            queue.extend(_extract_skill_imports(norm_skills[s_name]))
 
-        pruned = {k: v for k, v in skills.items() if k in keep}
-        removed = sorted(set(skills.keys()) - keep)
+        pruned = {k: v for k, v in norm_skills.items() if k in keep}
+        removed = sorted(set(norm_skills.keys()) - keep)
         if skills_dir is not None:
             s_dir = Path(skills_dir)
             if s_dir.exists():
-                for p in s_dir.glob("*.py"):
-                    if p.stem != "__init__" and p.stem not in keep:
+                for p in s_dir.rglob("*.py"):
+                    if p.name == "__init__.py":
+                        continue
+                    rel_k = (
+                        str(p.relative_to(s_dir)).removesuffix(".py").replace("\\", "/")
+                    )
+                    if rel_k not in keep:
                         try:
                             p.unlink()
                         except Exception:

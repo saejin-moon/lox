@@ -108,11 +108,11 @@ def _clone_incumbent_eval(
 
 
 def _is_wait_zombie_run(run: dict[str, Any]) -> bool:
-    """Returns True when an episode spent >=50 turns paralyzed pressing WAIT or stuck on <=1 tile."""
+    """Returns True when an episode spent >=50 turns heavily stalled on WAIT or stuck on <=1 tile."""
     turns = int(run.get("turns", 0) or 0)
     if turns < 50:
         return False
-    if float(run.get("pct_wait", 0.0) or 0.0) >= 90.0:
+    if float(run.get("pct_wait", 0.0) or 0.0) >= 65.0:
         return True
     raw_tiles = run.get("unique_tiles")
     return raw_tiles is not None and int(raw_tiles) <= 1 and turns >= 100
@@ -488,6 +488,7 @@ class SwarmReferee:
         holdout_seeds: list[int] | None = None,
         race_seeds: int | None = None,
         scenario_gate: str = "off",
+        frontier_shards: list[Any] | None = None,
     ) -> TournamentVerdict:
         """Runs paired CRN evaluation across Incumbent + Top Survivors (+ Orthogonal Merges, Seed Racing, N-Way Stacking, Holdout)."""
         finalists = self.select_finalists(candidates, base_policy, base_skills)
@@ -704,14 +705,24 @@ class SwarmReferee:
                 if cb is not None:
                     stage1_stats_by_id[cand.peer_id] = (st, pr)
 
-            def _s1_score(cand: PeerCandidate) -> tuple[int, float, float]:
+            def _s1_score(cand: PeerCandidate) -> tuple[int, int, float, float]:
                 if cand.peer_id in stage1_stats_by_id:
                     st, pr = stage1_stats_by_id[cand.peer_id]
                 else:
-                    st, pr = {}, {"iqm_delta": 0.0}
+                    st, pr = {}, {"iqm_delta": 0.0, "wins": 0, "losses": 0}
                 exc = 1 if int(st.get("policy_exceptions", 0) or 0) == 0 else 0
+                non_noop = (
+                    1
+                    if (
+                        not base_policy.strip()
+                        or int(pr.get("wins", 0) or 0) > 0
+                        or int(pr.get("losses", 0) or 0) > 0
+                    )
+                    else 0
+                )
                 return (
                     exc,
+                    non_noop,
                     float(pr.get("iqm_delta", 0.0)),
                     float(st.get("avg_depth", 1.0)),
                 )
@@ -827,14 +838,20 @@ class SwarmReferee:
             cand_hard = int(cand_stats.get("hard_stall_count", 0))
             cand_n = max(1, int(cand_stats.get("run_count", 0) or 0))
             stall_tol = cand_n // 16
-            inc_zombie = float(inc_stats.get("pct_wait", 0.0) or 0.0) >= 85.0
-            cand_active = float(cand_stats.get("pct_wait", 0.0) or 0.0) <= 75.0
+            inc_zombie = float(inc_stats.get("pct_wait", 0.0) or 0.0) >= 65.0
+            cand_active = float(cand_stats.get("pct_wait", 0.0) or 0.0) <= 60.0
+            inc_ac = float(inc_stats.get("avg_ac", 10.0) or 10.0)
+            cand_ac = float(cand_stats.get("avg_ac", 10.0) or 10.0)
+            multi_axis_win = d_gain >= 0.05 and cand_s > inc_s and cand_ac <= inc_ac
             if cand_hard > inc_hard and not (
                 inc_zombie and cand_active and d_gain > 0.0
             ):
                 if d_gain < 0.05 and cand_s <= inc_s:
                     return False
-                if cand_hard > inc_hard + stall_tol and d_gain < 0.25:
+                hard_cap = inc_hard + (
+                    max(2, cand_n // 8) if multi_axis_win else stall_tol
+                )
+                if cand_hard > hard_cap and d_gain < 0.25:
                     return False
             return True
 
@@ -895,7 +912,6 @@ class SwarmReferee:
                 float(cand_stats.get("avg_ac", 10.0))
                 <= float(inc_stats.get("avg_ac", 10.0)) + 0.5
             )
-            loc_improved = int(cand_stats["loc_total"]) <= int(inc_stats["loc_total"])
             pareto_non_regressing = (
                 d_delta >= -0.05
                 and iqm_delta >= -0.02
@@ -915,31 +931,46 @@ class SwarmReferee:
                 or (ac_improved and iqm_delta >= 0.0)
             )
             pareto_beats = (
-                pareto_non_regressing and pareto_axis_gain and (wins >= losses)
+                pareto_non_regressing
+                and pareto_axis_gain
+                and (wins > losses)
+                and d_delta >= 0.02
+                and s_delta >= 0.0
+            )
+            inc_zombie_rescue = (
+                float(inc_stats.get("pct_wait", 0.0) or 0.0) >= 65.0
+                and float(cand_stats.get("pct_wait", 0.0) or 0.0) <= 60.0
+                and d_delta > 0.05
+                and wins > losses
             )
             stat_sig_ok = (
                 (n_pairs < 8)
                 or (p_val < 0.05)
                 or (ci_low > 0.0)
-                or (wins > losses and iqm_delta >= 0.08)
+                or (wins > losses and losses == 0 and d_delta > 0.05 and s_delta >= 0.0)
             )
-            beats = guard_ok and (
-                pareto_beats
-                or (d_delta > 0.05 and iqm_delta >= -0.05 and ac_non_worse)
-                or (d_delta > 1e-4 and s_delta >= -1e-2)
-                or (
-                    iqm_delta > 1e-4
-                    and wins >= losses
-                    and mean_p_delta >= 0.0
-                    and stat_sig_ok
-                )
-                or (
-                    abs(d_delta) <= 1e-4
-                    and abs(iqm_delta) <= 0.02
-                    and (
-                        s_delta > 1e-2
-                        or ac_improved
-                        or (abs(s_delta) <= 1e-2 and loc_improved)
+            is_noop = wins == 0 and losses == 0 and n_pairs >= 4
+            beats = (
+                guard_ok
+                and not is_noop
+                and wins > losses
+                and (
+                    pareto_beats
+                    or inc_zombie_rescue
+                    or (
+                        losses == 0
+                        and wins >= max(2, n_pairs // 16)
+                        and d_delta > 0.05
+                        and s_delta >= 0.0
+                        and ac_non_worse
+                    )
+                    or (
+                        (p_val < 0.05 or ci_low > 0.0 or n_pairs < 8)
+                        and iqm_delta >= 0.0
+                        and d_delta >= -0.02
+                        and mean_p_delta >= 0.0
+                        and ac_non_worse
+                        and stat_sig_ok
                     )
                 )
             )
@@ -952,12 +983,22 @@ class SwarmReferee:
 
         def _rank_key(
             idx_item: tuple[int, tuple[PeerCandidate, BatchEvaluation, dict[str, Any]]],
-        ) -> tuple[int, int, int, float, float, float, int, float, int]:
+        ) -> tuple[int, int, int, int, float, float, float, int, float, int]:
             idx_e, (_c, _be, st) = idx_item
             pr = paired_by_idx[idx_e]
             cand_beats, _dd, _sd, cand_guard_ok = eligibility_by_idx[idx_e]
+            non_noop = (
+                1
+                if (
+                    not base_policy.strip()
+                    or int(pr.get("wins", 0) or 0) > 0
+                    or int(pr.get("losses", 0) or 0) > 0
+                )
+                else 0
+            )
             return (
                 1 if int(st.get("policy_exceptions", 0) or 0) == 0 else 0,
+                non_noop,
                 1 if cand_guard_ok else 0,
                 1 if cand_beats else 0,
                 round(float(pr.get("iqm_delta", 0.0)), 4),
@@ -1127,12 +1168,49 @@ class SwarmReferee:
                     h_avg_d = float(h_cand_stats.get("avg_depth", 1.0))
                     h_iqm_d = float(h_pair.get("iqm_delta", 0.0))
                     h_exc = int(h_cand_stats.get("policy_exceptions", 0) or 0)
-                    if h_exc > 0 or h_iqm_d < -0.35:
+                    if h_exc > 0 or h_iqm_d < -0.05:
                         ui.warn(
                             f"Gen {generation}: Holdout gate cancelled promotion of `{cand_obj.peer_id}` "
                             f"(holdout_iqm_delta={h_iqm_d:+.3f}, exc={h_exc})."
                         )
                         return False, h_avg_d, h_iqm_d, True
+                    # Optional Organic Tier-2 Frontier Checkpoint Evaluation (strictly campaign-saved Dlvl >= 3 states)
+                    if frontier_shards:
+                        f_inc_eval = eval_pool.evaluate_batch(
+                            batch_id=f"tier2_g{generation}_inc_{int(time.time())}",
+                            policy_code=base_policy,
+                            macros_code="",
+                            skills=base_skills,
+                            target_episodes=len(frontier_shards),
+                            shards=list(frontier_shards),
+                            record_ticks=False,
+                            **fin_eval_kwargs,
+                        )
+                        f_cand_eval = eval_pool.evaluate_batch(
+                            batch_id=f"tier2_g{generation}_{cand_obj.peer_id}_{int(time.time())}",
+                            policy_code=cand_obj.policy_code,
+                            macros_code="",
+                            skills=cand_obj.skills,
+                            target_episodes=len(frontier_shards),
+                            shards=list(frontier_shards),
+                            record_ticks=False,
+                            **fin_eval_kwargs,
+                        )
+                        f_cand_stats = _extract_eval_stats(
+                            f_cand_eval, loc_total=cand_obj.loc_total
+                        )
+                        f_pair = evaluate_tournament_pair(
+                            f_cand_eval.get("runs", []) or [],
+                            f_inc_eval.get("runs", []) or [],
+                        )
+                        f_exc = int(f_cand_stats.get("policy_exceptions", 0) or 0)
+                        f_iqm_d = float(f_pair.get("iqm_delta", 0.0))
+                        if f_exc > 0 or f_iqm_d < -0.10:
+                            ui.warn(
+                                f"Gen {generation}: Organic Tier-2 Frontier gate cancelled `{cand_obj.peer_id}` "
+                                f"(frontier_iqm_delta={f_iqm_d:+.3f}, exc={f_exc})."
+                            )
+                            return False, h_avg_d, h_iqm_d, True
                     return True, h_avg_d, h_iqm_d, False
                 except Exception:
                     pass

@@ -192,7 +192,15 @@ def _unpack_xml_bundle(raw_code: str) -> tuple[str, dict[str, str]]:
     )
     for m in skill_pat.finditer(text):
         mod_raw = (m.group("mod") or "").strip().removesuffix(".py")
-        mod_name = re.sub(r"[^a-zA-Z0-9_]", "_", mod_raw.lower()).strip("_")
+        mod_clean = mod_raw.replace("\\", "/").replace(".", "/").strip("/")
+        if mod_clean.startswith("skills/"):
+            mod_clean = mod_clean[len("skills/") :]
+        parts = [
+            re.sub(r"[^a-zA-Z0-9_]", "_", p.lower()).strip("_")
+            for p in mod_clean.split("/")
+            if p.strip()
+        ]
+        mod_name = "/".join(parts[:2])
         inner = smart_dedent(_strip_fences(m.group("code")))
         if mod_name and inner.strip():
             skills_found[mod_name] = inner.strip()
@@ -762,9 +770,42 @@ class AuthorToolRegistry:
             str(s_json or "{}"),
         )
 
-    def read_skill(self, skill_name: str, policy_id: str = "") -> tuple[str, str]:
-        """Reads the full Python source code of an individual skill module from the skill library or a historical policy snapshot."""
-        clean_name = skill_name.strip().removeprefix("skills/").removesuffix(".py")
+    def read_skill(
+        self,
+        skill_name: str,
+        policy_id: str = "",
+        start_line: int = 1,
+        end_line: int | None = None,
+    ) -> tuple[str, str]:
+        """Reads a skill module (or line range `start_line..end_line`) from the workspace or a `policy_id` snapshot."""
+        from lox.lang.validator import normalize_skill_key
+
+        try:
+            clean_name = normalize_skill_key(skill_name)
+        except Exception:
+            clean_name = skill_name.strip().removeprefix("skills/").removesuffix(".py")
+
+        def _slice_lines(src_text: str, tag: str) -> tuple[str, str]:
+            all_lines = src_text.splitlines()
+            total_l = len(all_lines)
+            s_l = max(1, int(start_line or 1))
+            e_l = min(total_l, int(end_line)) if end_line is not None else total_l
+            if s_l == 1 and end_line is None:
+                return src_text, f"{total_l} lines{tag}"
+            if s_l > total_l:
+                return (
+                    f"(File `{clean_name}` has only {total_l} lines.)",
+                    f"0 lines{tag}",
+                )
+            numbered = [
+                f"{idx}: {all_lines[idx - 1]}" for idx in range(s_l, max(s_l, e_l) + 1)
+            ]
+            return (
+                f"# {clean_name}.py lines {s_l}-{max(s_l, e_l)} of {total_l}\n"
+                + "\n".join(numbered),
+                f"lines {s_l}-{max(s_l, e_l)}/{total_l}{tag}",
+            )
+
         pid = str(policy_id or "").strip()
         if pid:
             if not os.path.exists(self.db_path):
@@ -779,8 +820,7 @@ class AuthorToolRegistry:
                 except Exception:
                     skills_map = {}
                 if clean_name in skills_map:
-                    code = str(skills_map[clean_name])
-                    return code, f"{len(code.splitlines())} lines ({pid})"
+                    return _slice_lines(str(skills_map[clean_name]), f" ({pid})")
                 return (
                     f"Error: Skill '{clean_name}' not found in policy '{pid}'. Available skills in '{pid}': {sorted(skills_map.keys()) or 'None'}",
                     "not_found",
@@ -789,17 +829,18 @@ class AuthorToolRegistry:
                 con.close()
 
         if clean_name in self.skills:
-            code = self.skills[clean_name]
-            return code, f"{len(code.splitlines())} lines"
+            return _slice_lines(self.skills[clean_name], "")
         skills_dir = Path(self.macro_lib.path).parent / "skills"
         skill_file = skills_dir / f"{clean_name}.py"
         if skill_file.exists():
             content = skill_file.read_text(encoding="utf-8")
-            return content, f"{len(content.splitlines())} lines"
+            return _slice_lines(content, "")
         avail = list(self.skills.keys())
         if skills_dir.exists():
             avail += [
-                p.stem for p in skills_dir.glob("*.py") if p.name != "__init__.py"
+                str(p.relative_to(skills_dir)).removesuffix(".py").replace("\\", "/")
+                for p in skills_dir.rglob("*.py")
+                if p.name != "__init__.py"
             ]
         return (
             f"Error: Skill '{clean_name}' not found. Available skills: {sorted(set(avail)) or 'None'}",
@@ -925,7 +966,7 @@ class AuthorToolRegistry:
             con.close()
 
     def _iter_workspace_sources(self) -> list[tuple[str, str]]:
-        """Returns `[(rel_path, source_text), ...]` for active `policy.py` and `skills/*.py`."""
+        """Returns `[(rel_path, source_text), ...]` for active `policy.py` and `skills/**/*.py`."""
         files: list[tuple[str, str]] = []
         pol = str(self.current_policy_code or "").strip()
         if pol:
@@ -934,19 +975,98 @@ class AuthorToolRegistry:
         for k in sorted(self.skills.keys()):
             src = str(self.skills.get(k) or "")
             if src.strip():
-                files.append((f"skills/{k}.py", src))
-                seen_sk.add(k)
+                clean_k = str(k).replace(".", "/").strip("/")
+                files.append((f"skills/{clean_k}.py", src))
+                seen_sk.add(clean_k)
         skills_dir = Path(self.macro_lib.path).parent / "skills"
         if skills_dir.exists():
-            for p in sorted(skills_dir.glob("*.py")):
-                if p.stem != "__init__" and p.stem not in seen_sk:
+            for p in sorted(skills_dir.rglob("*.py")):
+                if p.name == "__init__.py":
+                    continue
+                rel_k = (
+                    str(p.relative_to(skills_dir))
+                    .removesuffix(".py")
+                    .replace("\\", "/")
+                )
+                if rel_k not in seen_sk:
                     try:
                         files.append(
-                            (f"skills/{p.stem}.py", p.read_text(encoding="utf-8"))
+                            (f"skills/{rel_k}.py", p.read_text(encoding="utf-8"))
                         )
                     except Exception:
                         pass
         return files
+
+    def read_symbol(self, qualified_name: str) -> tuple[str, str]:
+        """Reads an exact top-level function, class, or `Class.method` AST definition with line numbers."""
+        q = str(qualified_name or "").strip()
+        if not q:
+            return "Error: `qualified_name` must be non-empty.", "error"
+        mod_hint = ""
+        cls_hint = ""
+        sym_name = q
+        if ":" in q:
+            mod_hint, rest = q.split(":", 1)
+            sym_name = rest.strip()
+        elif "/" in q and "." in q:
+            mod_hint, sym_name = q.rsplit(".", 1)
+        elif q.count(".") >= 2:
+            parts = q.rsplit(".", 1)
+            mod_hint, sym_name = parts[0], parts[1]
+        if "." in sym_name:
+            cls_hint, sym_name = sym_name.split(".", 1)
+
+        mod_hint_norm = (
+            mod_hint.strip()
+            .removeprefix("skills/")
+            .removesuffix(".py")
+            .replace(".", "/")
+        )
+        matches: list[str] = []
+        for rel_path, src in self._iter_workspace_sources():
+            rel_key = rel_path.removeprefix("skills/").removesuffix(".py")
+            if mod_hint_norm and mod_hint_norm not in (rel_key, rel_path):
+                continue
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            src_lines = src.splitlines()
+            for node in tree.body:
+                if (
+                    cls_hint
+                    and isinstance(node, ast.ClassDef)
+                    and node.name == cls_hint
+                ):
+                    for sub in node.body:
+                        if (
+                            isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
+                            and sub.name == sym_name
+                        ):
+                            s_l = int(sub.lineno)
+                            e_l = int(getattr(sub, "end_lineno", s_l) or s_l)
+                            body = "\n".join(
+                                f"{i}: {src_lines[i - 1]}" for i in range(s_l, e_l + 1)
+                            )
+                            matches.append(
+                                f"### {rel_path}:{s_l}-{e_l} (`{cls_hint}.{sym_name}`)\n{body}"
+                            )
+                elif (
+                    not cls_hint
+                    and isinstance(
+                        node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                    )
+                    and node.name == sym_name
+                ):
+                    s_l = int(node.lineno)
+                    e_l = int(getattr(node, "end_lineno", s_l) or s_l)
+                    body = "\n".join(
+                        f"{i}: {src_lines[i - 1]}" for i in range(s_l, e_l + 1)
+                    )
+                    matches.append(f"### {rel_path}:{s_l}-{e_l} (`{sym_name}`)\n{body}")
+        if not matches:
+            return f"Symbol `{q}` not found in `policy.py` or `skills/`.", "not_found"
+        return "\n\n".join(matches[:4]), f"{len(matches)} match(es)"
 
     def read_wiki_article(
         self, title: str, section: str = "", offset: int = 0, max_chars: int = 0
@@ -1096,6 +1216,98 @@ class AuthorToolRegistry:
             r = ", ".join(sorted(bb_keys[k]["readers"])[:4]) or "none"
             lines.append(f"  - `{k}` | writers=[{w}] | readers=[{r}]")
         return "\n".join(lines), f"{len(bb_keys)} keys"
+
+    def architecture_map(self) -> tuple[str, str]:
+        """AST-indexed map of registered `@register_goal` / `GoalSpec` handlers, `ws.domain(...)` typed states, and module LOC."""
+        goals_found: list[tuple[str, str, int, str]] = []
+        domains_found: dict[str, dict[str, Any]] = {}
+        module_summary: list[str] = []
+
+        for rel_path, src in self._iter_workspace_sources():
+            loc = len(src.splitlines())
+            module_summary.append(f"  - `{rel_path}` ({loc} LOC)")
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    fn_nm = (
+                        node.func.id
+                        if isinstance(node.func, ast.Name)
+                        else (
+                            node.func.attr
+                            if isinstance(node.func, ast.Attribute)
+                            else ""
+                        )
+                    )
+                    if fn_nm == "register_goal":
+                        g_name = ""
+                        prio = "50"
+                        if node.args and isinstance(node.args[0], ast.Constant):
+                            g_name = str(node.args[0].value)
+                        for kw in node.keywords:
+                            if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                                g_name = str(kw.value.value)
+                            elif kw.arg == "priority" and isinstance(
+                                kw.value, ast.Constant
+                            ):
+                                prio = str(kw.value.value)
+                        if g_name:
+                            goals_found.append(
+                                (
+                                    prio,
+                                    g_name,
+                                    int(getattr(node, "lineno", 1)),
+                                    rel_path,
+                                )
+                            )
+                    elif (
+                        fn_nm == "domain"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                    ):
+                        d_name = str(node.args[0].value)
+                        cls_nm = ""
+                        if len(node.args) >= 2:
+                            a1 = node.args[1]
+                            cls_nm = (
+                                a1.id
+                                if isinstance(a1, ast.Name)
+                                else (a1.attr if isinstance(a1, ast.Attribute) else "")
+                            )
+                        entry = domains_found.setdefault(
+                            d_name, {"class": cls_nm, "sites": set()}
+                        )
+                        if cls_nm and not entry["class"]:
+                            entry["class"] = cls_nm
+                        entry["sites"].add(f"{rel_path}:{getattr(node, 'lineno', 1)}")
+
+        lines: list[str] = ["### Architecture Map (Option A)"]
+        lines.append(f"**Modules ({len(module_summary)}):**")
+        lines.extend(module_summary[:40])
+        if len(module_summary) > 40:
+            lines.append(f"  ... (+{len(module_summary) - 40} more)")
+        lines.append(f"\n**Registered Goals ({len(goals_found)}):**")
+        if goals_found:
+            for prio, g_name, ln, rp in sorted(
+                goals_found,
+                key=lambda t: (int(t[0]) if t[0].lstrip("-").isdigit() else 999, t[1]),
+            ):
+                lines.append(f"  - prio={prio} `{g_name}` @ `{rp}:{ln}`")
+        else:
+            lines.append("  (none registered yet via `register_goal(...)`)")
+        lines.append(f"\n**Typed `ws.domain(...)` Sub-States ({len(domains_found)}):**")
+        if domains_found:
+            for d_name, info in sorted(domains_found.items()):
+                cls_lbl = info["class"] or "?"
+                sites = ", ".join(sorted(info["sites"])[:5])
+                lines.append(f"  - `{d_name}` ({cls_lbl}) used at [{sites}]")
+        else:
+            lines.append("  (none registered yet)")
+        return "\n".join(
+            lines
+        ), f"{len(goals_found)} goals, {len(domains_found)} domains"
 
     def benchmark_expert_parity(self, top_n: int = 10) -> tuple[str, str]:
         """Compares champion `runs` vs `expert_runs` across progression, survival, and telemetry metrics."""
@@ -3007,23 +3219,49 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
         "function": {
             "name": "read_skill",
             "description": (
-                "Retrieve the complete Python source code of a specific skill module (e.g., 'survival', 'combat', 'exploration') "
-                "from the current workspace or from a historical `policy_id` snapshot in DuckDB."
+                "Read Python source (full or line slice `start_line..end_line`) of a skill module "
+                "(e.g. 'world', 'survival/core', 'goals/explore') from workspace or a historical `policy_id`."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "skill_name": {
                         "type": "string",
-                        "description": "Name of the skill module to read (e.g. 'survival', 'combat', 'identification').",
+                        "description": "Skill module path/key (e.g. 'world', 'survival/core', 'navigation/pathing').",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional 1-indexed start line for partial reads (default: 1).",
+                        "default": 1,
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Optional 1-indexed inclusive end line (omit for full file).",
                     },
                     "policy_id": {
                         "type": "string",
-                        "description": "Optional historical policy_id (e.g. 'policy_swarm_g12') to read that policy's stored version of the skill.",
+                        "description": "Optional historical policy_id (e.g. 'policy_swarm_g12') to read that policy's snapshot.",
                         "default": "",
                     },
                 },
                 "required": ["skill_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_symbol",
+            "description": "Read an exact function, class, or `Class.method` definition with line numbers (e.g. 'survival/core.check_interrupt' or 'Policy.step').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "qualified_name": {
+                        "type": "string",
+                        "description": "Qualified or bare symbol name (e.g. 'goals/core.GoalRunner.tick', 'world.WorldState', 'step_toward').",
+                    }
+                },
+                "required": ["qualified_name"],
             },
         },
     },
@@ -3203,8 +3441,16 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "architecture_map",
+            "description": "AST-indexed overview of all modules (with LOC), registered `@register_goal` Goals, and typed `ws.domain(...)` sub-states.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "blackboard_map",
-            "description": "Lists shared Blackboard keys/attributes with writer and reader locations across `policy.py` and `skills/*.py`.",
+            "description": "Legacy Blackboard key map (retained for backward compatibility; prefer `architecture_map`).",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },

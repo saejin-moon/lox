@@ -1282,6 +1282,52 @@ def _extract_module_exports(tree: ast.Module) -> tuple[set[str], bool]:
     return exports, has_star
 
 
+def normalize_skill_key(raw: str) -> str:
+    """Normalizes `skills/a/b.py`, `skills.a.b`, `a.b`, or `a/b` into `'a/b'` (max depth 2)."""
+    s = str(raw or "").strip().replace("\\", "/")
+    if s.startswith("skills/"):
+        s = s[len("skills/") :]
+    elif s.startswith("skills."):
+        s = s[len("skills.") :]
+    if s.endswith(".py"):
+        s = s[:-3]
+    s = s.replace(".", "/").strip("/")
+    parts = [p for p in s.split("/") if p]
+    if len(parts) > 2:
+        raise PolicyValidationError(
+            f"Skill package depth > 2 is not allowed (`{raw}`): use `skills/<domain>/<module>.py`."
+        )
+    return "/".join(parts)
+
+
+def skill_key_to_module(key: str) -> str:
+    """Converts normalized key `'a/b'` or `'a'` to `'skills.a.b'` or `'skills.a'`."""
+    clean = normalize_skill_key(key)
+    return f"skills.{clean.replace('/', '.')}" if clean else "skills"
+
+
+def skill_key_to_relpath(key: str) -> str:
+    """Converts normalized key `'a/b'` or `'a'` to `'skills/a/b.py'` or `'skills/a.py'`."""
+    clean = normalize_skill_key(key)
+    return f"skills/{clean}.py" if clean else "skills/__init__.py"
+
+
+def resolve_skill_import(mod_str: str, known_keys: set[str]) -> str:
+    """Resolves `'skills.domain.sub'` or `'skills.domain'` against normalized `known_keys`."""
+    tail = mod_str[len("skills.") :] if mod_str.startswith("skills.") else mod_str
+    parts = [p for p in tail.replace("/", ".").split(".") if p]
+    if len(parts) >= 2:
+        two = f"{parts[0]}/{parts[1]}"
+        if two in known_keys or not known_keys:
+            return two
+    if parts:
+        one = parts[0]
+        if one in known_keys:
+            return one
+        return "/".join(parts[:2])
+    return ""
+
+
 def check_undefined_symbols(
     policy_code: str,
     skills: dict[str, str] | None = None,
@@ -1300,7 +1346,13 @@ def check_undefined_symbols(
     )
     global_env = known_builtins | frozenset(allowed_globals)
 
-    skill_map = dict(skills or {})
+    skill_map: dict[str, str] = {}
+    for raw_k, raw_v in (skills or {}).items():
+        nk = normalize_skill_key(raw_k)
+        if nk:
+            skill_map[nk] = raw_v
+    known_skill_keys = set(skill_map.keys())
+    skill_pkg_names = {k.split("/", 1)[0] for k in known_skill_keys if "/" in k}
     skill_exports: dict[str, set[str]] = {}
     skill_has_star: dict[str, bool] = {}
 
@@ -1309,16 +1361,17 @@ def check_undefined_symbols(
         if not s_src or not s_src.strip():
             continue
         cleaned = smart_dedent(s_src.replace("\t", "    ")).strip()
+        rel_fn = skill_key_to_relpath(s_name)
         try:
-            tree = ast.parse(cleaned, filename=f"skills/{s_name}.py")
+            tree = ast.parse(cleaned, filename=rel_fn)
         except SyntaxError as exc:
             raise PolicyValidationError(
-                f"SyntaxError in skills/{s_name}.py line {exc.lineno}: {exc.msg}"
+                f"SyntaxError in {rel_fn} line {exc.lineno}: {exc.msg}"
             ) from exc
         exp, has_star = _extract_module_exports(tree)
         skill_exports[s_name] = exp
         skill_has_star[s_name] = has_star
-        sources.append((f"skills/{s_name}.py", cleaned))
+        sources.append((rel_fn, cleaned))
 
     cleaned_pol = smart_dedent((policy_code or "").replace("\t", "    ")).strip()
     if cleaned_pol:
@@ -1339,39 +1392,67 @@ def check_undefined_symbols(
                 mod = str(node.module or "")
                 if mod == "skills":
                     for al in node.names:
-                        s_mod = al.name
-                        if skill_map and s_mod not in skill_exports:
+                        s_mod = normalize_skill_key(al.name)
+                        if (
+                            skill_map
+                            and s_mod not in skill_exports
+                            and s_mod not in skill_pkg_names
+                        ):
                             raise PolicyValidationError(
-                                f"Undefined skill module 'skills.{s_mod}' imported in {filename}"
+                                f"Undefined skill module 'skills.{al.name}' imported in {filename}"
                             )
-                        skill_aliases[al.asname or s_mod] = s_mod
+                        if s_mod in skill_exports:
+                            skill_aliases[al.asname or al.name] = s_mod
                 elif mod.startswith("skills."):
-                    s_mod = mod.split(".", 1)[1].split(".", 1)[0]
+                    s_mod = resolve_skill_import(mod, known_skill_keys)
+                    tail = mod[len("skills.") :]
+                    if tail in skill_pkg_names and tail not in skill_exports:
+                        for al in node.names:
+                            sub_k = f"{tail}/{al.name}"
+                            if sub_k not in skill_exports:
+                                raise PolicyValidationError(
+                                    f"Undefined skill module 'skills.{tail}.{al.name}' imported in {filename}"
+                                )
+                            skill_aliases[al.asname or al.name] = sub_k
+                        continue
                     if skill_map and s_mod not in skill_exports:
                         raise PolicyValidationError(
-                            f"Undefined skill module 'skills.{s_mod}' imported in {filename}"
+                            f"Undefined skill module '{mod}' imported in {filename}"
                         )
                     if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
                         for al in node.names:
                             if al.name != "*" and al.name not in skill_exports[s_mod]:
                                 raise PolicyValidationError(
-                                    f"Symbol '{al.name}' not exported by skills/{s_mod}.py (referenced in {filename})"
+                                    f"Symbol '{al.name}' not exported by {skill_key_to_relpath(s_mod)} (referenced in {filename})"
                                 )
             elif isinstance(node, ast.Import):
                 for al in node.names:
                     if al.name.startswith("skills."):
-                        s_mod = al.name.split(".", 1)[1].split(".", 1)[0]
+                        s_mod = resolve_skill_import(al.name, known_skill_keys)
                         if skill_map and s_mod not in skill_exports:
                             raise PolicyValidationError(
-                                f"Undefined skill module 'skills.{s_mod}' imported in {filename}"
+                                f"Undefined skill module '{al.name}' imported in {filename}"
                             )
                         if al.asname:
                             skill_aliases[al.asname] = s_mod
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and not node.attr.startswith("_"):
-                # Match skills.<mod>.<attr> or <alias>.<attr>
+                # Match skills.<pkg>.<mod>.<attr>, skills.<mod>.<attr>, or <alias>.<attr>
                 if (
+                    isinstance(node.value, ast.Attribute)
+                    and isinstance(node.value.value, ast.Attribute)
+                    and isinstance(node.value.value.value, ast.Name)
+                    and node.value.value.value.id == "skills"
+                ):
+                    s_mod = f"{node.value.value.attr}/{node.value.attr}"
+                    if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
+                        if node.attr not in skill_exports[s_mod]:
+                            raise PolicyValidationError(
+                                f"Symbol 'skills.{node.value.value.attr}.{node.value.attr}.{node.attr}' "
+                                f"not found in {skill_key_to_relpath(s_mod)} (referenced in {filename})"
+                            )
+                elif (
                     isinstance(node.value, ast.Attribute)
                     and isinstance(node.value.value, ast.Name)
                     and node.value.value.id == "skills"
@@ -1380,7 +1461,7 @@ def check_undefined_symbols(
                     if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
                         if node.attr not in skill_exports[s_mod]:
                             raise PolicyValidationError(
-                                f"Symbol 'skills.{s_mod}.{node.attr}' not found in skills/{s_mod}.py (referenced in {filename})"
+                                f"Symbol 'skills.{s_mod}.{node.attr}' not found in {skill_key_to_relpath(s_mod)} (referenced in {filename})"
                             )
                 elif (
                     isinstance(node.value, ast.Name) and node.value.id in skill_aliases
@@ -1389,7 +1470,7 @@ def check_undefined_symbols(
                     if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
                         if node.attr not in skill_exports[s_mod]:
                             raise PolicyValidationError(
-                                f"Symbol '{node.value.id}.{node.attr}' not found in skills/{s_mod}.py (referenced in {filename})"
+                                f"Symbol '{node.value.id}.{node.attr}' not found in {skill_key_to_relpath(s_mod)} (referenced in {filename})"
                             )
 
         # 2. CPython symtable undefined-global check
@@ -1409,14 +1490,17 @@ def check_undefined_symbols(
             if isinstance(node, ast.ImportFrom):
                 mod = str(node.module or "")
                 if mod.startswith("skills."):
-                    s_mod = mod.split(".", 1)[1].split(".", 1)[0]
+                    s_mod = resolve_skill_import(mod, known_skill_keys)
                     if (
                         any(al.name == "*" for al in node.names)
                         and s_mod in skill_exports
                     ):
                         mod_defined.update(skill_exports[s_mod])
 
-        valid_globals = global_env | mod_defined | set(skill_exports.keys())
+        top_pkg_keys = {k.split("/", 1)[0] for k in skill_exports}
+        valid_globals = (
+            global_env | mod_defined | set(skill_exports.keys()) | top_pkg_keys
+        )
 
         def _check_table(tbl: symtable.SymbolTable, is_root: bool) -> None:
             for sym in tbl.get_symbols():
@@ -1699,15 +1783,22 @@ def validate_cross_module_contracts(
     policy_code: str, skills: dict[str, str] | None = None
 ) -> None:
     """Checks static cross-module `skills.*` imports, signatures, and `self.*` calls."""
-    skills_map = dict(skills or {})
+    skills_map: dict[str, str] = {}
+    for raw_k, raw_v in (skills or {}).items():
+        nk = normalize_skill_key(raw_k)
+        if nk:
+            skills_map[nk] = raw_v
+    known_keys = set(skills_map.keys())
+    pkg_names = {k.split("/", 1)[0] for k in known_keys if "/" in k}
     parsed_skills: dict[str, ast.Module] = {}
     skill_fn_sigs: dict[str, dict[str, tuple[int, int, bool, set[str]]]] = {}
 
     for s_name, s_src in skills_map.items():
         if not str(s_src or "").strip():
             continue
+        rel_fn = skill_key_to_relpath(s_name)
         try:
-            s_tree = ast.parse(s_src, filename=f"skills/{s_name}.py")
+            s_tree = ast.parse(s_src, filename=rel_fn)
         except SyntaxError:
             continue
         parsed_skills[s_name] = s_tree
@@ -1754,7 +1845,7 @@ def validate_cross_module_contracts(
             elif isinstance(node, ast.ImportFrom) and node.module:
                 src_mod = str(node.module)
                 if src_mod.startswith("skills."):
-                    dep_mod = src_mod.split(".", 1)[1].split(".", 1)[0]
+                    dep_mod = resolve_skill_import(src_mod, known_keys)
                     dep_exports = _collect_skill_exports(dep_mod, visited)
                     dep_sigs = skill_fn_sigs.get(dep_mod, {})
                     for al in node.names:
@@ -1787,7 +1878,7 @@ def validate_cross_module_contracts(
         return
 
     modules_to_check: list[tuple[str, ast.Module]] = [("policy.py", p_tree)] + [
-        (f"skills/{k}.py", v) for k, v in parsed_skills.items()
+        (skill_key_to_relpath(k), v) for k, v in parsed_skills.items()
     ]
 
     for fname, tree in modules_to_check:
@@ -1797,10 +1888,20 @@ def validate_cross_module_contracts(
             if isinstance(node, ast.ImportFrom) and node.module:
                 mod = node.module
                 if mod.startswith("skills."):
-                    s_mod = mod.split(".", 1)[1].split(".", 1)[0]
+                    tail = mod[len("skills.") :]
+                    if tail in pkg_names and tail not in skills_map:
+                        for al in node.names:
+                            sub_k = f"{tail}/{al.name}"
+                            if sub_k not in skills_map:
+                                raise PolicyValidationError(
+                                    f"Cross-module error in {fname}: imports missing skill module 'skills.{tail}.{al.name}'."
+                                )
+                            module_aliases[al.asname or al.name] = sub_k
+                        continue
+                    s_mod = resolve_skill_import(mod, known_keys)
                     if s_mod not in skills_map:
                         raise PolicyValidationError(
-                            f"Cross-module error in {fname}: imports missing skill module 'skills.{s_mod}'."
+                            f"Cross-module error in {fname}: imports missing skill module '{mod}'."
                         )
                     mod_exports = (
                         _collect_skill_exports(s_mod)
@@ -1812,16 +1913,16 @@ def validate_cross_module_contracts(
                             continue
                         if mod_exports is not None and al.name not in mod_exports:
                             raise PolicyValidationError(
-                                f"Cross-module error in {fname}: 'skills.{s_mod}' has no symbol '{al.name}'."
+                                f"Cross-module error in {fname}: '{skill_key_to_module(s_mod)}' has no symbol '{al.name}'."
                             )
                         direct_imports[al.asname or al.name] = (s_mod, al.name)
             elif isinstance(node, ast.Import):
                 for al in node.names:
                     if al.name.startswith("skills."):
-                        s_mod = al.name.split(".", 1)[1].split(".", 1)[0]
+                        s_mod = resolve_skill_import(al.name, known_keys)
                         if s_mod not in skills_map:
                             raise PolicyValidationError(
-                                f"Cross-module error in {fname}: imports missing skill module 'skills.{s_mod}'."
+                                f"Cross-module error in {fname}: imports missing skill module '{al.name}'."
                             )
                         if al.asname:
                             module_aliases[al.asname] = s_mod
@@ -1897,11 +1998,15 @@ def run_pyright_on_package(
         skills_dir.mkdir(parents=True, exist_ok=True)
         (skills_dir / "__init__.py").write_text("", encoding="utf-8")
         for s_name, s_src in skills_map.items():
-            clean_k = str(s_name or "").strip().removesuffix(".py")
+            clean_k = normalize_skill_key(s_name)
             if clean_k and str(s_src or "").strip():
-                (skills_dir / f"{clean_k}.py").write_text(
-                    prelude_header + str(s_src), encoding="utf-8"
-                )
+                dst = skills_dir / f"{clean_k}.py"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if "/" in clean_k:
+                    pkg_init = dst.parent / "__init__.py"
+                    if not pkg_init.exists():
+                        pkg_init.write_text("", encoding="utf-8")
+                dst.write_text(prelude_header + str(s_src), encoding="utf-8")
 
         # Write cached lox.*.pyi & _lox_prelude.pyi stubs under typings/
         typings_dir = root / "typings"
@@ -1948,10 +2053,11 @@ def run_pyright_on_package(
                 msg = str(d.get("message", "") or "").strip()
                 if 'Cannot access attribute "param" for class "Policy"' in msg:
                     continue
-                fpath = str(d.get("file", "") or "")
-                rel_f = os.path.basename(fpath) if fpath else "policy.py"
-                if "/skills/" in fpath.replace("\\", "/"):
-                    rel_f = f"skills/{rel_f}"
+                fpath = str(d.get("file", "") or "").replace("\\", "/")
+                if "/skills/" in fpath:
+                    rel_f = f"skills/{fpath.split('/skills/', 1)[1]}"
+                else:
+                    rel_f = os.path.basename(fpath) if fpath else "policy.py"
                 raw_line = int(
                     ((d.get("range") or {}).get("start") or {}).get("line", 0)
                 )

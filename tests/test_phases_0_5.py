@@ -123,7 +123,7 @@ def test_phase1_cli_args_wiki_and_prompts():
     assert args_def.reasoning_effort == "medium"
     assert args_def.seeds == 64
     assert args_def.race_seeds == 32
-    assert args_def.scenario_gate == "advisory"
+    assert args_def.scenario_gate == "off"
 
     args_custom = parse_args(
         [

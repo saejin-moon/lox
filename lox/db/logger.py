@@ -710,7 +710,7 @@ class BatchDatabaseLogger:
             )
             if (
                 verdict.get("passed")
-                and mode != "PILOT"
+                and mode not in ("PILOT", "SWARM")
                 and (hypothesis.get("verified_c_rule") or hypothesis.get("mechanism"))
             ):
                 try:

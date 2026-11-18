@@ -115,7 +115,7 @@ class DeficitReport:
             lines.append(f"- Recent Outcome Distribution (diagnose freely): {hist_str}")
         if self.plateau_hints:
             lines.append(
-                "- MAP-Elites Diversity Stepping Stones (inspect code via `read_policy('<cell_id>')`; archived snapshots are NOT in `runs`/`batches` tables): "
+                "- Near-Miss Stepping Stones (recent frontier challengers; inspect code/diffs to synthesize improvements): "
                 + " | ".join(self.plateau_hints[:4])
             )
         if self.recent_attempts:
@@ -598,7 +598,8 @@ class DeficitAnalyzer:
     @classmethod
     def _populate_d_fail_clusters(cls, con: Any, report: DeficitReport) -> None:
         where_runs = cls._valid_runs_clause(con)
-        rows = con.execute(
+        # Fetch up to 64 runs from the latest batch/window without dropping short-turn early deaths!
+        raw_rows = con.execute(
             f"""
             SELECT run_id, seed, depth, max_depth, turns, end_reason,
                    unique_tiles, pct_wait, pct_search,
@@ -613,12 +614,29 @@ class DeficitAnalyzer:
                    COALESCE(RIGHT(game_log, 600), '') AS game_log_tail
             FROM runs
             WHERE {where_runs}
-            ORDER BY generation DESC, turns DESC
-            LIMIT 48
+            ORDER BY generation DESC, turns ASC
+            LIMIT 96
             """
         ).fetchall()
-        if not rows:
+        if not raw_rows:
             return
+        if len(raw_rows) <= 64:
+            rows = list(raw_rows)
+        else:
+            # Stratified across shortest early deaths/stalls (16), median (16), deepest/longest (16), + remaining recent
+            by_turns = sorted(raw_rows, key=lambda x: int(x[4] or 0))
+            by_depth = sorted(raw_rows, key=lambda x: int(x[3] or 1), reverse=True)
+            mid_start = max(0, (len(by_turns) // 2) - 8)
+            picked: dict[str, tuple[Any, ...]] = {}
+            for r in (
+                by_turns[:20] + by_turns[mid_start : mid_start + 16] + by_depth[:16]
+            ):
+                picked[str(r[0])] = r
+            for r in raw_rows:
+                if len(picked) >= 64:
+                    break
+                picked.setdefault(str(r[0]), r)
+            rows = list(picked.values())
 
         # Build raw end_reason histogram across recent runs so peers freely diagnose root causes
         end_counts: dict[str, list[float]] = {}

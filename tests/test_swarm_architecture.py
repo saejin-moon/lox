@@ -1427,10 +1427,19 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
         seeds=[1000, 1001],
     )
     assert len(eval_calls) == 2  # Incumbent once + cand_a once
+    cand_a2 = PeerCandidate(
+        peer_id="peer_a2",
+        claimed_deficit_id="explore",
+        claimed_label="fresh variant",
+        policy_code=base_pol + "\ndef _variant_step():\n    return 1\n",
+        skills=base_skills,
+        sandbox_passed=True,
+        loc_total=len(base_pol.splitlines()),
+    )
     eval_calls.clear()
     referee.evaluate_tournament(
         generation=5,
-        candidates=[cand_a],
+        candidates=[cand_a2],
         base_policy=base_pol,
         base_skills=base_skills,
         eval_pool=c_pool,
@@ -1439,10 +1448,19 @@ def test_democratized_peer_swarm_incubation_and_crn_tournament(tmp_path):
     assert len(eval_calls) == 1  # Incumbent served from CRN cache!
 
     # Increasing max_steps tier invalidates cached incumbent cleanly
+    cand_a3 = PeerCandidate(
+        peer_id="peer_a3",
+        claimed_deficit_id="explore",
+        claimed_label="fresh tier variant",
+        policy_code=base_pol + "\ndef _variant_step_2():\n    return 2\n",
+        skills=base_skills,
+        sandbox_passed=True,
+        loc_total=len(base_pol.splitlines()),
+    )
     eval_calls.clear()
     referee.evaluate_tournament(
         generation=6,
-        candidates=[cand_a],
+        candidates=[cand_a3],
         base_policy=base_pol,
         base_skills=base_skills,
         eval_pool=c_pool,
@@ -1738,12 +1756,16 @@ def test_ast_modularizer_hysteresis_incremental_and_orchestrator(tmp_path):
     )
     try:
         res = orch.run_generation(1)
-        assert res["promoted"] is True
+        # Pre-gen side cohesion refactor writes modular files without falsely forcing promoted=True!
+        assert res["promoted"] is False
         written_pol = (ws_dir / "policy.py").read_text(encoding="utf-8")
         assert len(written_pol.splitlines()) < 60
         skill_files = {
-            p.stem: p.read_text(encoding="utf-8")
-            for p in (ws_dir / "skills").glob("*.py")
+            str(p.relative_to(ws_dir / "skills"))
+            .removesuffix(".py")
+            .replace("\\", "/"): p.read_text(encoding="utf-8")
+            for p in (ws_dir / "skills").rglob("*.py")
+            if p.name != "__init__.py"
         }
         assert "shared" in skill_files and len(skill_files) >= 2
         con = connect_db(db_path, read_only=True)
@@ -1948,7 +1970,7 @@ def test_gen41_prompt_grounding_and_xml_instructions():
     assert "query_wiki" in usr_prompt
     assert "query_theories" in usr_prompt
     assert "Recent Experiment & Rejection Memory" in usr_prompt
-    assert '<skill_code module="name">' in usr_prompt
+    assert '<skill_code module="' in usr_prompt
     assert "<policy_code>" in usr_prompt
     assert "skills={{" not in usr_prompt
 
@@ -3151,7 +3173,8 @@ def test_swarm_referee_stall_tol_holdout_telemetry_and_experiments_discoveries(
 
     assert len(seen_holdout_sets) >= 1
     assert len(seen_holdout_sets[0]) == 16
-    assert all(100_000 <= s < 100_064 for s in seen_holdout_sets[0])
+    assert all(s >= 100_100 for s in seen_holdout_sets[0])
+    assert len(set(seen_holdout_sets[0])) == 16
     con2 = connect_db(db2, read_only=True)
     try:
         assert (
@@ -3266,7 +3289,7 @@ def test_map_elites_v2_calibration_deficits_confinement_and_private_symbols(tmp_
     )
     assert "closed obstacle" in conf_c.evidence
 
-    # 4. Tier-1 SWARM_PEER manifest includes private _helpers and module constants
+    # 4. Tier-1 SWARM_PEER compact Domain Tree Index includes public entrypoints without bloated private dumps
     prompt = build_user_prompt(
         generation=2,
         mode="SWARM_PEER",
@@ -3276,8 +3299,9 @@ def test_map_elites_v2_calibration_deficits_confinement_and_private_symbols(tmp_
         },
         recent_discoveries=[],
     )
-    assert "_private_helper" in prompt
-    assert "_STALL_CAP" in prompt
+    assert "skills/nav.py" in prompt
+    assert "public_step" in prompt
+    assert "read_skill" in prompt
 
 
 def test_swarm_referee_promotes_explorer_over_wait_zombie_incumbent_and_preserves_ticks(
@@ -3663,12 +3687,19 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
     )
     try:
         res = orch.run_generation(16)
-        assert res["promoted"] is True
+        assert res["promoted"] is False
         disk_skills = {
-            p.stem: p.read_text(encoding="utf-8") for p in (ws / "skills").glob("*.py")
+            str(p.relative_to(ws / "skills"))
+            .removesuffix(".py")
+            .replace("\\", "/"): p.read_text(encoding="utf-8")
+            for p in (ws / "skills").rglob("*.py")
+            if p.name != "__init__.py"
         }
-        assert len(disk_skills) >= 3
-        assert len(disk_skills["exploration"].splitlines()) < 30
+        assert len(disk_skills) >= 2
+        assert "exploration/core" in disk_skills
+        assert len(disk_skills["exploration/core"].splitlines()) < len(
+            bloated_real_skill.splitlines()
+        )
         con = connect_db(dbp, read_only=True)
         try:
             row = con.execute(

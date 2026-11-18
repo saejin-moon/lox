@@ -457,9 +457,14 @@ class AuthorAgent:
         out: dict[str, str] = {}
 
         def _store(raw_name: str, raw_src: str) -> None:
-            mod_name = re.sub(r"[^a-zA-Z0-9_]", "_", raw_name.strip().lower()).strip(
-                "_"
-            )
+            from lox.lang.validator import normalize_skill_key
+
+            try:
+                mod_name = normalize_skill_key(raw_name)
+            except Exception:
+                mod_name = re.sub(
+                    r"[^a-zA-Z0-9_/]", "_", raw_name.strip().lower()
+                ).strip("_/")
             if not mod_name:
                 return
             s_clean = AuthorAgent._sanitize_skill_code(raw_src.strip())
@@ -481,7 +486,7 @@ class AuthorAgent:
             _store(mod_name, s_raw)
 
         for m in re.finditer(
-            r"###\s*skill:\s*([A-Za-z0-9_.-]+)\s*\n+```(?:python)?\s*\n(.*?)```",
+            r"###\s*skill:\s*([A-Za-z0-9_./-]+)\s*\n+```(?:python)?\s*\n(.*?)```",
             text,
             flags=re.DOTALL | re.IGNORECASE,
         ):
@@ -559,8 +564,20 @@ class AuthorAgent:
         elif name == "read_skill":
             skill_name = str(args.get("skill_name", ""))
             policy_id = str(args.get("policy_id", ""))
-            out, summary = self.tools.read_skill(skill_name, policy_id=policy_id)
+            start_line = int(args.get("start_line", 1) or 1)
+            raw_end = args.get("end_line")
+            end_line = int(raw_end) if raw_end is not None else None
+            out, summary = self.tools.read_skill(
+                skill_name,
+                policy_id=policy_id,
+                start_line=start_line,
+                end_line=end_line,
+            )
             arg_disp = f"{skill_name}@{policy_id}" if policy_id else skill_name
+        elif name == "read_symbol":
+            q_name = str(args.get("qualified_name", ""))
+            out, summary = self.tools.read_symbol(q_name)
+            arg_disp = q_name[:40]
         elif name == "read_policy":
             policy_id = str(args.get("policy_id", ""))
             out, summary = self.tools.read_policy(policy_id)
@@ -593,6 +610,9 @@ class AuthorAgent:
             pat = str(args.get("pattern", ""))
             out, summary = self.tools.grep_skills(pat)
             arg_disp = pat[:35]
+        elif name == "architecture_map":
+            out, summary = self.tools.architecture_map()
+            arg_disp = "architecture"
         elif name == "blackboard_map":
             out, summary = self.tools.blackboard_map()
             arg_disp = "all keys"
@@ -1470,7 +1490,9 @@ class AuthorAgent:
                     "benchmark_expert_parity",
                     "find_references",
                     "grep_skills",
+                    "architecture_map",
                     "blackboard_map",
+                    "read_symbol",
                 ):
                     research_tools_called.add(t_name)
                     if t_name == "read_wiki_article":

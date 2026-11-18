@@ -18,6 +18,7 @@ def reset_clean(
     macros_path: str = MACROS_PATH,
     theories_path: str | None = None,
     frontier_dir: str | None = None,
+    seed_starter: bool = False,
 ):
     import shutil
     from pathlib import Path
@@ -41,6 +42,25 @@ def reset_clean(
         shutil.rmtree(skills_dir)
         skills_dir.mkdir(parents=True, exist_ok=True)
         print(f"Cleared {skills_dir}")
+
+    if seed_starter:
+        from lox.lang.starter import build_clean_option_a_starter
+        from lox.lang.validator import skill_key_to_relpath
+
+        starter_pol, starter_skills = build_clean_option_a_starter()
+        Path(policy_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(policy_path).write_text(starter_pol, encoding="utf-8")
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / "__init__.py").write_text("", encoding="utf-8")
+        for s_name, s_src in starter_skills.items():
+            dst = workspace_dir / skill_key_to_relpath(s_name)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.parent != skills_dir:
+                pkg_init = dst.parent / "__init__.py"
+                if not pkg_init.exists():
+                    pkg_init.write_text("", encoding="utf-8")
+            dst.write_text(s_src, encoding="utf-8")
+        print(f"Seeded bare Option-A Gen 0 starter ({len(starter_skills)} modules)")
 
     t_path = (
         Path(theories_path) if theories_path else (workspace_dir / "theories.lance")

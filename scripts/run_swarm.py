@@ -95,8 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scenario-gate",
         choices=["off", "advisory", "strict"],
-        default="advisory",
-        help="Mid-game MiniHack scenario & prompt-torture curriculum gate mode (default: advisory).",
+        default="off",
+        help="Optional synthetic scenario gate mode (default: off; organic FrontierArchive is always preferred).",
     )
     parser.add_argument(
         "--db-path",
