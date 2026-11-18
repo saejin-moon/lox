@@ -536,12 +536,17 @@ def mark_outlier_good_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # Composite progression index: prioritizes max_depth, branches explored, xp_level, AC improvement, score, then turns
     scores = np.array(
         [
-            float(r.get("max_depth", 1)) * 100.0
+            float(r.get("max_depth") or 1) * 100.0
             + float(max(0, _run_dungeons_count(r) - 1)) * 40.0
-            + float(r.get("xp_level", 1)) * 15.0
-            + max(0.0, 10.0 - float(r.get("final_ac", 10))) * 6.0
-            + float(r.get("score", 0)) * 0.05
-            + min(float(r.get("turns", 0)), 2000.0) * 0.005
+            + float(r.get("xp_level") or 1) * 15.0
+            + max(
+                0.0,
+                10.0
+                - float(r.get("final_ac") if r.get("final_ac") is not None else 10),
+            )
+            * 6.0
+            + float(r.get("score") or 0) * 0.05
+            + min(float(r.get("turns") or 0), 2000.0) * 0.005
             for r in runs
         ],
         dtype=np.float64,
@@ -627,10 +632,19 @@ def compute_function_stats(
 
     for r in runs:
         raw_t = r.get("triggered_functions") or r.get("functions_triggered") or "{}"
-        t_dict = json.loads(raw_t) if isinstance(raw_t, str) else dict(raw_t or {})
+        if isinstance(raw_t, str):
+            try:
+                t_dict = json.loads(raw_t or "{}")
+            except Exception:
+                t_dict = {}
+        else:
+            t_dict = dict(raw_t or {})
         u_dict = r.get("fn_turns") or r.get("function_turns") or {}
         if isinstance(u_dict, str):
-            u_dict = json.loads(u_dict)
+            try:
+                u_dict = json.loads(u_dict or "{}")
+            except Exception:
+                u_dict = {}
         parsed_trig.append(t_dict)
         parsed_turns.append(u_dict)
         all_fns.update(t_dict.keys())
@@ -664,12 +678,7 @@ def compute_function_stats(
                     e_good += 1
                 else:
                     e_bad += 1
-                ms = r.get("milestones") or {}
-                if isinstance(ms, str):
-                    try:
-                        ms = json.loads(ms)
-                    except Exception:
-                        ms = {}
+                ms = _extract_run_milestones(r)
                 pre_inf = r.get("pre_inflection_function") or ms.get(
                     "pre_inflection_function"
                 )
@@ -815,20 +824,40 @@ def build_batch_contrast_digest(
     normals = [r for r in runs if not r.get("is_outlier_good")]
 
     out_d = (
-        float(np.mean([r.get("max_depth", 1) for r in outliers])) if outliers else 0.0
+        float(np.mean([float(r.get("max_depth") or 1) for r in outliers]))
+        if outliers
+        else 0.0
     )
     norm_d = (
-        float(np.mean([r.get("max_depth", 1) for r in normals])) if normals else 0.0
+        float(np.mean([float(r.get("max_depth") or 1) for r in normals]))
+        if normals
+        else 0.0
     )
-    out_s = float(np.mean([r.get("score", 0) for r in outliers])) if outliers else 0.0
-    norm_s = float(np.mean([r.get("score", 0) for r in normals])) if normals else 0.0
-    out_t = float(np.mean([r.get("turns", 0) for r in outliers])) if outliers else 0.0
-    norm_t = float(np.mean([r.get("turns", 0) for r in normals])) if normals else 0.0
+    out_s = (
+        float(np.mean([float(r.get("score") or 0) for r in outliers]))
+        if outliers
+        else 0.0
+    )
+    norm_s = (
+        float(np.mean([float(r.get("score") or 0) for r in normals]))
+        if normals
+        else 0.0
+    )
+    out_t = (
+        float(np.mean([float(r.get("turns") or 0) for r in outliers]))
+        if outliers
+        else 0.0
+    )
+    norm_t = (
+        float(np.mean([float(r.get("turns") or 0) for r in normals]))
+        if normals
+        else 0.0
+    )
 
     lines = [
         f"### Batch Overview (`{batch_stats.get('batch_id', 'latest')}`):",
-        f"- **Episodes Recorded**: {len(runs)} (Discarded untriggered: {batch_stats.get('episodes_discarded', 0)})",
-        f"- **Overall Depth**: Avg={batch_stats.get('avg_depth', 0.0):.2f} | P90={batch_stats.get('p90_depth', 0.0):.1f} | Max={batch_stats.get('max_depth', 1)}",
+        f"- **Episodes Recorded**: {len(runs)} (Discarded untriggered: {batch_stats.get('episodes_discarded') or 0})",
+        f"- **Overall Depth**: Avg={float(batch_stats.get('avg_depth') or 0.0):.2f} | P90={float(batch_stats.get('p90_depth') or 0.0):.1f} | Max={batch_stats.get('max_depth') or 1}",
         f"- **Outlier Good Runs (`is_outlier_good = TRUE`, count={len(outliers)}) vs Normal Runs (count={len(normals)})**:",
         f"  * Outlier Good Runs: Avg MaxDepth={out_d:.2f}, Avg Score={out_s:.1f}, Avg Turns={out_t:.1f}",
         f"  * Normal Runs:       Avg MaxDepth={norm_d:.2f}, Avg Score={norm_s:.1f}, Avg Turns={norm_t:.1f}",
@@ -1051,7 +1080,7 @@ def build_batch_contrast_digest(
     )
 
     if stairs_seen > 0:
-        descended_runs = sum(1 for r in stair_runs if int(r.get("max_depth", 1)) > 1)
+        descended_runs = sum(1 for r in stair_runs if int(r.get("max_depth") or 1) > 1)
         remained_runs = stairs_seen - descended_runs
         conv_rate = descended_runs * 100.0 / stairs_seen
         lines.append(
@@ -1365,7 +1394,7 @@ def build_batch_contrast_digest(
             lethal_runs,
             key=lambda x: (
                 cause_freq[str(x.get("end_reason", "ended"))],
-                int(x.get("max_depth", 1)),
+                int(x.get("max_depth") or 1),
             ),
             reverse=True,
         ):
@@ -1391,7 +1420,8 @@ def build_batch_contrast_digest(
                 )
                 lines.append(
                     f"- **Run `{ex.get('run_id')}`** (Seed={ex.get('seed')}, Dlvl={ex.get('depth', ex.get('max_depth', 1))}, "
-                    f"XL={ex.get('final_xp_level', 1)}, HP={ex.get('final_hp', 0)}/{ex.get('final_max_hp', 0)}, "
+                    f"XL={ex.get('final_xp_level', ex.get('xp_level', 1)) or 1}, "
+                    f"HP={ex.get('final_hp', 0) or 0}/{ex.get('final_max_hp', ex.get('max_hp', 0)) or 0}, "
                     f"AC={ex.get('final_ac', 10)}, ActiveFn=`{ex.get('last_active_function', 'root')}`, "
                     f"End=`{ex.get('end_reason', 'ended')}`):\n"
                     f"  * **Terminal Inventory**: `{fin_inv[:800] if fin_inv else 'n/a'}`\n"
@@ -1425,7 +1455,7 @@ def build_batch_contrast_digest(
             lines.append(
                 f"- **Run `{ex.get('run_id')}`** (Seed={ex.get('seed')}, Dlvl={ex.get('depth', ex.get('max_depth', 1))}, "
                 f"Turns={ex.get('turns', 0)}, Steps={ex.get('steps', 0)}, "
-                f"HP={ex.get('final_hp', 0)}/{ex.get('final_max_hp', 0)}, AC={ex.get('final_ac', 10)}, "
+                f"HP={ex.get('final_hp', 0) or 0}/{ex.get('final_max_hp', ex.get('max_hp', 0)) or 0}, AC={ex.get('final_ac', 10) if ex.get('final_ac') is not None else 10}, "
                 f"LastActiveFn=`{ex.get('last_active_function', 'root')}`, TopStalledFn=`{top_stag_fn}` ({stag_turns} turns), Downstairs={stairs_status}):\n"
                 f"  * **Terminal Inventory**: `{fin_inv[:800] if fin_inv else 'n/a'}`\n"
                 f"  * **Final 8 Game Log Messages**:\n```text\n{tail_log}\n```"

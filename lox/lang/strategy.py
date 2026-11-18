@@ -112,6 +112,12 @@ class StrategyStack:
         for cand in self._registered:
             if cand.priority <= cur_prio and self._stack:
                 break
+            if cand.until is not None:
+                try:
+                    if cand.until(state, bb):
+                        continue
+                except Exception:
+                    pass
             should_fire = False
             if cand.preempt_if is not None:
                 try:
@@ -157,12 +163,15 @@ class StrategyStack:
                         if act is not None:
                             return act
                         continue
+                    except Exception:
+                        self._pop_top(state, bb, run_cleanup=False)
+                        raise
                     return act
                 else:
                     # Single-step function frame
                     if out is not None:
                         return out
-                    self._pop_top(state, bb, run_cleanup=False)
+                    self._pop_top(state, bb, run_cleanup=True)
                     continue
             else:
                 try:
@@ -174,6 +183,9 @@ class StrategyStack:
                     if act is not None:
                         return act
                     continue
+                except Exception:
+                    self._pop_top(state, bb, run_cleanup=False)
+                    raise
         return None
 
 

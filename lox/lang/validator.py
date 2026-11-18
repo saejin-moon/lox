@@ -236,14 +236,15 @@ def is_ast_equivalent(code1: str, code2: str) -> bool:
 
 def smart_dedent(code: str) -> str:
     """Smart dedents code even when comments or docstrings appear at column 0."""
-    lines = code.splitlines()
+    norm = (code or "").replace("\t", "    ")
+    lines = norm.splitlines()
     code_lines = [
         line_str
         for line_str in lines
         if line_str.strip() and not line_str.strip().startswith("#")
     ]
     if not code_lines:
-        return code
+        return norm
     common_indent = min(
         len(line_str) - len(line_str.lstrip()) for line_str in code_lines
     )
@@ -264,7 +265,7 @@ def smart_dedent(code: str) -> str:
                     else line_str.lstrip()
                 )
         return "\n".join(new_lines)
-    return code
+    return norm
 
 
 def splice_functions_into_policy(
@@ -291,7 +292,8 @@ def splice_functions_into_policy(
 
     base_tree = validate_python_code(base_policy_code, filename="<base_policy>")
 
-    # Locate target class (`Policy` or `Agent` or first ClassDef) in base_tree
+    # Locate target class (`Policy` or `Agent` or a stateful class with `self` methods) in base_tree;
+    # plain field-only @dataclass structs (e.g. ExploreState) must NOT act as target_class.
     target_class: ast.ClassDef | None = None
     for node in base_tree.body:
         if isinstance(node, ast.ClassDef) and node.name in ("Policy", "Agent"):
@@ -299,7 +301,11 @@ def splice_functions_into_policy(
             break
     if target_class is None:
         for node in base_tree.body:
-            if isinstance(node, ast.ClassDef):
+            if isinstance(node, ast.ClassDef) and any(
+                isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and bool(m.args.args and m.args.args[0].arg == "self")
+                for m in node.body
+            ):
                 target_class = node
                 break
 
@@ -375,21 +381,69 @@ def splice_functions_into_policy(
             if _assign_target_name(stmt) is not None
         }
 
-        def _insert_pos_for(stmt: ast.stmt) -> int:
-            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                idx = 0
+        def _refresh_top_indices() -> None:
+            nonlocal existing_top_classes, existing_top_assigns
+            existing_top_classes = {
+                stmt.name: idx
+                for idx, stmt in enumerate(base_tree.body)
+                if isinstance(stmt, ast.ClassDef)
+            }
+            existing_top_assigns = {
+                _assign_target_name(stmt): idx
+                for idx, stmt in enumerate(base_tree.body)
+                if _assign_target_name(stmt) is not None
+            }
+
+        def _is_future_import(stmt: ast.stmt) -> bool:
+            return isinstance(stmt, ast.ImportFrom) and stmt.module == "__future__"
+
+        def _goal_reg_key(stmt: ast.stmt) -> str | None:
+            if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+                return None
+            call = stmt.value
+            fn = call.func
+            fn_nm = (
+                fn.id
+                if isinstance(fn, ast.Name)
+                else (fn.attr if isinstance(fn, ast.Attribute) else "")
+            )
+            if fn_nm != "register_goal":
+                return None
+            if (
+                call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+            ):
+                return call.args[0].value
+            for kw in call.keywords:
                 if (
-                    base_tree.body
-                    and isinstance(base_tree.body[0], ast.Expr)
-                    and isinstance(base_tree.body[0].value, ast.Constant)
-                    and isinstance(base_tree.body[0].value.value, str)
+                    kw.arg == "name"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
                 ):
-                    idx = 1
+                    return kw.value.value
+            return None
+
+        def _insert_pos_for(stmt: ast.stmt) -> int:
+            doc_offset = 0
+            if (
+                base_tree.body
+                and isinstance(base_tree.body[0], ast.Expr)
+                and isinstance(base_tree.body[0].value, ast.Constant)
+                and isinstance(base_tree.body[0].value.value, str)
+            ):
+                doc_offset = 1
+            if _is_future_import(stmt):
+                return doc_offset
+            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                idx = doc_offset
                 while idx < len(base_tree.body) and isinstance(
                     base_tree.body[idx], (ast.Import, ast.ImportFrom)
                 ):
                     idx += 1
                 return idx
+            if isinstance(stmt, (ast.Expr, ast.If)):
+                return len(base_tree.body)
             for j, st in enumerate(base_tree.body):
                 if isinstance(
                     st, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
@@ -403,6 +457,7 @@ def splice_functions_into_policy(
                     base_tree.body[existing_top_classes[extra.name]] = extra
                 else:
                     base_tree.body.insert(_insert_pos_for(extra), extra)
+                    _refresh_top_indices()
                 changed_top.append(extra.name)
             elif isinstance(extra, ast.ImportFrom):
                 matched_idx = None
@@ -417,22 +472,42 @@ def splice_functions_into_policy(
                 if matched_idx is not None:
                     ex_if = base_tree.body[matched_idx]
                     assert isinstance(ex_if, ast.ImportFrom)
-                    have = {(a.name, a.asname) for a in ex_if.names}
-                    for a in extra.names:
-                        if (a.name, a.asname) not in have:
-                            ex_if.names.append(copy.deepcopy(a))
-                            have.add((a.name, a.asname))
-                            changed_top.append(f"import:{extra.module or ''}.{a.name}")
+                    if any(a.name == "*" for a in extra.names):
+                        if not any(a.name == "*" for a in ex_if.names):
+                            ex_if.names = [ast.alias(name="*", asname=None)]
+                            changed_top.append(f"import:{extra.module or ''}.*")
+                    elif not any(a.name == "*" for a in ex_if.names):
+                        have = {(a.name, a.asname) for a in ex_if.names}
+                        for a in extra.names:
+                            if (a.name, a.asname) not in have:
+                                ex_if.names.append(copy.deepcopy(a))
+                                have.add((a.name, a.asname))
+                                changed_top.append(
+                                    f"import:{extra.module or ''}.{a.name}"
+                                )
                 else:
                     base_tree.body.insert(_insert_pos_for(extra), extra)
+                    _refresh_top_indices()
                     changed_top.append(f"import:{extra.module or ''}")
             elif isinstance(extra, ast.Import):
                 raw = ast.unparse(extra).strip()
                 if raw not in existing_top_src:
                     base_tree.body.insert(_insert_pos_for(extra), extra)
                     existing_top_src.add(raw)
+                    _refresh_top_indices()
                     changed_top.append(raw)
             else:
+                reg_k = _goal_reg_key(extra)
+                if reg_k is not None:
+                    replaced_reg = False
+                    for idx_r, st_r in enumerate(base_tree.body):
+                        if _goal_reg_key(st_r) == reg_k:
+                            base_tree.body[idx_r] = extra
+                            replaced_reg = True
+                            changed_top.append(f"register_goal:{reg_k}")
+                            break
+                    if replaced_reg:
+                        continue
                 t_nm = _assign_target_name(extra)
                 if t_nm is not None and t_nm in existing_top_assigns:
                     old_dump = ast.dump(base_tree.body[existing_top_assigns[t_nm]])
@@ -445,16 +520,7 @@ def splice_functions_into_policy(
                     existing_top_src.add(ast.unparse(extra).strip())
                     if t_nm is not None:
                         changed_top.append(t_nm)
-                        existing_top_assigns = {
-                            _assign_target_name(s): i
-                            for i, s in enumerate(base_tree.body)
-                            if _assign_target_name(s) is not None
-                        }
-                        existing_top_classes = {
-                            s.name: i
-                            for i, s in enumerate(base_tree.body)
-                            if isinstance(s, ast.ClassDef)
-                        }
+                    _refresh_top_indices()
         return changed_top
 
     for node in patch_tree.body:
@@ -463,14 +529,12 @@ def splice_functions_into_policy(
                 node.name == target_class.name or node.name in ("Policy", "Agent")
             ):
                 for item in node.body:
-                    if isinstance(item, ast.FunctionDef):
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         patch_methods[item.name] = item
                     elif isinstance(item, (ast.Assign, ast.AnnAssign)):
                         c_nm = _assign_target_name(item)
                         if c_nm is not None:
                             patch_class_assigns[c_nm] = item
-                        else:
-                            target_class.body.insert(0, item)
             else:
                 patch_top_extras.append(node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -479,57 +543,149 @@ def splice_functions_into_policy(
                 patch_methods[node.name] = node
             elif target_class is not None:
                 existing_in_class = any(
-                    isinstance(m, ast.FunctionDef) and m.name == node.name
+                    isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and m.name == node.name
                     for m in target_class.body
                 )
-                if existing_in_class or node.name in self_attrs_referenced:
-                    node.args.args.insert(0, ast.arg(arg="self"))
+                if existing_in_class:
+                    if not (node.args.args and node.args.args[0].arg == "self"):
+                        node.args.args.insert(0, ast.arg(arg="self"))
                     patch_methods[node.name] = node
                 else:
                     patch_top_funcs[node.name] = node
             else:
                 patch_top_funcs[node.name] = node
-        elif isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign)):
+        elif isinstance(
+            node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.If)
+        ):
+            patch_top_extras.append(node)
+        elif isinstance(node, ast.Expr) and not (
+            isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+        ):
             patch_top_extras.append(node)
 
     # Merge top-level imports, constants, and helper classes BEFORE checking target_class is None
     # so modular skill patches (`skills/*.py`) keep imports & module constants too.
     top_changed = _merge_top_extras(patch_top_extras)
 
-    if target_class is None:
-        # Base has no class; merge top-level functions (deduplicating existing names in-place)
-        changed: list[str] = list(top_changed)
+    def _merge_top_funcs(funcs: dict[str, ast.FunctionDef]) -> list[str]:
+        """Replaces top-level functions in place (removing duplicates) and inserts new ones after imports."""
+        changed_top_fns: list[str] = []
+        if not funcs:
+            return changed_top_fns
+        seen_names: set[str] = set()
+        deduped_body: list[ast.stmt] = []
+        for stmt in base_tree.body:
+            if (
+                isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and stmt.name in funcs
+            ):
+                if stmt.name in seen_names:
+                    continue
+                seen_names.add(stmt.name)
+            deduped_body.append(stmt)
+        base_tree.body = deduped_body
+
         existing_map = {
             n.name: i
             for i, n in enumerate(base_tree.body)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
-        for name, fn_node in {**patch_top_funcs, **patch_methods}.items():
+        for name, fn_node in funcs.items():
             if name in existing_map:
-                if ast.dump(base_tree.body[existing_map[name]]) != ast.dump(fn_node):
-                    changed.append(name)
-                base_tree.body[existing_map[name]] = fn_node
+                idx = existing_map[name]
+                if ast.dump(base_tree.body[idx]) != ast.dump(fn_node):
+                    changed_top_fns.append(name)
+                base_tree.body[idx] = fn_node
             else:
-                changed.append(name)
-                base_tree.body.append(fn_node)
+                changed_top_fns.append(name)
+                insert_at = 0
+                if (
+                    base_tree.body
+                    and isinstance(base_tree.body[0], ast.Expr)
+                    and isinstance(base_tree.body[0].value, ast.Constant)
+                    and isinstance(base_tree.body[0].value.value, str)
+                ):
+                    insert_at = 1
+                while insert_at < len(base_tree.body) and isinstance(
+                    base_tree.body[insert_at],
+                    (
+                        ast.Import,
+                        ast.ImportFrom,
+                        ast.Assign,
+                        ast.AnnAssign,
+                        ast.FunctionDef,
+                        ast.AsyncFunctionDef,
+                    ),
+                ):
+                    insert_at += 1
+                base_tree.body.insert(insert_at, fn_node)
+                existing_map = {
+                    n.name: i
+                    for i, n in enumerate(base_tree.body)
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+        return changed_top_fns
+
+    if target_class is None:
+        # Base has no stateful class; merge top-level functions cleanly after imports/constants
+        changed = list(top_changed)
+        changed.extend(_merge_top_funcs({**patch_top_funcs, **patch_methods}))
         return ast.unparse(base_tree), changed
 
     # Merge any class-level assignments in-place onto target_class.body
     if patch_class_assigns:
-        existing_cls_assigns = {
-            _assign_target_name(st): idx
-            for idx, st in enumerate(target_class.body)
-            if _assign_target_name(st) is not None
-        }
-        for c_nm, c_stmt in reversed(list(patch_class_assigns.items())):
-            if c_nm in existing_cls_assigns:
-                target_class.body[existing_cls_assigns[c_nm]] = c_stmt
+        is_dataclass = any(
+            (isinstance(d, ast.Name) and d.id == "dataclass")
+            or (isinstance(d, ast.Attribute) and d.attr == "dataclass")
+            or (
+                isinstance(d, ast.Call)
+                and (
+                    (isinstance(d.func, ast.Name) and d.func.id == "dataclass")
+                    or (
+                        isinstance(d.func, ast.Attribute) and d.func.attr == "dataclass"
+                    )
+                )
+            )
+            for d in getattr(target_class, "decorator_list", [])
+        )
+        cls_doc_offset = (
+            1
+            if (
+                target_class.body
+                and isinstance(target_class.body[0], ast.Expr)
+                and isinstance(target_class.body[0].value, ast.Constant)
+                and isinstance(target_class.body[0].value.value, str)
+            )
+            else 0
+        )
+        for c_nm, c_stmt in patch_class_assigns.items():
+            repl_idx = next(
+                (
+                    idx
+                    for idx, st in enumerate(target_class.body)
+                    if _assign_target_name(st) == c_nm
+                ),
+                None,
+            )
+            if repl_idx is not None:
+                target_class.body[repl_idx] = c_stmt
+            elif is_dataclass:
+                ins_dc = cls_doc_offset
+                while ins_dc < len(target_class.body) and not isinstance(
+                    target_class.body[ins_dc],
+                    (ast.FunctionDef, ast.AsyncFunctionDef),
+                ):
+                    ins_dc += 1
+                target_class.body.insert(ins_dc, c_stmt)
             else:
-                target_class.body.insert(0, c_stmt)
+                target_class.body.insert(cls_doc_offset, c_stmt)
 
     # Compute which methods in patch_methods are genuinely new or modified compared to target_class
-    existing_methods: dict[str, ast.FunctionDef] = {
-        m.name: m for m in target_class.body if isinstance(m, ast.FunctionDef)
+    existing_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {
+        m.name: m
+        for m in target_class.body
+        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
     if "__init__" in existing_methods and "__init__" in patch_methods:
@@ -560,10 +716,38 @@ def splice_functions_into_policy(
         for stmt in patch_init.body:
             patch_assigned.update(_get_self_attrs(stmt))
 
+        def _local_bound_in(fn_n: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+            names = {
+                a.arg
+                for a in (
+                    list(fn_n.args.posonlyargs)
+                    + list(fn_n.args.args)
+                    + list(fn_n.args.kwonlyargs)
+                    + ([fn_n.args.vararg] if fn_n.args.vararg else [])
+                    + ([fn_n.args.kwarg] if fn_n.args.kwarg else [])
+                )
+            }
+            for st in fn_n.body:
+                if isinstance(st, ast.Assign):
+                    for t in st.targets:
+                        if isinstance(t, ast.Name):
+                            names.add(t.id)
+                elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name):
+                    names.add(st.target.id)
+            return names
+
+        exist_only_locals = _local_bound_in(exist_init) - _local_bound_in(patch_init)
         missing_stmts: list[ast.stmt] = []
         for stmt in exist_init.body:
             stmt_attrs = _get_self_attrs(stmt)
             if stmt_attrs and not (stmt_attrs & patch_assigned):
+                used_vars = {
+                    n.id
+                    for n in ast.walk(stmt)
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                }
+                if used_vars & exist_only_locals:
+                    continue
                 missing_stmts.append(copy.deepcopy(stmt))
                 patch_assigned.update(stmt_attrs)
 
@@ -594,7 +778,10 @@ def splice_functions_into_policy(
     new_class_body: list[ast.stmt] = []
     inserted: set[str] = set()
     for item in target_class.body:
-        if isinstance(item, ast.FunctionDef) and item.name in patch_methods:
+        if (
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name in patch_methods
+        ):
             new_class_body.append(patch_methods[item.name])
             inserted.add(item.name)
         else:
@@ -606,24 +793,19 @@ def splice_functions_into_policy(
 
     target_class.body = new_class_body
 
-    # Merge any top-level helper functions
-    existing_top = {
-        n.name: i
-        for i, n in enumerate(base_tree.body)
-        if isinstance(n, ast.FunctionDef)
-    }
-    for name, fn_node in patch_top_funcs.items():
+    # Merge any top-level helper functions cleanly after imports/constants (never at line 0)
+    for name in _merge_top_funcs(patch_top_funcs):
         if name not in changed_names:
             changed_names.append(name)
-        if name in existing_top:
-            base_tree.body[existing_top[name]] = fn_node
-        else:
-            base_tree.body.insert(0, fn_node)
 
     # If all methods matched identically, still report the method names present in patch_methods
     if not changed_names and patch_methods:
         changed_names = [k for k in patch_methods.keys() if k != "__init__"] or list(
             patch_methods.keys()
+        )
+    elif not changed_names and top_changed:
+        changed_names = [t for t in top_changed if not t.startswith("import")] or list(
+            top_changed
         )
 
     # When a caller entrypoint (`run`/`step`/`act`/`dispatch`) was modified alongside specific subroutines,
@@ -671,8 +853,8 @@ def prune_extracted_skill_functions(
                 if alias.asname:
                     imported_names.add(alias.asname)
 
-    called_bare_names: set[str] = set()
-    called_self_attrs: set[str] = set()
+    ref_bare_names: set[str] = set()
+    ref_self_attrs: set[str] = set()
     for node in pol_tree.body:
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -680,15 +862,14 @@ def prune_extracted_skill_functions(
         ):
             continue
         for sub in ast.walk(node):
-            if isinstance(sub, ast.Call):
-                if isinstance(sub.func, ast.Name):
-                    called_bare_names.add(sub.func.id)
-                elif (
-                    isinstance(sub.func, ast.Attribute)
-                    and isinstance(sub.func.value, ast.Name)
-                    and sub.func.value.id == "self"
-                ):
-                    called_self_attrs.add(sub.func.attr)
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                ref_bare_names.add(sub.id)
+            elif (
+                isinstance(sub, ast.Attribute)
+                and isinstance(sub.value, ast.Name)
+                and sub.value.id == "self"
+            ):
+                ref_self_attrs.add(sub.attr)
 
     pruned_names: list[str] = []
     new_body: list[ast.stmt] = []
@@ -697,7 +878,7 @@ def prune_extracted_skill_functions(
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name in skill_fn_names
         ):
-            if node.name in imported_names or node.name not in called_bare_names:
+            if node.name in imported_names or node.name not in ref_bare_names:
                 pruned_names.append(node.name)
                 continue
         elif isinstance(node, ast.ClassDef) and node.name in ("Policy", "Agent"):
@@ -716,7 +897,7 @@ def prune_extracted_skill_functions(
                         "__init__",
                     )
                 ):
-                    if item.name not in called_self_attrs:
+                    if item.name not in ref_self_attrs:
                         pruned_names.append(item.name)
                         continue
                 new_cls_body.append(item)
@@ -756,9 +937,12 @@ def audit_policy_ast_hygiene(policy_code: str) -> list[str]:
         ):
             nm = node.targets[0].id
             top_assign_counts[nm] = top_assign_counts.get(nm, 0) + 1
-        elif isinstance(node, ast.FunctionDef):
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            nm = node.target.id
+            top_assign_counts[nm] = top_assign_counts.get(nm, 0) + 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             top_fn_counts[node.name] = top_fn_counts.get(node.name, 0) + 1
-            top_fn_arity[node.name] = len(node.args.args)
+            top_fn_arity[node.name] = len(node.args.posonlyargs) + len(node.args.args)
         elif isinstance(node, ast.ClassDef) and node.name in ("Policy", "Agent"):
             policy_cls = node
 
@@ -776,7 +960,7 @@ def audit_policy_ast_hygiene(policy_code: str) -> list[str]:
 
     if policy_cls is not None:
         cls_assign_counts: dict[str, int] = {}
-        cls_methods: dict[str, ast.FunctionDef] = {}
+        cls_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
         cls_method_counts: dict[str, int] = {}
         for item in policy_cls.body:
             if (
@@ -786,7 +970,10 @@ def audit_policy_ast_hygiene(policy_code: str) -> list[str]:
             ):
                 nm = item.targets[0].id
                 cls_assign_counts[nm] = cls_assign_counts.get(nm, 0) + 1
-            elif isinstance(item, ast.FunctionDef):
+            elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                nm = item.target.id
+                cls_assign_counts[nm] = cls_assign_counts.get(nm, 0) + 1
+            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 cls_methods[item.name] = item
                 cls_method_counts[item.name] = cls_method_counts.get(item.name, 0) + 1
 
@@ -859,21 +1046,41 @@ def check_macro_contracts(policy_code: str, macros_code: str) -> list[str]:
     except Exception:
         return []
 
+    def _has_shallow_yield(fn_n: ast.AST) -> bool:
+        for ch in ast.iter_child_nodes(fn_n):
+            if isinstance(ch, (ast.Yield, ast.YieldFrom)):
+                return True
+            if not isinstance(
+                ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+            ):
+                if _has_shallow_yield(ch):
+                    return True
+        return False
+
     macro_specs: dict[str, dict[str, Any]] = {}
     for node in macro_tree.body:
-        if isinstance(node, ast.FunctionDef):
-            is_gen = any(
-                isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(node)
-            )
-            args = [a.arg for a in node.args.args if a.arg != "self"]
-            defaults_count = len(node.args.defaults)
-            min_args = len(args) - defaults_count
-            max_args = len(args)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            is_gen = _has_shallow_yield(node)
+            pos_args = [
+                a.arg
+                for a in (list(node.args.posonlyargs) + list(node.args.args))
+                if a.arg != "self"
+            ]
+            min_args = max(0, len(pos_args) - len(node.args.defaults))
+            max_args = len(pos_args) + len(node.args.kwonlyargs)
+            req_kwonly = {
+                a.arg
+                for a, d in zip(node.args.kwonlyargs, node.args.kw_defaults)
+                if d is None
+            }
             macro_specs[node.name] = {
                 "min_args": min_args,
                 "max_args": max_args,
+                "has_vararg": node.args.vararg is not None,
+                "has_kwarg": node.args.kwarg is not None,
+                "req_kwonly": req_kwonly,
                 "is_generator": is_gen,
-                "arg_names": set(args),
+                "arg_names": set(pos_args) | {a.arg for a in node.args.kwonlyargs},
             }
 
     if not macro_specs:
@@ -912,18 +1119,31 @@ def check_macro_contracts(policy_code: str, macros_code: str) -> list[str]:
 
             if fn_name:
                 spec = macro_specs[fn_name]
+                has_star = any(isinstance(a, ast.Starred) for a in node.args)
+                has_kwstar = any(kw.arg is None for kw in node.keywords)
                 passed_args = len(node.args)
-                passed_kwargs = len(node.keywords)
-                total_passed = passed_args + passed_kwargs
-                if total_passed < spec["min_args"]:
+                kw_names = {kw.arg for kw in node.keywords if kw.arg is not None}
+                total_passed = passed_args + len(node.keywords)
+                if not has_star and not has_kwstar and total_passed < spec["min_args"]:
                     errors.append(
                         f"MacroContractError: Macro '{fn_name}' requires at least {spec['min_args']} argument(s), "
                         f"but only {total_passed} were provided."
                     )
-                elif total_passed > spec["max_args"]:
+                elif (
+                    not spec["has_vararg"]
+                    and not spec["has_kwarg"]
+                    and not has_star
+                    and not has_kwstar
+                    and total_passed > spec["max_args"]
+                ):
                     errors.append(
                         f"MacroContractError: Macro '{fn_name}' takes at most {spec['max_args']} argument(s), "
                         f"but {total_passed} were provided."
+                    )
+                elif not has_kwstar and spec["req_kwonly"] - kw_names:
+                    miss_kw = sorted(spec["req_kwonly"] - kw_names)
+                    errors.append(
+                        f"MacroContractError: Macro '{fn_name}' missing required keyword-only argument(s): {miss_kw}."
                     )
 
                 # Check if generator macro is directly yielded (yield macro(...)) instead of (yield from macro(...))
@@ -1018,12 +1238,14 @@ def _try_merge_priority_selector_fn(
                     if isinstance(n.func, ast.Name)
                     else (n.func.attr if isinstance(n.func, ast.Attribute) else "")
                 )
-                if (
-                    fid in ("PrioritySelector", "BehaviorTree")
-                    and n.args
-                    and isinstance(n.args[0], ast.List)
-                ):
-                    found.append(n.args[0])
+                if fid in ("PrioritySelector", "BehaviorTree"):
+                    if n.args and isinstance(n.args[0], ast.List):
+                        found.append(n.args[0])
+                    else:
+                        for kw in n.keywords:
+                            if kw.arg == "children" and isinstance(kw.value, ast.List):
+                                found.append(kw.value)
+                                break
         return found
 
     ps_base = _find_ps_lists(fn_base)
@@ -1043,30 +1265,63 @@ def _try_merge_priority_selector_fn(
         return None
 
     ps_merged = _find_ps_lists(merged_fn)
+    import difflib
+
     for lb, la, lc, lm in zip(ps_base, ps_a, ps_b, ps_merged):
         base_dumps = [_node_dump(e) for e in lb.elts]
         a_dumps = [_node_dump(e) for e in la.elts]
         b_dumps = [_node_dump(e) for e in lc.elts]
-        # Simple 3-way list merge: keep surviving/updated base elements + append additions from A and B
-        a_set = set(a_dumps)
-        b_set = set(b_dumps)
+        # Position-preserving 3-way list merge keyed by base index boundaries.
+        sm_a = difflib.SequenceMatcher(None, base_dumps, a_dumps, autojunk=False)
+        sm_b = difflib.SequenceMatcher(None, base_dumps, b_dumps, autojunk=False)
+        a_ops = [op for op in sm_a.get_opcodes() if op[0] != "equal"]
+        b_ops = [op for op in sm_b.get_opcodes() if op[0] != "equal"]
+
+        # Map non-equal base spans and zero-width insertion points
+        edits_by_pos: list[tuple[int, int, str, list[ast.expr]]] = []
+        a_spans: list[tuple[int, int]] = []
+        for tag, i1, i2, j1, j2 in a_ops:
+            edits_by_pos.append((i1, i2, "a", list(la.elts[j1:j2])))
+            a_spans.append((i1, i2))
+
+        def _spans_overlap(s1: int, e1: int, s2: int, e2: int) -> bool:
+            if s1 == e1 and s2 == e2:
+                return s1 == s2
+            if s1 == e1:
+                return s2 < s1 < e2
+            if s2 == e2:
+                return s1 < s2 < e1
+            return max(s1, s2) < min(e1, e2)
+
+        for tag, i1, i2, j1, j2 in b_ops:
+            if any(_spans_overlap(i1, i2, a_i1, a_i2) for a_i1, a_i2 in a_spans):
+                # Identical edit in both branches is non-conflicting; divergent/overlapping edits abort.
+                matching_a = [
+                    e
+                    for e in edits_by_pos
+                    if e[0] == i1
+                    and e[1] == i2
+                    and [_node_dump(x) for x in e[3]] == b_dumps[j1:j2]
+                ]
+                if not matching_a:
+                    return None
+                continue
+            edits_by_pos.append((i1, i2, "b", list(lc.elts[j1:j2])))
+
+        # Reconstruct list in ascending base order preserving relative positions
+        edits_by_pos.sort(key=lambda e: (e[0], e[1]))
         new_elts: list[ast.expr] = []
-        seen_dumps: set[str] = set()
-        # Keep items from base present in both A and B (unless removed only by one -> respect removal)
-        for elt, d in zip(lb.elts, base_dumps):
-            if d in a_set and d in b_set and d not in seen_dumps:
+        cursor = 0
+        for i1, i2, _src, repl_elts in edits_by_pos:
+            while cursor < i1:
+                new_elts.append(copy.deepcopy(lb.elts[cursor]))
+                cursor += 1
+            for elt in repl_elts:
                 new_elts.append(copy.deepcopy(elt))
-                seen_dumps.add(d)
-        # Additions from A (or kept ordering relative to additions)
-        base_set = set(base_dumps)
-        for elt, d in zip(la.elts, a_dumps):
-            if d not in base_set and d not in seen_dumps:
-                new_elts.append(copy.deepcopy(elt))
-                seen_dumps.add(d)
-        for elt, d in zip(lc.elts, b_dumps):
-            if d not in base_set and d not in seen_dumps:
-                new_elts.append(copy.deepcopy(elt))
-                seen_dumps.add(d)
+            cursor = max(cursor, i2)
+        while cursor < len(lb.elts):
+            new_elts.append(copy.deepcopy(lb.elts[cursor]))
+            cursor += 1
         lm.elts = new_elts
     return merged_fn
 
@@ -1113,53 +1368,88 @@ def three_way_ast_merge(base_src: str, src_a: str, src_b: str) -> str | None:
         c_body: list[ast.stmt],
         allow_selector_merge: bool = False,
     ) -> list[ast.stmt] | None:
-        # Union-merge Import / ImportFrom statements first
-        imports_merged: list[ast.stmt] = []
-        import_from_map: dict[tuple[str | None, int], ast.ImportFrom] = {}
-        seen_imports: set[str] = set()
-        other_base: list[ast.stmt] = []
-        other_a: list[ast.stmt] = []
-        other_b: list[ast.stmt] = []
-
-        for body, bucket in (
-            (b_body, other_base),
-            (a_body, other_a),
-            (c_body, other_b),
-        ):
+        # Deletion-aware 3-way merge of Import / ImportFrom statements
+        def _collect_imp_tokens(
+            body: list[ast.stmt],
+        ) -> tuple[list[tuple[str, Any]], list[ast.stmt]]:
+            toks: list[tuple[str, Any]] = []
+            rest: list[ast.stmt] = []
             for st in body:
                 if isinstance(st, ast.ImportFrom):
-                    key = (st.module, int(st.level or 0))
-                    if key not in import_from_map:
-                        cp = copy.deepcopy(st)
-                        import_from_map[key] = cp
-                        imports_merged.append(cp)
-                    else:
-                        ex = import_from_map[key]
-                        have = {(al.name, al.asname) for al in ex.names}
-                        for al in st.names:
-                            if (al.name, al.asname) not in have:
-                                ex.names.append(copy.deepcopy(al))
-                                have.add((al.name, al.asname))
+                    lvl = int(st.level or 0)
+                    for al in st.names:
+                        toks.append(("from", (st.module, lvl, al.name, al.asname)))
                 elif isinstance(st, ast.Import):
-                    d = _node_dump(st)
-                    if d not in seen_imports:
-                        seen_imports.add(d)
-                        imports_merged.append(copy.deepcopy(st))
+                    for al in st.names:
+                        toks.append(("imp", (al.name, al.asname)))
                 else:
-                    bucket.append(st)
+                    rest.append(st)
+            return toks, rest
 
-        # Keep module docstring if any
-        doc_stmt: ast.stmt | None = None
-        for bucket in (other_a, other_b, other_base):
+        base_toks, other_base = _collect_imp_tokens(b_body)
+        a_toks, other_a = _collect_imp_tokens(a_body)
+        b_toks, other_b = _collect_imp_tokens(c_body)
+        base_tset, a_tset, b_tset = set(base_toks), set(a_toks), set(b_toks)
+        kept_toks: list[tuple[str, Any]] = []
+        seen_toks: set[tuple[str, Any]] = set()
+        for tok in a_toks + b_toks:
+            if tok in seen_toks:
+                continue
+            # Deletion in one branch when present in base removes it cleanly
+            if tok in base_tset and (tok not in a_tset or tok not in b_tset):
+                continue
+            seen_toks.add(tok)
+            kept_toks.append(tok)
+
+        # Keep `__future__` imports pinned first
+        kept_toks.sort(
+            key=lambda t: 0 if t[0] == "from" and t[1][0] == "__future__" else 1
+        )
+        imports_merged: list[ast.stmt] = []
+        import_from_map: dict[tuple[str | None, int], ast.ImportFrom] = {}
+        for kind, payload in kept_toks:
+            if kind == "from":
+                mod, lvl, nm, asnm = payload
+                key = (mod, lvl)
+                if key not in import_from_map:
+                    node = ast.ImportFrom(
+                        module=mod,
+                        names=[ast.alias(name=nm, asname=asnm)],
+                        level=lvl,
+                    )
+                    import_from_map[key] = node
+                    imports_merged.append(node)
+                else:
+                    import_from_map[key].names.append(ast.alias(name=nm, asname=asnm))
+            else:
+                nm, asnm = payload
+                imports_merged.append(
+                    ast.Import(names=[ast.alias(name=nm, asname=asnm)])
+                )
+
+        # 3-way merge module/class docstring cleanly
+        def _pop_doc(bucket: list[ast.stmt]) -> ast.stmt | None:
             if (
                 bucket
                 and isinstance(bucket[0], ast.Expr)
                 and isinstance(bucket[0].value, ast.Constant)
                 and isinstance(bucket[0].value.value, str)
             ):
-                if doc_stmt is None:
-                    doc_stmt = copy.deepcopy(bucket[0])
-                bucket.pop(0)
+                return bucket.pop(0)
+            return None
+
+        doc_base = _pop_doc(other_base)
+        doc_a = _pop_doc(other_a)
+        doc_b = _pop_doc(other_b)
+        db_d, da_d, dc_d = _node_dump(doc_base), _node_dump(doc_a), _node_dump(doc_b)
+        if da_d == dc_d:
+            doc_stmt = copy.deepcopy(doc_a) if doc_a is not None else None
+        elif da_d == db_d:
+            doc_stmt = copy.deepcopy(doc_b) if doc_b is not None else None
+        elif dc_d == db_d:
+            doc_stmt = copy.deepcopy(doc_a) if doc_a is not None else None
+        else:
+            return None
 
         def _index(
             stmts: list[ast.stmt],
@@ -1219,14 +1509,26 @@ def three_way_ast_merge(base_src: str, src_a: str, src_b: str) -> str | None:
                 )
                 if cls_body is None:
                     return None
-                merged_cls = copy.deepcopy(nb)
+                hb_b = [_node_dump(x) for x in nb.bases] + [
+                    _node_dump(x) for x in nb.decorator_list
+                ]
+                hb_a = [_node_dump(x) for x in na.bases] + [
+                    _node_dump(x) for x in na.decorator_list
+                ]
+                hb_c = [_node_dump(x) for x in nc.bases] + [
+                    _node_dump(x) for x in nc.decorator_list
+                ]
+                if hb_a != hb_b and hb_c != hb_b and hb_a != hb_c:
+                    return None
+                hdr_src = na if hb_a != hb_b else nc
+                merged_cls = copy.deepcopy(hdr_src)
                 merged_cls.body = cls_body or [ast.Pass()]
                 merged_named.append(merged_cls)
             elif (
                 allow_selector_merge
-                and isinstance(nb, ast.FunctionDef)
-                and isinstance(na, ast.FunctionDef)
-                and isinstance(nc, ast.FunctionDef)
+                and isinstance(nb, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and type(na) is type(nb)
+                and type(nc) is type(nb)
             ):
                 ps_merged = _try_merge_priority_selector_fn(nb, na, nc)
                 if ps_merged is None:
@@ -1328,6 +1630,89 @@ def resolve_skill_import(mod_str: str, known_keys: set[str]) -> str:
     return ""
 
 
+def _collect_scope_locals(node: ast.AST) -> set[str]:
+    """Collects parameter/local assignment names inside a function or comprehension scope."""
+    locals_set: set[str] = set()
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        args = node.args
+        for a in (
+            list(getattr(args, "posonlyargs", []))
+            + list(args.args)
+            + list(args.kwonlyargs)
+        ):
+            locals_set.add(a.arg)
+        if args.vararg is not None:
+            locals_set.add(args.vararg.arg)
+        if args.kwarg is not None:
+            locals_set.add(args.kwarg.arg)
+    if isinstance(node, ast.Lambda):
+        return locals_set
+
+    def _add_target(tgt: ast.AST) -> None:
+        if isinstance(tgt, ast.Name):
+            locals_set.add(tgt.id)
+        elif isinstance(tgt, (ast.Tuple, ast.List)):
+            for elt in tgt.elts:
+                _add_target(elt)
+        elif isinstance(tgt, ast.Starred):
+            _add_target(tgt.value)
+
+    stack: list[ast.AST] = list(ast.iter_child_nodes(node))
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(cur, ast.Assign):
+            for t in cur.targets:
+                _add_target(t)
+        elif isinstance(cur, ast.AnnAssign):
+            _add_target(cur.target)
+        elif isinstance(cur, (ast.For, ast.AsyncFor)):
+            _add_target(cur.target)
+        elif isinstance(cur, (ast.With, ast.AsyncWith)):
+            for it in cur.items:
+                if it.optional_vars is not None:
+                    _add_target(it.optional_vars)
+        elif isinstance(cur, ast.ExceptHandler) and cur.name:
+            locals_set.add(cur.name)
+        elif isinstance(cur, ast.NamedExpr):
+            _add_target(cur.target)
+        elif isinstance(cur, ast.comprehension):
+            _add_target(cur.target)
+        for ch in ast.iter_child_nodes(cur):
+            stack.append(ch)
+    return locals_set
+
+
+def _walk_with_shadowed(tree: ast.AST):
+    """Yields `(ast_node, shadowed_names)` respecting local bindings in inner scopes."""
+
+    def _visit(node: ast.AST, shadowed: frozenset[str]):
+        yield node, shadowed
+        next_shadowed = shadowed
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            next_shadowed = shadowed | frozenset(_collect_scope_locals(node))
+        elif isinstance(
+            node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+        ):
+            gen_names: set[str] = set()
+            for comp in node.generators:
+                stack_t: list[ast.AST] = [comp.target]
+                while stack_t:
+                    t = stack_t.pop()
+                    if isinstance(t, ast.Name):
+                        gen_names.add(t.id)
+                    elif isinstance(t, (ast.Tuple, ast.List)):
+                        stack_t.extend(t.elts)
+                    elif isinstance(t, ast.Starred):
+                        stack_t.append(t.value)
+            next_shadowed = shadowed | frozenset(gen_names)
+        for ch in ast.iter_child_nodes(node):
+            yield from _visit(ch, next_shadowed)
+
+    return _visit(tree, frozenset())
+
+
 def check_undefined_symbols(
     policy_code: str,
     skills: dict[str, str] | None = None,
@@ -1357,6 +1742,7 @@ def check_undefined_symbols(
     skill_has_star: dict[str, bool] = {}
 
     sources: list[tuple[str, str]] = []
+    parsed_skill_trees: dict[str, ast.Module] = {}
     for s_name, s_src in sorted(skill_map.items()):
         if not s_src or not s_src.strip():
             continue
@@ -1371,7 +1757,28 @@ def check_undefined_symbols(
         exp, has_star = _extract_module_exports(tree)
         skill_exports[s_name] = exp
         skill_has_star[s_name] = has_star
+        parsed_skill_trees[s_name] = tree
         sources.append((rel_fn, cleaned))
+
+    # Propagate transitive `from skills.<mod> import *` exports across skill modules
+    for _ in range(len(parsed_skill_trees) + 1):
+        changed_exp = False
+        for s_name, s_tree in parsed_skill_trees.items():
+            for st in s_tree.body:
+                if isinstance(st, ast.ImportFrom) and str(st.module or "").startswith(
+                    "skills."
+                ):
+                    dep = resolve_skill_import(str(st.module), known_skill_keys)
+                    if dep in skill_exports and any(al.name == "*" for al in st.names):
+                        before_n = len(skill_exports[s_name])
+                        skill_exports[s_name] |= skill_exports[dep]
+                        if (
+                            not skill_has_star.get(dep, False)
+                            and len(skill_exports[s_name]) > before_n
+                        ):
+                            changed_exp = True
+        if not changed_exp:
+            break
 
     cleaned_pol = smart_dedent((policy_code or "").replace("\t", "    ")).strip()
     if cleaned_pol:
@@ -1385,65 +1792,37 @@ def check_undefined_symbols(
                 f"SyntaxError in {filename} line {exc.lineno}: {exc.msg}"
             ) from exc
 
-        # 1. Cross-skill import & attribute validation
-        skill_aliases: dict[str, str] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                mod = str(node.module or "")
-                if mod == "skills":
-                    for al in node.names:
-                        s_mod = normalize_skill_key(al.name)
-                        if (
-                            skill_map
-                            and s_mod not in skill_exports
-                            and s_mod not in skill_pkg_names
-                        ):
-                            raise PolicyValidationError(
-                                f"Undefined skill module 'skills.{al.name}' imported in {filename}"
-                            )
-                        if s_mod in skill_exports:
-                            skill_aliases[al.asname or al.name] = s_mod
-                elif mod.startswith("skills."):
-                    s_mod = resolve_skill_import(mod, known_skill_keys)
-                    tail = mod[len("skills.") :]
-                    if tail in skill_pkg_names and tail not in skill_exports:
-                        for al in node.names:
-                            sub_k = f"{tail}/{al.name}"
-                            if sub_k not in skill_exports:
-                                raise PolicyValidationError(
-                                    f"Undefined skill module 'skills.{tail}.{al.name}' imported in {filename}"
-                                )
-                            skill_aliases[al.asname or al.name] = sub_k
-                        continue
-                    if skill_map and s_mod not in skill_exports:
-                        raise PolicyValidationError(
-                            f"Undefined skill module '{mod}' imported in {filename}"
-                        )
-                    if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
-                        for al in node.names:
-                            if al.name != "*" and al.name not in skill_exports[s_mod]:
-                                raise PolicyValidationError(
-                                    f"Symbol '{al.name}' not exported by {skill_key_to_relpath(s_mod)} (referenced in {filename})"
-                                )
-            elif isinstance(node, ast.Import):
-                for al in node.names:
-                    if al.name.startswith("skills."):
-                        s_mod = resolve_skill_import(al.name, known_skill_keys)
-                        if skill_map and s_mod not in skill_exports:
-                            raise PolicyValidationError(
-                                f"Undefined skill module '{al.name}' imported in {filename}"
-                            )
-                        if al.asname:
-                            skill_aliases[al.asname] = s_mod
+        # 1. Cross-skill import & attribute validation (via bundle.extract_skill_imports SSOT)
+        from lox.lang.bundle import extract_skill_imports
 
-        for node in ast.walk(tree):
+        imp_info = extract_skill_imports(
+            tree, known_skill_keys, pkg_names=skill_pkg_names
+        )
+        missing_mods = list(imp_info.missing_refs)
+        if skills is not None:
+            for rk in sorted(imp_info.referenced_keys - known_skill_keys):
+                missing_mods.append(skill_key_to_module(rk))
+        if missing_mods and (skill_map or skills is not None):
+            raise PolicyValidationError(
+                f"Undefined skill module '{missing_mods[0]}' imported in {filename}"
+            )
+        for s_mod, sym_name in imp_info.direct_symbols.values():
+            if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
+                if sym_name not in skill_exports[s_mod]:
+                    raise PolicyValidationError(
+                        f"Symbol '{sym_name}' not exported by {skill_key_to_relpath(s_mod)} (referenced in {filename})"
+                    )
+        skill_aliases: dict[str, str] = dict(imp_info.module_aliases)
+
+        for node, shadowed in _walk_with_shadowed(tree):
             if isinstance(node, ast.Attribute) and not node.attr.startswith("_"):
-                # Match skills.<pkg>.<mod>.<attr>, skills.<mod>.<attr>, or <alias>.<attr>
+                # Match skills.<pkg>.<mod>.<attr>, skills.<mod>.<attr>, or unshadowed <alias>.<attr>
                 if (
                     isinstance(node.value, ast.Attribute)
                     and isinstance(node.value.value, ast.Attribute)
                     and isinstance(node.value.value.value, ast.Name)
                     and node.value.value.value.id == "skills"
+                    and "skills" not in shadowed
                 ):
                     s_mod = f"{node.value.value.attr}/{node.value.attr}"
                     if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
@@ -1456,6 +1835,7 @@ def check_undefined_symbols(
                     isinstance(node.value, ast.Attribute)
                     and isinstance(node.value.value, ast.Name)
                     and node.value.value.id == "skills"
+                    and "skills" not in shadowed
                 ):
                     s_mod = node.value.attr
                     if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
@@ -1464,7 +1844,9 @@ def check_undefined_symbols(
                                 f"Symbol 'skills.{s_mod}.{node.attr}' not found in {skill_key_to_relpath(s_mod)} (referenced in {filename})"
                             )
                 elif (
-                    isinstance(node.value, ast.Name) and node.value.id in skill_aliases
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in skill_aliases
+                    and node.value.id not in shadowed
                 ):
                     s_mod = skill_aliases[node.value.id]
                     if s_mod in skill_exports and not skill_has_star.get(s_mod, False):
@@ -1497,10 +1879,7 @@ def check_undefined_symbols(
                     ):
                         mod_defined.update(skill_exports[s_mod])
 
-        top_pkg_keys = {k.split("/", 1)[0] for k in skill_exports}
-        valid_globals = (
-            global_env | mod_defined | set(skill_exports.keys()) | top_pkg_keys
-        )
+        valid_globals = global_env | mod_defined
 
         def _check_table(tbl: symtable.SymbolTable, is_root: bool) -> None:
             for sym in tbl.get_symbols():
@@ -1550,10 +1929,38 @@ def _build_class_stub(cls: Any) -> list[str]:
     base_clause = f"({', '.join(bases)})" if bases else ""
     lines = [f"class {cls.__name__}{base_clause}:"]
     seen_members: set[str] = set()
+
+    def _clean_sig_params(sig_obj: Any, fallback: str) -> str:
+        raw = str(sig_obj)
+        # Strip inspect.signature return annotation before appending stub return type
+        paren_depth = 0
+        bracket_depth = 0
+        cut_idx = -1
+        for i, ch in enumerate(raw):
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                paren_depth = max(0, paren_depth - 1)
+            elif ch in "[{":
+                bracket_depth += 1
+            elif ch in "]}":
+                bracket_depth = max(0, bracket_depth - 1)
+            elif paren_depth == 0 and bracket_depth == 0 and raw.startswith("->", i):
+                cut_idx = i
+                break
+        if cut_idx >= 0:
+            raw = raw[:cut_idx].rstrip()
+        # Sanitize unparseable repr defaults like <factory> or <function ...>
+        raw = re.sub(r"=<[^>]+>", "=...", raw)
+        return raw if raw.startswith("(") else fallback
+
     if getattr(cls, "__init__", object.__init__) is not object.__init__:
         seen_members.add("__init__")
         try:
-            init_sig = str(inspect.signature(cls.__init__))
+            init_sig = _clean_sig_params(
+                inspect.signature(cls.__init__),
+                "(self, *args: Any, **kwargs: Any)",
+            )
         except Exception:
             init_sig = "(self, *args: Any, **kwargs: Any)"
         lines.append(f"    def __init__{init_sig} -> None: ...")
@@ -1572,7 +1979,9 @@ def _build_class_stub(cls: Any) -> list[str]:
         elif callable(val) and not isinstance(val, (staticmethod, classmethod)):
             seen_members.add(attr_name)
             try:
-                sig = str(inspect.signature(val))
+                sig = _clean_sig_params(
+                    inspect.signature(val), "(self, *args: Any, **kwargs: Any)"
+                )
             except Exception:
                 sig = "(self, *args: Any, **kwargs: Any)"
             lines.append(f"    def {attr_name}{sig} -> Any: ...")
@@ -1581,7 +1990,9 @@ def _build_class_stub(cls: Any) -> list[str]:
             fn = val.__func__
             dec = "@staticmethod" if isinstance(val, staticmethod) else "@classmethod"
             try:
-                sig = str(inspect.signature(fn))
+                sig = _clean_sig_params(
+                    inspect.signature(fn), "(*args: Any, **kwargs: Any)"
+                )
             except Exception:
                 sig = "(*args: Any, **kwargs: Any)"
             lines.append(f"    {dec}\n    def {attr_name}{sig} -> Any: ...")
@@ -1791,7 +2202,9 @@ def validate_cross_module_contracts(
     known_keys = set(skills_map.keys())
     pkg_names = {k.split("/", 1)[0] for k in known_keys if "/" in k}
     parsed_skills: dict[str, ast.Module] = {}
-    skill_fn_sigs: dict[str, dict[str, tuple[int, int, bool, set[str]]]] = {}
+    skill_fn_sigs: dict[
+        str, dict[str, tuple[list[str], int, int, bool, bool, set[str], set[str]]]
+    ] = {}
 
     for s_name, s_src in skills_map.items():
         if not str(s_src or "").strip():
@@ -1802,19 +2215,33 @@ def validate_cross_module_contracts(
         except SyntaxError:
             continue
         parsed_skills[s_name] = s_tree
-        fn_map: dict[str, tuple[int, int, bool, set[str]]] = {}
+        fn_map: dict[
+            str, tuple[list[str], int, int, bool, bool, set[str], set[str]]
+        ] = {}
         for node in s_tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                pos_args = len(node.args.posonlyargs) + len(node.args.args)
+                pos_param_names = [a.arg for a in node.args.posonlyargs] + [
+                    a.arg for a in node.args.args
+                ]
+                pos_args = len(pos_param_names)
                 req_pos = max(0, pos_args - len(node.args.defaults))
                 has_varargs = node.args.vararg is not None
-                kw_names = {
+                has_kwargs = node.args.kwarg is not None
+                req_kwonly = {
                     a.arg
-                    for a in (
-                        node.args.posonlyargs + node.args.args + node.args.kwonlyargs
-                    )
+                    for a, d in zip(node.args.kwonlyargs, node.args.kw_defaults)
+                    if d is None
                 }
-                fn_map[node.name] = (req_pos, pos_args, has_varargs, kw_names)
+                kw_names = {a.arg for a in (node.args.args + node.args.kwonlyargs)}
+                fn_map[node.name] = (
+                    pos_param_names,
+                    req_pos,
+                    pos_args,
+                    has_varargs,
+                    has_kwargs,
+                    kw_names,
+                    req_kwonly,
+                )
         skill_fn_sigs[s_name] = fn_map
 
     skill_exports_cache: dict[str, set[str]] = {}
@@ -1881,88 +2308,141 @@ def validate_cross_module_contracts(
         (skill_key_to_relpath(k), v) for k, v in parsed_skills.items()
     ]
 
+    from lox.lang.bundle import extract_skill_imports
+
     for fname, tree in modules_to_check:
-        direct_imports: dict[str, tuple[str, str]] = {}
-        module_aliases: dict[str, str] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                mod = node.module
-                if mod.startswith("skills."):
-                    tail = mod[len("skills.") :]
-                    if tail in pkg_names and tail not in skills_map:
-                        for al in node.names:
-                            sub_k = f"{tail}/{al.name}"
-                            if sub_k not in skills_map:
-                                raise PolicyValidationError(
-                                    f"Cross-module error in {fname}: imports missing skill module 'skills.{tail}.{al.name}'."
-                                )
-                            module_aliases[al.asname or al.name] = sub_k
-                        continue
-                    s_mod = resolve_skill_import(mod, known_keys)
-                    if s_mod not in skills_map:
-                        raise PolicyValidationError(
-                            f"Cross-module error in {fname}: imports missing skill module '{mod}'."
-                        )
-                    mod_exports = (
-                        _collect_skill_exports(s_mod)
-                        if s_mod in parsed_skills
-                        else None
+        imp_info = extract_skill_imports(tree, known_keys, pkg_names=pkg_names)
+        missing_mods = list(imp_info.missing_refs)
+        for rk in sorted(imp_info.referenced_keys - known_keys):
+            missing_mods.append(skill_key_to_module(rk))
+        if missing_mods:
+            raise PolicyValidationError(
+                f"Cross-module error in {fname}: imports missing skill module '{missing_mods[0]}'."
+            )
+        for s_mod, sym_name in imp_info.direct_symbols.values():
+            if s_mod in parsed_skills:
+                mod_exports = _collect_skill_exports(s_mod)
+                if sym_name not in mod_exports:
+                    raise PolicyValidationError(
+                        f"Cross-module error in {fname}: '{skill_key_to_module(s_mod)}' has no symbol '{sym_name}'."
                     )
-                    for al in node.names:
-                        if al.name == "*":
-                            continue
-                        if mod_exports is not None and al.name not in mod_exports:
-                            raise PolicyValidationError(
-                                f"Cross-module error in {fname}: '{skill_key_to_module(s_mod)}' has no symbol '{al.name}'."
-                            )
-                        direct_imports[al.asname or al.name] = (s_mod, al.name)
-            elif isinstance(node, ast.Import):
-                for al in node.names:
-                    if al.name.startswith("skills."):
-                        s_mod = resolve_skill_import(al.name, known_keys)
-                        if s_mod not in skills_map:
-                            raise PolicyValidationError(
-                                f"Cross-module error in {fname}: imports missing skill module '{al.name}'."
-                            )
-                        if al.asname:
-                            module_aliases[al.asname] = s_mod
+        module_aliases: dict[str, str] = dict(imp_info.module_aliases)
+        direct_imports: dict[str, tuple[str, str]] = dict(imp_info.direct_symbols)
 
         # Check arity / kwarg mismatches on calls to imported skill functions
-        for node in ast.walk(tree):
+        for node, shadowed in _walk_with_shadowed(tree):
             if not isinstance(node, ast.Call):
                 continue
             target: tuple[str, str] | None = None
-            if isinstance(node.func, ast.Name) and node.func.id in direct_imports:
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in direct_imports
+                and node.func.id not in shadowed
+            ):
                 target = direct_imports[node.func.id]
             elif (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id in module_aliases
+                and node.func.value.id not in shadowed
             ):
                 target = (module_aliases[node.func.value.id], node.func.attr)
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Attribute)
+                and isinstance(node.func.value.value, ast.Attribute)
+                and isinstance(node.func.value.value.value, ast.Name)
+                and node.func.value.value.value.id == "skills"
+                and "skills" not in shadowed
+            ):
+                s_mod = f"{node.func.value.value.attr}/{node.func.value.attr}"
+                target = (s_mod, node.func.attr)
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Attribute)
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "skills"
+                and "skills" not in shadowed
+            ):
+                target = (node.func.value.attr, node.func.attr)
             if target is None:
                 continue
             s_mod, fn_name = target
             sig = skill_fn_sigs.get(s_mod, {}).get(fn_name)
             if sig is None:
                 continue
-            req_pos, max_pos, has_varargs, kw_names = sig
+            (
+                pos_param_names,
+                req_pos,
+                max_pos,
+                has_varargs,
+                has_kwargs,
+                kw_names,
+                req_kwonly,
+            ) = sig
             if any(isinstance(a, ast.Starred) for a in node.args) or any(
                 k.arg is None for k in node.keywords
             ):
                 continue
             n_pos = len(node.args)
-            n_kw = len(node.keywords)
+            kw_passed = {k.arg for k in node.keywords if k.arg is not None}
             if not has_varargs and n_pos > max_pos:
                 raise PolicyValidationError(
                     f"Call contract error in {fname} (line {getattr(node, 'lineno', '?')}): "
                     f"skills.{s_mod}.{fn_name}() accepts at most {max_pos} positional args, got {n_pos}."
                 )
-            if n_pos + n_kw < req_pos:
+            if not has_kwargs:
+                unknown_kws = kw_passed - kw_names
+                if unknown_kws:
+                    raise PolicyValidationError(
+                        f"Call contract error in {fname} (line {getattr(node, 'lineno', '?')}): "
+                        f"skills.{s_mod}.{fn_name}() got unexpected keyword argument(s): {sorted(unknown_kws)}."
+                    )
+            req_pos_names = pos_param_names[:req_pos]
+            missing_pos = [
+                p
+                for idx_p, p in enumerate(req_pos_names)
+                if idx_p >= n_pos and p not in kw_passed
+            ]
+            missing_kwonly = sorted(req_kwonly - kw_passed)
+            if missing_pos or missing_kwonly:
                 raise PolicyValidationError(
                     f"Call contract error in {fname} (line {getattr(node, 'lineno', '?')}): "
-                    f"skills.{s_mod}.{fn_name}() requires at least {req_pos} args, got {n_pos + n_kw}."
+                    f"skills.{s_mod}.{fn_name}() missing required argument(s): {missing_pos + missing_kwonly}."
                 )
+
+
+def _insert_prelude_after_future(src: str, prelude_header: str) -> tuple[str, int]:
+    """
+    Inserts `_lox_prelude` import after leading docstring and `from __future__` imports.
+    Returns `(rewritten_src, inserted_at_1idx_line)` so diagnostic line numbers adjust accurately.
+    """
+    text = str(src or "")
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return prelude_header + text, 1
+    insert_after_line = 0
+    for st in tree.body:
+        if (
+            isinstance(st, ast.Expr)
+            and isinstance(st.value, ast.Constant)
+            and isinstance(st.value.value, str)
+            and insert_after_line == 0
+        ):
+            insert_after_line = int(getattr(st, "end_lineno", st.lineno) or st.lineno)
+        elif isinstance(st, ast.ImportFrom) and st.module == "__future__":
+            insert_after_line = int(getattr(st, "end_lineno", st.lineno) or st.lineno)
+        else:
+            break
+    if insert_after_line <= 0:
+        return prelude_header + text, 1
+    lines = text.splitlines(keepends=True)
+    head = "".join(lines[:insert_after_line])
+    if head and not head.endswith("\n"):
+        head += "\n"
+    tail = "".join(lines[insert_after_line:])
+    return head + prelude_header + tail, insert_after_line + 1
 
 
 def run_pyright_on_package(
@@ -1988,12 +2468,16 @@ def run_pyright_on_package(
     stubs = _get_lox_stub_files()
     skills_map = dict(skills or {})
     prelude_header = "from _lox_prelude import *  # pyright: ignore\n"
+    prelude_lines = prelude_header.count("\n")
+    prelude_offsets: dict[str, int] = {}
     with tempfile.TemporaryDirectory(prefix="lox_pyright_") as tmp_root:
         root = Path(tmp_root)
-        # Write policy & skills with pre-injected LOX globals prelude
-        (root / "policy.py").write_text(
-            prelude_header + (policy_code or ""), encoding="utf-8"
+        # Write policy & skills with pre-injected LOX globals prelude (after docstring / __future__)
+        pol_wrapped, pol_ins_line = _insert_prelude_after_future(
+            policy_code or "", prelude_header
         )
+        prelude_offsets["policy.py"] = pol_ins_line
+        (root / "policy.py").write_text(pol_wrapped, encoding="utf-8")
         skills_dir = root / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
         (skills_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -2006,7 +2490,11 @@ def run_pyright_on_package(
                     pkg_init = dst.parent / "__init__.py"
                     if not pkg_init.exists():
                         pkg_init.write_text("", encoding="utf-8")
-                dst.write_text(prelude_header + str(s_src), encoding="utf-8")
+                s_wrapped, s_ins_line = _insert_prelude_after_future(
+                    str(s_src), prelude_header
+                )
+                prelude_offsets[f"skills/{clean_k}.py"] = s_ins_line
+                dst.write_text(s_wrapped, encoding="utf-8")
 
         # Write cached lox.*.pyi & _lox_prelude.pyi stubs under typings/
         typings_dir = root / "typings"
@@ -2061,14 +2549,17 @@ def run_pyright_on_package(
                 raw_line = int(
                     ((d.get("range") or {}).get("start") or {}).get("line", 0)
                 )
-                line_no = max(
-                    1, raw_line
-                )  # raw_line is 0-indexed -> 1-indexed - 1 header
+                line_1idx = raw_line + 1
+                ins_line = prelude_offsets.get(rel_f, 1)
+                if line_1idx > ins_line:
+                    line_1idx = max(1, line_1idx - prelude_lines)
                 if msg:
-                    errors.append(f"{rel_f}:{line_no} [{rule or 'pyright'}]: {msg}")
+                    errors.append(f"{rel_f}:{line_1idx} [{rule or 'pyright'}]: {msg}")
             return errors[:12]
-        except Exception:
-            return []
+        except Exception as exc:
+            return [
+                f"policy.py:0 [pyright]: typecheck failed ({type(exc).__name__}: {exc})"
+            ]
 
 
 _EVOLVE_START_RE = re.compile(r"^\s*#\s*EVOLVE-BLOCK\b(.*)$", re.IGNORECASE)

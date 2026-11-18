@@ -352,3 +352,155 @@ def test_pool_preserves_last_depth_on_terminal_death():
     )
     assert res["depth"] >= 1
     assert res["max_depth"] >= 1
+
+
+def test_starter_navigation_step_toward_returns_action():
+    from lox.env.actions import Action
+    from lox.env.harness import NetHackHarness
+    from lox.lang.starter import build_clean_option_a_starter
+
+    _, skills = build_clean_option_a_starter()
+    world_ns: dict = {}
+    nav_ns: dict = {}
+    exec(compile(skills["world"], "<world>", "exec"), world_ns)
+    exec(compile(skills["navigation/core"], "<navigation/core>", "exec"), nav_ns)
+
+    h = NetHackHarness(max_steps=20)
+    try:
+        st = h.reset(seed=42)
+        ws = world_ns["WorldState"]()
+        ws.observe(st)
+        # Find an adjacent passable tile from GameState.passable_mask
+        target = None
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                ny, nx = st.y + dy, st.x + dx
+                if 0 <= ny < 21 and 0 <= nx < 79 and ws.passable_mask[ny, nx]:
+                    target = (ny, nx)
+                    break
+            if target is not None:
+                break
+        assert target is not None
+        act = nav_ns["step_toward"](st, ws, target)
+        assert isinstance(act, (Action, int))
+        assert act is not None
+    finally:
+        h.close()
+
+
+def test_merge_and_splice_dataclass_skill_no_corruption():
+    from lox.author.tools import merge_skill_module_update
+    from lox.lang.starter import build_clean_option_a_starter
+    from lox.lang.validator import (
+        run_pyright_on_package,
+        splice_functions_into_policy,
+    )
+
+    existing = '''"""Explore goal."""
+
+from dataclasses import dataclass
+from lox.env.actions import Action
+
+
+@dataclass
+class ExploreState:
+    target: tuple[int, int] | None = None
+
+
+def _nearest_frontier(state, ws):
+    return None
+
+
+def _explore_trigger(state, ws):
+    return True
+
+
+def _explore_step(state, ws):
+    t = _nearest_frontier(state, ws)
+    return Action.SEARCH if t is None else Action.WAIT
+'''
+    full_rewrite = '''"""Explore goal (refactored)."""
+
+from dataclasses import dataclass
+from lox.env.actions import Action
+
+
+@dataclass
+class ExploreState:
+    target: tuple[int, int] | None = None
+    last_turn: int = 0
+
+
+def _find_frontier(state, ws):
+    return (int(state.y), int(state.x))
+
+
+def _explore_trigger(state, ws):
+    return True
+
+
+def _explore_step(state, ws):
+    t = _find_frontier(state, ws)
+    return Action.SEARCH if t is None else Action.WAIT
+'''
+    merged = merge_skill_module_update(existing, full_rewrite)
+    assert "_nearest_frontier" not in merged
+    assert "def _find_frontier" in merged
+    assert merged.count("def _explore_step") == 1
+
+    # Partial patch onto @dataclass skill must not insert new defs before docstring/imports
+    patch = """# PATCH
+def _pick_door(state):
+    return None
+
+def _explore_step(state, ws):
+    return _pick_door(state) or Action.WAIT
+"""
+    spliced, changed = splice_functions_into_policy(existing, patch)
+    assert "_pick_door" in changed
+    assert spliced.splitlines()[0].startswith('"""') or spliced.splitlines()[
+        0
+    ].startswith("'")
+    assert spliced.count("def _explore_step") == 1
+    assert spliced.index("from lox.env.actions import Action") < spliced.index(
+        "def _pick_door"
+    )
+
+    pol, base_skills = build_clean_option_a_starter()
+    base_skills["goals/explore"] = full_rewrite
+    pol2 = "import skills.goals.explore  # noqa: F401\n" + pol
+    assert run_pyright_on_package(pol2, skills=base_skills) == []
+
+
+def test_read_symbol_resolves_skills_dotted_class_method(tmp_path):
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import init_db
+    from lox.lang.starter import build_clean_option_a_starter
+
+    dbp = str(tmp_path / "tools2.duckdb")
+    init_db(dbp).close()
+    pol, skills = build_clean_option_a_starter()
+    reg = AuthorToolRegistry(db_path=dbp, macros_path=str(tmp_path / "macros.py"))
+    reg.configure_generation(
+        pool=None,
+        baseline_runs=[],
+        skills=skills,
+        generation=1,
+        mode="SWARM_PEER",
+    )
+    reg.current_policy_code = pol
+
+    txt1, tag1 = reg.read_symbol("skills.goals.core.GoalRunner.tick")
+    assert tag1 != "not_found"
+    assert "GoalRunner.tick" in txt1
+    assert "def tick(" in txt1
+
+    txt2, tag2 = reg.read_symbol("goals/core.GoalRunner.tick")
+    assert tag2 != "not_found"
+    assert "def tick(" in txt2
+
+    txt3, tag3 = reg.read_symbol("skills.navigation.core.step_toward")
+    assert tag3 != "not_found"
+    assert "def step_toward(" in txt3

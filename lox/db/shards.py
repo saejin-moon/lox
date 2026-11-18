@@ -302,9 +302,13 @@ def extract_shards_from_db(
     try:
         cur = con.execute(
             """
-            SELECT run_id, seed, depth, max_depth, end_reason, summary_digest, milestones_json, action_bytes, turns, steps
+            SELECT run_id, seed, depth, max_depth, end_reason, summary_digest,
+                   milestones_json, triggered_functions, action_bytes, turns, steps
             FROM runs
-            WHERE batch_id = ? AND action_bytes IS NOT NULL
+            WHERE batch_id = ?
+              AND action_bytes IS NOT NULL
+              AND COALESCE(is_shard, FALSE) = FALSE
+              AND run_id NOT LIKE 'shard_%'
             ORDER BY max_depth DESC, COALESCE(outlier_z_score, 0.0) DESC, turns DESC
             LIMIT 500
             """,
@@ -436,6 +440,7 @@ def mine_organic_scenarios(
                     WHERE action_bytes IS NOT NULL
                       AND OCTET_LENGTH(action_bytes) > 12
                       AND COALESCE(is_shard, FALSE) = FALSE
+                      AND COALESCE(run_id, '') NOT LIKE 'shard_%'
                       AND ({where_sql})
                     ORDER BY {order_sql}
                     LIMIT 6

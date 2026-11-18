@@ -919,6 +919,12 @@ class WorldMemory:
     def safe_passable_mask(self) -> np.ndarray:
         return self.current_floor.safe_passable_mask
 
+    def copy_passable_mask(self) -> np.ndarray:
+        return self.current_floor.copy_passable_mask()
+
+    def copy_safe_passable_mask(self) -> np.ndarray:
+        return self.current_floor.copy_safe_passable_mask()
+
     @property
     def locked_doors(self) -> set[tuple[int, int]]:
         return self.current_floor.locked_doors
@@ -2087,7 +2093,7 @@ class GameState:
         lines = self.tty_lines
         if lines and "--more--" in lines[0].lower():
             return False
-        joined = "\n".join(lines[:22]).lower()
+        joined = "\n".join(lines[:24]).lower()
         return "(end)" in joined or bool(
             re.search(r"\(\d+\s+of\s+\d+\)", joined)
             or (

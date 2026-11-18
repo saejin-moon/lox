@@ -148,23 +148,63 @@ def write_status_report(
 
     clean_runs = [r for r in (baseline_runs or []) if not r.get("is_shard")]
     c_depth = (
-        float(np.mean([r.get("max_depth", 1) for r in clean_runs]))
+        float(
+            np.mean(
+                [
+                    r.get("max_depth") if r.get("max_depth") is not None else 1
+                    for r in clean_runs
+                ]
+            )
+        )
         if clean_runs
         else 1.0
     )
     c_p90 = (
-        float(np.percentile([r.get("max_depth", 1) for r in clean_runs], 90))
+        float(
+            np.percentile(
+                [
+                    r.get("max_depth") if r.get("max_depth") is not None else 1
+                    for r in clean_runs
+                ],
+                90,
+            )
+        )
         if clean_runs
         else 1.0
     )
-    c_max = int(max([r.get("max_depth", 1) for r in clean_runs])) if clean_runs else 1
+    c_max = (
+        int(
+            max(
+                [
+                    r.get("max_depth") if r.get("max_depth") is not None else 1
+                    for r in clean_runs
+                ]
+            )
+        )
+        if clean_runs
+        else 1
+    )
     c_ac = (
-        float(np.mean([r.get("final_ac", 10) for r in clean_runs]))
+        float(
+            np.mean(
+                [
+                    r.get("final_ac") if r.get("final_ac") is not None else 10
+                    for r in clean_runs
+                ]
+            )
+        )
         if clean_runs
         else 10.0
     )
     c_xl = (
-        float(np.mean([r.get("xp_level", 1) for r in clean_runs]))
+        float(
+            np.mean(
+                [
+                    r.get("xp_level") if r.get("xp_level") is not None else 1
+                    for r in clean_runs
+                ]
+            )
+        )
         if clean_runs
         else 1.0
     )
@@ -182,11 +222,13 @@ def write_status_report(
 
     deepest_outlier = None
     try:
+        from lox.db.schema import NON_SHARD_RUNS_SQL
+
         cur = con.execute(
-            """
+            f"""
             SELECT run_id, seed, max_depth, xp_level, final_ac, end_reason, summary_digest
             FROM runs
-            WHERE is_outlier_good = TRUE
+            WHERE is_outlier_good = TRUE AND {NON_SHARD_RUNS_SQL}
             ORDER BY max_depth DESC, score DESC
             LIMIT 1
             """
@@ -383,36 +425,29 @@ class CampaignOrchestrator:
             f.write(code.strip() + "\n" if code.strip() else "")
 
     def load_workspace_skills(self) -> dict[str, str]:
-        skills_dir = Path(self.workspace_dir) / "skills"
-        skills: dict[str, str] = {}
-        if skills_dir.exists():
-            for p in sorted(skills_dir.glob("*.py")):
-                if p.name != "__init__.py":
-                    skills[p.stem] = p.read_text(encoding="utf-8")
-        return skills
+        from lox.lang.bundle import load_skills_dir
+
+        return load_skills_dir(Path(self.workspace_dir) / "skills")
 
     def save_workspace_skill(self, skill_name: str, code: str) -> None:
-        skills_dir = Path(self.workspace_dir) / "skills"
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        skill_path = skills_dir / f"{skill_name}.py"
-        skill_path.write_text(code.strip() + "\n", encoding="utf-8")
+        from lox.lang.bundle import write_skills_dir
+        from lox.lang.validator import normalize_skill_key, skill_key_to_relpath
+
+        clean_k = normalize_skill_key(skill_name)
+        if not clean_k:
+            return
+        write_skills_dir(
+            Path(self.workspace_dir) / "skills", {clean_k: code}, sync=False
+        )
         ui.info(
-            f"Committed modular skill `skills/{skill_name}.py` ({len(code.strip().splitlines())} lines)"
+            f"Committed modular skill `{skill_key_to_relpath(clean_k)}` ({len(code.strip().splitlines())} lines)"
         )
 
     def sync_workspace_skills(self, skills: dict[str, str]) -> None:
         """Synchronizes data/workspace/skills/ with an exact dictionary of modular skills."""
-        skills_dir = Path(self.workspace_dir) / "skills"
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        for p in skills_dir.glob("*.py"):
-            if p.name != "__init__.py" and p.stem not in skills:
-                try:
-                    p.unlink()
-                except Exception:
-                    pass
-        for name, code in skills.items():
-            skill_path = skills_dir / f"{name}.py"
-            skill_path.write_text(code.strip() + "\n", encoding="utf-8")
+        from lox.lang.bundle import write_skills_dir
+
+        write_skills_dir(Path(self.workspace_dir) / "skills", skills or {}, sync=True)
 
     def get_recent_experiments_markdown(self, limit: int = 10) -> str:
         con = connect_db(self.db_path, read_only=True)
@@ -523,6 +558,8 @@ class CampaignOrchestrator:
                     )
                     current_policy = champ_base["policy_code"] or current_policy
                     current_policy_id = champ_base["policy_id"]
+                    if champ_base.get("skills"):
+                        self.sync_workspace_skills(champ_base["skills"])
                     if champ_base.get("params"):
                         registered_params.update(champ_base["params"])
                     baseline_runs = assert_baseline_invariants(
@@ -632,6 +669,7 @@ class CampaignOrchestrator:
                     avg_depth=warm_res.get("avg_depth", 1.0),
                     max_depth=warm_res.get("max_depth", 1),
                     is_promoted=True,
+                    skills=self.load_workspace_skills(),
                 )
                 last_batch_digest = build_batch_contrast_digest(
                     warm_res, baseline_runs, warm_fn_stats
@@ -714,26 +752,6 @@ class CampaignOrchestrator:
                     # MAP-Elites UCB parent selection
                     chosen_niche = "descent"
                     if self.policy_archive:
-                        if "descent" in self.policy_archive:
-                            champ_entry = self.policy_archive["descent"]
-                            for n_key, n_entry in list(self.policy_archive.items()):
-                                if n_entry.avg_depth < champ_entry.avg_depth or (
-                                    n_entry.policy_id != champ_entry.policy_id
-                                    and n_entry.avg_depth <= champ_entry.avg_depth
-                                ):
-                                    self.policy_archive[n_key] = PolicyArchiveEntry(
-                                        policy_id=champ_entry.policy_id,
-                                        policy_code=champ_entry.policy_code,
-                                        niche=n_key,
-                                        avg_depth=champ_entry.avg_depth,
-                                        p90_depth=champ_entry.p90_depth,
-                                        max_depth=champ_entry.max_depth,
-                                        avg_ac=champ_entry.avg_ac,
-                                        avg_xl=champ_entry.avg_xl,
-                                        baseline_runs=list(champ_entry.baseline_runs),
-                                        batch_digest=champ_entry.batch_digest,
-                                        skills=dict(champ_entry.skills),
-                                    )
                         best_niche = "descent"
                         best_score = -1e9
                         total_p = sum(
@@ -760,8 +778,7 @@ class CampaignOrchestrator:
                         }
                         if chosen_entry.batch_digest:
                             last_batch_digest = chosen_entry.batch_digest
-                        if chosen_entry.skills:
-                            self.sync_workspace_skills(chosen_entry.skills)
+                        self.sync_workspace_skills(chosen_entry.skills or {})
                         self.save_active_policy(current_policy)
 
                     pol_lines = (
@@ -1032,12 +1049,21 @@ class CampaignOrchestrator:
 
                         early_stop_cb = _check_futility
 
+                    from lox.lang.validator import normalize_skill_key
+
                     candidate_skills = self.load_workspace_skills()
+                    for sk_k, sk_v in (
+                        getattr(proposal, "skill_modules", None) or {}
+                    ).items():
+                        ck = normalize_skill_key(str(sk_k or ""))
+                        if ck and str(sk_v or "").strip():
+                            candidate_skills[ck] = str(sk_v)
                     if proposal.skill_code:
-                        skill_mod_name = str(
-                            proposal.hypothesis.get("skill_module") or "skill"
+                        skill_mod_name = normalize_skill_key(
+                            str(proposal.hypothesis.get("skill_module") or "skill")
                         )
-                        candidate_skills[skill_mod_name] = proposal.skill_code
+                        if skill_mod_name:
+                            candidate_skills[skill_mod_name] = proposal.skill_code
 
                     eval_res = self.pool.evaluate_batch(
                         batch_id=batch_id,
@@ -1191,6 +1217,9 @@ class CampaignOrchestrator:
                         eval_res.get("wall_sec", 1.0),
                         passed=bool(verdict.get("passed", False)),
                     )
+                    verdict.setdefault("avg_depth", eval_res.get("avg_depth", 1.0))
+                    verdict.setdefault("p90_depth", eval_res.get("p90_depth", 1.0))
+                    verdict.setdefault("max_depth", eval_res.get("max_depth", 1))
                     self.db_logger.save_experiment(
                         experiment_id=f"exp_{batch_id}",
                         generation=gen,
@@ -1210,13 +1239,49 @@ class CampaignOrchestrator:
                         avg_depth=eval_res["avg_depth"],
                         max_depth=eval_res["max_depth"],
                         is_promoted=verdict["passed"],
+                        skills=candidate_skills,
                     )
+
+                    eval_runs = eval_res.get("runs", []) or []
+                    eval_metrics = dict(eval_res)
+                    if eval_runs:
+                        eval_metrics.setdefault(
+                            "avg_ac",
+                            float(
+                                np.mean(
+                                    [
+                                        r.get("final_ac")
+                                        if r.get("final_ac") is not None
+                                        else 10
+                                        for r in eval_runs
+                                    ]
+                                )
+                            ),
+                        )
+                        eval_metrics.setdefault(
+                            "avg_xp_level",
+                            float(np.mean([r.get("xp_level") or 1 for r in eval_runs])),
+                        )
+                        eval_metrics.setdefault(
+                            "avg_unique_tiles",
+                            float(
+                                np.mean([r.get("unique_tiles") or 0 for r in eval_runs])
+                            ),
+                        )
+                        eval_metrics.setdefault(
+                            "avg_branches",
+                            float(
+                                np.mean(
+                                    [r.get("dungeons_visited") or 1 for r in eval_runs]
+                                )
+                            ),
+                        )
 
                     con_map = connect_db(self.db_path, read_only=False)
                     try:
                         added, cell_id, elite = self.map_elites.add_candidate(
                             policy_code=proposal.full_policy_code,
-                            metrics=eval_res,
+                            metrics=eval_metrics,
                             batch_id=batch_id,
                             generation=gen,
                             con=con_map,
@@ -1248,13 +1313,10 @@ class CampaignOrchestrator:
                         current_policy = proposal.full_policy_code
                         current_policy_id = cand_id
                         self.save_active_policy(current_policy)
-                        if proposal.hypothesis.get("skill_module") and getattr(
-                            proposal, "skill_code", ""
+                        if proposal.skill_code or getattr(
+                            proposal, "skill_modules", None
                         ):
-                            self.save_workspace_skill(
-                                str(proposal.hypothesis["skill_module"]),
-                                proposal.skill_code,
-                            )
+                            self.sync_workspace_skills(candidate_skills)
 
                         # Update baseline runs by merging newly evaluated non-shard runs into existing baseline seeds
                         full_promoted = {
@@ -1288,10 +1350,6 @@ class CampaignOrchestrator:
                         if canon_prop_mode == "REFACTOR":
                             # Refactor establishes a new structural baseline across all archive niches
                             self.policy_archive.clear()
-                        elif "descent" in self.policy_archive:
-                            c_depth = max(
-                                c_depth, self.policy_archive["descent"].avg_depth
-                            )
                         c_p90 = (
                             float(
                                 np.percentile(

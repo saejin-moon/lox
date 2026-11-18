@@ -70,14 +70,23 @@ class MAPElitesArchive:
         return len(thresholds)
 
     @classmethod
-    def compute_cell_id(cls, metrics: dict[str, Any]) -> tuple[str, int, int, int]:
+    def compute_cell_id(
+        cls,
+        metrics: dict[str, Any],
+        *,
+        depth_thresholds: tuple[float, ...] | None = None,
+        caution_thresholds: tuple[float, ...] | None = None,
+        density_thresholds: tuple[float, ...] | None = None,
+    ) -> tuple[str, int, int, int]:
         """
         Maps episode metrics to non-aliasing 3D niche coordinates (`cell_v2_d{d}_v{v}_t{t}`):
         (depth_bin, vital_bin, tempo_bin).
         """
         # 1. Avg Depth Dimension (0 to 4, non-aliasing: avg_depth rather than single outlier max_depth)
         avg_depth = float(metrics.get("avg_depth", metrics.get("mean_depth", 1.0)))
-        d_bin = cls._bin_value(avg_depth, cls.DEFAULT_DEPTH_THRESHOLDS)
+        d_bin = cls._bin_value(
+            avg_depth, depth_thresholds or cls.DEFAULT_DEPTH_THRESHOLDS
+        )
 
         # 2. Vitals Progression Dimension (0 to 3): rewards armor upgrades (low AC), XL, branches
         avg_ac = float(metrics.get("avg_ac", 10.0) or 10.0)
@@ -88,7 +97,9 @@ class MAPElitesArchive:
             + 1.5 * max(0.0, avg_xl - 1.0)
             + 2.0 * max(0.0, avg_branches - 1.0)
         )
-        v_bin = cls._bin_value(vitals_val, cls.DEFAULT_CAUTION_THRESHOLDS)
+        v_bin = cls._bin_value(
+            vitals_val, caution_thresholds or cls.DEFAULT_CAUTION_THRESHOLDS
+        )
 
         # 3. Spatial Tempo Dimension (0 to 3): unique_tiles explored per turn
         avg_turns = max(
@@ -108,17 +119,28 @@ class MAPElitesArchive:
             )
         else:
             tempo_val = avg_tiles / avg_turns
-        t_bin = cls._bin_value(tempo_val, cls.DEFAULT_DENSITY_THRESHOLDS)
+        t_bin = cls._bin_value(
+            tempo_val, density_thresholds or cls.DEFAULT_DENSITY_THRESHOLDS
+        )
 
         cell_id = f"cell_v2_d{d_bin}_v{v_bin}_t{t_bin}"
         return cell_id, d_bin, v_bin, t_bin
 
     @staticmethod
-    def compute_fitness(metrics: dict[str, Any]) -> float:
+    def compute_fitness(
+        metrics: dict[str, Any],
+        *,
+        fitness_weights: tuple[float, float, float, float] | None = None,
+    ) -> float:
         """
         Computes scalar fitness for comparing policies within the same niche.
         Incorporates avg_depth, vitals (AC, XL, branches), max_depth, and score.
         """
+        w_depth, w_max, w_score, w_turns = (
+            fitness_weights
+            if fitness_weights is not None
+            else (1000.0, 150.0, 0.1, 0.05)
+        )
         avg_depth = float(metrics.get("avg_depth", metrics.get("mean_depth", 1.0)))
         max_depth = float(metrics.get("max_depth", 1.0))
         avg_score = float(metrics.get("avg_score", metrics.get("mean_score", 0.0)))
@@ -132,11 +154,11 @@ class MAPElitesArchive:
             + max(0.0, avg_branches - 1.0) * 200.0
         )
         return (
-            (avg_depth * 1000.0)
-            + (max_depth * 150.0)
+            (avg_depth * w_depth)
+            + (max_depth * w_max)
             + vitals_bonus
-            + (avg_score * 0.1)
-            + (avg_turns * 0.05)
+            + (avg_score * w_score)
+            + (avg_turns * w_turns)
         )
 
     def add_candidate(
@@ -153,8 +175,13 @@ class MAPElitesArchive:
         If cell is empty or candidate has higher fitness, adds/replaces the elite.
         Returns (improved, cell_id, elite).
         """
-        cell_id, d_bin, c_bin, r_bin = self.compute_cell_id(metrics)
-        fitness = self.compute_fitness(metrics)
+        cell_id, d_bin, c_bin, r_bin = self.compute_cell_id(
+            metrics,
+            depth_thresholds=self.depth_thresholds,
+            caution_thresholds=self.caution_thresholds,
+            density_thresholds=self.density_thresholds,
+        )
+        fitness = self.compute_fitness(metrics, fitness_weights=self.fitness_weights)
 
         existing = self.cells.get(cell_id)
         if existing is not None and existing.fitness >= fitness:

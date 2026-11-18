@@ -75,32 +75,34 @@ CORE_HARNESS_DOCS = r"""### 1-to-1 NetHack API & `GameState`
 
 #### 1. Execution & Prompts
 - Zero-turn stalls keep `state.turn_advanced == False`; avoid repeating stalled steps (`>=100` consecutive aborts as `stalled_zero_turn`).
-- `state.in_yn_prompt`: `[yn]`/`[ynq]` -> `key('y')`/`key('n')`/`key('q')`.
+- `state.in_yn_prompt`: strict `[yn]`/`[ynq]` prompts (returns `False` for getobj/getdir prompts) -> `key('y')`/`key('n')`/`key('q')`.
+- `state.in_getobj_prompt` / `state.in_getdir_prompt`: item-letter (`[?*]`) or direction prompts -> item letter, `DIR_DELTAS[(dy,dx)]`, or `Action.ESC`.
 - `state.in_text_prompt`: text/naming prompt -> `Action.ESC`.
-- `state.in_menu`: selection/pager (`tty_lines`) -> item `key('a')`, `Action.SPACE`, or `Action.ESC`.
+- `state.in_menu`: selection/pager (`tty_lines`) -> item `key('a')`, `Action.SPACE`, or `Action.ESC` (check `in_menu` BEFORE `waiting_for_space`!).
 - Allowed modules: `lox.*`, `skills.*`, `numpy as np`, stdlib (`math`, `collections`, `heapq`, `itertools`, `functools`, `re`, `enum`, `dataclasses`, `random`, `copy`, `bisect`).
 
 #### 2. 1-to-1 Actions (`Action`, `key`, `seq`, `repeat`, `extcmd`, `DIR_DELTAS`)
-- Compass (`DIR_DELTAS[(dy,dx)]`): `Action.N` `(-1,0)`, `Action.S` `(1,0)`, `Action.E` `(0,1)`, `Action.W` `(0,-1)`, `Action.NE` `(-1,1)`, `Action.NW` `(-1,-1)`, `Action.SE` `(1,1)`, `Action.SW` `(1,-1)`.
+- Compass (`DIR_DELTAS: dict[tuple[int, int], Action]`, keys `(dy, dx)` -> values `Action`, e.g. `DIR_DELTAS[(-1, 0)] == Action.N`): `Action.N` `(-1,0)`, `Action.S` `(1,0)`, `Action.E` `(0,1)`, `Action.W` `(0,-1)`, `Action.NE` `(-1,1)`, `Action.NW` `(-1,-1)`, `Action.SE` `(1,1)`, `Action.SW` `(1,-1)`. Never iterate `DIR_DELTAS.values()` expecting `(dy, dx)`.
 - Vertical/Wait/Prompt: `Action.UP` `'<'`, `Action.DOWN` `'>'`, `Action.WAIT` `'.'`, `Action.MORE` `'\r'`, `Action.ESC` `'\x1b'`, `Action.SPACE` `' '`.
-- Commands: `Action.SEARCH` `'s'`, `Action.OPEN` `'o'`, `Action.CLOSE` `'c'`, `Action.KICK` `C('d')`, `Action.UNTRAP` `M('u')`, `Action.EAT` `'e'`, `Action.WIELD` `'w'`, `Action.WEAR` `'W'`, `Action.TAKEOFF` `'T'`, `Action.PUTON` `'P'`, `Action.REMOVE` `'R'`, `Action.QUAFF` `'q'`, `Action.READ` `'r'`, `Action.ZAP` `'z'`, `Action.FIRE` `'f'`, `Action.THROW` `'t'`, `Action.PICKUP` `','`, `Action.DROP` `'d'`, `Action.APPLY` `'a'`, `Action.LOOT` `M('l')`, `Action.PRAY` `M('p')`, `Action.ENGRAVE` `'E'`, `Action.OFFER` `M('o')`, `Action.PAY` `'p'`, `Action.NAME` `'C'`, `Action.DIP` `M('d')`, `Action.ENHANCE` `M('e')`, `Action.TWOWEAPON` `'X'`, `Action.SWAP` `'x'`, `Action.CAST` `'Z'`, `Action.LOOK` `';'`.
+- Commands: `Action.SEARCH` `'s'`, `Action.OPEN` `'o'`, `Action.CLOSE` `'c'`, `Action.KICK` `C('d')`, `Action.UNTRAP` `M('u')`, `Action.EAT` `'e'`, `Action.WIELD` `'w'`, `Action.WEAR` `'W'`, `Action.TAKEOFF` `'T'`, `Action.PUTON` `'P'`, `Action.REMOVE` `'R'`, `Action.QUAFF` `'q'`, `Action.READ` `'r'`, `Action.ZAP` `'z'`, `Action.FIRE` `'f'`, `Action.THROW` `'t'`, `Action.PICKUP` `','`, `Action.DROP` `'d'`, `Action.APPLY` `'a'`, `Action.LOOT` `M('l')`, `Action.PRAY` `M('p')`, `Action.ENGRAVE` `'E'`, `Action.OFFER` `M('o')`, `Action.PAY` `'p'`, `Action.CALL` `'C'`, `Action.DIP` `M('d')`, `Action.ENHANCE` `M('e')`, `Action.TWOWEAPON` `'X'`, `Action.SWAP` `'x'`, `Action.CAST` `'Z'`, `Action.GLANCE` `';'`, `Action.LOOK` `':'`.
 - Sequences: `seq(Action.OPEN, DIR_DELTAS[(dy,dx)])`, `seq(Action.KICK, DIR_DELTAS[(dy,dx)])`, `seq(Action.EAT, 'f')`, `seq(Action.ZAP, 'i', dir_act)`, `extcmd("pray", "y")`, `repeat(5, Action.SEARCH)`.
 
 #### 3. `GameState` (`state`)
-- Vitals/Dungeon: `hp`, `max_hp`, `ac`, `energy`, `max_energy`, `xp_level`, `xp`, `score`, `gold`, `y` (0..20), `x` (0..78), `pos`, `turn`, `step_count`, `hunger_state` (0=Satiated..5=Fainted), `internal_hunger`, `depth`, `dungeon_num` (0=Doom, 1=Gehennom, 2=Mines, 3=Quest, 4=Sokoban, 5=Ludios, 6=Vlad, 7=Planes), `level_num`, `deepest_level_reached`, `is_on_stairs_down`, `carrying_capacity` (0..5), `encumbrance_name`, `worn_oprop_mask`.
+- Vitals/Dungeon: `hp`, `max_hp`, `ac`, `energy`, `max_energy`, `xp_level`, `xp`, `score`, `gold`, `y` (0..20), `x` (0..78), `pos`, `turn`, `step_count`, `hunger_state` (0=Satiated, 1=Not Hungry, 2=Hungry, 3=Weak, 4=Fainting, 5=Fainted, 6=Starved), `internal_hunger`, `depth`, `dungeon_num` (0=Doom, 1=Gehennom, 2=Mines, 3=Quest, 4=Sokoban, 5=Ludios, 6=Vlad, 7=Planes), `level_num`, `deepest_level_reached`, `is_on_stairs_down`, `carrying_capacity` (0..5), `encumbrance_name`, `worn_oprop_mask`.
 - Inventory (`state.inventory -> list[InventoryItem]`): `letter`, `name`, `quantity`, `oclass`, `oclass_name`, `enchantment`, `is_weapon`/`is_armor`/`is_food`/`is_corpse`/`is_potion`/`is_scroll`/`is_wand`/`is_ring`/`is_amulet`/`is_tool`/`is_spellbook`/`is_coin`/`is_gem`, `is_worn`, `is_wielded`, `is_quivered`, `is_blessed`, `is_uncursed`, `is_cursed`, `is_for_sale`, `info` (`ObjectInfo`), `corpse_monster` (`MonsterInfo`).
 - Monsters (`visible_monsters()`, `adjacent_monsters(exclude_pets=True)`): `y`, `x`, `name`, `char`, `color`, `is_adjacent_to(y,x)`, `is_pet`, `is_statue`, `is_invisible`, `info` (`difficulty`, `ac`, `speed`, `level`, `mr`, `nutrition`, `weight`, `size`, `resistances_mask`, `conveys_mask`, `is_acidic`/`is_poisonous`/`is_undead`/`is_were`/`is_human`/`is_elf`/`is_dwarf`/`is_gnome`/`is_orc`/`is_demon`/`is_giant`/`is_domestic`, `conveys_poison_res`/`conveys_fire_res`/`conveys_cold_res`/`conveys_sleep_res`/`conveys_shock_res`).
-- Floor (`visible_objects()`, `objects_here()`): same item flags + `y`, `x`, `is_boulder`; C lookups `monster_info_by_name(name)`, `object_info_by_name(name)`.
+- Floor (`visible_objects()`, `objects_here()`): `VisibleObject` (`y`, `x`, `name`, `char`, `color`, `glyph`, `is_boulder`, `info: ObjectInfo`; check food/armor/weapon via `obj.info.is_food`/`obj.info.is_weapon`/`obj.info.is_armor`/`obj.info.oclass`, NOT `obj.is_food`); C lookups `monster_info_by_name(name)`, `object_info_by_name(name)`.
 - Conditions: `is_blind`, `is_confused`, `is_stunned`, `is_hallucinating`, `is_levitating`, `is_food_poisoned`, `is_terminally_ill`, `is_stoning`, `is_slimed`, `is_strangled`, `condition_mask`.
 - Map/Terrain/Features: `message`, `chars` (`uint8[21,79]`), `glyphs` (`int16[21,79]`), `char_at(y,x)`, `ascii_map()`, `tty_text`, `tty_lines`, `terrain_at(y,x)`, `trap_at(y,x)`, `is_trap(y,x)`, `trap_mask`, `is_closed_door(y,x)`, `is_open_door(y,x)`, `adjacent_closed_doors()`, `unexplored_frontier_mask(passable_mask=None, include_doors=True)` *(passable tiles bordering unvisited walkable/door tiles—`state.pos` has `dist==0`, so filter `dist > 0`)*, `is_water(y,x)`, `is_lava(y,x)`, `is_ice(y,x)`, `is_iron_bars(y,x)`, `is_boulder(y,x)`, `boulder_positions`, `stairs_down_pos`/`positions`, `stairs_up_pos`/`positions`, `altar_positions`, `fountain_positions`, `portal_positions`.
 - Pathfinding (8-way adjacency `max(abs(dy),abs(dx))==1`; `'-'`, `'|'`, `' '` walls IMPASSABLE): `bfs_distances(passable_mask, start=(y,x), allow_diagonal=True, no_diag=state.mem.door_mask)` & `path_step(passable_mask, target=(ty,tx), start=(y,x), allow_diagonal=True, no_diag=state.mem.door_mask) -> (dy,dx)`.
 
 #### 4. Zero-Heuristic `WorldMemory` (`state.mem` & `state.kv`)
-- Floor (`state.mem`): `visited`, `visit_count`, `remembered_chars`, `passable_mask`, `copy_passable_mask()`, `door_mask`, `searched_counts`, `remembered_obj_glyphs`, `remembered_trap_glyphs`, `locked_doors`.
+- Floor (`state.mem`): `visited` (**`bool[21,79]` `ndarray`** — index `visited[y, x]`, NEVER `(y, x) in visited`!; whereas `ws.floor(state).visited` is `set[(y,x)]`), `visit_count` (`int[21,79]`), `remembered_chars` (`uint8[21,79]`), `passable_mask`, `copy_passable_mask()`, `door_mask`, `searched_counts`, `remembered_obj_glyphs`, `remembered_trap_glyphs`, `locked_doors`.
 - Inter-Branch Graph & Persistence: `stair_graph` (`dict[(dnum, dlvl, y, x), (dnum2, dlvl2, y2, x2)]`), `level_exits` (`dict[(dnum, dlvl), dict[(y, x), glyph]]`), `pos_history`, `is_oscillating`, `recent_messages`, `kv` (persisted across floors & replays).
 """
 
-POLICY_LANG_DOCS = f"{GENERATOR_POLICY_DOCS}\n{CORE_HARNESS_DOCS[len('### 1-to-1 NetHack Harness & `GameState` Reference') :]}"
+_CORE_HARNESS_BODY = CORE_HARNESS_DOCS.split("\n", 1)[1]
+POLICY_LANG_DOCS = f"{GENERATOR_POLICY_DOCS}\n{_CORE_HARNESS_BODY}"
 
 
 def build_system_prompt(
@@ -174,7 +176,7 @@ Do not guess why a run stalled or died. Formulate differential queries against D
 3. **Outlier & Failure Trace Inspection Query (Full Lossless Ticks & Specialist Attribution)**:
    ```sql
    -- 3A. Compare top outlier runs vs worst failures in the active champion batch
-   SELECT run_id, seed, depth, max_depth, final_ac, final_xp_level, turns, last_active_function, end_reason, summary_digest
+   SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, last_active_function, end_reason, summary_digest
    FROM champion_runs ORDER BY max_depth DESC, turns DESC LIMIT 5;
 
    -- 3B. Inspect exact step-by-step pre-mortem ticks (100% full lossless ticks with inventory & monster alignment)
@@ -210,13 +212,13 @@ Do not guess why a run stalled or died. Formulate differential queries against D
    - Query `expert_runs` and `expert_ticks` to study how successful human ascensions and reference runs progress, what intrinsics/kit they acquire, and how they act across depths.
 2. `query_wiki(query, top_k=3)`: Search the offline NetHack 3.6.6 Wiki for exact monster mechanics, corpse effects, item properties, intrinsics, and dungeon branches.
 3. `query_monster(name)`: Query the exact C-level engine `permonst` struct for any monster (e.g. `jackal`, `floating eye`, `lichen`, `orc`). Returns exact level, AC, movement speed, magic resistance, corpse weight, corpse nutrition, conveyed intrinsics (e.g. poison resistance), and monster innate resistances.
-4. `query_item(name)`: Query the exact C-level engine `objclass` struct for any item (e.g. `food ration`, `potion of extra healing`, `long sword`). Returns exact object class, cost, weight, and nutrition value.
+4. `query_item(name)`: Query the exact C-level engine `objclass` struct for any item (e.g. `food ration`, `potion of extra healing`, `long sword`). Returns exact object class, cost, weight, and nutrition value (when food).
 5. `query_policy_docs(topic="all")`: View the policy language specification and the full source/docstrings of all macros currently in `macros.py` (or call `query_policy_docs("actions")` for the complete command index).
 6. `read_skill(skill_name, policy_id="")`: Retrieve the complete Python source code of any modular skill package currently residing in `skills/` (or from a historical `policy_id` snapshot).
-7. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, replay_run_id="", replay_steps=0)`:
+7. `dry_run_policy(code, is_macro=False, seed=42, max_turns=150, smoke_only=False, replay_run_id="", replay_steps=0)`:
    - Tests candidate Python code in a live NetHack sandbox.
    - **Step 1 (Smoke Check & Behavioral Critic)**: Verifies AST, checks reachability, detects oscillations and search spam. Optional `replay_run_id` fast-forwards into any recorded mid-game run in ~10ms.
-   - **Step 2 (30-Episode Parallel Pilot Batch)**: Dispatches 30 episodes across persistent workers (up to 8 pilot revisions per generation, with fallback to best candidate) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.
+   - **Step 2 (30-Episode Parallel Pilot Batch)**: Dispatches 30 episodes across persistent workers (up to 4 pilot revisions per generation by default, with fallback to best non-regressive candidate) paired 1-to-1 against current baseline seeds, returning paired Wins/Losses/Ties, Δ depth, and concrete game logs of the worst stalled runs.
 
 ### Scientific Investigation Protocol (MANDATORY)
 1. **Never Guess from Intuition**: NetHack mechanics are strictly ruled by the C engine (e.g. traps, secret doors, searching probabilities, hunger increments, prayer timeouts, pet displacement, monster ranged attacks). Guessing code changes without empirical research causes catastrophic regressions.
@@ -633,7 +635,7 @@ The policy has grown into a large monolith (or reached a structural threshold). 
    - Check where the hero spent turns (e.g. `SELECT depth, AVG(turns) FROM champion_runs GROUP BY depth`), whether food was present in inventory (`starved_with_food`), and which functions consumed turns.
 
 2. **Step 2: Pre-Mortem & Full-Tick Trace to Exact Code Line**:
-   - Run `query_db` on `champion_ticks` (which stores **100% full, lossless step-by-step ticks** with `inventory_summary` and `visible_monsters`) to trace the exact 10–20 turns before death or stall.
+   - Run `query_db` on `champion_ticks` (which captures step-by-step ticks with `inventory_summary` and `visible_monsters` for sampled/outlier champion runs) to trace the exact turns before death or stall.
    - Cross-reference those ticks with the exact lines of `Current policy.py` (or `read_skill(...)`) to pinpoint the exact conditional branch, missing guard, or threshold that caused the specialist function to make the wrong decision.
 
 3. **Step 3: C-Mechanic & Expert Verification (`query_wiki` / `expert_runs`)**:

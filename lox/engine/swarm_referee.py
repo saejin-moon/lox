@@ -395,7 +395,8 @@ class SwarmReferee:
         kept_skills = SwarmMetaAgent.prune_unused_skills(chosen_pol, merged_skills)
         try:
             with _COMPILE_EXEC_LOCK:
-                compile_policy_package(chosen_pol, "", skills=kept_skills)
+                compiled = compile_policy_package(chosen_pol, "", skills=kept_skills)
+                compiled.create_runner()
         except Exception:
             return None
 
@@ -856,13 +857,18 @@ class SwarmReferee:
             return True
 
         # Compute paired hypothesis stats (IQM, CS, Wilcoxon) for each evaluated finalist
+        bm_name = str(getattr(eval_pool, "benchmark", "nethack") or "nethack")
         inc_runs_list = (
             (inc_batch_eval.get("runs", []) or []) if inc_batch_eval is not None else []
         )
         paired_by_idx: list[dict[str, Any]] = []
         for _c, b_eval, _st in evaluated_entries:
             p_res = (
-                evaluate_tournament_pair(b_eval.get("runs", []) or [], inc_runs_list)
+                evaluate_tournament_pair(
+                    b_eval.get("runs", []) or [],
+                    inc_runs_list,
+                    benchmark=bm_name,
+                )
                 if inc_runs_list
                 else {
                     "iqm_cand": float(_st.get("iqm_prog", 1.0)),
@@ -1039,13 +1045,20 @@ class SwarmReferee:
                 reverse=True,
             )
             cur_stack_fp = _package_fingerprint(best_cand.policy_code, best_cand.skills)
-            for next_c, _nxt_st, _nxt_pr in winning_indivs[:3]:
+            for stk_step_i, (next_c, _nxt_st, _nxt_pr) in enumerate(
+                winning_indivs[:3], start=1
+            ):
+                stack_pid = (
+                    f"stk{stk_step_i}_{best_cand.peer_id[:16]}_{next_c.peer_id[:16]}"[
+                        :48
+                    ]
+                )
                 cand_stack = self._compose_two_packages(
                     base_policy,
                     base_skills,
                     best_cand,
                     next_c,
-                    peer_id=f"stack_{best_cand.peer_id}_{next_c.peer_id}"[:48],
+                    peer_id=stack_pid,
                     claimed_label=f"Greedy N-way stack (+{next_c.peer_id})",
                     check_symbol_disjoint=True,
                 )
@@ -1147,6 +1160,8 @@ class SwarmReferee:
                         h_inc_stats = _extract_eval_stats(
                             h_inc_eval, loc_total=base_loc
                         )
+                        if len(self._incumbent_cache) >= 4:
+                            self._incumbent_cache.pop(next(iter(self._incumbent_cache)))
                         self._incumbent_cache[h_inc_key] = (h_inc_eval, h_inc_stats)
                     h_cand_eval = eval_pool.evaluate_batch(
                         batch_id=f"holdout_g{generation}_{cand_obj.peer_id}_{int(time.time())}",
@@ -1164,6 +1179,7 @@ class SwarmReferee:
                     h_pair = evaluate_tournament_pair(
                         h_cand_eval.get("runs", []) or [],
                         h_inc_eval.get("runs", []) or [],
+                        benchmark=bm_name,
                     )
                     h_avg_d = float(h_cand_stats.get("avg_depth", 1.0))
                     h_iqm_d = float(h_pair.get("iqm_delta", 0.0))
@@ -1202,6 +1218,7 @@ class SwarmReferee:
                         f_pair = evaluate_tournament_pair(
                             f_cand_eval.get("runs", []) or [],
                             f_inc_eval.get("runs", []) or [],
+                            benchmark=bm_name,
                         )
                         f_exc = int(f_cand_stats.get("policy_exceptions", 0) or 0)
                         f_iqm_d = float(f_pair.get("iqm_delta", 0.0))
@@ -1212,8 +1229,11 @@ class SwarmReferee:
                             )
                             return False, h_avg_d, h_iqm_d, True
                     return True, h_avg_d, h_iqm_d, False
-                except Exception:
-                    pass
+                except Exception as exc:
+                    ui.warn(
+                        f"Gen {generation}: Post-CRN gate error for `{cand_obj.peer_id}` ({exc}); failing closed."
+                    )
+                    return False, None, None, False
             return True, None, None, False
 
         # Optional Scenario + Hidden Holdout Gate (with fallback to next eligible finalist on rejection)
@@ -1276,6 +1296,34 @@ class SwarmReferee:
                     "holdout_avg_depth": holdout_avg_depth if is_best else None,
                     "holdout_iqm_delta": holdout_iqm_delta if is_best else None,
                     "holdout_rejected": bool(holdout_rejected and is_best),
+                }
+            )
+        if best_cand.peer_id not in evaluated_ids and best_cand.peer_id != "incumbent":
+            evaluated_ids.add(best_cand.peer_id)
+            attempts_summary.append(
+                {
+                    "attempt_id": f"att_g{generation}_{best_cand.peer_id}_{int(time.time() * 1000)}",
+                    "generation": generation,
+                    "peer_id": best_cand.peer_id,
+                    "deficit_id": best_cand.claimed_deficit_id,
+                    "candidate_fp": _package_fingerprint(
+                        best_cand.policy_code, best_cand.skills
+                    ),
+                    "promoted": bool(beats_incumbent),
+                    "sandbox_passed": bool(best_cand.sandbox_passed),
+                    "sandbox_error": str(best_cand.error or ""),
+                    "avg_depth": float(best_stats.get("avg_depth", 1.0)),
+                    "max_depth": int(best_stats.get("max_depth", 1)),
+                    "avg_score": float(best_stats.get("avg_score", 0.0)),
+                    "avg_ac": float(best_stats.get("avg_ac", 10.0)),
+                    "avg_xp_level": float(best_stats.get("avg_xp_level", 1.0)),
+                    "policy_exceptions": int(best_stats.get("policy_exceptions", 0)),
+                    "seeds_gained": list(best_pair.get("seeds_gained", [])),
+                    "seeds_lost": list(best_pair.get("seeds_lost", [])),
+                    "top_tracebacks": list(best_stats.get("top_tracebacks", [])),
+                    "holdout_avg_depth": holdout_avg_depth,
+                    "holdout_iqm_delta": holdout_iqm_delta,
+                    "holdout_rejected": bool(holdout_rejected),
                 }
             )
         for c in candidates:

@@ -84,7 +84,7 @@ class MacroLibrary:
 
         updated_names: list[str] = []
         for node in new_tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 updated_names.append(node.name)
                 if node.name in existing_idx:
                     base_tree.body[existing_idx[node.name]] = node
@@ -95,10 +95,32 @@ class MacroLibrary:
                 imp_src = ast.unparse(node).strip()
                 if imp_src not in existing_imports:
                     existing_imports.add(imp_src)
-                    base_tree.body.insert(0, node)
-                    existing_idx = {k: v + 1 for k, v in existing_idx.items()}
+                    doc_at = (
+                        1
+                        if (
+                            base_tree.body
+                            and isinstance(base_tree.body[0], ast.Expr)
+                            and isinstance(base_tree.body[0].value, ast.Constant)
+                            and isinstance(base_tree.body[0].value.value, str)
+                        )
+                        else 0
+                    )
+                    if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                        ins_at = doc_at
+                    else:
+                        ins_at = doc_at
+                        while ins_at < len(base_tree.body) and isinstance(
+                            base_tree.body[ins_at], (ast.Import, ast.ImportFrom)
+                        ):
+                            ins_at += 1
+                    base_tree.body.insert(ins_at, node)
+                    existing_idx = {
+                        k: (v + 1 if v >= ins_at else v)
+                        for k, v in existing_idx.items()
+                    }
                     existing_assign_idx = {
-                        k: v + 1 for k, v in existing_assign_idx.items()
+                        k: (v + 1 if v >= ins_at else v)
+                        for k, v in existing_assign_idx.items()
                     }
             elif isinstance(node, (ast.Assign, ast.AnnAssign)):
                 var_name = None
@@ -141,17 +163,29 @@ class MacroLibrary:
         except SyntaxError:
             return []
 
+        def _has_shallow_yield(fn_node: ast.AST) -> bool:
+            for ch in ast.iter_child_nodes(fn_node):
+                if isinstance(ch, (ast.Yield, ast.YieldFrom)):
+                    return True
+                if not isinstance(
+                    ch,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+                ):
+                    if _has_shallow_yield(ch):
+                        return True
+            return False
+
         specs: list[MacroSpec] = []
         for node in tree.body:
-            if isinstance(node, ast.FunctionDef):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 args_str = ast.unparse(node.args)
                 ret_str = f" -> {ast.unparse(node.returns)}" if node.returns else ""
-                sig = f"def {node.name}({args_str}){ret_str}"
-                doc = ast.get_docstring(node) or "No docstring provided."
-                is_gen = any(
-                    isinstance(sub, (ast.Yield, ast.YieldFrom))
-                    for sub in ast.walk(node)
+                prefix = (
+                    "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
                 )
+                sig = f"{prefix} {node.name}({args_str}){ret_str}"
+                doc = ast.get_docstring(node) or "No docstring provided."
+                is_gen = _has_shallow_yield(node)
                 specs.append(
                     MacroSpec(
                         name=node.name,
@@ -264,6 +298,19 @@ class MacroHarvester:
                 def __init__(self) -> None:
                     self.invalid = False
 
+                def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+                    return node
+
+                def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+                    if node is not cloned:
+                        return node
+                    return self.generic_visit(node)
+
+                def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+                    if node is not cloned:
+                        return node
+                    return self.generic_visit(node)
+
                 def visit_Attribute(self, node: ast.Attribute) -> Any:
                     if isinstance(node.value, ast.Name) and node.value.id == "self":
                         if has_state_arg and node.attr in (
@@ -312,9 +359,25 @@ class MacroHarvester:
             if rewriter.invalid:
                 continue
 
-            # Remove self from arguments
-            if cloned.args.args and cloned.args.args[0].arg == "self":
+            # Remove self and class/method decorators that fail on standalone functions
+            if cloned.args.posonlyargs and cloned.args.posonlyargs[0].arg == "self":
+                cloned.args.posonlyargs.pop(0)
+            elif cloned.args.args and cloned.args.args[0].arg == "self":
                 cloned.args.args.pop(0)
+            if getattr(cloned, "decorator_list", None):
+                cloned.decorator_list = [
+                    d
+                    for d in cloned.decorator_list
+                    if (
+                        isinstance(d, ast.Name)
+                        and d.id not in ("classmethod", "staticmethod", "bt_leaf")
+                    )
+                    or (
+                        isinstance(d, ast.Call)
+                        and isinstance(d.func, ast.Name)
+                        and d.func.id != "bt_leaf"
+                    )
+                ]
 
             # Ensure docstring
             doc = ast.get_docstring(cloned)

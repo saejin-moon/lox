@@ -25,7 +25,7 @@ def parse_pilot_delta(tool_results_json: str | None) -> float | None:
     """Extracts numerical pilot delta from tool results json or summary text."""
     if not tool_results_json:
         return None
-    m = re.search(r"[Δ\\]Delta\s*=\s*([+-]?\d+\.?\d*)", tool_results_json)
+    m = re.search(r"(?:Δ|\\Delta|Delta)\s*=\s*([+-]?\d+\.?\d*)", tool_results_json)
     if m:
         try:
             return float(m.group(1))
@@ -40,6 +40,17 @@ def calibrate_pilot(db_path: str, min_generations: int = 5) -> None:
         sys.exit(1)
 
     con = duckdb.connect(db_path, read_only=True)
+    try:
+        return _calibrate_with_conn(con, db_path, min_generations=min_generations)
+    finally:
+        con.close()
+
+
+def _calibrate_with_conn(
+    con: duckdb.DuckDBPyConnection,
+    db_path: str,
+    min_generations: int = 5,
+) -> None:
     tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
     if "synthesis_logs" not in tables:
         print(

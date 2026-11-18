@@ -66,6 +66,8 @@ def validate_contract_instance(obj: Any) -> list[str]:
         issues.append("CapabilityScorer.score_capability must be callable")
     if hasattr(obj, "query_goal") and not callable(obj.query_goal):
         issues.append("WorldTracker.query_goal must be callable")
+    if hasattr(obj, "update") and not callable(obj.update):
+        issues.append("WorldTracker.update must be callable")
     return issues
 
 

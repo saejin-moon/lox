@@ -3,7 +3,7 @@ Mode Scheduler (`ModeScheduler`).
 Schedules the 3 core policy synthesis modes (`CREATE`, `WRITE`, `REFACTOR`):
 1. Generation 0 (or empty policy): `CREATE` (formerly `FULL_WRITE`)
 2. Focused synthesis / modification: `WRITE` (formerly `FUNC_MOD_ADD`, max 2 functions)
-3. Modular skill extraction when `policy.py` reaches >= 450 lines: `REFACTOR` (formerly `STRUCTURAL_REFACTOR`)
+3. Modular skill extraction when `policy.py` or a skill reaches >= 320 lines: `REFACTOR` (formerly `STRUCTURAL_REFACTOR`)
 """
 
 from __future__ import annotations

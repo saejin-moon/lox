@@ -12,7 +12,6 @@ Replaces hierarchical `SwarmCriticAgent` / `SwarmMetaAgent` / thematic `SwarmWor
 from __future__ import annotations
 
 import json
-import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -22,7 +21,6 @@ from lox.author.agent import AuthorAgent
 from lox.author.swarm_critic import extract_priority_selector_branches
 from lox.author.swarm_deficits import DeficitCluster, DeficitReport
 from lox.author.swarm_meta import SwarmMetaAgent
-from lox.author.tools import merge_skill_module_update
 from lox.env.harness import NetHackHarness, policy_handles_menus
 from lox.lang.bt import extract_runner_leaf_errors
 from lox.lang.compiler import _COMPILE_EXEC_LOCK, compile_policy_package
@@ -62,6 +60,12 @@ def parse_peer_output(
     - Optional `### skill: <name>` followed by ```python ... ```
     - `<policy_code> ... </policy_code>` or the final ```python ... ``` defining `class Policy`
     """
+    from lox.lang.bundle import (
+        extract_policy_fallback_from_markdown,
+        extract_skill_modules,
+    )
+    from lox.lang.validator import normalize_skill_key
+
     hyp, extracted_code = AuthorAgent.extract_yaml_and_python(raw_text or "")
 
     updated_skills = dict(base_skills or {})
@@ -69,37 +73,21 @@ def parse_peer_output(
     raw_prunes = hyp.get("skills_to_prune")
     if isinstance(raw_prunes, list):
         for s in raw_prunes:
-            s_name = str(s or "").strip().removesuffix(".py")
+            s_name = normalize_skill_key(str(s or ""))
             if s_name and s_name in updated_skills:
                 updated_skills.pop(s_name, None)
                 explicit_prunes.append(s_name)
 
-    skill_blocks = re.findall(
-        r"###\s*skill:\s*([A-Za-z0-9_./-]+)\s*\n+```(?:python)?\s*\n(.*?)```",
-        raw_text or "",
-        flags=re.DOTALL,
-    )
-    from lox.lang.validator import normalize_skill_key
+    extracted_skills = extract_skill_modules(raw_text or "", include_markdown=True)
+    updated_skills.update(extracted_skills)
 
-    for s_name, s_src in skill_blocks:
-        try:
-            clean_name = normalize_skill_key(s_name)
-        except Exception:
-            clean_name = s_name.strip().removesuffix(".py")
-        if clean_name and s_src.strip():
-            updated_skills[clean_name] = s_src.strip()
-
-    # If <policy_code> wasn't explicit and the trailing python block was actually a ### skill block,
-    # inspect any python block containing `class Policy`.
+    # If <policy_code> wasn't explicit and the trailing python block was actually a skill block,
+    # inspect any remaining python block containing `class Policy`.
     policy_code = extracted_code.strip()
     if "<policy_code>" not in (raw_text or "") and "class Policy" not in policy_code:
-        py_blocks = re.findall(
-            r"```(?:python)?\s*\n(.*?)```", raw_text or "", flags=re.DOTALL
-        )
-        for blk in reversed(py_blocks):
-            if "class Policy" in blk:
-                policy_code = blk.strip()
-                break
+        fallback = extract_policy_fallback_from_markdown(raw_text or "")
+        if fallback:
+            policy_code = fallback.strip()
 
     if not policy_code:
         policy_code = str(base_policy or "").strip()
@@ -693,14 +681,30 @@ class SwarmPeerAgent:
             f"{frontier_block}\n"
         )
 
-        proposal = self.author.synthesize(
-            mode="SWARM_PEER",
-            generation=generation,
-            current_policy=current_policy,
-            batch_digest=extra_context,
-            skills=skills_copy,
-            max_tool_turns=self.max_tool_turns,
-        )
+        try:
+            proposal = self.author.synthesize(
+                mode="SWARM_PEER",
+                generation=generation,
+                current_policy=current_policy,
+                batch_digest=extra_context,
+                skills=skills_copy,
+                max_tool_turns=self.max_tool_turns,
+            )
+        except RuntimeError as exc:
+            failed_cand = PeerCandidate(
+                peer_id=self.peer_id,
+                claimed_deficit_id=claimed_deficit.cluster_id,
+                claimed_label=claimed_deficit.label,
+                hypothesis_yaml={},
+                policy_code=current_policy,
+                skills=skills_copy,
+                sandbox_passed=False,
+                error=str(exc),
+            )
+            self._record_peer_theory(generation, claimed_deficit, failed_cand)
+            return failed_cand
+        finally:
+            self.author.tools.close()
 
         if getattr(proposal, "aborted", False):
             aborted_cand = PeerCandidate(
@@ -727,20 +731,18 @@ class SwarmPeerAgent:
         for s_name, s_src in (getattr(proposal, "skill_modules", {}) or {}).items():
             from lox.lang.validator import normalize_skill_key
 
-            try:
-                clean_s = normalize_skill_key(str(s_name or ""))
-            except Exception:
-                clean_s = str(s_name or "").strip().removesuffix(".py")
+            clean_s = normalize_skill_key(str(s_name or ""))
             if clean_s and str(s_src or "").strip():
-                updated_skills[clean_s] = merge_skill_module_update(
-                    updated_skills.get(clean_s, ""), str(s_src)
-                )
+                # `AuthorAgent.synthesize` already ran `merge_skill_module_update` on edited skills.
+                updated_skills[clean_s] = str(s_src)
 
         explicit_prunes: list[str] = []
         raw_prunes = hyp.get("skills_to_prune")
         if isinstance(raw_prunes, list):
+            from lox.lang.validator import normalize_skill_key
+
             for s in raw_prunes:
-                s_name = str(s or "").strip().removesuffix(".py")
+                s_name = normalize_skill_key(str(s or ""))
                 if s_name and s_name in updated_skills:
                     updated_skills.pop(s_name, None)
                     explicit_prunes.append(s_name)

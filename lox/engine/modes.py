@@ -51,4 +51,10 @@ MODES: dict[str, ModeConfig] = {
         requires_llm=True,
         requires_trigger_filter=True,
     ),
+    "STRUCTURAL_REFACTOR": ModeConfig(
+        name="REFACTOR",
+        episodes_per_unit=200,
+        requires_llm=True,
+        requires_trigger_filter=False,
+    ),
 }

@@ -148,45 +148,62 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
 
     if is_shard:
         state = harness.replay_bytes(seed=seed, recorded_bytes=replay_bytes)
+        if harness.done and replay_bytes and len(replay_bytes) > 1:
+            buf_sh = bytes(replay_bytes)
+            for back in (30, 80, max(120, len(buf_sh) // 2)):
+                state = harness.replay_bytes(
+                    seed=seed,
+                    recorded_bytes=buf_sh,
+                    stop_at_byte_idx=max(1, len(buf_sh) - back),
+                )
+                if not harness.done:
+                    break
         runner.tracer.reset_for_episode()
         max_steps = int(post_replay_max_steps or 200)
         harness.step_count = 0
         harness.max_steps = max_steps
         if harness.done:
-            msg = getattr(state, "message", "")
-            return {
-                "triggered": True,
-                "is_shard": True,
-                "shard_id": task.get("shard_id"),
-                "run_id": run_id,
-                "seed": seed,
-                "steps": 0,
-                "turns": getattr(state, "turn", 0),
-                "score": getattr(state, "score", 0),
-                "gold": getattr(state, "gold", 0),
-                "max_depth": getattr(state, "depth", 1),
-                "depth": getattr(state, "depth", 1),
-                "hp": getattr(state, "hp", 0),
-                "max_hp": getattr(state, "max_hp", 0),
-                "ac": getattr(state, "ac", 10),
-                "xp_level": getattr(state, "xp_level", 1),
-                "end_reason": msg.split(".")[0][:60] if msg else "died",
-                "death_message": msg[:160],
-                "action_bytes": bytes(harness.action_bytes),
-                "auto_esc_count": 0,
-                "subgen_preemptions": 0,
-                "policy_exceptions": 0,
-                "unique_tiles": 1,
-                "pct_wait": 0.0,
-                "pct_search": 0.0,
-                "starved_with_food": False,
-                "died_unarmored": False,
-                "worn_oprop_count": 0,
-                "dungeons_visited": 1,
-                "ticks": [],
-                "function_stats": {},
-                "registered_params": {},
-            }
+            msg = getattr(state, "message", "") or ""
+            return EpisodeRun(
+                {
+                    "triggered": True,
+                    "is_shard": True,
+                    "shard_id": task.get("shard_id") or "",
+                    "run_id": run_id,
+                    "seed": seed,
+                    "steps": 0,
+                    "turns": int(getattr(state, "turn", 0) or 0),
+                    "score": int(getattr(state, "score", 0) or 0),
+                    "gold": int(getattr(state, "gold", 0) or 0),
+                    "max_depth": int(getattr(state, "depth", 1) or 1),
+                    "depth": int(getattr(state, "depth", 1) or 1),
+                    "final_hp": int(getattr(state, "hp", 0) or 0),
+                    "max_hp": int(getattr(state, "max_hp", 0) or 0),
+                    "final_ac": int(
+                        getattr(state, "ac", 10)
+                        if getattr(state, "ac", None) is not None
+                        else 10
+                    ),
+                    "xp_level": int(getattr(state, "xp_level", 1) or 1),
+                    "end_reason": msg.split(".")[0][:60] if msg else "died",
+                    "death_message": msg[:160],
+                    "action_bytes": bytes(harness.action_bytes),
+                    "auto_esc_count": 0,
+                    "subgen_preemptions": 0,
+                    "policy_exceptions": 0,
+                    "unique_tiles": 1,
+                    "pct_wait": 0.0,
+                    "pct_search": 0.0,
+                    "starved_with_food": False,
+                    "died_unarmored": False,
+                    "worn_oprop_count": 0,
+                    "dungeons_visited": 1,
+                    "ticks": [],
+                    "triggered_functions": {},
+                    "fn_turns": {},
+                    "registered_params": {},
+                }
+            )
         harness.done = False
         if hasattr(state, "mem") and hasattr(state.mem, "kv"):
             for k, v in state.mem.kv.items():
@@ -312,15 +329,19 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             exception_tracebacks.append(f"{loc}{type(exc).__name__}: {str(exc)[:160]}")
             break
 
+        raw_byte = getattr(raw_act, "byte_val", None)
+        raw_seq = getattr(raw_act, "bytes_seq", None)
         is_wait = (
             raw_act == Action.WAIT
             or raw_act == "."
-            or (hasattr(raw_act, "bytes_payload") and raw_act.bytes_payload == b".")
+            or raw_byte == ord(".")
+            or raw_seq == (ord("."),)
         )
         is_search = (
             raw_act == Action.SEARCH
             or raw_act == "s"
-            or (hasattr(raw_act, "bytes_payload") and raw_act.bytes_payload == b"s")
+            or raw_byte == ord("s")
+            or raw_seq == (ord("s"),)
         )
         if is_wait:
             wait_count += 1
@@ -487,6 +508,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     if (
         enforce_trigger
         and target_functions
+        and runner.policy_exceptions == 0
         and not runner.tracer.triggered_any(target_functions)
     ):
         return {
@@ -891,6 +913,7 @@ class PersistentEvalPool:
                                     "enforce_trigger": False,
                                     "skills": skills,
                                     "benchmark": bench,
+                                    "_cancel_epoch": int(self._cancel_epoch.value),
                                 }
                             )
                         else:
@@ -1105,10 +1128,25 @@ class PersistentEvalPool:
         if not tasks:
             return []
         with self._pool_lock:
-            pool = self._ensure_pool()
-            if pool is not None:
-                return list(pool.imap_unordered(run_single_episode, tasks, chunksize=1))
-            return [run_single_episode(tk) for tk in tasks]
+            for attempt in range(2):
+                try:
+                    pool = self._ensure_pool()
+                    if pool is not None:
+                        return list(
+                            pool.imap_unordered(run_single_episode, tasks, chunksize=1)
+                        )
+                    return [run_single_episode(tk) for tk in tasks]
+                except Exception as pool_exc:
+                    if attempt == 0 and self.workers > 1:
+                        ui.warn(
+                            f"Worker pool encountered transient error in evaluate_tasks ({pool_exc}); "
+                            "re-initializing pool and retrying..."
+                        )
+                        self.close()
+                        self._pool = None
+                        continue
+                    raise
+        return []
 
     def close(self) -> None:
         with self._pool_lock:

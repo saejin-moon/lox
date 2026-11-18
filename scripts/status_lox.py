@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lox.db.schema import DEFAULT_DB_PATH, connect_db
+from lox.db.schema import DEFAULT_DB_PATH, NON_SHARD_RUNS_SQL, connect_db
 
 
 def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> None:
@@ -90,7 +90,12 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
         )
 
         total_batches = con.execute("SELECT COUNT(*) FROM batches").fetchone()[0] or 0
-        total_runs = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0] or 0
+        total_runs = (
+            con.execute(
+                f"SELECT COUNT(*) FROM runs WHERE {NON_SHARD_RUNS_SQL}"
+            ).fetchone()[0]
+            or 0
+        )
         cost_row = con.execute(
             """
             SELECT COALESCE(SUM(total_cost_usd), 0.0),
@@ -143,10 +148,10 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
         # Deepest runs in window
         try:
             run_cur = con.execute(
-                """
+                f"""
                 SELECT run_id, seed, max_depth, score, xp_level, final_ac, end_reason
                 FROM runs
-                WHERE created_at >= ?
+                WHERE created_at >= ? AND {NON_SHARD_RUNS_SQL}
                 ORDER BY max_depth DESC, score DESC
                 LIMIT 5
                 """,
@@ -157,8 +162,12 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
                 print("\n🏆 DEEPEST RUNS IN WINDOW:")
                 for r in deepest:
                     rid, s, md, sc, xl, ac, reason = r
+                    md_s = int(md or 1)
+                    sc_s = int(sc or 0)
+                    xl_s = int(xl or 1)
+                    ac_s = int(ac if ac is not None else 10)
                     print(
-                        f"  • `{rid}` (Seed={s}): Dlvl {md}, Score {sc:,}, XL {xl}, AC {ac} -> {reason}"
+                        f"  • `{rid}` (Seed={s}): Dlvl {md_s}, Score {sc_s:,}, XL {xl_s}, AC {ac_s} -> {reason}"
                     )
         except Exception:
             pass

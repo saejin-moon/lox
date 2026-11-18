@@ -30,6 +30,12 @@ from lox.db.schema import DEFAULT_DB_PATH, connect_db
 from lox.db.shards import extract_shards_from_runs
 from lox.env.actions import Action
 from lox.env.harness import NetHackHarness, policy_handles_menus
+from lox.lang.bundle import (
+    strip_code_fences as _strip_fences,
+)
+from lox.lang.bundle import (
+    unpack_code_bundle,
+)
 from lox.lang.compiler import compile_policy_package
 from lox.lang.macros import DEFAULT_MACROS_PATH, MacroLibrary
 from lox.lang.validator import (
@@ -37,6 +43,7 @@ from lox.lang.validator import (
     check_evolve_block_bounds,
     is_ast_equivalent,
     normalize_mode,
+    normalize_skill_key,
     prune_extracted_skill_functions,
     run_pyright_on_package,
     smart_dedent,
@@ -87,6 +94,10 @@ def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
         if isinstance(n, ast.Assign)
         for t in n.targets
         if isinstance(t, ast.Name)
+    } | {
+        n.target.id
+        for n in ex_tree.body
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
     }
     ca_assigns = {
         t.id
@@ -94,6 +105,10 @@ def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
         if isinstance(n, ast.Assign)
         for t in n.targets
         if isinstance(t, ast.Name)
+    } | {
+        n.target.id
+        for n in ca_tree.body
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
     }
     first_line = cand.splitlines()[0].strip().lower() if cand.splitlines() else ""
     if first_line.startswith("# replace") or first_line.startswith("# full replace"):
@@ -102,9 +117,27 @@ def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
         first_line.startswith("# patch")
         or "other functions unchanged" in cand[:300].lower()
     )
+    ca_has_docstring = ast.get_docstring(ca_tree) is not None
     dropped_most_defs = len(ex_defs) >= 3 and len(ca_defs) < max(2, len(ex_defs) // 2)
     omitted_existing = bool((ex_defs - ca_defs) | (ex_assigns - ca_assigns))
     overlaps_existing = bool((ex_defs & ca_defs) or (ex_assigns & ca_assigns))
+    looks_full_rewrite = (
+        not looks_patch_comment
+        and (ca_has_docstring or ca_has_imports)
+        and (ca_has_imports or not ex_has_imports)
+        and (len(ca_assigns) > 0 or len(ex_assigns) == 0 or ca_has_docstring)
+        and not dropped_most_defs
+        and (
+            (ca_has_docstring and len(ca_defs) >= 2 and not (ca_defs < ex_defs))
+            or (
+                len(ca_defs) >= max(2, len(ex_defs) - 1)
+                and (ca_has_docstring or not (ca_defs < ex_defs))
+            )
+        )
+    )
+    if looks_full_rewrite:
+        return cand
+
     partial_subset = (
         (len(ex_defs) >= 2 and 0 < len(ca_defs) < len(ex_defs) and ca_defs <= ex_defs)
         or (len(ex_defs) >= 1 and len(ca_defs) == 0 and len(ca_assigns) > 0)
@@ -137,7 +170,7 @@ def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
     new_skill_imports = _imported_skill_modules(ca_tree) - _imported_skill_modules(
         ex_tree
     )
-    if new_skill_imports:
+    if new_skill_imports and not looks_patch_comment:
         return cand
 
     if (
@@ -155,74 +188,17 @@ def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
     return cand
 
 
-def _strip_fences(src: str) -> str:
-    text = str(src or "").strip()
-    fence_m = re.match(
-        r"^```(?:python)?\s*\n(.*?)```\s*$", text, flags=re.DOTALL | re.IGNORECASE
-    )
-    if fence_m:
-        return fence_m.group(1).strip()
-    return text
-
-
 def _unpack_xml_bundle(raw_code: str) -> tuple[str, dict[str, str]]:
     """
     Extracts `<skill_code module="name">...</skill_code>` blocks and `<policy_code>...</policy_code>`
-    from `raw_code`. Supports both XML bundles and raw tagless Python cleanly.
+    from `raw_code`. Delegates to canonical `lox.lang.bundle.unpack_code_bundle`.
     """
-    raw_str = str(raw_code or "")
-    text = raw_str.strip()
-    if not text:
-        return "", {}
-
-    # Strip accidental wrapper hypothesis/reflection XML tags from code payload
-    text = re.sub(
-        r"<(?P<tag>hypothesis|reflection)>.*?</(?P=tag)>",
-        "",
-        text,
-        flags=re.DOTALL | re.IGNORECASE,
-    ).strip()
-    if not text:
-        return "", {}
-
-    skills_found: dict[str, str] = {}
-    skill_pat = re.compile(
-        r"<(?P<tag>skill_code|skill)(?:\s+(?:module|name)=[\"'](?P<mod>[^\"']+)[\"'])?[^>]*>(?P<code>.*?)</(?P=tag)>",
-        flags=re.DOTALL | re.IGNORECASE,
+    return unpack_code_bundle(
+        raw_code,
+        merge_fn=merge_skill_module_update,
+        include_markdown_skills=False,
+        preserve_raw_verbatim=True,
     )
-    for m in skill_pat.finditer(text):
-        mod_raw = (m.group("mod") or "").strip().removesuffix(".py")
-        mod_clean = mod_raw.replace("\\", "/").replace(".", "/").strip("/")
-        if mod_clean.startswith("skills/"):
-            mod_clean = mod_clean[len("skills/") :]
-        parts = [
-            re.sub(r"[^a-zA-Z0-9_]", "_", p.lower()).strip("_")
-            for p in mod_clean.split("/")
-            if p.strip()
-        ]
-        mod_name = "/".join(parts[:2])
-        inner = smart_dedent(_strip_fences(m.group("code")))
-        if mod_name and inner.strip():
-            skills_found[mod_name] = inner.strip()
-
-    pol_pat = re.compile(
-        r"<(?P<tag>policy_code|policy)>(?P<code>.*?)</(?P=tag)>",
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    pol_match = pol_pat.search(text)
-    if pol_match:
-        pol_src = smart_dedent(_strip_fences(pol_match.group("code"))).strip()
-        return pol_src, skills_found
-
-    if skills_found:
-        rem = skill_pat.sub("", text).strip()
-        rem = smart_dedent(_strip_fences(rem)).strip()
-        return rem, skills_found
-
-    unfenced = _strip_fences(raw_str)
-    if unfenced != text:
-        return smart_dedent(unfenced).strip(), {}
-    return raw_str, {}
 
 
 def _format_cursor_yaml(cur: Any, max_rows: int = 40) -> tuple[str, int]:
@@ -314,20 +290,45 @@ class AuthorToolRegistry:
         self.swarm_replay_fixtures: list[dict[str, Any]] = []
         self.swarm_scaffold_code: str = ""
         self.swarm_experiments: list[dict[str, Any]] = []
-        self._reusable_harness: NetHackHarness | None = None
+        self._reusable_harness: Any = None
+        self._reusable_harness_benchmark: str = ""
         self.wiki_queries_run: int = 0
         self.theories_queries_run: int = 0
         self.enforce_peer_research_gate: bool = False
         self.claimed_deficit: Any = None
         self.scenario_gate: str = "off"
 
-    def _get_harness(self, max_steps: int) -> NetHackHarness:
+    def _get_harness(self, max_steps: int, benchmark: str | None = None) -> Any:
         steps = max(10, int(max_steps))
+        bench = str(benchmark or self.benchmark or "nethack").strip().lower()
+        if (
+            self._reusable_harness is not None
+            and self._reusable_harness_benchmark != bench
+        ):
+            self.close()
         if self._reusable_harness is None:
-            self._reusable_harness = NetHackHarness(max_steps=steps)
+            if bench == "nethack":
+                self._reusable_harness = NetHackHarness(max_steps=steps)
+            else:
+                from lox.env import get_adapter
+
+                self._reusable_harness = get_adapter(bench).create_harness(
+                    max_steps=steps
+                )
+            self._reusable_harness_benchmark = bench
         else:
             self._reusable_harness.max_steps = steps
         return self._reusable_harness
+
+    def close(self) -> None:
+        """Closes any cached C/simulator harness owned by this registry."""
+        if self._reusable_harness is not None:
+            try:
+                self._reusable_harness.close()
+            except Exception:
+                pass
+            self._reusable_harness = None
+            self._reusable_harness_benchmark = ""
 
     @property
     def last_passed_code(self) -> str:
@@ -653,11 +654,17 @@ class AuthorToolRegistry:
             else "\n### Current `macros.py`: (Empty - no custom macros defined yet)"
         )
         skill_names = sorted(self.skills.keys())
-        skills_dir = Path(self.macro_lib.path).parent / "skills"
-        if skills_dir.exists():
-            for p in sorted(skills_dir.glob("*.py")):
-                if p.stem != "__init__" and p.stem not in skill_names:
-                    skill_names.append(p.stem)
+        if not skill_names:
+            skills_dir = Path(self.macro_lib.path).parent / "skills"
+            if skills_dir.exists():
+                for p in sorted(skills_dir.rglob("*.py")):
+                    if p.name == "__init__.py":
+                        continue
+                    rel_k = normalize_skill_key(
+                        str(p.relative_to(skills_dir)).replace("\\", "/")
+                    )
+                    if rel_k and rel_k not in skill_names:
+                        skill_names.append(rel_k)
         skills_section = (
             f"\n### Available `skills/` Modules ({len(skill_names)}): {', '.join(sorted(skill_names)) or '(none)'}\n"
             f"(Call `read_skill(skill_name)` to inspect full source of any module.)"
@@ -978,23 +985,24 @@ class AuthorToolRegistry:
                 clean_k = str(k).replace(".", "/").strip("/")
                 files.append((f"skills/{clean_k}.py", src))
                 seen_sk.add(clean_k)
-        skills_dir = Path(self.macro_lib.path).parent / "skills"
-        if skills_dir.exists():
-            for p in sorted(skills_dir.rglob("*.py")):
-                if p.name == "__init__.py":
-                    continue
-                rel_k = (
-                    str(p.relative_to(skills_dir))
-                    .removesuffix(".py")
-                    .replace("\\", "/")
-                )
-                if rel_k not in seen_sk:
-                    try:
-                        files.append(
-                            (f"skills/{rel_k}.py", p.read_text(encoding="utf-8"))
-                        )
-                    except Exception:
-                        pass
+        if not self.skills:
+            skills_dir = Path(self.macro_lib.path).parent / "skills"
+            if skills_dir.exists():
+                for p in sorted(skills_dir.rglob("*.py")):
+                    if p.name == "__init__.py":
+                        continue
+                    rel_k = (
+                        str(p.relative_to(skills_dir))
+                        .removesuffix(".py")
+                        .replace("\\", "/")
+                    )
+                    if rel_k not in seen_sk:
+                        try:
+                            files.append(
+                                (f"skills/{rel_k}.py", p.read_text(encoding="utf-8"))
+                            )
+                        except Exception:
+                            pass
         return files
 
     def read_symbol(self, qualified_name: str) -> tuple[str, str]:
@@ -1002,28 +1010,46 @@ class AuthorToolRegistry:
         q = str(qualified_name or "").strip()
         if not q:
             return "Error: `qualified_name` must be non-empty.", "error"
+        sources = self._iter_workspace_sources()
+        known_keys = {
+            rel_path.removeprefix("skills/").removesuffix(".py"): rel_path
+            for rel_path, _ in sources
+        }
         mod_hint = ""
         cls_hint = ""
         sym_name = q
-        if ":" in q:
-            mod_hint, rest = q.split(":", 1)
+        q_norm = q.replace(".py.", ".")
+        if ":" in q_norm:
+            mod_hint, rest = q_norm.split(":", 1)
             sym_name = rest.strip()
-        elif "/" in q and "." in q:
-            mod_hint, sym_name = q.rsplit(".", 1)
-        elif q.count(".") >= 2:
-            parts = q.rsplit(".", 1)
-            mod_hint, sym_name = parts[0], parts[1]
+        elif "/" in q_norm and "." in q_norm:
+            mod_hint, sym_name = q_norm.split(".", 1)
+        elif q_norm.count(".") >= 1:
+            q_dot = q_norm.removeprefix("skills.")
+            matched_key = ""
+            for key in sorted(known_keys.keys(), key=len, reverse=True):
+                dot_key = key.replace("/", ".")
+                if q_dot.startswith(dot_key + "."):
+                    matched_key = key
+                    sym_name = q_dot[len(dot_key) + 1 :]
+                    break
+            if matched_key:
+                mod_hint = matched_key
+            elif q_norm.count(".") >= 2:
+                parts = q_norm.rsplit(".", 1)
+                mod_hint, sym_name = parts[0], parts[1]
         if "." in sym_name:
             cls_hint, sym_name = sym_name.split(".", 1)
 
         mod_hint_norm = (
             mod_hint.strip()
             .removeprefix("skills/")
+            .removeprefix("skills.")
             .removesuffix(".py")
             .replace(".", "/")
         )
         matches: list[str] = []
-        for rel_path, src in self._iter_workspace_sources():
+        for rel_path, src in sources:
             rel_key = rel_path.removeprefix("skills/").removesuffix(".py")
             if mod_hint_norm and mod_hint_norm not in (rel_key, rel_path):
                 continue
@@ -1164,28 +1190,25 @@ class AuthorToolRegistry:
                         best_span = e_l - s_l
                 return f"{rel_path}::{best}"
 
+            def _is_bb_expr(expr: ast.AST) -> bool:
+                return (isinstance(expr, ast.Name) and expr.id in bb_names) or (
+                    isinstance(expr, ast.Attribute)
+                    and isinstance(expr.value, ast.Name)
+                    and expr.value.id == "self"
+                    and expr.attr == "blackboard"
+                )
+
             for node in ast.walk(tree):
-                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                    if (
-                        node.value.id in bb_names
-                        or node.value.id == "self"
-                        and node.attr == "blackboard"
-                    ):
-                        if node.attr.startswith("__"):
-                            continue
-                        is_write = isinstance(node.ctx, (ast.Store, ast.Del))
-                        kind = "writers" if is_write else "readers"
-                        if node.attr not in {"get", "set", "setdefault", "data"}:
-                            _rec(
-                                node.attr, kind, _scope_for(getattr(node, "lineno", 1))
-                            )
-                elif isinstance(node, ast.Subscript) and isinstance(
-                    node.value, ast.Name
-                ):
-                    if (
-                        node.value.id in bb_names
-                        and isinstance(node.slice, ast.Constant)
-                        and isinstance(node.slice.value, str)
+                if isinstance(node, ast.Attribute) and _is_bb_expr(node.value):
+                    if node.attr.startswith("__"):
+                        continue
+                    is_write = isinstance(node.ctx, (ast.Store, ast.Del))
+                    kind = "writers" if is_write else "readers"
+                    if node.attr not in {"get", "set", "setdefault", "data"}:
+                        _rec(node.attr, kind, _scope_for(getattr(node, "lineno", 1)))
+                elif isinstance(node, ast.Subscript) and _is_bb_expr(node.value):
+                    if isinstance(node.slice, ast.Constant) and isinstance(
+                        node.slice.value, str
                     ):
                         kind = (
                             "writers"
@@ -1197,12 +1220,29 @@ class AuthorToolRegistry:
                             kind,
                             _scope_for(getattr(node, "lineno", 1)),
                         )
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and _is_bb_expr(node.func.value)
+                    and node.func.attr in ("get", "set", "setdefault")
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                ):
+                    loc = _scope_for(getattr(node, "lineno", 1))
+                    key_s = node.args[0].value
+                    if node.func.attr == "get":
+                        _rec(key_s, "readers", loc)
+                    elif node.func.attr == "set":
+                        _rec(key_s, "writers", loc)
+                    else:
+                        _rec(key_s, "readers", loc)
+                        _rec(key_s, "writers", loc)
                 elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     if node.func.id in ("setattr", "getattr") and len(node.args) >= 2:
                         a0, a1 = node.args[0], node.args[1]
                         if (
-                            isinstance(a0, ast.Name)
-                            and a0.id in bb_names
+                            _is_bb_expr(a0)
                             and isinstance(a1, ast.Constant)
                             and isinstance(a1.value, str)
                         ):
@@ -1218,7 +1258,7 @@ class AuthorToolRegistry:
         return "\n".join(lines), f"{len(bb_keys)} keys"
 
     def architecture_map(self) -> tuple[str, str]:
-        """AST-indexed map of registered `@register_goal` / `GoalSpec` handlers, `ws.domain(...)` typed states, and module LOC."""
+        """AST-indexed map of `register_goal(...)` GoalSpec handlers, `ws.domain(...)` typed states, and module LOC."""
         goals_found: list[tuple[str, str, int, str]] = []
         domains_found: dict[str, dict[str, Any]] = {}
         module_summary: list[str] = []
@@ -1324,7 +1364,7 @@ class AuthorToolRegistry:
                            ROUND(AVG(turns), 1) AS avg_turns,
                            ROUND(AVG(score), 1) AS avg_score,
                            ROUND(AVG(final_ac), 2) AS avg_ac,
-                           ROUND(AVG(final_xp_level), 2) AS avg_xl,
+                           ROUND(AVG(xp_level), 2) AS avg_xl,
                            ROUND(AVG(worn_oprop_count), 2) AS avg_oprop,
                            ROUND(AVG(dungeons_visited), 2) AS avg_branches,
                            ROUND(AVG(unique_tiles), 1) AS avg_tiles
@@ -1350,7 +1390,7 @@ class AuthorToolRegistry:
                 lim = max(1, min(30, int(top_n or 10)))
                 early_expert = con.execute(
                     f"""
-                    SELECT run_id, role, race, alignment, max_depth, turns, score, summary_digest
+                    SELECT run_id, role, max_depth, turns, score, summary_digest
                     FROM expert_runs
                     ORDER BY turns DESC
                     LIMIT {lim}
@@ -1378,9 +1418,9 @@ class AuthorToolRegistry:
         if early_expert:
             out_parts.append(f"- Top {len(early_expert)} Expert Reference Runs:")
             for row in early_expert[:10]:
-                digest_line = str(row[7] or "").replace("\n", " ")[:180]
+                digest_line = str(row[5] or "").replace("\n", " ")[:180]
                 out_parts.append(
-                    f"  * `{row[0]}` ({row[1]}-{row[2]}-{row[3]}, Dlvl {row[4]}, turns={row[5]}, score={row[6]}): {digest_line}"
+                    f"  * `{row[0]}` ({row[1]}, Dlvl {row[2]}, turns={row[3]}, score={row[4]}): {digest_line}"
                 )
         return "\n".join(out_parts), "parity ok"
 
@@ -1393,7 +1433,7 @@ class AuthorToolRegistry:
 
         from lox.env.actions import ActionSequence, RawAction
         from lox.env.state import GameState, VisibleMonster, VisibleObject
-        from lox.lang.compiler import _build_base_namespace
+        from lox.lang.compiler import _COMPILE_EXEC_LOCK, _build_base_namespace
         from lox.lang.instrument import ExecutionTracer, PolicyInstrumentTransformer
         from lox.lang.validator import validate_python_code
 
@@ -1406,7 +1446,9 @@ class AuthorToolRegistry:
             )
 
         fn_names = [
-            n.name for n in ast.walk(macro_tree) if isinstance(n, ast.FunctionDef)
+            n.name
+            for n in macro_tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
         if not fn_names:
             return (
@@ -1415,18 +1457,19 @@ class AuthorToolRegistry:
             )
 
         try:
-            tracer = ExecutionTracer()
-            ns = _build_base_namespace(tracer)
-            macro_inst_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(
-                macro_tree
-            )
-            ast.fix_missing_locations(macro_inst_tree)
-            code_obj = compile(
-                macro_inst_tree, filename="macros_candidate.py", mode="exec"
-            )
-            exec(code_obj, ns)
+            with _COMPILE_EXEC_LOCK:
+                tracer = ExecutionTracer()
+                ns = _build_base_namespace(tracer)
+                macro_inst_tree = PolicyInstrumentTransformer(
+                    is_macro_module=True
+                ).visit(macro_tree)
+                ast.fix_missing_locations(macro_inst_tree)
+                code_obj = compile(
+                    macro_inst_tree, filename="macros_candidate.py", mode="exec"
+                )
+                exec(code_obj, ns)
         except Exception as exc:
-            tb = traceback.format_exc(limit=4)
+            tb = traceback.format_exc(limit=-8)
             return (
                 f"Macro Import/Compilation Error:\n{type(exc).__name__}: {exc}\n{tb}",
                 "COMPILE_ERROR",
@@ -1451,7 +1494,7 @@ class AuthorToolRegistry:
                 finally:
                     h.close()
         except Exception as exc:
-            tb = traceback.format_exc(limit=4)
+            tb = traceback.format_exc(limit=-8)
             return (
                 f"Harness Error preparing GameState fixtures:\n{type(exc).__name__}: {exc}\n{tb}",
                 "RUNTIME_ERROR",
@@ -1576,7 +1619,7 @@ class AuthorToolRegistry:
                                     "OUT_OF_BOUNDS",
                                 )
                 except Exception as exc:
-                    tb = traceback.format_exc(limit=4)
+                    tb = traceback.format_exc(limit=-8)
                     return (
                         f"Runtime Error in macro `{fn_name}` on real NetHack GameState fixture {state_idx + 1}/3:\n{type(exc).__name__}: {exc}\n{tb}",
                         "RUNTIME_ERROR",
@@ -1799,21 +1842,26 @@ class AuthorToolRegistry:
         code, bundle_skills = _unpack_xml_bundle(code)
 
         cand_skills = dict(self.skills)
-        for prev_k, prev_v in self.last_passed_skills.items():
-            if prev_v:
-                cand_skills[prev_k] = prev_v
+        if self.mode != "SWARM_PEER":
+            for prev_k, prev_v in self.last_passed_skills.items():
+                if prev_v:
+                    cand_skills[prev_k] = prev_v
         if isinstance(skills, dict):
             for k, v in skills.items():
-                clean_k = str(k or "").strip().removesuffix(".py")
+                clean_k = normalize_skill_key(str(k or ""))
                 if clean_k and str(v or "").strip():
                     cleaned_v = _strip_fences(str(v))
                     cand_skills[clean_k] = merge_skill_module_update(
                         cand_skills.get(clean_k, ""), cleaned_v
                     )
         for k, v in bundle_skills.items():
-            cand_skills[k] = merge_skill_module_update(cand_skills.get(k, ""), v)
+            clean_bk = normalize_skill_key(str(k or ""))
+            if clean_bk:
+                cand_skills[clean_bk] = merge_skill_module_update(
+                    cand_skills.get(clean_bk, ""), v
+                )
         if skill_name and skill_code:
-            clean_sn = str(skill_name).strip().removesuffix(".py")
+            clean_sn = normalize_skill_key(str(skill_name))
             if clean_sn:
                 cleaned_sc = _strip_fences(str(skill_code))
                 cand_skills[clean_sn] = merge_skill_module_update(
@@ -1999,6 +2047,7 @@ class AuthorToolRegistry:
             )
 
         # Step 1: Single-Episode Smoke Check + Behavioral Critic (reuse persistent harness)
+        active_seed = int(seed)
         harness = self._get_harness(max_turns)
         harness.allow_menu_linger = policy_handles_menus(spliced_policy, cand_skills)
         try:
@@ -2035,7 +2084,17 @@ class AuthorToolRegistry:
                         recorded_bytes=r_bytes,
                         stop_at_byte_idx=cut,
                     )
+                    if harness.done and cut > 1:
+                        for back in (25, 60, max(100, cut // 2)):
+                            state = harness.replay_bytes(
+                                seed=r_seed,
+                                recorded_bytes=r_bytes,
+                                stop_at_byte_idx=max(1, cut - back),
+                            )
+                            if not harness.done:
+                                break
                     harness.step_count = 0
+                    harness.done = False
                 else:
                     state = harness.reset(seed=int(seed))
             else:
@@ -2116,6 +2175,7 @@ class AuthorToolRegistry:
                 for extra_s in (1000, 1001):
                     if int(seed) == extra_s:
                         continue
+                    active_seed = int(extra_s)
                     extra_runner = compiled.create_runner()
                     est = harness.reset(seed=extra_s)
                     for _ in range(extra_smoke_steps):
@@ -2133,6 +2193,7 @@ class AuthorToolRegistry:
                             "Fix the crashing leaf or missing attribute/import before finalizing.",
                             "RUNTIME_ERROR",
                         )
+                active_seed = int(seed)
 
             warn_lines: list[str] = []
             for h_warn in audit_policy_ast_hygiene(spliced_policy):
@@ -2668,6 +2729,7 @@ class AuthorToolRegistry:
                         avg_depth=c_avg_depth,
                         max_depth=int(c_max_depth),
                         is_promoted=improved,
+                        skills=cand_skills,
                     )
                     db_logger.save_batch(
                         batch_id=pilot_batch_id,
@@ -2792,6 +2854,8 @@ class AuthorToolRegistry:
                             SELECT r.run_id, r.seed, r.end_reason, r.action_bytes
                             FROM runs r
                             WHERE octet_length(r.action_bytes) > 20
+                              AND COALESCE(r.is_shard, FALSE) = FALSE
+                              AND COALESCE(r.run_id, '') NOT LIKE 'shard_%'
                               AND r.end_reason NOT IN ('ascended', 'max_steps')
                               AND (
                                   NOT EXISTS (SELECT 1 FROM batches WHERE hypothesis_passed = TRUE OR batch_id LIKE '%_inc_%')
@@ -2813,13 +2877,17 @@ class AuthorToolRegistry:
                             if len(r_buf) > 60
                             else max(1, len(r_buf) - 10)
                         )
-                        rh = self._get_harness(120)
-                        r_runner = compiled.create_runner()
-                        r_st = rh.replay_bytes(
-                            seed=int(f_seed),
-                            recorded_bytes=r_buf,
-                            stop_at_byte_idx=cut_pt,
-                        )
+                        try:
+                            rh = self._get_harness(120)
+                            r_runner = compiled.create_runner()
+                            r_st = rh.replay_bytes(
+                                seed=int(f_seed),
+                                recorded_bytes=r_buf,
+                                stop_at_byte_idx=cut_pt,
+                            )
+                        except Exception:
+                            continue
+                        active_seed = int(f_seed)
                         rh.step_count = 0
                         r_acts: list[str] = []
                         r_tiles: set[tuple[int, int, int]] = {
@@ -2869,18 +2937,39 @@ class AuthorToolRegistry:
                             f"  * `{f_rid}` (prior `{f_end}`, rewound -50B): {r_status} | "
                             f"Dlvl={r_st.depth} | HP={r_st.hp}/{r_st.max_hp} | Tiles={len(r_tiles)} | Acts=[{top_r_acts}]"
                         )
-                except Exception:
-                    pass
+                    active_seed = int(seed)
+                except Exception as exc:
+                    if isinstance(
+                        exc,
+                        (
+                            RuntimeError,
+                            ValueError,
+                            TypeError,
+                            AttributeError,
+                            KeyError,
+                            IndexError,
+                            ZeroDivisionError,
+                            NameError,
+                        ),
+                    ):
+                        raise
                 # Also replay 1 deep FrontierArchive checkpoint if available
                 if self.swarm_frontier is not None and getattr(
                     self.swarm_frontier, "checkpoints", None
                 ):
                     try:
                         f_cp = self.swarm_frontier.sample_checkpoint(min_depth=2)
-                        if f_cp is not None and getattr(f_cp, "action_bytes", b""):
+                    except Exception:
+                        f_cp = None
+                    if f_cp is not None and getattr(f_cp, "action_bytes", b""):
+                        try:
                             fh = self._get_harness(len(f_cp.action_bytes) + 150)
                             f_runner = compiled.create_runner()
                             f_st = self.swarm_frontier.replay_into(fh, f_cp)
+                        except Exception:
+                            f_st = None
+                        if f_st is not None:
+                            active_seed = int(f_cp.seed)
                             fh.step_count = 0
                             fh.max_steps = 120
                             f_acts: list[str] = []
@@ -2937,8 +3026,7 @@ class AuthorToolRegistry:
                                 f"  * Frontier `{f_cp.checkpoint_id}` (Dlvl {f_cp.depth}, seed={f_cp.seed}): {f_status} | "
                                 f"EndDlvl={f_st.depth} | HP={f_st.hp}/{f_st.max_hp} | Tiles={len(f_tiles)} | Acts=[{top_f_acts}]"
                             )
-                    except Exception:
-                        pass
+                            active_seed = int(seed)
                 if replay_summaries:
                     replay_checks_block = (
                         "\n- Mid-Game Failure & Frontier-Replay Checks:\n"
@@ -2988,25 +3076,27 @@ class AuthorToolRegistry:
                         f_buf = bytes(fix.get("action_bytes") or b"")
                         if not f_buf:
                             continue
+                        active_seed = int(fix.get("seed", 1))
                         try:
                             fh = self._get_harness(100)
                             f_runner = compiled.create_runner()
                             f_st = fh.replay_bytes(
-                                seed=int(fix.get("seed", 1)),
+                                seed=active_seed,
                                 recorded_bytes=f_buf,
                                 stop_at_byte_idx=int(
                                     fix.get("stop_at_byte_idx", max(1, len(f_buf) - 35))
                                 ),
                             )
-                            fh.step_count = 0
-                            for _ in range(100):
-                                fa, _ = f_runner.next_action(f_st)
-                                f_st, f_done, _ = fh.step(fa)
-                                if f_done:
-                                    break
-                            fixture_calls.update(f_runner.tracer.fn_calls)
                         except Exception:
-                            pass
+                            continue
+                        fh.step_count = 0
+                        for _ in range(100):
+                            fa, _ = f_runner.next_action(f_st)
+                            f_st, f_done, _ = fh.step(fa)
+                            if f_done:
+                                break
+                        fixture_calls.update(f_runner.tracer.fn_calls)
+                        active_seed = int(seed)
                     if sum(fixture_calls.get(fn, 0) for fn in edited_fns) == 0:
                         warn_block += (
                             f"\n- TRIGGER_MISS WARNING: Modified function(s) {sorted(edited_fns)} executed 0 times "
@@ -3033,8 +3123,13 @@ class AuthorToolRegistry:
                         if self.scenario_gate == "strict":
                             return (msg_sg, "RUNTIME_ERROR")
                         warn_block += f"\n- SCENARIO_GATE ADVISORY: {msg_sg}"
-                except Exception:
-                    pass
+                except Exception as sg_exc:
+                    if self.scenario_gate == "strict":
+                        return (
+                            f"Prompt-Torture Scenario Gate raised internal error: {type(sg_exc).__name__}: {sg_exc}",
+                            "RUNTIME_ERROR",
+                        )
+                    warn_block += f"\n- SCENARIO_GATE ERROR: {sg_exc}"
 
             self.last_passed_code = (
                 spliced_policy
@@ -3066,7 +3161,7 @@ class AuthorToolRegistry:
         except Exception as exc:
             import traceback
 
-            tb = traceback.format_exc(limit=4)
+            tb = traceback.format_exc(limit=-8)
             extra_hint = ""
             if isinstance(exc, ImportError) and "skills." in str(exc):
                 extra_hint = (
@@ -3078,7 +3173,7 @@ class AuthorToolRegistry:
                 )
             self.last_dry_run_diag = f"{type(exc).__name__}: {exc}{extra_hint}"
             return (
-                f"Runtime Error during Dry-Run on seed {seed}:\n{type(exc).__name__}: {exc}\n{tb}{extra_hint}",
+                f"Runtime Error during Dry-Run on seed {active_seed}:\n{type(exc).__name__}: {exc}\n{tb}{extra_hint}",
                 "RUNTIME_ERROR",
             )
 
@@ -3153,7 +3248,7 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
             "name": "query_item",
             "description": (
                 "Query exact C-level engine objclass struct for an item name "
-                "(class, cost, weight, nutrition)."
+                "(class, cost, weight, and nutrition for food items)."
             ),
             "parameters": {
                 "type": "object",
@@ -3351,6 +3446,11 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                         "description": "Number of initial actions from replay_run_id to fast-forward (0 defaults to 25 steps before run end).",
                         "default": 0,
                     },
+                    "smoke_only": {
+                        "type": "boolean",
+                        "description": "Set to true to run only the fast single-seed smoke check without consuming a parallel pilot batch.",
+                        "default": False,
+                    },
                     "skill_name": {
                         "type": "string",
                         "description": "Legacy single-skill name (prefer `<skill_code module='name'>` inside `code`).",
@@ -3442,7 +3542,7 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "architecture_map",
-            "description": "AST-indexed overview of all modules (with LOC), registered `@register_goal` Goals, and typed `ws.domain(...)` sub-states.",
+            "description": "AST-indexed overview of all modules (with LOC), `register_goal(...)` Goals, and typed `ws.domain(...)` sub-states.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },

@@ -251,9 +251,11 @@ class DeficitAnalyzer:
 
     @staticmethod
     def _populate_telemetry_window(con: Any, report: DeficitReport) -> None:
+        from lox.db.schema import NON_SHARD_RUNS_SQL
+
         try:
             row = con.execute(
-                "SELECT COALESCE(MAX(generation), 0) FROM runs"
+                f"SELECT COALESCE(MAX(generation), 0) FROM runs WHERE {NON_SHARD_RUNS_SQL}"
             ).fetchone()
             if row and row[0] is not None:
                 report.latest_completed_gen = int(row[0])
@@ -262,7 +264,8 @@ class DeficitAnalyzer:
         try:
             t_row = con.execute(
                 "SELECT COALESCE(MIN(r.generation), 0) "
-                "FROM ticks t JOIN runs r ON t.run_id = r.run_id"
+                "FROM ticks t JOIN runs r ON t.run_id = r.run_id "
+                "WHERE COALESCE(r.is_shard, FALSE) = FALSE AND COALESCE(r.run_id, '') NOT LIKE 'shard_%'"
             ).fetchone()
             if t_row and t_row[0] is not None:
                 report.ticks_min_gen = int(t_row[0])
@@ -281,14 +284,16 @@ class DeficitAnalyzer:
 
     @classmethod
     def _valid_runs_clause(cls, con: Any) -> str:
+        from lox.db.schema import NON_SHARD_RUNS_SQL
+
         if cls._has_verified_batches(con):
             return (
-                "generation > 0 AND ("
+                f"generation > 0 AND {NON_SHARD_RUNS_SQL} AND ("
                 "batch_id LIKE '%_inc_%' OR EXISTS ("
                 "SELECT 1 FROM batches b WHERE b.batch_id = runs.batch_id AND b.hypothesis_passed = TRUE"
                 "))"
             )
-        return "generation > 0"
+        return f"generation > 0 AND {NON_SHARD_RUNS_SQL}"
 
     @classmethod
     def _populate_vital_summary(cls, con: Any, report: DeficitReport) -> None:

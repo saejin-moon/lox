@@ -102,10 +102,28 @@ class ExecutionTracer:
         )
         if not is_noop:
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
-            is_action_like = (
-                not isinstance(val, (bool, float, set, dict, list, tuple))
-                and type(val).__name__ != "ndarray"
-            )
+            is_action_like = False
+            val_type = type(val)
+            val_type_name = val_type.__name__
+            if val_type_name in ("Action", "RawAction", "ActionSequence"):
+                is_action_like = True
+            elif isinstance(val, str) and len(val) == 1:
+                is_action_like = True
+            elif (
+                isinstance(val, tuple)
+                and len(val) == 2
+                and all(
+                    (isinstance(c, int) or type(c).__module__ == "numpy")
+                    and not isinstance(c, bool)
+                    for c in val
+                )
+            ):
+                is_action_like = True
+            elif (
+                not isinstance(val, (bool, int, float, str, set, dict, list, tuple))
+                and val_type_name != "ndarray"
+            ):
+                is_action_like = True
             if is_action_like:
                 if self.call_stack:
                     self.call_stack[-1][2] = True
@@ -114,7 +132,8 @@ class ExecutionTracer:
         return val
 
     def on_yield(self, fn_name: str, val: Any) -> Any:
-        self.active_fn = fn_name
+        if not (self._turn_fn_locked and fn_name in self._ROOT_FNS):
+            self.active_fn = fn_name
         if fn_name not in self._ROOT_FNS:
             self._turn_fn_locked = True
         return val
@@ -332,30 +351,35 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
         self.generic_visit(node)
         if self._current_fn_stack and self._current_fn_stack[-1] != "__init__":
             fn_name = self._current_fn_stack[-1]
-            return ast.Call(
+            inner_val = (
+                node.value if node.value is not None else ast.Constant(value=None)
+            )
+            marked = ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
                     attr="on_yield",
                     ctx=ast.Load(),
                 ),
-                args=[ast.Constant(value=fn_name), node],
+                args=[ast.Constant(value=fn_name), inner_val],
                 keywords=[],
             )
+            return ast.copy_location(ast.Yield(value=marked), node)
         return node
 
     def visit_YieldFrom(self, node: ast.YieldFrom) -> ast.AST:
         self.generic_visit(node)
         if self._current_fn_stack and self._current_fn_stack[-1] != "__init__":
             fn_name = self._current_fn_stack[-1]
-            return ast.Call(
+            marked = ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
                     attr="on_yield",
                     ctx=ast.Load(),
                 ),
-                args=[ast.Constant(value=fn_name), node],
+                args=[ast.Constant(value=fn_name), node.value],
                 keywords=[],
             )
+            return ast.copy_location(ast.YieldFrom(value=marked), node)
         return node
 
     @staticmethod
@@ -398,7 +422,7 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                 stack.append(child)
         return is_gen, (not is_gen) and has_val_ret, shadows_range
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+    def _visit_fn_like(self, node: Any) -> Any:
         fn_name = node.name
         is_gen, has_val_ret, shadows_range = self._scan_fn_flags(node)
         self._current_fn_stack.append(fn_name)
@@ -437,6 +461,14 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                 )
                 node.body = [enter_stmt, try_stmt]
         return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        return self._visit_fn_like(node)
+
+    def visit_AsyncFunctionDef(
+        self, node: ast.AsyncFunctionDef
+    ) -> ast.AsyncFunctionDef:
+        return self._visit_fn_like(node)
 
     def visit_While(self, node: ast.While) -> ast.While:
         self.generic_visit(node)

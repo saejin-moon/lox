@@ -34,32 +34,35 @@ class NetHackAdapter(BenchmarkAdapter):
     def progression_metric(self, run: dict[str, Any]) -> float:
         import math
 
-        d = float(run.get("max_depth", run.get("depth", 1)))
+        d = float(run.get("max_depth") or run.get("depth") or 1)
         raw_xl = run.get("xp_level")
         if raw_xl is None:
-            raw_xl = run.get("final_xp_level", 1)
-        xl = max(0.0, min(float(raw_xl or 1), 30.0) - 1.0) * 0.14
-        ac_val = float(run.get("final_ac", 10))
+            raw_xl = run.get("final_xp_level")
+        xl = (
+            max(0.0, min(float(raw_xl if raw_xl is not None else 1), 30.0) - 1.0) * 0.14
+        )
+        raw_ac = run.get("final_ac")
+        ac_val = float(raw_ac if raw_ac is not None else 10)
         ac_bonus = max(0.0, 10.0 - ac_val) * 0.06
-        oprop_bonus = max(0, min(6, int(run.get("worn_oprop_count", 0) or 0))) * 0.10
-        branch_bonus = max(0, int(run.get("dungeons_visited", 1) or 1) - 1) * 0.15
-        sc = math.log1p(max(0.0, float(run.get("score", 0)))) * 0.06
+        oprop_bonus = max(0, min(6, int(run.get("worn_oprop_count") or 0))) * 0.10
+        branch_bonus = max(0, int(run.get("dungeons_visited") or 1) - 1) * 0.15
+        sc = math.log1p(max(0.0, float(run.get("score") or 0))) * 0.06
+        ms_dict = (
+            run.get("milestones") if isinstance(run.get("milestones"), dict) else {}
+        )
 
         has_stairs = bool(
             run.get("stairs_down_found")
-            or (
-                isinstance(run.get("milestones"), dict)
-                and run["milestones"].get("stairs_down_found")
-            )
+            or ms_dict.get("stairs_down_found")
             or d > 1.0
-            or "'>'" in str(run.get("summary_digest", ""))
+            or "'>'" in str(run.get("summary_digest") or "")
         )
         stairs_bonus = 0.20 if has_stairs else 0.0
+        raw_tiles = run.get("unique_tiles")
         tiles = float(
-            run.get(
-                "unique_tiles",
-                run.get("milestones", {}).get("unique_tiles_d1", 0),
-            )
+            raw_tiles
+            if raw_tiles is not None
+            else (ms_dict.get("unique_tiles_d1", 0) or 0)
         )
         tiles_bonus = 0.10 * min(1.0, tiles / 60.0)
 
@@ -67,8 +70,8 @@ class NetHackAdapter(BenchmarkAdapter):
             0.08
             if (
                 run.get("is_shard")
-                and int(run.get("final_hp", 0)) > 0
-                and str(run.get("end_reason", "")) in ("max_steps", "ascended")
+                and int(run.get("final_hp") or 0) > 0
+                and str(run.get("end_reason") or "") in ("max_steps", "ascended")
             )
             else 0.0
         )

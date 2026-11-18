@@ -47,7 +47,6 @@ from lox.engine.swarm_referee import (
 )
 from lox.lang.modularize import run_side_cohesion_refactor
 from lox.lang.starter import build_clean_option_a_starter
-from lox.lang.validator import normalize_skill_key, skill_key_to_relpath
 from lox.runner.pool import PersistentEvalPool
 from lox.ui.console import ui
 
@@ -255,19 +254,9 @@ class SwarmCampaignOrchestrator:
 
     def _load_workspace_skills(self, skills_dir: Path) -> dict[str, str]:
         """Recursively loads `skills/*.py` and `skills/<domain>/*.py` into normalized skill keys."""
-        if not skills_dir.exists():
-            return {}
-        loaded: dict[str, str] = {}
-        for p in sorted(skills_dir.rglob("*.py")):
-            if p.name == "__init__.py":
-                continue
-            rel = str(p.relative_to(skills_dir)).removesuffix(".py").replace("\\", "/")
-            try:
-                nk = normalize_skill_key(rel)
-                loaded[nk] = p.read_text(encoding="utf-8")
-            except Exception:
-                continue
-        return loaded
+        from lox.lang.bundle import load_skills_dir
+
+        return load_skills_dir(skills_dir)
 
     def _write_workspace_package(
         self,
@@ -277,18 +266,12 @@ class SwarmCampaignOrchestrator:
         skills: dict[str, str],
     ) -> None:
         """Writes `policy.py` and `skills/**/*.py` (with `__init__.py` for subpackages) and prunes orphans."""
+        from lox.lang.bundle import write_skills_dir
+
         policy_path.write_text(policy_code, encoding="utf-8")
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        (skills_dir / "__init__.py").write_text("", encoding="utf-8")
-        for s_name, s_src in (skills or {}).items():
-            rel_p = skill_key_to_relpath(s_name)
-            dst = self.workspace_dir / rel_p
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.parent != skills_dir:
-                pkg_init = dst.parent / "__init__.py"
-                if not pkg_init.exists():
-                    pkg_init.write_text("", encoding="utf-8")
-            dst.write_text(s_src, encoding="utf-8")
+        write_skills_dir(
+            skills_dir, skills or {}, sync=False, ensure_trailing_newline=False
+        )
         SwarmMetaAgent.prune_unused_skills(policy_code, skills, skills_dir=skills_dir)
 
     def _run_generation_peer(self, generation: int) -> dict[str, Any]:
@@ -388,6 +371,9 @@ class SwarmCampaignOrchestrator:
                     used_dom_fns.add(dom)
         if not orthogonal_clusters:
             orthogonal_clusters = list(clusters)
+
+        # Keep eval_pool step horizon synchronized with active_max_steps so incubation and tournament agree
+        self.eval_pool.max_steps = int(active_max_steps)
 
         ui.info(
             f"Gen {generation}: Regime={deficit_report.regime} "
@@ -602,12 +588,17 @@ class SwarmCampaignOrchestrator:
         )
 
         # 4b. Side Cohesion Refactor (post-promotion side maintenance ONLY — never forces promoted=True)
-        if verdict.promoted and any(
-            len(v.splitlines()) >= 500 for v in (verdict.winner_skills or {}).values()
-        ):
+        win_pol_loc = len(str(verdict.winner_policy_code or "").splitlines())
+        win_skills_dict = dict(verdict.winner_skills or {})
+        needs_post_refactor = (
+            (not win_skills_dict and win_pol_loc >= 200)
+            or win_pol_loc >= 500
+            or any(len(v.splitlines()) >= 500 for v in win_skills_dict.values())
+        )
+        if verdict.promoted and needs_post_refactor:
             ref_changed, ref_pol, ref_skills, ref_msg = run_side_cohesion_refactor(
                 verdict.winner_policy_code,
-                dict(verdict.winner_skills or {}),
+                win_skills_dict,
                 max_loc=500,
                 verify_seeds=seeds[:6],
                 verify_steps=250,
@@ -1031,6 +1022,11 @@ class SwarmCampaignOrchestrator:
             )
             if runs
             else 0.0,
+            "avg_branches": float(
+                np.mean([r.get("dungeons_visited", 1) or 1 for r in runs])
+            )
+            if runs
+            else 1.0,
             "pct_wait": float(np.mean([r.get("pct_wait", 0.0) for r in runs]))
             if runs
             else 0.0,
@@ -1085,15 +1081,7 @@ class SwarmCampaignOrchestrator:
         current_policy = (
             policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
         )
-        initial_skills = (
-            {
-                p.stem: p.read_text(encoding="utf-8")
-                for p in sorted(skills_dir.glob("*.py"))
-                if p.stem != "__init__"
-            }
-            if skills_dir.exists()
-            else {}
-        )
+        initial_skills = self._load_workspace_skills(skills_dir)
 
         # 1. Critic Pass 1: Pre-Generation High-Level Guide (very first agent called)
         pre_gen_guide = self.critic.guide_before_generation(
@@ -1162,15 +1150,7 @@ class SwarmCampaignOrchestrator:
             pre_gen_guide=pre_gen_guide,
         )
         policy_path.write_text(master_policy_code, encoding="utf-8")
-        skills_dict = (
-            {
-                p.stem: p.read_text(encoding="utf-8")
-                for p in sorted(skills_dir.glob("*.py"))
-                if p.stem != "__init__"
-            }
-            if skills_dir.exists()
-            else {}
-        )
+        skills_dict = self._load_workspace_skills(skills_dir)
         skills_dict = self.meta_agent.prune_unused_skills(
             master_policy_code, skills_dict, skills_dir=skills_dir
         )
@@ -1339,12 +1319,23 @@ class SwarmCampaignOrchestrator:
             if runs
             else 100.0,
         }
-        self.map_elites.add_candidate(
-            policy_code=master_policy_code,
-            metrics=metrics,
-            batch_id=batch_id,
-            generation=generation,
-        )
+        con_leg = None
+        try:
+            con_leg = connect_db(self.db_path, read_only=False)
+            self.map_elites.add_candidate(
+                policy_code=master_policy_code,
+                metrics=metrics,
+                batch_id=batch_id,
+                generation=generation,
+                con=con_leg,
+                skills=skills_dict,
+            )
+        finally:
+            if con_leg is not None:
+                try:
+                    con_leg.close()
+                except Exception:
+                    pass
         self._sync_batch_cost(batch_id, generation)
 
         if generation % 5 == 0:

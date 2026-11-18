@@ -215,7 +215,7 @@ class NetHackHarness:
             return True
         joined = "\n".join(
             bytes(tty_chars[r]).decode("latin1", errors="ignore")
-            for r in range(min(22, len(tty_chars)))
+            for r in range(min(24, len(tty_chars)))
         ).lower()
         return "(end)" in joined or bool(re.search(r"\(\d+\s+of\s+\d+\)", joined))
 
@@ -254,7 +254,12 @@ class NetHackHarness:
                 b = ASCII_SPACE
             elif self._in_yn(obs_tuple) or self._in_getlin(obs_tuple) or menu_linger:
                 # Allow interactive prompt/menu to be returned to policy for resolution
-                if self.prompt_linger_steps < self.max_prompt_linger:
+                linger_limit = (
+                    max(self.max_prompt_linger, 16)
+                    if menu_linger
+                    else self.max_prompt_linger
+                )
+                if self.prompt_linger_steps < linger_limit:
                     self.prompt_linger_steps += 1
                     break
                 raw_m_l = self._extract_raw_message(obs_tuple).lower()
@@ -413,7 +418,13 @@ class NetHackHarness:
                 ):
                     more_guard += 1
                     self.action_bytes.append(ASCII_SPACE)
-                    obs_tuple, done = self.nh.step(ASCII_SPACE)
+                    try:
+                        obs_tuple, done = self.nh.step(ASCII_SPACE)
+                    except RuntimeError as exc:
+                        if "finished" in str(exc).lower():
+                            done = True
+                            break
+                        raise
                     raw_m2 = self._extract_raw_message(obs_tuple)
                     if raw_m2 and (not messages or messages[-1] != raw_m2):
                         messages.append(raw_m2)
@@ -544,6 +555,9 @@ class NetHackHarness:
         self.action_bytes.clear()
         self.step_count = 0
         self.prompt_aborts = 0
+        self.prompt_linger_steps = 0
+        self.consecutive_zero_turn_steps = 0
+        self._prev_turn = -1
         self.step_byte_offsets = [0]
         self.done = False
         self.mem.reset()

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,11 +29,21 @@ from lox.author.tools import (
 )
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH
+from lox.lang.bundle import (
+    extract_fenced_inner,
+    extract_json_payload,
+    extract_policy_fallback_from_markdown,
+    extract_skill_modules,
+    strip_think_tags,
+    unpack_code_bundle,
+)
 from lox.lang.macros import DEFAULT_MACROS_PATH
 from lox.lang.validator import (
     is_ast_equivalent,
     normalize_mode,
+    normalize_skill_key,
     prune_extracted_skill_functions,
+    skill_key_to_relpath,
     smart_dedent,
     splice_functions_into_policy,
     validate_python_code,
@@ -240,9 +251,29 @@ class AuthorAgent:
         return "\n".join(lines[start_idx:])
 
     @staticmethod
+    def _parse_tool_args(raw_args: Any) -> tuple[dict[str, Any], str | None]:
+        """Parses OpenAI tool arguments JSON; returns `(args_dict, error_message)` failing closed on malformed JSON."""
+        if raw_args is None or raw_args == "":
+            return {}, None
+        if isinstance(raw_args, dict):
+            return dict(raw_args), None
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args)
+            except Exception as exc:
+                return (
+                    {},
+                    f"TOOL_ARG_ERROR: Malformed JSON arguments ({exc}). Re-emit valid JSON.",
+                )
+            if isinstance(parsed, dict):
+                return parsed, None
+            return {}, "TOOL_ARG_ERROR: Tool arguments must be a JSON object."
+        return {}, "TOOL_ARG_ERROR: Unsupported tool arguments type."
+
+    @staticmethod
     def extract_yaml_and_python(content: str) -> tuple[dict[str, Any], str]:
         """Extracts the YAML hypothesis dict and Python code block from an LLM response."""
-        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL).strip()
+        text = strip_think_tags(content or "")
 
         yaml_dict: dict[str, Any] = {}
         # 1. Prefer explicit <hypothesis> ... </hypothesis> XML tags
@@ -304,54 +335,20 @@ class AuthorAgent:
                 )
 
         code_str = ""
-        # 2. Prefer explicit <policy_code> ... </policy_code> or <policy> ... </policy> XML tags
+        # 2. Prefer explicit <policy_code> / <policy> XML tags; otherwise markdown fallback excluding skill blocks
         pol_match = re.search(
-            r"<(?:policy_code|policy)>(.*?)</(?:policy_code|policy)>",
+            r"<(?:policy_code|policy)(?:\s+[^>]*)?>(.*?)</(?:policy_code|policy)>",
             text,
             flags=re.DOTALL | re.IGNORECASE,
         )
         if pol_match:
-            code_str = pol_match.group(1).strip()
-            fence_m = re.search(
-                r"```(?:python)?\s*\n(.*?)```",
-                code_str,
-                flags=re.DOTALL | re.IGNORECASE,
+            code_str, _ = unpack_code_bundle(
+                pol_match.group(0),
+                include_markdown_skills=False,
+                preserve_raw_verbatim=False,
             )
-            if fence_m:
-                code_str = fence_m.group(1).strip()
-
-        if not code_str:
-            py_blocks = re.findall(
-                r"```python\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
-            )
-            if not py_blocks:
-                py_blocks = re.findall(r"```\s*\n(.*?)```", text, flags=re.DOTALL)
-                py_blocks = [
-                    b
-                    for b in py_blocks
-                    if any(
-                        tok in b
-                        for tok in (
-                            "def ",
-                            "class ",
-                            "ActionLeaf",
-                            "ConditionLeaf",
-                            "PrioritySelector",
-                            "Sequence",
-                            "BehaviorTree",
-                            "subtree",
-                        )
-                    )
-                ]
-
-            if py_blocks:
-                policy_candidates = [
-                    b for b in py_blocks if "class Policy" in b or "class Agent" in b
-                ]
-                if policy_candidates:
-                    code_str = policy_candidates[-1].strip()
-                else:
-                    code_str = py_blocks[-1].strip()
+        else:
+            code_str = extract_policy_fallback_from_markdown(text)
 
         if code_str:
             code_str = smart_dedent(code_str)
@@ -366,27 +363,25 @@ class AuthorAgent:
         fallback_skill_name: str | None = None,
     ) -> str:
         """Extracts external skill module code if specified in hypothesis, XML tags, or markdown."""
-        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL)
+        text = strip_think_tags(content or "")
+        extracted = AuthorAgent.extract_all_skill_codes(text, hyp)
 
-        # 1. Prefer explicit <skill_code ...> ... </skill_code> or <skill ...> ... </skill> XML tags
-        skill_tag_m = re.search(
-            r"<(?:skill_code|skill)(?:\s+(?:module|name)=[\"'](?P<mod>[^\"']+)[\"'])?[^>]*>(?P<code>.*?)</(?:skill_code|skill)>",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        if skill_tag_m:
-            mod_attr = skill_tag_m.group("mod")
-            if mod_attr and not hyp.get("skill_module"):
-                hyp["skill_module"] = mod_attr.strip()
-            s_raw = skill_tag_m.group("code").strip()
-            fence_m = re.search(
-                r"```(?:python)?\s*\n(.*?)```", s_raw, flags=re.DOTALL | re.IGNORECASE
-            )
-            if fence_m:
-                s_raw = fence_m.group(1).strip()
-            s_clean = AuthorAgent._sanitize_skill_code(s_raw)
-            if s_clean:
-                return smart_dedent(s_clean)
+        # Prefer matching requested/hypothesis skill_module if present
+        req_mod = hyp.get("skill_module") or fallback_skill_name
+        if req_mod:
+            try:
+                norm_req = normalize_skill_key(str(req_mod))
+            except Exception:
+                norm_req = str(req_mod).strip()
+            if norm_req in extracted:
+                if "skill_module" not in hyp:
+                    hyp["skill_module"] = norm_req
+                return extracted[norm_req]
+        if extracted:
+            first_mod, first_src = next(iter(extracted.items()))
+            if not hyp.get("skill_module"):
+                hyp["skill_module"] = first_mod
+            return first_src
 
         skill_mod = hyp.get("skill_module") or fallback_skill_name
         if skill_mod and "skill_module" not in hyp:
@@ -453,45 +448,36 @@ class AuthorAgent:
         hyp: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         """Extracts all `<skill_code module="name">...</skill_code>` and `### skill: <name>` blocks."""
-        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL)
+        raw_found = extract_skill_modules(
+            content or "",
+            merge_fn=merge_skill_module_update,
+            include_markdown=True,
+        )
         out: dict[str, str] = {}
-
-        def _store(raw_name: str, raw_src: str) -> None:
-            from lox.lang.validator import normalize_skill_key
-
-            try:
-                mod_name = normalize_skill_key(raw_name)
-            except Exception:
-                mod_name = re.sub(
-                    r"[^a-zA-Z0-9_/]", "_", raw_name.strip().lower()
-                ).strip("_/")
-            if not mod_name:
-                return
-            s_clean = AuthorAgent._sanitize_skill_code(raw_src.strip())
+        for k, v in raw_found.items():
+            s_clean = AuthorAgent._sanitize_skill_code(v.strip())
             if s_clean:
-                out[mod_name] = smart_dedent(s_clean)
+                out[k] = smart_dedent(s_clean)
 
-        for m in re.finditer(
-            r"<(?:skill_code|skill)(?:\s+(?:module|name)=[\"'](?P<mod>[^\"']+)[\"'])?[^>]*>(?P<code>.*?)</(?:skill_code|skill)>",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
-        ):
-            mod_name = (m.group("mod") or (hyp or {}).get("skill_module") or "").strip()
-            s_raw = m.group("code").strip()
-            fence_m = re.search(
-                r"```(?:python)?\s*\n(.*?)```", s_raw, flags=re.DOTALL | re.IGNORECASE
-            )
-            if fence_m:
-                s_raw = fence_m.group(1).strip()
-            _store(mod_name, s_raw)
-
-        for m in re.finditer(
-            r"###\s*skill:\s*([A-Za-z0-9_./-]+)\s*\n+```(?:python)?\s*\n(.*?)```",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
-        ):
-            _store(m.group(1).removesuffix(".py"), m.group(2))
-
+        # Preserve fallback for unlabelled <skill_code>...</skill_code> using hyp["skill_module"]
+        hyp_mod = str((hyp or {}).get("skill_module") or "").strip()
+        if hyp_mod:
+            text = strip_think_tags(content or "")
+            for m in re.finditer(
+                r"<(?:skill_code|skill)(?!\s+(?:module|name)=)[^>]*>(?P<code>.*?)</(?:skill_code|skill)>",
+                text,
+                flags=re.DOTALL | re.IGNORECASE,
+            ):
+                s_clean = AuthorAgent._sanitize_skill_code(
+                    extract_fenced_inner(m.group("code"))
+                )
+                if s_clean:
+                    try:
+                        nk = normalize_skill_key(hyp_mod)
+                    except Exception:
+                        nk = hyp_mod
+                    if nk:
+                        out[nk] = smart_dedent(s_clean)
         return out
 
     @staticmethod
@@ -629,12 +615,12 @@ class AuthorAgent:
                 for k, v in (
                     self.extract_all_skill_codes(assistant_text, latest_hyp) or {}
                 ).items():
-                    clean_k = str(k or "").strip().removesuffix(".py")
+                    clean_k = normalize_skill_key(str(k or ""))
                     if clean_k and str(v or "").strip():
                         merged_s_map[clean_k] = str(v)
             if isinstance(args.get("skills"), dict):
                 for k, v in args["skills"].items():
-                    clean_k = str(k or "").strip().removesuffix(".py")
+                    clean_k = normalize_skill_key(str(k or ""))
                     if clean_k and str(v or "").strip():
                         merged_s_map[clean_k] = str(v)
             s_map = merged_s_map or None
@@ -1500,21 +1486,17 @@ class AuthorAgent:
                     if t_name == "benchmark_expert_parity":
                         called_expert_query = True
                 raw_args = fn_Spec.get("arguments", "{}")
-                try:
-                    t_args = (
-                        json.loads(raw_args)
-                        if isinstance(raw_args, str)
-                        else dict(raw_args)
+                t_args, arg_err = self._parse_tool_args(raw_args)
+                if arg_err:
+                    tool_out = arg_err
+                else:
+                    tool_out = self._execute_tool_call(
+                        turn_idx,
+                        t_name,
+                        t_args,
+                        assistant_text=msg_text,
+                        latest_hyp=latest_hyp,
                     )
-                except Exception:
-                    t_args = {}
-                tool_out = self._execute_tool_call(
-                    turn_idx,
-                    t_name,
-                    t_args,
-                    assistant_text=msg_text,
-                    latest_hyp=latest_hyp,
-                )
                 if t_name == "query_db":
                     sql_low = str((t_args or {}).get("sql", "")).lower()
                     if "expert_runs" in sql_low or "expert_ticks" in sql_low:
@@ -1689,7 +1671,11 @@ class AuthorAgent:
 
         # Compiler-in-the-loop verification & sequential self-repair
         diag = ""
+        merged_skills_map: dict[str, str] = {}
         for repair_idx in range(self.max_repair_turns + 1):
+            merged_skills_map = {
+                **(getattr(self.tools, "last_passed_skills", {}) or {}),
+            }
             s_name: str | None = None
             s_code = ""
             hyp, code_patch = self.extract_yaml_and_python(final_content)
@@ -1703,11 +1689,8 @@ class AuthorAgent:
                 final_content, hyp or latest_hyp
             )
             base_skills = dict(getattr(self.tools, "skills", {}) or {})
-            merged_skills_map: dict[str, str] = {
-                **(getattr(self.tools, "last_passed_skills", {}) or {}),
-            }
             for s_mod, s_src in (extracted_skills_map or {}).items():
-                clean_mod = str(s_mod or "").strip().removesuffix(".py")
+                clean_mod = normalize_skill_key(str(s_mod or ""))
                 if clean_mod and str(s_src or "").strip():
                     existing_mod_src = str(
                         merged_skills_map.get(clean_mod, base_skills.get(clean_mod, ""))
@@ -1767,21 +1750,23 @@ class AuthorAgent:
                     ),
                     fallback_skill_name=s_name,
                 )
+                norm_s_name = normalize_skill_key(str(s_name)) if s_name else ""
+                already_merged = bool(norm_s_name and norm_s_name in merged_skills_map)
                 diag, status = self.tools.dry_run_policy(
                     code=code_patch,
                     is_macro=False,
                     seed=42,
                     max_turns=100,
                     smoke_only=True,
-                    skill_name=s_name,
-                    skill_code=s_code,
+                    skill_name=None if already_merged else s_name,
+                    skill_code="" if already_merged else s_code,
                     skills=merged_skills_map or None,
                 )
 
             # Persist verification check to synthesis_logs
             try:
                 self.db_logger.save_synthesis_log(
-                    log_id=f"syn_{generation}_{max_tool_turns + repair_idx}_{repair_idx}_{int(time.time() * 1000)}",
+                    log_id=f"syn_{self.agent_role}_{generation}_{max_tool_turns + repair_idx}_{repair_idx}_{uuid.uuid4().hex[:6]}",
                     generation=generation,
                     batch_id=batch_id,
                     mode=mode,
@@ -1827,9 +1812,12 @@ class AuthorAgent:
                 )
                 if skill_code and skill_code.strip():
                     try:
+                        raw_skill_k = normalize_skill_key(
+                            str(hyp.get("skill_module", "skill") or "skill")
+                        )
                         validate_python_code(
                             skill_code,
-                            filename=f"skills/{hyp.get('skill_module', 'skill')}.py",
+                            filename=skill_key_to_relpath(raw_skill_k or "skill"),
                         )
                     except Exception as val_err:
                         diag = f"SyntaxError in skill code: {val_err}"
@@ -1957,7 +1945,9 @@ class AuthorAgent:
                 messages.append({"role": "user", "content": repair_prompt})
 
                 t0_rep = time.perf_counter()
-                repair_msg = self._call_llm_api(messages, allow_tools=True)
+                repair_msg = self._call_llm_api(
+                    messages, allow_tools=True, tool_specs=active_tool_specs
+                )
                 if repair_msg.get("tool_calls"):
                     tcs = repair_msg.get("tool_calls") or []
                     messages.append(
@@ -1978,7 +1968,9 @@ class AuthorAgent:
                                 "content": res_out,
                             }
                         )
-                    repair_msg = self._call_llm_api(messages, allow_tools=False)
+                    repair_msg = self._call_llm_api(
+                        messages, allow_tools=False, tool_specs=active_tool_specs
+                    )
                 rep_ms = (time.perf_counter() - t0_rep) * 1000.0
 
                 rep_text = repair_msg.get("content") or ""
@@ -2001,7 +1993,7 @@ class AuthorAgent:
                 # Persist repair turn to synthesis_logs
                 try:
                     self.db_logger.save_synthesis_log(
-                        log_id=f"syn_{generation}_{max_tool_turns + repair_idx + 1}_rep_{repair_idx + 1}_{int(time.time() * 1000)}",
+                        log_id=f"syn_{self.agent_role}_{generation}_{max_tool_turns + repair_idx + 1}_rep_{repair_idx + 1}_{uuid.uuid4().hex[:6]}",
                         generation=generation,
                         batch_id=batch_id,
                         mode=mode,
@@ -2118,10 +2110,6 @@ class AuthorAgent:
                     abort_reason=f"MUTATION_SCOPE_EXCEEDED: modified {len(changed_fns)} functions ({changed_fns}), limit is 2",
                     pilot_best_delta=best_delta,
                 )
-            fallback_merged_skills = {
-                **(getattr(self.tools, "last_passed_skills", {}) or {}),
-                **(self.extract_all_skill_codes(final_content, latest_hyp) or {}),
-            }
             return SynthesisProposal(
                 mode=mode,
                 hypothesis=latest_hyp,
@@ -2131,7 +2119,7 @@ class AuthorAgent:
                 target_functions=list(changed_fns),
                 tool_calls_made=total_tool_calls,
                 skill_code=skill_code,
-                skill_modules=fallback_merged_skills,
+                skill_modules=dict(merged_skills_map),
                 pilot_best_delta=best_delta,
             )
 
@@ -2143,47 +2131,22 @@ class AuthorAgent:
         """Parses an OpenAI-format tool call dict and executes it via `_execute_tool_call`."""
         fn_spec = tc.get("function") or {}
         t_name = str(fn_spec.get("name") or "")
-        raw_args = fn_spec.get("arguments", "{}")
-        try:
-            t_args = (
-                json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
-            )
-        except Exception:
-            t_args = {}
+        t_args, arg_err = self._parse_tool_args(fn_spec.get("arguments", "{}"))
+        if arg_err:
+            return arg_err
         return self._execute_tool_call(turn_idx, t_name, t_args)
 
     @staticmethod
     def _has_valid_json(text: str, expected_type: str = "object") -> bool:
         """Checks if `text` contains a valid JSON object (`{...}`) or array (`[...]`)."""
-        txt = re.sub(
-            r"<think>.*?</think>", "", str(text or ""), flags=re.DOTALL
-        ).strip()
-        if "```" in txt:
-            m = re.search(r"```(?:json)?\s*\n(.*?)```", txt, flags=re.DOTALL)
-            if m:
-                txt = m.group(1).strip()
-        want_type = list if expected_type == "array" else dict
-        try:
-            parsed = json.loads(txt)
-            if isinstance(parsed, want_type):
-                return True
-            if (
-                expected_type == "array"
-                and isinstance(parsed, dict)
-                and isinstance(parsed.get("categories"), list)
-            ):
-                return True
-        except Exception:
-            pass
-        pattern = r"\[.*\]" if expected_type == "array" else r"\{.*\}"
-        m_sub = re.search(pattern, txt, flags=re.DOTALL)
-        if m_sub:
-            try:
-                parsed = json.loads(m_sub.group(0))
-                return isinstance(parsed, want_type)
-            except Exception:
-                pass
-        return False
+        parsed = extract_json_payload(text)
+        if parsed is None:
+            return False
+        if expected_type == "array":
+            return isinstance(parsed, list) or (
+                isinstance(parsed, dict) and isinstance(parsed.get("categories"), list)
+            )
+        return isinstance(parsed, dict)
 
     def run_tool_session(
         self,
@@ -2340,15 +2303,9 @@ class AuthorAgent:
                     if fn_name:
                         called_tools.add(fn_name)
                         if fn_name == "query_db":
-                            raw_args = fn_spec.get("arguments", "{}")
-                            try:
-                                parsed_args = (
-                                    json.loads(raw_args)
-                                    if isinstance(raw_args, str)
-                                    else dict(raw_args)
-                                )
-                            except Exception:
-                                parsed_args = {}
+                            parsed_args, _ = self._parse_tool_args(
+                                fn_spec.get("arguments", "{}")
+                            )
                             sql_low = str((parsed_args or {}).get("sql", "")).lower()
                             if "expert_runs" in sql_low or "expert_ticks" in sql_low:
                                 called_expert_query = True
@@ -2368,7 +2325,7 @@ class AuthorAgent:
                     )
                 try:
                     self.db_logger.save_synthesis_log(
-                        log_id=f"syn_ts_{generation}_{self.agent_role}_{turn_idx}_{int(time.time() * 1000)}",
+                        log_id=f"syn_ts_{generation}_{self.agent_role}_{turn_idx}_{uuid.uuid4().hex[:6]}",
                         generation=generation,
                         batch_id=f"swarm_g{generation}_{self.agent_role}",
                         mode=session_mode,
@@ -2638,14 +2595,12 @@ class AuthorAgent:
                 total_tool_calls += 1
                 fn_obj = tc.get("function", {})
                 t_name = fn_obj.get("name", "")
-                raw_args = fn_obj.get("arguments", "{}")
-                try:
-                    t_args = (
-                        json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                    )
-                except Exception:
-                    t_args = {}
-                t_out = self._execute_tool_call(turn_idx, t_name, t_args or {})
+                t_args, arg_err = self._parse_tool_args(fn_obj.get("arguments", "{}"))
+                t_out = (
+                    arg_err
+                    if arg_err
+                    else self._execute_tool_call(turn_idx, t_name, t_args or {})
+                )
                 if t_name == "query_wiki":
                     called_wiki = True
                 elif t_name == "query_db":
@@ -2663,7 +2618,7 @@ class AuthorAgent:
 
             try:
                 self.db_logger.save_synthesis_log(
-                    log_id=f"syn_sw_{generation}_{self.agent_role}_{turn_idx}_{int(time.time() * 1000)}",
+                    log_id=f"syn_sw_{generation}_{self.agent_role}_{turn_idx}_{uuid.uuid4().hex[:6]}",
                     generation=generation,
                     batch_id=batch_id,
                     mode="SWARM_WORKER",

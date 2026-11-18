@@ -131,7 +131,22 @@ class CraftaxHarness(EnvHarness):
         if self.done:
             return self._state, True, {"action_name": "DONE"}
 
-        act_val = int(action) if hasattr(action, "value") else int(action)
+        if isinstance(action, str):
+            act_val = (
+                0
+                if action in (".", "wait", "WAIT")
+                else (ord(action[0]) if action else 0)
+            )
+        elif hasattr(action, "value") and isinstance(
+            getattr(action, "value", None), int
+        ):
+            act_val = int(action.value)
+            if act_val == 46 and getattr(action, "name", "") == "WAIT":
+                act_val = int(CraftaxAction.NOOP)
+        elif isinstance(action, (int, np.integer)):
+            act_val = int(action)
+        else:
+            act_val = int(CraftaxAction.NOOP)
         self.action_bytes.append(act_val & 0xFF)
         self.step_byte_offsets.append(len(self.action_bytes))
         self.step_count += 1
@@ -420,9 +435,9 @@ class CraftaxHarness(EnvHarness):
                 self._state.message = "Forged iron sword at furnace."
 
         # Vitality decay
-        if self.step_count % 30 == 0:
+        if self.step_count > 0 and self.step_count % 30 == 0:
             self._state.energy = max(0, self._state.energy - 1)
-        if self.step_count % 60 == 0:
+        if self.step_count > 0 and self.step_count % 60 == 0:
             self._state.food = max(0, self._state.food - 1)
             self._state.drink = max(0, self._state.drink - 1)
             if self._state.food == 0 or self._state.drink == 0:

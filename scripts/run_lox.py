@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -177,7 +178,13 @@ def main() -> None:
             db_path=args.db_path,
             policy_path=args.policy_path,
             macros_path=args.macros_path,
+            frontier_dir=str(Path(args.policy_path).parent.parent / "frontier"),
         )
+        ws_frontier = Path(args.policy_path).parent / "frontier"
+        if ws_frontier.exists():
+            import shutil
+
+            shutil.rmtree(ws_frontier)
 
     orchestrator = CampaignOrchestrator(
         provider=args.provider,

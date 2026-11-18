@@ -26,9 +26,123 @@ from lox.lang.validator import (
 )
 
 
+def _collect_local_bindings(body: list[ast.stmt]) -> set[str]:
+    """Collects variable/function/class/import names directly bound inside `body` (shallow over nested defs)."""
+    bound: set[str] = set()
+
+    def _add_target(tgt: ast.AST) -> None:
+        if isinstance(tgt, ast.Name):
+            bound.add(tgt.id)
+        elif isinstance(tgt, (ast.Tuple, ast.List)):
+            for elt in tgt.elts:
+                _add_target(elt)
+        elif isinstance(tgt, ast.Starred):
+            _add_target(tgt.value)
+
+    def _scan(node: ast.AST) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+            return
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                _add_target(t)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                bound.add(node.target.id)
+        elif isinstance(node, ast.AugAssign):
+            _add_target(node.target)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            _add_target(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    _add_target(item.optional_vars)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for al in node.names:
+                bound.add(al.asname or al.name.split(".")[0])
+        for child in ast.iter_child_nodes(node):
+            _scan(child)
+
+    for stmt in body:
+        _scan(stmt)
+    return bound
+
+
 def _extract_names_used(node: ast.AST) -> set[str]:
-    """Returns all `ast.Name` identifiers referenced within `node`."""
-    return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+    """Returns free `ast.Name` load identifiers referenced within `node`, respecting local scopes."""
+    free: set[str] = set()
+
+    def _walk(n: ast.AST, bound: frozenset[str]) -> None:
+        if isinstance(n, ast.Name):
+            if isinstance(n.ctx, ast.Load) and n.id not in bound:
+                free.add(n.id)
+            return
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for dec in n.decorator_list:
+                _walk(dec, bound)
+            for d in n.args.defaults:
+                _walk(d, bound)
+            for d in n.args.kw_defaults:
+                if d is not None:
+                    _walk(d, bound)
+            if n.returns is not None:
+                _walk(n.returns, bound)
+            fn_bound = set(bound)
+            for a in (
+                list(n.args.posonlyargs)
+                + list(n.args.args)
+                + list(n.args.kwonlyargs)
+                + ([n.args.vararg] if n.args.vararg else [])
+                + ([n.args.kwarg] if n.args.kwarg else [])
+            ):
+                fn_bound.add(a.arg)
+            fn_bound |= _collect_local_bindings(n.body)
+            frozen_fn = frozenset(fn_bound)
+            for st in n.body:
+                _walk(st, frozen_fn)
+            return
+        if isinstance(n, ast.Lambda):
+            for d in n.args.defaults:
+                _walk(d, bound)
+            for d in n.args.kw_defaults:
+                if d is not None:
+                    _walk(d, bound)
+            lam_bound = set(bound) | {
+                a.arg
+                for a in (
+                    list(n.args.posonlyargs)
+                    + list(n.args.args)
+                    + list(n.args.kwonlyargs)
+                    + ([n.args.vararg] if n.args.vararg else [])
+                    + ([n.args.kwarg] if n.args.kwarg else [])
+                )
+            }
+            _walk(n.body, frozenset(lam_bound))
+            return
+        if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            comp_bound = set(bound)
+            for gen in n.generators:
+                _walk(gen.iter, frozenset(comp_bound))
+                for t in ast.walk(gen.target):
+                    if isinstance(t, ast.Name):
+                        comp_bound.add(t.id)
+                frozen_c = frozenset(comp_bound)
+                for cond in gen.ifs:
+                    _walk(cond, frozen_c)
+            frozen_c = frozenset(comp_bound)
+            if isinstance(n, ast.DictComp):
+                _walk(n.key, frozen_c)
+                _walk(n.value, frozen_c)
+            else:
+                _walk(n.elt, frozen_c)
+            return
+        for child in ast.iter_child_nodes(n):
+            _walk(child, bound)
+
+    _walk(node, frozenset())
+    return free
 
 
 def _import_bound_names(stmt: ast.Import | ast.ImportFrom) -> set[str]:
@@ -81,8 +195,13 @@ def modularize_policy_source(
     tree = ast.parse(policy_code)
 
     def _slice_stmt(stmt: ast.stmt) -> str:
-        start = getattr(stmt, "lineno", 1) - 1
-        end = getattr(stmt, "end_lineno", start + 1)
+        decs = getattr(stmt, "decorator_list", None) or []
+        raw_start = min(
+            [int(getattr(stmt, "lineno", 1) or 1)]
+            + [int(getattr(d, "lineno", 1) or 1) for d in decs]
+        )
+        start = max(0, raw_start - 1)
+        end = getattr(stmt, "end_lineno", raw_start)
         return "\n".join(lines[start:end])
 
     import_stmts: list[tuple[ast.Import | ast.ImportFrom, str]] = []
@@ -93,7 +212,16 @@ def modularize_policy_source(
     build_tree_src: str = ""
     policy_classes: list[tuple[str, ast.ClassDef]] = []
 
-    for stmt in tree.body:
+    mod_docstring = ""
+    for i_stmt, stmt in enumerate(tree.body):
+        if (
+            i_stmt == 0
+            and isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            mod_docstring = _slice_stmt(stmt)
+            continue
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             import_stmts.append((stmt, _slice_stmt(stmt)))
         elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
@@ -380,8 +508,13 @@ def modularize_policy_source(
         + [cls_src for cls_src, _ in policy_classes]
     )
     root_imports = _emit_used_imports(set(), extra_text=root_text)
+    header_doc = (mod_docstring + "\n\n") if mod_docstring else ""
     new_policy = (
-        "\n".join(root_imports + policy_skill_imports) + "\n\n\n" + root_text + "\n"
+        header_doc
+        + "\n".join(root_imports + policy_skill_imports)
+        + "\n\n\n"
+        + root_text
+        + "\n"
     )
     merged_skills = {**existing, **new_skills}
     return new_policy, merged_skills
@@ -404,8 +537,13 @@ def _modularize_skill_module(
     tree = ast.parse(skill_src)
 
     def _slice_stmt(stmt: ast.stmt) -> str:
-        start = getattr(stmt, "lineno", 1) - 1
-        end = getattr(stmt, "end_lineno", start + 1)
+        decs = getattr(stmt, "decorator_list", None) or []
+        raw_start = min(
+            [int(getattr(stmt, "lineno", 1) or 1)]
+            + [int(getattr(d, "lineno", 1) or 1) for d in decs]
+        )
+        start = max(0, raw_start - 1)
+        end = getattr(stmt, "end_lineno", raw_start)
         return "\n".join(lines[start:end])
 
     import_stmts: list[tuple[ast.Import | ast.ImportFrom, str]] = []
@@ -415,7 +553,7 @@ def _modularize_skill_module(
     ] = {}
     helper_classes: dict[str, tuple[str, set[str]]] = {}
     extra_stmts: list[str] = []
-    self_mod_full = f"skills.{skill_name}"
+    self_mod_full = skill_key_to_module(skill_name)
 
     def _collect_refs_and_self_imports(node: ast.AST) -> tuple[set[str], set[str]]:
         refs = _extract_names_used(node)
@@ -590,9 +728,10 @@ def _modularize_skill_module(
 
     def _rewrite_self_imports(code_src: str, target_mod: str) -> str:
         """Redirects `from skills.<skill> import ...` inside split modules to `target_mod` to prevent cycles."""
+        target_dotted = skill_key_to_module(target_mod)
         return re.sub(
-            rf"\bfrom\s+skills\.{re.escape(skill_name)}\s+import\b",
-            f"from skills.{target_mod} import",
+            rf"\bfrom\s+{re.escape(self_mod_full)}\s+import\b",
+            f"from {target_dotted} import",
             code_src,
         )
 
@@ -623,6 +762,7 @@ def _modularize_skill_module(
     exported_order = list(dict.fromkeys(decl_order))
 
     shared_mod = _pick_unused_name(f"{skill_name}_shared", local_reserved)
+    shared_dotted = skill_key_to_module(shared_mod)
     if shared_syms:
         local_reserved.add(shared_mod)
         sh_imports = _emit_used_imports(shared_syms)
@@ -637,7 +777,7 @@ def _modularize_skill_module(
         sh_exports = [s for s in exported_order if s in shared_syms]
         if sh_exports:
             reexport_lines.append(
-                f"from skills.{shared_mod} import {', '.join(sh_exports)}"
+                f"from {shared_dotted} import {', '.join(sh_exports)}"
             )
 
     for idx_ch, (ch_leaves, cl) in enumerate(
@@ -649,6 +789,7 @@ def _modularize_skill_module(
         slug = re.sub(r"[^a-z0-9_]", "_", ch_leaves[0].lower()).strip("_")[:18]
         raw_sub = f"{skill_name}_{slug}" if slug else f"{skill_name}_part_{idx_ch}"
         sub_name = _pick_unused_name(raw_sub, local_reserved)
+        sub_dotted = skill_key_to_module(sub_name)
         local_reserved.add(sub_name)
 
         needed_shared = sorted(
@@ -656,9 +797,7 @@ def _modularize_skill_module(
         )
         m_imports = _emit_used_imports(mod_syms)
         if needed_shared:
-            m_imports.append(
-                f"from skills.{shared_mod} import {', '.join(needed_shared)}"
-            )
+            m_imports.append(f"from {shared_dotted} import {', '.join(needed_shared)}")
         m_body = _render_defs(mod_syms, shared_mod)
         submodules[sub_name] = (
             f'"""Submodule `{sub_name}` split from `{skill_name}`."""\n\n'
@@ -669,9 +808,7 @@ def _modularize_skill_module(
         )
         sub_exports = [s for s in exported_order if s in mod_syms]
         if sub_exports:
-            reexport_lines.append(
-                f"from skills.{sub_name} import {', '.join(sub_exports)}"
-            )
+            reexport_lines.append(f"from {sub_dotted} import {', '.join(sub_exports)}")
 
     if len(submodules) < 2 or not reexport_lines:
         return None
@@ -1005,11 +1142,52 @@ def _rewrite_symbol_imports_in_source(
 
     # Check if any attribute accesses `<alias>.<moved_sym>` or `skills.<...>.<moved_sym>` exist
     class _AttrRewriter(ast.NodeTransformer):
+        def __init__(self) -> None:
+            self.shadowed: set[str] = set()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+            fn_params = {
+                a.arg
+                for a in (
+                    list(node.args.posonlyargs)
+                    + list(node.args.args)
+                    + list(node.args.kwonlyargs)
+                    + ([node.args.vararg] if node.args.vararg else [])
+                    + ([node.args.kwarg] if node.args.kwarg else [])
+                )
+            }
+            prev = self.shadowed
+            self.shadowed = prev | fn_params | _collect_local_bindings(node.body)
+            try:
+                node.body = [self.visit(s) for s in node.body]
+            finally:
+                self.shadowed = prev
+            return node
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+            fn_params = {
+                a.arg
+                for a in (
+                    list(node.args.posonlyargs)
+                    + list(node.args.args)
+                    + list(node.args.kwonlyargs)
+                    + ([node.args.vararg] if node.args.vararg else [])
+                    + ([node.args.kwarg] if node.args.kwarg else [])
+                )
+            }
+            prev = self.shadowed
+            self.shadowed = prev | fn_params | _collect_local_bindings(node.body)
+            try:
+                node.body = [self.visit(s) for s in node.body]
+            finally:
+                self.shadowed = prev
+            return node
+
         def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
             nonlocal need_dst_import
             self.generic_visit(node)
             if node.attr in moved_symbols and isinstance(node.value, ast.Name):
-                if node.value.id in old_aliases:
+                if node.value.id in old_aliases and node.value.id not in self.shadowed:
                     need_dst_import = True
                     return ast.Attribute(
                         value=ast.Name(id=used_dst_alias, ctx=ast.Load()),
@@ -1022,13 +1200,23 @@ def _rewrite_symbol_imports_in_source(
     tree = _AttrRewriter().visit(tree)
 
     if need_dst_import or ensure_dst_imported:
-        already_imported = any(
-            (
-                isinstance(st, ast.Import)
-                and any(al.name == dst_mod_dotted for al in st.names)
+        has_module_import = any(
+            isinstance(st, ast.Import)
+            and any(
+                al.name == dst_mod_dotted
+                and (not need_dst_import or (al.asname or al.name) == used_dst_alias)
+                for al in st.names
             )
-            or (isinstance(st, ast.ImportFrom) and st.module == dst_mod_dotted)
             for st in tree.body
+        )
+        has_from_import = any(
+            isinstance(st, ast.ImportFrom) and st.module == dst_mod_dotted
+            for st in tree.body
+        )
+        already_imported = (
+            has_module_import
+            if need_dst_import
+            else (has_module_import or has_from_import)
         )
         if not already_imported:
             imp_stmt = (
@@ -1046,6 +1234,12 @@ def _rewrite_symbol_imports_in_source(
                 and isinstance(tree.body[0].value.value, str)
             ):
                 insert_at = 1
+            while (
+                insert_at < len(tree.body)
+                and isinstance(tree.body[insert_at], ast.ImportFrom)
+                and tree.body[insert_at].module == "__future__"
+            ):
+                insert_at += 1
             tree.body.insert(insert_at, imp_stmt)
 
     ast.fix_missing_locations(tree)
@@ -1078,8 +1272,13 @@ def _split_module_ast_verbatim(
     moved_names: set[str] = set()
 
     def _stmt_segment(stmt: ast.stmt) -> str:
-        s_line = max(1, int(stmt.lineno) - 1)
-        e_line = int(getattr(stmt, "end_lineno", stmt.lineno) or stmt.lineno)
+        decs = getattr(stmt, "decorator_list", None) or []
+        raw_start = min(
+            [int(getattr(stmt, "lineno", 1) or 1)]
+            + [int(getattr(d, "lineno", 1) or 1) for d in decs]
+        )
+        s_line = max(0, raw_start - 1)
+        e_line = int(getattr(stmt, "end_lineno", raw_start) or raw_start)
         return "\n".join(lines[s_line:e_line])
 
     def _top_name(stmt: ast.stmt) -> str:

@@ -107,6 +107,8 @@ class EpisodeRun(dict):
             ("max_hp", "final_max_hp"),
             ("triggered_functions", "functions_triggered"),
             ("fn_turns", "function_turns"),
+            ("final_hp", "hp"),
+            ("final_ac", "ac"),
         ):
             v_a = super().get(k_a)
             v_b = super().get(k_b)
@@ -181,9 +183,24 @@ class EpisodeRun(dict):
             ("is_outlier_good", False),
             ("worn_oprop_count", 0),
             ("dungeons_visited", 1),
+            ("end_reason", ""),
+            ("death_message", ""),
+            ("summary_digest", ""),
+            ("game_log", ""),
+            ("last_active_function", "root"),
         ):
             if super().get(k) is None:
                 super().__setitem__(k, default_val)
+        for k_dict in (
+            "triggered_functions",
+            "functions_triggered",
+            "fn_turns",
+            "function_turns",
+            "registered_params",
+            "milestones",
+        ):
+            if not isinstance(super().get(k_dict), dict):
+                super().__setitem__(k_dict, {})
 
     def __setitem__(self, key: str, value: Any) -> None:
         super().__setitem__(key, value)
@@ -300,6 +317,6 @@ def assert_baseline_invariants(
         er = normalize_episode_run(r)
         if er.is_shard_run:
             continue
-        if "seed" in er:
+        if "seed" in er and er["seed"] is not None:
             by_seed[int(er["seed"])] = er
     return list(by_seed.values())

@@ -305,6 +305,7 @@ _GOLD_RE = re.compile(r"\$:(\d+)")
 
 HUNGER_MAP = {
     "Satiated": 0,
+    "Not Hungry": 1,
     "Hungry": 2,
     "Weak": 3,
     "Fainting": 4,
@@ -476,12 +477,12 @@ def extract_milestone_ticks_from_dumplog(
     (e.g. jackal combat, armor equipping, food consumption, stair descent) so expert_ticks
     provides deep tactical reference across all dungeon depths.
     """
-    first_line = dumplog_text.splitlines()[0] if dumplog_text else ""
-    d_m = _DLVL_RE.search(first_line)
-    hp_m = _HP_RE.search(first_line)
-    ac_m = _AC_RE.search(first_line)
-    xp_m = _XP_RE.search(first_line)
-    t_m = _TURN_RE.search(first_line)
+    status_blob = "\n".join(dumplog_text.splitlines()[:40]) if dumplog_text else ""
+    d_m = _DLVL_RE.search(status_blob)
+    hp_m = _HP_RE.search(status_blob)
+    ac_m = _AC_RE.search(status_blob)
+    xp_m = _XP_RE.search(status_blob)
+    t_m = _TURN_RE.search(status_blob)
 
     max_d = (
         int(d_m.group(1))
@@ -741,13 +742,37 @@ def ingest_expert_runs_into_duckdb(
     query them via `query_db(sql)`.
     """
     con = init_db(db_path)
+    try:
+        return _ingest_with_conn(
+            con=con,
+            max_ascensions=max_ascensions,
+            fetch_dumplogs=fetch_dumplogs,
+            timeout_sec=timeout_sec,
+            dumplog_paths=dumplog_paths,
+            ttyrec_paths=ttyrec_paths,
+            urls=urls,
+            force=force,
+        )
+    finally:
+        con.close()
+
+
+def _ingest_with_conn(
+    con: Any,
+    max_ascensions: int = 1000,
+    fetch_dumplogs: int = 25,
+    timeout_sec: float = 30.0,
+    dumplog_paths: list[str] | None = None,
+    ttyrec_paths: list[str] | None = None,
+    urls: list[str] | None = None,
+    force: bool = False,
+) -> dict[str, int]:
     existing = con.execute("SELECT COUNT(*) FROM expert_runs").fetchone()[0]
     deep_ticks = con.execute(
         "SELECT COUNT(*) FROM expert_ticks WHERE depth >= 2"
     ).fetchone()[0]
     has_custom = bool(dumplog_paths or ttyrec_paths or urls)
     if existing >= max_ascensions and deep_ticks > 0 and not force and not has_custom:
-        con.close()
         return {"expert_runs": existing, "newly_added": 0}
 
     expert_rows: list[dict[str, Any]] = []
@@ -1100,5 +1125,4 @@ def ingest_expert_runs_into_duckdb(
         raise
 
     total_now = con.execute("SELECT COUNT(*) FROM expert_runs").fetchone()[0]
-    con.close()
     return {"expert_runs": total_now, "newly_added": len(expert_rows)}

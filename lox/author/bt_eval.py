@@ -127,18 +127,20 @@ def sample_condition_fixtures(
             if m_clean in allowed_order_cols:
                 metric_col = m_clean
                 break
+        from lox.db.schema import NON_SHARD_RUNS_SQL
+
         queries = [
             f"""
             SELECT run_id, seed, max_depth, end_reason, action_bytes
             FROM runs
-            WHERE octet_length(action_bytes) > 10 AND end_reason != 'active'
+            WHERE octet_length(action_bytes) > 10 AND end_reason != 'active' AND {NON_SHARD_RUNS_SQL}
             ORDER BY generation DESC, {metric_col} DESC
             LIMIT ?
             """,
-            """
+            f"""
             SELECT run_id, seed, max_depth, end_reason, action_bytes
             FROM runs
-            WHERE octet_length(action_bytes) > 10
+            WHERE octet_length(action_bytes) > 10 AND {NON_SHARD_RUNS_SQL}
             ORDER BY max_depth DESC, turns DESC
             LIMIT ?
             """,
@@ -183,6 +185,10 @@ def sample_condition_fixtures(
 
 def _tick_node(node: Any, state: Any, bb: Blackboard) -> Any:
     if isinstance(node, BehaviorTree):
+        if getattr(node, "blackboard", None) is not None and not getattr(
+            node.blackboard, "strict_errors", False
+        ):
+            node.blackboard.strict_errors = True
         return node.tick(state)
     if hasattr(node, "tick"):
         import inspect
@@ -236,142 +242,162 @@ def evaluate_bt_subtree(
 
         subtree_tracer = getattr(node, "_lox_tracer", None)
 
-        harness = NetHackHarness(max_steps=steps + 50)
-        try:
-            if replay_fixture is not None:
-                buf = bytes(replay_fixture.get("action_bytes") or b"")
-                stop_idx = int(replay_fixture.get("stop_at_byte_idx") or len(buf))
-                r_seed = int(replay_fixture.get("seed", 42))
+    harness = NetHackHarness(max_steps=steps + 50)
+    try:
+        if replay_fixture is not None:
+            buf = bytes(replay_fixture.get("action_bytes") or b"")
+            stop_idx = int(replay_fixture.get("stop_at_byte_idx") or len(buf))
+            r_seed = int(replay_fixture.get("seed", 42))
+            st = harness.replay_bytes(
+                seed=r_seed,
+                recorded_bytes=buf,
+                stop_at_byte_idx=stop_idx,
+            )
+            if harness.done and stop_idx > 1:
                 st = harness.replay_bytes(
                     seed=r_seed,
                     recorded_bytes=buf,
-                    stop_at_byte_idx=stop_idx,
+                    stop_at_byte_idx=max(1, stop_idx - 25),
                 )
-                harness.step_count = 0
-                ctx_label = f"replay:{str(replay_fixture.get('run_id', ''))[-8:]}"
-            elif checkpoint is not None and frontier is not None:
-                st = frontier.replay_into(harness, checkpoint)
-                ctx_label = f"cp:dlvl{checkpoint.depth}_s{checkpoint.seed}"
-            else:
-                use_seed = int(seed if seed is not None else random.randint(1000, 9999))
-                st = harness.reset(seed=use_seed)
-                ctx_label = f"seed:{use_seed}"
+            harness.step_count = 0
+            ctx_label = f"replay:{str(replay_fixture.get('run_id', ''))[-8:]}"
+        elif checkpoint is not None and frontier is not None:
+            st = frontier.replay_into(harness, checkpoint)
+            ctx_label = f"cp:dlvl{checkpoint.depth}_s{checkpoint.seed}"
+        else:
+            use_seed = int(seed if seed is not None else random.randint(1000, 9999))
+            st = harness.reset(seed=use_seed)
+            ctx_label = f"seed:{use_seed}"
 
-            start_score = int(st.score)
-            start_hp = int(st.hp)
-            start_depth = int(st.depth)
+        start_score = int(st.score)
+        start_hp = int(st.hp)
+        start_depth = int(st.depth)
+        last_alive_depth = start_depth
 
-            bb = Blackboard(strict_errors=True)
-            action_counts: dict[str, int] = collections.defaultdict(int)
-            visited_tiles: set[tuple[int, int, int, int]] = set()
-            rle_runs: list[dict[str, Any]] = []
-            triggered_steps = 0
-            eval_steps = 0
+        bb = Blackboard(strict_errors=True)
+        action_counts: dict[str, int] = collections.defaultdict(int)
+        visited_tiles: set[tuple[int, int, int, int]] = set()
+        rle_runs: list[dict[str, Any]] = []
+        triggered_steps = 0
+        eval_steps = 0
 
-            for step_idx in range(1, steps + 1):
-                eval_steps += 1
-                pre_pos = (int(st.y), int(st.x))
-                pre_turn = int(st.turn)
-                visited_tiles.add(
-                    (
-                        int(getattr(st, "dungeon_num", 0) or 0),
-                        max(1, int(getattr(st, "depth", 1) or 1)),
-                        int(st.y),
-                        int(st.x),
-                    )
+        for step_idx in range(1, steps + 1):
+            if harness.done:
+                break
+            eval_steps += 1
+            pre_pos = (int(st.y), int(st.x))
+            pre_turn = int(st.turn)
+            visited_tiles.add(
+                (
+                    int(getattr(st, "dungeon_num", 0) or 0),
+                    max(1, int(getattr(st, "depth", 1) or 1)),
+                    int(st.y),
+                    int(st.x),
                 )
-                cand_act = _tick_node(node, st, bb)
-                if cand_act is not None:
-                    triggered_steps += 1
-                    chosen_act = cand_act
-                    act_source = "subtree"
-                    if subtree_tracer is not None:
-                        subtree_tracer.record_turn_yield()
-                elif baseline_runner is not None:
-                    base_act, _ = baseline_runner.next_action(st)
-                    chosen_act = base_act if base_act is not None else Action.WAIT
-                    act_source = "baseline" if base_act is not None else "wait_fallback"
-                else:
-                    chosen_act = Action.WAIT
-                    act_source = "wait_fallback"
-
-                act_name = (
-                    chosen_act.name if hasattr(chosen_act, "name") else str(chosen_act)
-                )
-                action_counts[act_name] += 1
-                st, done, _ = harness.step(chosen_act)
-                post_pos = (int(st.y), int(st.x))
-                turn_adv = int(st.turn) - pre_turn
-
-                if (
-                    rle_runs
-                    and rle_runs[-1]["source"] == act_source
-                    and rle_runs[-1]["act"] == act_name
-                ):
-                    seg = rle_runs[-1]
-                    seg["end_step"] = step_idx
-                    seg["count"] += 1
-                    seg["end_pos"] = post_pos
-                    seg["turn_adv"] += turn_adv
-                else:
-                    rle_runs.append(
-                        {
-                            "start_step": step_idx,
-                            "end_step": step_idx,
-                            "count": 1,
-                            "source": act_source,
-                            "act": act_name,
-                            "start_pos": pre_pos,
-                            "end_pos": post_pos,
-                            "turn_adv": turn_adv,
-                        }
-                    )
-                if done:
-                    break
-
-            rle_trace = [
-                f"[S{seg['start_step']}..{seg['end_step']} ({seg['count']}x) {seg['source']}:{seg['act']} "
-                f"{seg['start_pos']}->{seg['end_pos']} dt={seg['turn_adv']}]"
-                for seg in rle_runs
-            ]
-            if not harness.done and int(getattr(st, "depth", 0) or 0) > 0:
-                visited_tiles.add(
-                    (
-                        int(getattr(st, "dungeon_num", 0) or 0),
-                        int(getattr(st, "depth", 1) or 1),
-                        int(st.y),
-                        int(st.x),
-                    )
-                )
-            end_msg_s = str(getattr(st, "end_reason", "") or "").strip()
-            if not end_msg_s and harness.done:
-                raw_msg = str(getattr(st, "message", "") or "").strip()
-                end_msg_s = raw_msg.split(".")[0][:60] if raw_msg else "death"
-            obs = ObservationDigest(
-                survived=not harness.done,
-                steps_taken=harness.step_count,
-                triggered_steps=triggered_steps,
-                total_eval_steps=eval_steps,
-                end_reason=end_msg_s if harness.done else "active",
-                hp_start=start_hp,
-                hp_end=int(st.hp),
-                depth_start=start_depth,
-                depth_end=int(st.depth),
-                score_start=start_score,
-                score_end=int(st.score),
-                unique_tiles=len(visited_tiles),
-                actions_taken=dict(action_counts),
-                fn_turns=dict(subtree_tracer.fn_turns)
-                if subtree_tracer is not None
-                else {},
-                rle_trace=rle_trace,
-                dialog_resolved=not getattr(st, "waiting_for_space", False)
-                and not getattr(st, "in_text_prompt", False),
-                context_label=ctx_label,
             )
-            return obs, ""
-        except Exception as exc:
-            tb = traceback.format_exc()
-            return ObservationDigest(), f"{type(exc).__name__}: {exc}\n{tb}"
-        finally:
-            harness.close()
+            bb.last_active_leaf = ""
+            cand_act = _tick_node(node, st, bb)
+            if cand_act is not None:
+                triggered_steps += 1
+                chosen_act = cand_act
+                act_source = "subtree"
+                if subtree_tracer is not None:
+                    subtree_tracer.record_turn_yield(
+                        preferred_fn=getattr(bb, "last_active_leaf", None) or None
+                    )
+            elif baseline_runner is not None:
+                if subtree_tracer is not None:
+                    subtree_tracer.loop_ticks = 0
+                base_act, _ = baseline_runner.next_action(st)
+                chosen_act = base_act if base_act is not None else Action.WAIT
+                act_source = "baseline" if base_act is not None else "wait_fallback"
+            else:
+                if subtree_tracer is not None:
+                    subtree_tracer.loop_ticks = 0
+                chosen_act = Action.WAIT
+                act_source = "wait_fallback"
+
+            act_name = (
+                chosen_act.name if hasattr(chosen_act, "name") else str(chosen_act)
+            )
+            action_counts[act_name] += 1
+            st, done, _ = harness.step(chosen_act)
+            if not done and int(getattr(st, "depth", 0) or 0) > 0:
+                last_alive_depth = int(st.depth)
+            post_pos = (int(st.y), int(st.x))
+            turn_adv = int(st.turn) - pre_turn
+
+            if (
+                rle_runs
+                and rle_runs[-1]["source"] == act_source
+                and rle_runs[-1]["act"] == act_name
+            ):
+                seg = rle_runs[-1]
+                seg["end_step"] = step_idx
+                seg["count"] += 1
+                seg["end_pos"] = post_pos
+                seg["turn_adv"] += turn_adv
+            else:
+                rle_runs.append(
+                    {
+                        "start_step": step_idx,
+                        "end_step": step_idx,
+                        "count": 1,
+                        "source": act_source,
+                        "act": act_name,
+                        "start_pos": pre_pos,
+                        "end_pos": post_pos,
+                        "turn_adv": turn_adv,
+                    }
+                )
+            if done:
+                break
+
+        rle_trace = [
+            f"[S{seg['start_step']}..{seg['end_step']} ({seg['count']}x) {seg['source']}:{seg['act']} "
+            f"{seg['start_pos']}->{seg['end_pos']} dt={seg['turn_adv']}]"
+            for seg in rle_runs
+        ]
+        if not harness.done and int(getattr(st, "depth", 0) or 0) > 0:
+            visited_tiles.add(
+                (
+                    int(getattr(st, "dungeon_num", 0) or 0),
+                    int(getattr(st, "depth", 1) or 1),
+                    int(st.y),
+                    int(st.x),
+                )
+            )
+        end_msg_s = str(getattr(st, "end_reason", "") or "").strip()
+        if not end_msg_s and harness.done:
+            raw_msg = str(getattr(st, "message", "") or "").strip()
+            end_msg_s = raw_msg.split(".")[0][:60] if raw_msg else "death"
+        obs = ObservationDigest(
+            survived=not harness.done,
+            steps_taken=harness.step_count,
+            triggered_steps=triggered_steps,
+            total_eval_steps=eval_steps,
+            end_reason=end_msg_s if harness.done else "active",
+            hp_start=start_hp,
+            hp_end=int(st.hp),
+            depth_start=start_depth,
+            depth_end=last_alive_depth
+            if harness.done and int(st.depth or 0) <= 0
+            else int(st.depth),
+            score_start=start_score,
+            score_end=int(st.score),
+            unique_tiles=len(visited_tiles),
+            actions_taken=dict(action_counts),
+            fn_turns=dict(subtree_tracer.fn_turns)
+            if subtree_tracer is not None
+            else {},
+            rle_trace=rle_trace,
+            dialog_resolved=not getattr(st, "waiting_for_space", False)
+            and not getattr(st, "in_text_prompt", False),
+            context_label=ctx_label,
+        )
+        return obs, ""
+    except Exception as exc:
+        tb = traceback.format_exc()
+        return ObservationDigest(), f"{type(exc).__name__}: {exc}\n{tb}"
+    finally:
+        harness.close()

@@ -94,15 +94,26 @@ def test_duckdb_llm_cost_and_token_tracking(tmp_path):
 
 def test_frontier_bootstrapping_and_checkpoints(tmp_path):
     frontier_dir = str(tmp_path / "frontier")
-    # Bootstrap from current data/lox.duckdb if available
-    db_file = Path("data/lox.duckdb")
-    if db_file.exists():
-        count = bootstrap_frontier_from_duckdb(
-            db_path=str(db_file),
-            frontier_dir=frontier_dir,
-            max_checkpoints_per_depth=2,
-        )
-        assert count > 0
+    seed_db = str(tmp_path / "seed_frontier.duckdb")
+    con = init_db(seed_db)
+    con.execute(
+        """
+        INSERT INTO runs (run_id, batch_id, generation, seed, role, depth, max_depth, score, turns, action_bytes, game_log, is_shard)
+        VALUES
+          ('r_dlvl3_a', 'b1', 1, 101, 'Val', 3, 3, 250, 120, ?::BLOB, 'Turn 1\nTurn 120', FALSE),
+          ('r_dlvl3_b', 'b1', 1, 102, 'Val', 3, 3, 180, 95, ?::BLOB, 'Turn 1\nTurn 95', FALSE),
+          ('r_shard_ign', 'b1', 1, 103, 'Val', 3, 3, 999, 500, ?::BLOB, 'Shard run', TRUE)
+        """,
+        [b"abcde", b"fghij", b"zzzzz"],
+    )
+    con.close()
+
+    count = bootstrap_frontier_from_duckdb(
+        db_path=seed_db,
+        frontier_dir=frontier_dir,
+        max_checkpoints_per_depth=2,
+    )
+    assert count == 2
 
 
 def test_swarm_worker_and_meta_agent_end_to_end(tmp_path):

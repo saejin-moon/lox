@@ -185,25 +185,29 @@ class ConsoleUI:
     ) -> None:
         if not self.enabled:
             return
-        pct = (
-            min(100.0, 100.0 * triggered_done / max(1, triggered_target))
-            if triggered_target > 0
-            else 100.0
-        )
-        bar_len = 16
-        filled = int(round(bar_len * pct / 100.0))
-        bar = "█" * filled + "░" * (bar_len - filled)
-        msg = (
-            f"\r  {self._c(self.CYAN, f'[{bar}]')} {pct:5.1f}% │ "
-            f"Trig: {triggered_done:,}/{triggered_target:,} "
-            f"{self._c(self.DIM, f'(raw {raw_done:,})')} │ "
-            f"{steps_per_sec:,.0f} sps │ "
-            f"Depth: {avg_depth:.2f} (max {max_depth}) │ "
-            f"Outliers: {outliers}"
-        )
-        sys.stdout.write(msg + "\033[K")
-        sys.stdout.flush()
-        self._in_progress_line = True
+        with self._lock:
+            pct = (
+                min(100.0, 100.0 * triggered_done / max(1, triggered_target))
+                if triggered_target > 0
+                else 100.0
+            )
+            bar_len = 16
+            filled = int(round(bar_len * pct / 100.0))
+            bar = "█" * filled + "░" * (bar_len - filled)
+            avg_d_v = float(avg_depth if avg_depth is not None else 0.0)
+            sps_v = float(steps_per_sec if steps_per_sec is not None else 0.0)
+            max_d_v = int(max_depth if max_depth is not None else 0)
+            msg = (
+                f"\r  {self._c(self.CYAN, f'[{bar}]')} {pct:5.1f}% │ "
+                f"Trig: {triggered_done:,}/{triggered_target:,} "
+                f"{self._c(self.DIM, f'(raw {raw_done:,})')} │ "
+                f"{sps_v:,.0f} sps │ "
+                f"Depth: {avg_d_v:.2f} (max {max_d_v}) │ "
+                f"Outliers: {outliers}"
+            )
+            sys.stdout.write(msg + "\033[K")
+            sys.stdout.flush()
+            self._in_progress_line = True
 
     def batch_summary(
         self,
@@ -212,48 +216,61 @@ class ConsoleUI:
     ) -> None:
         if not self.enabled:
             return
-        self._clear_progress()
-        eps = batch_stats.get("episodes_recorded", 0)
-        disc = batch_stats.get("episodes_discarded", 0)
-        avg_d = batch_stats.get("avg_depth", 0.0)
-        p90_d = batch_stats.get("p90_depth", 0.0)
-        max_d = batch_stats.get("max_depth", 0)
-        avg_s = batch_stats.get("avg_score", 0.0)
-        avg_t = batch_stats.get("avg_turns", 0.0)
-        outliers = batch_stats.get("outlier_count", 0)
-        sps = batch_stats.get("steps_per_sec", 0.0)
-        wall_s = batch_stats.get("wall_sec", 0.0)
-
-        print(
-            f"  {self._c(self.BOLD, 'Rollout')}    │ "
-            f"Recorded: {eps:,} {self._c(self.DIM, f'(discarded {disc:,})')} │ "
-            f"Depth: {self._c(self.BOLD, f'{avg_d:.2f}')} "
-            f"(P90 {p90_d:.1f}, Max {max_d}) │ "
-            f"Score: {avg_s:.1f} │ Turns: {avg_t:.0f} │ "
-            f"Outliers: {self._c(self.YELLOW, str(outliers))} │ "
-            f"{sps:,.0f} sps ({wall_s:.1f}s)"
-        )
-
-        if verdict is not None:
-            passed = verdict.get("passed", False)
-            status_str = (
-                self._c(self.GREEN + self.BOLD, "PROMOTED ✓")
-                if passed
-                else self._c(self.RED + self.BOLD, "REJECTED ✗")
+        with self._lock:
+            self._clear_progress()
+            eps = int(batch_stats.get("episodes_recorded") or 0)
+            disc = int(batch_stats.get("episodes_discarded") or 0)
+            avg_d = float(
+                batch_stats.get("avg_depth")
+                if batch_stats.get("avg_depth") is not None
+                else 0.0
             )
-            mean_d = verdict.get("mean_delta", 0.0)
-            ci_l = verdict.get("ci_lower", 0.0)
-            ci_u = verdict.get("ci_upper", 0.0)
-            p_val = verdict.get("wilcoxon_p", 1.0)
-            wins = verdict.get("wins", 0)
-            losses = verdict.get("losses", 0)
-            ties = verdict.get("ties", 0)
-            reason = verdict.get("reason", "")
+            p90_d = float(
+                batch_stats.get("p90_depth")
+                if batch_stats.get("p90_depth") is not None
+                else 0.0
+            )
+            max_d = int(batch_stats.get("max_depth") or 0)
+            avg_s = float(batch_stats.get("avg_score") or 0.0)
+            avg_t = float(batch_stats.get("avg_turns") or 0.0)
+            outliers = int(batch_stats.get("outlier_count") or 0)
+            sps = float(batch_stats.get("steps_per_sec") or 0.0)
+            wall_s = float(batch_stats.get("wall_sec") or 0.0)
+
             print(
-                f"  {self._c(self.BOLD, 'Verdict')}    │ {status_str} │ "
-                f"Δ: {mean_d:+.3f} (95% CS [{ci_l:+.3f}, {ci_u:+.3f}]) │ "
-                f"W/L/T: {wins}/{losses}/{ties} (p={p_val:.4f}) │ {self._c(self.DIM, reason)}"
+                f"  {self._c(self.BOLD, 'Rollout')}    │ "
+                f"Recorded: {eps:,} {self._c(self.DIM, f'(discarded {disc:,})')} │ "
+                f"Depth: {self._c(self.BOLD, f'{avg_d:.2f}')} "
+                f"(P90 {p90_d:.1f}, Max {max_d}) │ "
+                f"Score: {avg_s:.1f} │ Turns: {avg_t:.0f} │ "
+                f"Outliers: {self._c(self.YELLOW, str(outliers))} │ "
+                f"{sps:,.0f} sps ({wall_s:.1f}s)"
             )
+
+            if verdict is not None:
+                passed = bool(verdict.get("passed", False))
+                status_str = (
+                    self._c(self.GREEN + self.BOLD, "PROMOTED ✓")
+                    if passed
+                    else self._c(self.RED + self.BOLD, "REJECTED ✗")
+                )
+                mean_d = float(verdict.get("mean_delta") or 0.0)
+                ci_l = float(verdict.get("ci_lower") or 0.0)
+                ci_u = float(verdict.get("ci_upper") or 0.0)
+                p_val = float(
+                    verdict.get("wilcoxon_p")
+                    if verdict.get("wilcoxon_p") is not None
+                    else 1.0
+                )
+                wins = int(verdict.get("wins") or 0)
+                losses = int(verdict.get("losses") or 0)
+                ties = int(verdict.get("ties") or 0)
+                reason = str(verdict.get("reason") or "")
+                print(
+                    f"  {self._c(self.BOLD, 'Verdict')}    │ {status_str} │ "
+                    f"Δ: {mean_d:+.3f} (95% CS [{ci_l:+.3f}, {ci_u:+.3f}]) │ "
+                    f"W/L/T: {wins}/{losses}/{ties} (p={p_val:.4f}) │ {self._c(self.DIM, reason)}"
+                )
 
     def status(self, msg: str) -> None:
         """Prints a temporary status line in place (cleared on next log)."""

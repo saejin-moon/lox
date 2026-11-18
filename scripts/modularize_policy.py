@@ -85,16 +85,10 @@ def main() -> None:
         orig_skills = dict(json.loads(row[3]) if row[3] else {})
         ui.info(f"Loaded promoted `{row[0]}` (Gen {row[1]}) from `{args.db_path}`.")
     else:
+        from lox.lang.bundle import load_skills_dir
+
         orig_policy = pol_path.read_text(encoding="utf-8")
-        orig_skills = (
-            {
-                p.stem: p.read_text(encoding="utf-8")
-                for p in sorted(skills_dir.glob("*.py"))
-                if p.stem != "__init__"
-            }
-            if skills_dir.exists()
-            else {}
-        )
+        orig_skills = load_skills_dir(skills_dir)
         ui.info(f"Loaded `{pol_path}` ({len(orig_policy.splitlines())} LOC).")
 
     if orig_skills:
@@ -133,14 +127,11 @@ def main() -> None:
         ui.info("--dry-run set: no files written.")
         return
 
+    from lox.lang.bundle import write_skills_dir
+
     ws_dir.mkdir(parents=True, exist_ok=True)
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    for old in skills_dir.glob("*.py"):
-        if old.stem != "__init__" and old.stem not in final_skills:
-            old.unlink()
     pol_path.write_text(new_policy, encoding="utf-8")
-    for k, src in final_skills.items():
-        (skills_dir / f"{k}.py").write_text(src, encoding="utf-8")
+    write_skills_dir(skills_dir, final_skills, sync=True, ensure_trailing_newline=False)
     ui.info(f"Wrote modularized package cleanly to `{ws_dir}`.")
 
 

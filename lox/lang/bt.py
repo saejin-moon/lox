@@ -218,19 +218,29 @@ class ActionLeaf(BehaviorNode):
         action_fn: Callable[..., Any],
         name: str = "",
         is_running: bool = False,
-        min_commit: int = 0,
-        priority: float = 0.0,
+        min_commit: int | None = None,
+        priority: float | None = None,
         before: str | None = None,
         after: str | None = None,
         preempt_if: Callable[..., bool] | None = None,
     ) -> None:
         meta = getattr(action_fn, "_lox_bt_meta", None) or {}
+        resolved_min_commit = (
+            int(min_commit)
+            if min_commit is not None
+            else int(meta.get("min_commit", 0))
+        )
+        resolved_priority = (
+            float(priority)
+            if priority is not None
+            else float(meta.get("priority", 0.0))
+        )
         super().__init__(
             name=name
             or meta.get("name")
             or getattr(action_fn, "__name__", "ActionLeaf"),
-            min_commit=min_commit or int(meta.get("min_commit", 0)),
-            priority=priority or float(meta.get("priority", 0.0)),
+            min_commit=resolved_min_commit,
+            priority=resolved_priority,
             before=before if before is not None else meta.get("before"),
             after=after if after is not None else meta.get("after"),
         )
@@ -292,8 +302,9 @@ class ActionLeaf(BehaviorNode):
                                 active_gen.close()
                             except Exception:
                                 pass
-                        elif (
-                            hasattr(blackboard, "last_active_leaf")
+                        if (
+                            yielded[0] != NodeStatus.FAILURE
+                            and hasattr(blackboard, "last_active_leaf")
                             and yielded[1] is not None
                         ):
                             blackboard.last_active_leaf = self.name
@@ -534,6 +545,7 @@ class PrioritySelector(BehaviorNode):
         sel_id = id(self)
         prev_active = actives.get(sel_id) if isinstance(actives, dict) else None
 
+        failed_committed_idx: int | None = None
         if isinstance(commits, dict) and sel_id in commits:
             committed_idx, rem = commits[sel_id]
             if rem > 0 and 0 <= committed_idx < len(self.children):
@@ -551,11 +563,15 @@ class PrioritySelector(BehaviorNode):
                         if isinstance(actives, dict):
                             actives[sel_id] = committed_idx
                         return status, act
+                    committed_child.halt(blackboard)
                     commits.pop(sel_id, None)
+                    failed_committed_idx = committed_idx
             else:
                 commits.pop(sel_id, None)
 
         for idx, child in enumerate(self.children):
+            if idx == failed_committed_idx:
+                continue
             status, act = child.tick(state, blackboard)
             if status in (NodeStatus.SUCCESS, NodeStatus.RUNNING):
                 if (

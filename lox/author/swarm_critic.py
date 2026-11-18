@@ -19,7 +19,6 @@ from __future__ import annotations
 import ast
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,27 +62,76 @@ def extract_priority_selector_branches(policy_code: str) -> list[dict[str, str]]
         return ""
 
     selector_calls: list[ast.Call] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func_id = ""
-            if isinstance(node.func, ast.Name):
-                func_id = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                func_id = node.func.attr
-            if func_id == "PrioritySelector" and node.args:
-                if isinstance(node.args[0], (ast.List, ast.Tuple)):
+    scan_roots: list[ast.AST] = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "build_tree"
+    ] or [tree]
+
+    for root_node in scan_roots:
+        for node in ast.walk(root_node):
+            if isinstance(node, ast.Call):
+                func_id = ""
+                if isinstance(node.func, ast.Name):
+                    func_id = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    func_id = node.func.attr
+                if func_id == "PrioritySelector" and (
+                    node.args or any(kw.arg == "children" for kw in node.keywords)
+                ):
+                    if (
+                        node.args and isinstance(node.args[0], (ast.List, ast.Tuple))
+                    ) or any(
+                        kw.arg == "children"
+                        and isinstance(kw.value, (ast.List, ast.Tuple))
+                        for kw in node.keywords
+                    ):
+                        selector_calls.append(node)
+                elif (
+                    func_id == "from_modules"
+                    and isinstance(node.func, ast.Attribute)
+                    and _expr_name(node.func.value) == "PrioritySelector"
+                ):
                     selector_calls.append(node)
-            elif (
-                func_id == "from_modules"
-                and isinstance(node.func, ast.Attribute)
-                and _expr_name(node.func.value) == "PrioritySelector"
-            ):
-                selector_calls.append(node)
 
     if not selector_calls:
-        return []
+        # Option-A fallback: inspect registered `register_goal(...)` branches
+        goal_branches: list[dict[str, str]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fid = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else (
+                        node.func.attr if isinstance(node.func, ast.Attribute) else ""
+                    )
+                )
+                if fid == "register_goal":
+                    g_name = ""
+                    fn_ref = ""
+                    if node.args and isinstance(node.args[0], ast.Constant):
+                        g_name = str(node.args[0].value)
+                    for kw in node.keywords:
+                        if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                            g_name = str(kw.value.value)
+                        elif kw.arg in ("fn", "handler", "action_fn"):
+                            fn_ref = _expr_name(kw.value).split(".")[-1]
+                    if len(node.args) >= 2 and not fn_ref:
+                        fn_ref = _expr_name(node.args[1]).split(".")[-1]
+                    if g_name:
+                        idx_g = len(goal_branches) + 1
+                        goal_branches.append(
+                            {
+                                "priority": str(idx_g),
+                                "leaf_name": g_name,
+                                "fn_name": fn_ref or g_name,
+                            }
+                        )
+        return goal_branches
 
-    target_call = selector_calls[-1]
+    # Breadth-first ast.walk() yields the outermost PrioritySelector first; pick first unless named "master".
+    target_call = selector_calls[0]
     for c in selector_calls:
         for kw in c.keywords:
             if (
@@ -98,22 +146,51 @@ def extract_priority_selector_branches(policy_code: str) -> list[dict[str, str]]
         isinstance(target_call.func, ast.Attribute)
         and target_call.func.attr == "from_modules"
     ):
-        branches_fm: list[dict[str, str]] = []
-        for idx, arg in enumerate(target_call.args, start=1):
-            nm = _expr_name(arg) or f"module_{idx}"
-            branches_fm.append(
-                {"priority": str(idx), "leaf_name": nm, "fn_name": nm.split(".")[-1]}
+        seq_node = (
+            target_call.args[0]
+            if target_call.args
+            else next(
+                (kw.value for kw in target_call.keywords if kw.arg == "modules"),
+                None,
             )
-        return branches_fm
+        )
+        mod_elts = (
+            getattr(seq_node, "elts", [])
+            if isinstance(seq_node, (ast.List, ast.Tuple))
+            else []
+        )
+        mod_branches: list[dict[str, str]] = []
+        for idx_m, elt_m in enumerate(mod_elts, start=1):
+            nm = (
+                str(elt_m.value)
+                if isinstance(elt_m, ast.Constant) and isinstance(elt_m.value, str)
+                else _expr_name(elt_m)
+            )
+            if nm:
+                short_nm = nm.split(".")[-1]
+                mod_branches.append(
+                    {"priority": str(idx_m), "leaf_name": nm, "fn_name": short_nm}
+                )
+        return mod_branches
 
-    seq_node = target_call.args[0]
+    seq_node = (
+        target_call.args[0]
+        if target_call.args
+        else next(
+            (kw.value for kw in target_call.keywords if kw.arg == "children"),
+            None,
+        )
+    )
     elts = getattr(seq_node, "elts", [])
     branches: list[dict[str, str]] = []
 
     def _collect_call_fns(call_node: ast.Call) -> list[str]:
         sub_fns: list[str] = []
-        if call_node.args:
-            first = call_node.args[0]
+        target_args = list(call_node.args[:1])
+        for kw in call_node.keywords:
+            if kw.arg in ("action_fn", "cond_fn", "children", "child"):
+                target_args.append(kw.value)
+        for first in target_args:
             if isinstance(first, (ast.List, ast.Tuple)):
                 for sub in first.elts:
                     if isinstance(sub, ast.Call):
@@ -122,6 +199,8 @@ def extract_priority_selector_branches(policy_code: str) -> list[dict[str, str]]
                         s_fn = _expr_name(sub).split(".")[-1]
                         if s_fn:
                             sub_fns.append(s_fn)
+            elif isinstance(first, ast.Call):
+                sub_fns.extend(_collect_call_fns(first))
             else:
                 s_fn = _expr_name(first).split(".")[-1]
                 if s_fn:
@@ -186,8 +265,8 @@ def build_swarm_diagnostic_digest(
                    COALESCE(AVG(r.unique_tiles), 0.0) AS avg_tiles,
                    COALESCE(SUM(r.policy_exceptions), 0) AS total_exc
             FROM batches b
-            LEFT JOIN runs r ON r.batch_id = b.batch_id
-            GROUP BY b.generation, b.candidate_policy_id, b.avg_depth, b.p90_depth,
+            LEFT JOIN runs r ON r.batch_id = b.batch_id AND COALESCE(r.is_shard, FALSE) = FALSE
+            GROUP BY b.generation, b.batch_id, b.candidate_policy_id, b.avg_depth, b.p90_depth,
                      b.max_depth, b.avg_score, b.max_score, b.avg_turns, b.created_at
             ORDER BY b.generation ASC, b.created_at ASC
             """
@@ -206,6 +285,11 @@ def build_swarm_diagnostic_digest(
             if target_generation is not None
             else int(batch_rows[-1][0])
         )
+        latest_batch_row = con.execute(
+            "SELECT batch_id FROM batches WHERE generation = ? ORDER BY created_at DESC LIMIT 1",
+            [latest_gen_num],
+        ).fetchone()
+        latest_batch_id = str(latest_batch_row[0]) if latest_batch_row else None
 
         # 1. Cross-Generation Progression Table
         table_lines = [
@@ -221,14 +305,14 @@ def build_swarm_diagnostic_digest(
         for r in display_rows:
             g_num = int(r[0])
             p_id = str(r[1] or f"policy_swarm_g{g_num}")
-            avg_d = float(r[2] or 1.0)
-            p90_d = float(r[3] or 1.0)
-            max_d = int(r[4] or 1)
-            avg_s = float(r[5] or 0.0)
-            max_s = int(r[6] or 0)
-            avg_t = float(r[7] or 0.0)
-            avg_tiles = float(r[8] or 0.0)
-            tot_exc = int(r[9] or 0)
+            avg_d = float(r[2]) if r[2] is not None else 1.0
+            p90_d = float(r[3]) if r[3] is not None else 1.0
+            max_d = int(r[4]) if r[4] is not None else 1
+            avg_s = float(r[5]) if r[5] is not None else 0.0
+            max_s = int(r[6]) if r[6] is not None else 0
+            avg_t = float(r[7]) if r[7] is not None else 0.0
+            avg_tiles = float(r[8]) if r[8] is not None else 0.0
+            tot_exc = int(r[9]) if r[9] is not None else 0
             tags = []
             if g_num == best_gen_num:
                 tags.append("PEAK_DEPTH")
@@ -242,16 +326,18 @@ def build_swarm_diagnostic_digest(
         sections.append("\n".join(table_lines))
 
         # 2. Termination Breakdown & Leaf Errors for latest_gen_num
+        scope_col = "batch_id" if latest_batch_id is not None else "generation"
+        scope_val = latest_batch_id if latest_batch_id is not None else latest_gen_num
         end_rows = con.execute(
-            """
+            f"""
             SELECT end_reason, COUNT(*) AS cnt, ROUND(AVG(max_depth), 2) AS avg_d, ROUND(AVG(turns), 0) AS avg_t
             FROM runs
-            WHERE generation = ?
+            WHERE {scope_col} = ? AND COALESCE(is_shard, FALSE) = FALSE
             GROUP BY end_reason
             ORDER BY cnt DESC
             LIMIT 6
             """,
-            [latest_gen_num],
+            [scope_val],
         ).fetchall()
         if end_rows:
             end_bullets = [
@@ -265,8 +351,8 @@ def build_swarm_diagnostic_digest(
 
         # Check for swallowed leaf_errors in milestones_json
         milestone_rows = con.execute(
-            "SELECT run_id, milestones_json FROM runs WHERE generation = ? AND policy_exceptions > 0 LIMIT 10",
-            [latest_gen_num],
+            f"SELECT run_id, milestones_json FROM runs WHERE {scope_col} = ? AND COALESCE(is_shard, FALSE) = FALSE AND policy_exceptions > 0 LIMIT 10",
+            [scope_val],
         ).fetchall()
         leaf_err_samples: list[str] = []
         for r_id, m_json in milestone_rows:
@@ -286,17 +372,17 @@ def build_swarm_diagnostic_digest(
 
         # 3. Function Stats & Ordered PrioritySelector Branch Table
         fn_rows = con.execute(
-            """
+            f"""
             SELECT function_name, episodes_triggered, total_calls, total_turns_active,
                    COALESCE(stagnation_share, 0.0),
                    COALESCE(livelock_score, 0.0),
                    COALESCE(liblit_failure_score, 0.0),
                    COALESCE(ochiai_good_run_score, 0.0)
             FROM function_stats
-            WHERE generation = ?
+            WHERE {scope_col} = ?
             ORDER BY total_turns_active DESC, total_calls DESC
             """,
-            [latest_gen_num],
+            [scope_val],
         ).fetchall()
         fn_map: dict[str, dict[str, Any]] = {}
         total_active_turns = sum(int(r[3] or 0) for r in fn_rows) or 1
@@ -394,8 +480,8 @@ def build_swarm_diagnostic_digest(
                 "### Branch Activity Shifts vs. Prior Generations:\n"
                 + "\n".join(dropped_notes)
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        ui.warn(f"Critic diagnostic digest query warning: {exc}")
     finally:
         con.close()
 
@@ -519,7 +605,7 @@ class SwarmCriticAgent:
         self.provider = provider
         self.model = model
         self.db_path = db_path
-        self.theories = theories_store or TheoryDocumentStore()
+        self.theories = theories_store or TheoryDocumentStore(db_path=db_path)
         self.author = AuthorAgent(
             provider=provider,
             model=model or "z-ai/glm-5.3-flash:nitro",
@@ -530,25 +616,10 @@ class SwarmCriticAgent:
 
     @staticmethod
     def _parse_json_object(raw_txt: str) -> dict[str, Any]:
-        txt = re.sub(
-            r"<think>.*?</think>", "", str(raw_txt or ""), flags=re.DOTALL
-        ).strip()
-        if "```" in txt:
-            m = re.search(r"```(?:json)?\s*\n(.*?)```", txt, flags=re.DOTALL)
-            if m:
-                txt = m.group(1).strip()
-        try:
-            parsed = json.loads(txt)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            m_obj = re.search(r"\{.*\}", txt, flags=re.DOTALL)
-            if m_obj:
-                try:
-                    parsed = json.loads(m_obj.group(0))
-                    return parsed if isinstance(parsed, dict) else {}
-                except Exception:
-                    pass
-        return {}
+        from lox.lang.bundle import extract_json_payload
+
+        parsed = extract_json_payload(raw_txt)
+        return parsed if isinstance(parsed, dict) else {}
 
     def guide_before_generation(
         self,

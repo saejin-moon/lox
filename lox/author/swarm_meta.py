@@ -79,32 +79,13 @@ class SwarmMetaAgent:
     @staticmethod
     def _parse_categories_json(raw_txt: str) -> list[dict[str, Any]]:
         """Robustly extracts a JSON array of category dicts from LLM output."""
-        txt = re.sub(
-            r"<think>.*?</think>", "", str(raw_txt or ""), flags=re.DOTALL
-        ).strip()
-        if "```" in txt:
-            m = re.search(r"```(?:json)?\s*\n(.*?)```", txt, flags=re.DOTALL)
-            if m:
-                txt = m.group(1).strip()
-        for candidate in (txt,):
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, list):
-                    return [x for x in parsed if isinstance(x, dict)]
-                if isinstance(parsed, dict) and isinstance(
-                    parsed.get("categories"), list
-                ):
-                    return [x for x in parsed["categories"] if isinstance(x, dict)]
-            except Exception:
-                pass
-        m_arr = re.search(r"\[.*\]", txt, flags=re.DOTALL)
-        if m_arr:
-            try:
-                parsed = json.loads(m_arr.group(0))
-                if isinstance(parsed, list):
-                    return [x for x in parsed if isinstance(x, dict)]
-            except Exception:
-                pass
+        from lox.lang.bundle import extract_json_payload
+
+        parsed = extract_json_payload(raw_txt)
+        if isinstance(parsed, list):
+            return [x for x in parsed if isinstance(x, dict)]
+        if isinstance(parsed, dict) and isinstance(parsed.get("categories"), list):
+            return [x for x in parsed["categories"] if isinstance(x, dict)]
         return []
 
     def discover_macro_categories(
@@ -404,36 +385,66 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         return skill_modules
 
     @staticmethod
+    def _write_skill_to_dir(out_dir: Path, skill_key: str, code: str) -> None:
+        from lox.lang.validator import normalize_skill_key, skill_key_to_relpath
+
+        clean_k = normalize_skill_key(skill_key)
+        if not clean_k:
+            return
+        out_dir.mkdir(parents=True, exist_ok=True)
+        root_init = out_dir / "__init__.py"
+        if not root_init.exists():
+            root_init.write_text("", encoding="utf-8")
+        rel = skill_key_to_relpath(clean_k).removeprefix("skills/")
+        dst = out_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if "/" in clean_k:
+            sub_init = dst.parent / "__init__.py"
+            if not sub_init.exists():
+                sub_init.write_text("", encoding="utf-8")
+        dst.write_text(code, encoding="utf-8")
+
+    @classmethod
     def _apply_proposal_skills(
+        cls,
         proposal: Any,
         skill_modules: dict[str, str],
         skills_dir: str | Path | None = None,
     ) -> None:
         """Applies any `<skill_code module="...">` updates emitted by the Meta-Agent."""
+        from lox.lang.bundle import extract_skill_modules
+        from lox.lang.validator import normalize_skill_key, skill_key_to_relpath
+
         updates: dict[str, str] = {}
+        extracted_inline = extract_skill_modules(
+            getattr(proposal, "raw_code_patch", "") or "",
+            include_markdown=True,
+        )
+        for rk, rv in extracted_inline.items():
+            updates[rk] = rv
         if getattr(proposal, "skill_modules", None):
-            updates.update(proposal.skill_modules)
+            for rk, rv in proposal.skill_modules.items():
+                ck = normalize_skill_key(str(rk or ""))
+                if ck:
+                    updates[ck] = rv
         s_name_single = getattr(proposal, "skill_name", None) or (
             (getattr(proposal, "hypothesis", None) or {}).get("skill_module")
         )
         s_code_single = getattr(proposal, "skill_code", "")
         if s_name_single and s_code_single:
-            clean_s = re.sub(r"[^a-zA-Z0-9_]", "_", str(s_name_single).lower()).strip(
-                "_"
-            )
+            clean_s = normalize_skill_key(str(s_name_single))
             if clean_s:
                 updates[clean_s] = s_code_single
 
         for s_name, s_code in updates.items():
             try:
-                validate_python_code(s_code, filename=f"skills/{s_name}.py")
+                validate_python_code(s_code, filename=skill_key_to_relpath(s_name))
             except Exception as exc:
                 ui.warn(f"Meta-Agent: Skipping invalid skill update `{s_name}` ({exc})")
                 continue
             skill_modules[s_name] = s_code
             if skills_dir is not None:
-                Path(skills_dir).mkdir(parents=True, exist_ok=True)
-                (Path(skills_dir) / f"{s_name}.py").write_text(s_code, encoding="utf-8")
+                cls._write_skill_to_dir(Path(skills_dir), s_name, s_code)
 
     def assemble_policy(
         self,
@@ -592,7 +603,7 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         Finds the exact transitive set of `skills.<name>` / `skills.<domain>.<name>` modules
         imported by `policy_code` and removes orphaned `.py` files from `skills_dir` and `skills`.
         """
-        from lox.lang.validator import normalize_skill_key, resolve_skill_import
+        from lox.lang.validator import normalize_skill_key
 
         norm_skills = {
             normalize_skill_key(k): v
@@ -602,83 +613,40 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         known_keys = set(norm_skills.keys())
         pkg_names = {k.split("/", 1)[0] for k in known_keys if "/" in k}
 
+        from lox.lang.bundle import extract_skill_imports, write_skills_dir
+
         if not norm_skills:
             if skills_dir is not None:
                 s_dir = Path(skills_dir)
                 if s_dir.exists():
-                    removed_disk = []
-                    for p in sorted(s_dir.rglob("*.py")):
-                        if p.name != "__init__.py":
-                            try:
-                                p.unlink()
-                                removed_disk.append(str(p.relative_to(s_dir)))
-                            except Exception:
-                                pass
-                    if removed_disk:
-                        ui.info(
-                            f"Meta-Agent: Pruned {len(removed_disk)} unused skill module(s) from workspace "
-                            f"(kept 0 active): {removed_disk[:8]}"
-                            + ("..." if len(removed_disk) > 8 else "")
-                        )
+                    write_skills_dir(s_dir, {}, sync=True)
             return {}
 
-        def _extract_skill_imports(src: str) -> set[str]:
-            refs: set[str] = set()
+        def _extract_skill_imports(src: str) -> tuple[set[str], bool]:
             try:
                 tree = ast.parse(src)
-            except Exception:
-                return refs
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module == "skills":
-                        for alias in node.names:
-                            cand = normalize_skill_key(alias.name)
-                            if cand in known_keys:
-                                refs.add(cand)
-                    elif node.module.startswith("skills."):
-                        tail = node.module[len("skills.") :]
-                        if tail in pkg_names and tail not in known_keys:
-                            for alias in node.names:
-                                sub_k = f"{tail}/{alias.name}"
-                                if sub_k in known_keys:
-                                    refs.add(sub_k)
-                        else:
-                            resolved = resolve_skill_import(node.module, known_keys)
-                            if resolved in known_keys:
-                                refs.add(resolved)
-                elif isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith("skills."):
-                            resolved = resolve_skill_import(alias.name, known_keys)
-                            if resolved in known_keys:
-                                refs.add(resolved)
-            return refs
+            except SyntaxError:
+                return set(), False
+            info = extract_skill_imports(tree, known_keys, pkg_names=pkg_names)
+            return info.referenced_keys, True
 
         keep: set[str] = set()
-        queue = list(_extract_skill_imports(policy_code))
+        seed_refs, pol_ok = _extract_skill_imports(policy_code)
+        if not pol_ok:
+            return norm_skills
+        queue = list(seed_refs)
         while queue:
             s_name = queue.pop(0)
             if s_name in keep or s_name not in norm_skills:
                 continue
             keep.add(s_name)
-            queue.extend(_extract_skill_imports(norm_skills[s_name]))
+            sub_refs, _ = _extract_skill_imports(norm_skills[s_name])
+            queue.extend(sub_refs)
 
         pruned = {k: v for k, v in norm_skills.items() if k in keep}
         removed = sorted(set(norm_skills.keys()) - keep)
         if skills_dir is not None:
-            s_dir = Path(skills_dir)
-            if s_dir.exists():
-                for p in s_dir.rglob("*.py"):
-                    if p.name == "__init__.py":
-                        continue
-                    rel_k = (
-                        str(p.relative_to(s_dir)).removesuffix(".py").replace("\\", "/")
-                    )
-                    if rel_k not in keep:
-                        try:
-                            p.unlink()
-                        except Exception:
-                            pass
+            write_skills_dir(Path(skills_dir), pruned, sync=True)
         if removed and skills_dir is not None:
             ui.info(
                 f"Meta-Agent: Pruned {len(removed)} unused skill module(s) from workspace "
@@ -692,15 +660,15 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
         if not self.db_path or not Path(self.db_path).exists():
             return []
         try:
-            from lox.db.schema import connect_db
+            from lox.db.schema import NON_SHARD_RUNS_SQL, connect_db
 
             con = connect_db(self.db_path, read_only=True)
             try:
                 rows = con.execute(
-                    """
+                    f"""
                     SELECT run_id, end_reason, max_depth, turns
                     FROM runs
-                    WHERE generation = ? AND end_reason NOT IN ('ascended', 'max_steps')
+                    WHERE generation = ? AND {NON_SHARD_RUNS_SQL} AND end_reason NOT IN ('ascended', 'max_steps')
                     ORDER BY turns DESC, max_depth ASC
                     LIMIT ?
                     """,
@@ -839,9 +807,8 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
 
         if skills_dir is not None:
             out_dir = Path(skills_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
             for k, v in cand_skills.items():
-                (out_dir / f"{k}.py").write_text(v, encoding="utf-8")
+                self._write_skill_to_dir(out_dir, k, v)
 
         self.theories.save_document(
             generation=generation,

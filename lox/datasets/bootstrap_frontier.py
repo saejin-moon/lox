@@ -6,7 +6,7 @@ to seed the frontier archive for deep-tier sub-agent testing.
 
 from __future__ import annotations
 
-from lox.db.schema import DEFAULT_DB_PATH, connect_db
+from lox.db.schema import DEFAULT_DB_PATH, NON_SHARD_RUNS_SQL, connect_db
 from lox.engine.frontier import DEFAULT_FRONTIER_DIR, FrontierArchive
 
 
@@ -25,10 +25,10 @@ def bootstrap_frontier_from_duckdb(
 
     try:
         for depth in (2, 3, 4, 5):
-            query = """
+            query = f"""
                 SELECT run_id, seed, max_depth, turns, action_bytes, game_log
                 FROM runs
-                WHERE octet_length(action_bytes) > 0 AND max_depth = ?
+                WHERE octet_length(action_bytes) > 0 AND max_depth = ? AND {NON_SHARD_RUNS_SQL}
                 ORDER BY score DESC, turns DESC
                 LIMIT ?
             """

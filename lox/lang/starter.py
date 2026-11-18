@@ -100,16 +100,11 @@ class WorldState:
         self.last_floor_key = fk
         self.last_pos = pos
 
-        # Single-pass terrain & C-doorway no_diag masks per step
+        # Single-pass terrain & C-doorway no_diag masks per step (reuses vectorized state.mem.door_mask)
         try:
             self.passable_mask = state.passable_mask
             self.safe_passable_mask = state.safe_passable_mask
-            no_diag = np.zeros((21, 79), dtype=bool)
-            for ry in range(21):
-                for rx in range(79):
-                    if state.is_closed_door(ry, rx) or state.is_open_door(ry, rx):
-                        no_diag[ry, rx] = True
-            self.no_diag_mask = no_diag
+            self.no_diag_mask = np.array(state.mem.door_mask, dtype=bool)
         except Exception:
             self.passable_mask = None
             self.safe_passable_mask = None
@@ -123,11 +118,16 @@ from lox.env.actions import Action, key
 
 def handle_prompts(state, ws):
     """Unblocks pending TTY UI prompts safely without assuming strategy."""
+    if getattr(state, "in_menu", False):
+        return Action.ESC
     if getattr(state, "waiting_for_space", False):
         return Action.MORE
-    if getattr(state, "in_text_prompt", False) or getattr(state, "in_naming_prompt", False):
-        return Action.ESC
-    if getattr(state, "in_menu", False):
+    if (
+        getattr(state, "in_text_prompt", False)
+        or getattr(state, "in_naming_prompt", False)
+        or getattr(state, "in_getobj_prompt", False)
+        or getattr(state, "in_getdir_prompt", False)
+    ):
         return Action.ESC
     if getattr(state, "in_yn_prompt", False):
         return key("n")
@@ -155,9 +155,6 @@ NAVIGATION_PY = '''"""Pure geometric pathing helpers over GameState C masks and 
 from lox.env.actions import DIR_DELTAS
 
 
-_DELTA_TO_ACTION = {delta: act for act, delta in DIR_DELTAS.items()}
-
-
 def step_toward(state, ws, target, allow_diagonal=True):
     """Computes one pure A* step toward `target` honoring NLE doorway `no_diag` geometry."""
     mask = ws.safe_passable_mask if ws.safe_passable_mask is not None else ws.passable_mask
@@ -172,7 +169,7 @@ def step_toward(state, ws, target, allow_diagonal=True):
     if dy == 0 and dx == 0:
         return None
     ws.pending_move_target = (int(state.y) + dy, int(state.x) + dx)
-    return _DELTA_TO_ACTION.get((dy, dx))
+    return DIR_DELTAS.get((dy, dx))
 '''
 
 GOALS_PY = '''"""Plugin Goal registry and committed task dispatcher."""

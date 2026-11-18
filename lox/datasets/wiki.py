@@ -111,7 +111,11 @@ def ensure_wiki_ready(db_path: str = DEFAULT_WIKI_DB) -> bool:
             print(
                 "[LOX] `data/wiki_index.db` not found. Automatically building offline NetHack Wiki database..."
             )
-            subprocess.run([sys.executable, build_script], check=True, cwd=repo_root)
+            subprocess.run(
+                [sys.executable, build_script, "--db-path", str(db_path)],
+                check=True,
+                cwd=repo_root,
+            )
             return True
         except Exception as exc:
             print(f"[LOX] Warning: Could not auto-build full wiki index ({exc}).")

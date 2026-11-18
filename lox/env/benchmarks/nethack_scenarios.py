@@ -267,6 +267,7 @@ class NetHackScenarioHarness(NetHackHarness):
             except Exception:
                 pass
             self._mh_env = None
+            self.nh = None
 
         mh = MiniHackSkill(
             des_file=des_str,
@@ -327,7 +328,17 @@ class NetHackScenarioHarness(NetHackHarness):
                 break
             self.action_bytes.append(b)
             obs_tuple, self.done = self.nh.step(b)
+            self.step_count += 1
+            self.step_byte_offsets.append(len(self.action_bytes))
             self._last_raw_tuple = obs_tuple
+            st_step = GameState(
+                obs_tuple,
+                step_count=self.step_count,
+                mem=self.mem,
+                obs_keys=self._obs_keys,
+                obs_idx_map=self._idx_map,
+            )
+            self.mem.update(st_step)
         return self.wrap_state()
 
     def close(self) -> None:
@@ -337,6 +348,7 @@ class NetHackScenarioHarness(NetHackHarness):
             except Exception:
                 pass
             self._mh_env = None
+            self.nh = None
         super().close()
 
 
@@ -409,6 +421,16 @@ def run_scenario_gate(
                 steps_done += 1
                 if info.get("end_reason"):
                     last_end_reason = str(info["end_reason"])
+                elif done:
+                    if info.get("is_ascended"):
+                        last_end_reason = "ascended"
+                    elif info.get("truncated"):
+                        last_end_reason = "max_steps"
+                    elif int(getattr(state, "hp", 1) or 0) <= 0:
+                        msg_s = str(getattr(state, "message", "") or "").strip()
+                        last_end_reason = msg_s.split(".")[0][:60] if msg_s else "died"
+                    else:
+                        last_end_reason = "ended"
                 is_prompt = getattr(state, "in_yn_prompt", False) or getattr(
                     state, "in_text_prompt", False
                 )
@@ -426,6 +448,8 @@ def run_scenario_gate(
                     last_prompt = ""
                 if done:
                     break
+            if last_end_reason == "running" and steps_done >= max(10, int(max_steps)):
+                last_end_reason = "max_steps"
 
             leaf_errs = extract_runner_leaf_errors(runner)
             exc_cnt = int(getattr(runner, "policy_exceptions", 0) or 0) + len(leaf_errs)

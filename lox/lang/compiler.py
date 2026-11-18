@@ -87,6 +87,7 @@ from lox.lang.strategy import (
 from lox.lang.validator import (
     PolicyValidationError,
     check_undefined_symbols,
+    normalize_skill_key,
     validate_python_code,
 )
 
@@ -160,54 +161,85 @@ SAFE_BUILTINS: dict[str, Any] = {
 }
 
 
-def _safe_import(name: str, globals_dict=None, locals_dict=None, fromlist=(), level=0):
-    root = name.split(".")[0]
-    allowed_map = {
-        "math": math,
-        "collections": collections,
-        "heapq": heapq,
-        "itertools": itertools,
-        "functools": functools,
-        "re": re,
-        "enum": enum,
-        "dataclasses": dataclasses,
-        "typing": typing,
-        "numpy": np,
-        "np": np,
-        "random": random,
-        "operator": operator,
-        "bisect": bisect,
-        "copy": copy,
-    }
-    if root in allowed_map and root == name:
-        return allowed_map[root]
-    if root in allowed_map or root in ("skills", "lox"):
-        if root == "skills" and name != "skills" and name not in sys.modules:
-            avail_skills = sorted(k for k in sys.modules if k.startswith("skills."))
-            raise ImportError(
-                f"Skill module '{name}' not found. Available skills: {avail_skills or 'none'}"
-            )
-        if not fromlist:
-            if root in sys.modules:
-                return sys.modules[root]
-            if name in sys.modules:
-                return sys.modules[name]
-        else:
-            if name in sys.modules:
-                return sys.modules[name]
-            if root in sys.modules:
-                return sys.modules[root]
-    raise ImportError(f"Import of '{name}' is not permitted in policy sandbox.")
+def _make_scoped_import(scoped_modules: dict[str, types.ModuleType] | None = None):
+    """Returns an isolated `__import__` bound to this runner's `skills.*` namespace."""
+    scoped = scoped_modules if scoped_modules is not None else {}
+
+    def _safe_import(
+        name: str, globals_dict=None, locals_dict=None, fromlist=(), level=0
+    ):
+        root = name.split(".")[0]
+        allowed_map = {
+            "math": math,
+            "collections": collections,
+            "heapq": heapq,
+            "itertools": itertools,
+            "functools": functools,
+            "re": re,
+            "enum": enum,
+            "dataclasses": dataclasses,
+            "typing": typing,
+            "numpy": np,
+            "np": np,
+            "random": random,
+            "operator": operator,
+            "bisect": bisect,
+            "copy": copy,
+        }
+        if root in allowed_map and root == name:
+            return allowed_map[root]
+        if root == "skills":
+            if name != "skills" and name not in scoped and name not in sys.modules:
+                avail_skills = sorted(k for k in scoped if k.startswith("skills."))
+                raise ImportError(
+                    f"Skill module '{name}' not found. Available skills: {avail_skills or 'none'}"
+                )
+            if not fromlist:
+                if root in scoped:
+                    return scoped[root]
+                if name in scoped:
+                    return scoped[name]
+            else:
+                if name in scoped:
+                    return scoped[name]
+                if root in scoped:
+                    return scoped[root]
+        if root in allowed_map or root in ("skills", "lox"):
+            if root == "skills" and name != "skills" and name not in sys.modules:
+                avail_skills = sorted(k for k in sys.modules if k.startswith("skills."))
+                raise ImportError(
+                    f"Skill module '{name}' not found. Available skills: {avail_skills or 'none'}"
+                )
+            if not fromlist:
+                if root in sys.modules:
+                    return sys.modules[root]
+                if name in sys.modules:
+                    return sys.modules[name]
+            else:
+                if name in sys.modules:
+                    return sys.modules[name]
+                if root in sys.modules:
+                    return sys.modules[root]
+        raise ImportError(f"Import of '{name}' is not permitted in policy sandbox.")
+
+    return _safe_import
 
 
+_safe_import = _make_scoped_import(None)
 SAFE_BUILTINS["__import__"] = _safe_import
 SAFE_BUILTINS["__build_class__"] = __build_class__
 
 
-def _build_base_namespace(tracer: ExecutionTracer) -> dict[str, Any]:
+def _build_base_namespace(
+    tracer: ExecutionTracer,
+    scoped_modules: dict[str, types.ModuleType] | None = None,
+) -> dict[str, Any]:
     """Builds the sandboxed execution globals with 1-to-1 actions, state utilities, and stdlib."""
+    builtins_ns = dict(SAFE_BUILTINS)
+    if scoped_modules is not None:
+        builtins_ns["__import__"] = _make_scoped_import(scoped_modules)
     ns: dict[str, Any] = {
-        "__builtins__": SAFE_BUILTINS,
+        "__builtins__": builtins_ns,
         "__name__": "lox_policy",
         "_lox_tracer": tracer,
         # Standard library modules pre-loaded for convenience
@@ -281,6 +313,54 @@ def _build_base_namespace(tracer: ExecutionTracer) -> dict[str, Any]:
         "param": tracer.get_param,
     }
     return ns
+
+
+def _purge_skills_modules() -> None:
+    """Removes cached `skills` and `skills.*` modules from `sys.modules`."""
+    for mod_key in list(sys.modules.keys()):
+        if mod_key == "skills" or mod_key.startswith("skills."):
+            sys.modules.pop(mod_key, None)
+
+
+def _exec_skills_into_namespace(
+    ordered_skill_objs: dict[str, Any],
+    ns: dict[str, Any],
+    scoped_modules: dict[str, types.ModuleType] | None = None,
+) -> None:
+    """Registers and executes compiled skills (1-level and 2-level `domain/mod`) cleanly in a scoped dict."""
+    target_mods = scoped_modules if scoped_modules is not None else {}
+    _purge_skills_modules()
+    skills_pkg = types.ModuleType("skills")
+    skills_pkg.__path__ = []
+    target_mods["skills"] = skills_pkg
+    sys.modules["skills"] = skills_pkg
+    ns["skills"] = skills_pkg
+
+    for s_name, s_code_obj in ordered_skill_objs.items():
+        parts = [p for p in str(s_name).split("/") if p]
+        if not parts:
+            continue
+        mod_full = f"skills.{'.'.join(parts)}"
+        if len(parts) == 2:
+            pkg_full = f"skills.{parts[0]}"
+            pkg_mod = target_mods.get(pkg_full)
+            if pkg_mod is None:
+                pkg_mod = types.ModuleType(pkg_full)
+                pkg_mod.__path__ = []
+                target_mods[pkg_full] = pkg_mod
+                sys.modules[pkg_full] = pkg_mod
+                setattr(skills_pkg, parts[0], pkg_mod)
+        s_mod = types.ModuleType(mod_full)
+        s_mod.__dict__.update(ns)
+        s_mod.__name__ = mod_full
+        s_mod.__package__ = f"skills.{parts[0]}" if len(parts) == 2 else "skills"
+        target_mods[mod_full] = s_mod
+        sys.modules[mod_full] = s_mod
+        exec(s_code_obj, s_mod.__dict__)
+        if len(parts) == 2:
+            setattr(target_mods[f"skills.{parts[0]}"], parts[1], s_mod)
+        else:
+            setattr(skills_pkg, parts[0], s_mod)
 
 
 class PolicyRunner:
@@ -440,7 +520,7 @@ class PolicyRunner:
             else:
                 act = self.instance(state)
         except StopIteration:
-            if self._mode == "run":
+            if self._mode == "run" and hasattr(self.instance, "run"):
                 try:
                     res = self.instance.run(state)
                     if inspect.isgenerator(res):
@@ -471,37 +551,10 @@ class PolicyRunner:
 
 
 def _extract_skill_dependencies(tree: ast.AST, known_skills: set[str]) -> set[str]:
-    """Extracts intra-package `skills.<name>` or `skills.<domain>.<name>` dependencies."""
-    from lox.lang.validator import resolve_skill_import
+    """Extracts intra-package `skills.<name>` or `skills.<domain>.<name>` dependencies via bundle SSOT."""
+    from lox.lang.bundle import extract_skill_imports
 
-    deps: set[str] = set()
-    pkg_names = {k.split("/", 1)[0] for k in known_skills if "/" in k}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                name = str(alias.name or "")
-                if name.startswith("skills."):
-                    dep = resolve_skill_import(name, known_skills)
-                    if dep in known_skills:
-                        deps.add(dep)
-        elif isinstance(node, ast.ImportFrom):
-            mod = str(node.module or "")
-            if mod == "skills":
-                for alias in node.names:
-                    dep = str(alias.name or "").split(".", 1)[0]
-                    if dep in known_skills:
-                        deps.add(dep)
-            elif mod.startswith("skills."):
-                tail = mod[len("skills.") :]
-                if tail in pkg_names and tail not in known_skills:
-                    for alias in node.names:
-                        sub_k = f"{tail}/{alias.name}"
-                        if sub_k in known_skills:
-                            deps.add(sub_k)
-                dep = resolve_skill_import(mod, known_skills)
-                if dep in known_skills:
-                    deps.add(dep)
-    return deps
+    return extract_skill_imports(tree, known_skills).referenced_keys
 
 
 def _topological_skill_order(skill_trees: dict[str, ast.AST]) -> list[str]:
@@ -576,8 +629,9 @@ def _compile_skill_unit_cached(
     code_obj = compile(skill_tree, filename=rel_fn, mode="exec")
     fn_names = [
         n.name
-        for n in ast.walk(skill_tree)
-        if isinstance(n, ast.FunctionDef) and n.name != "__init__"
+        for n in skill_tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name != "__init__"
     ]
     raw_deps: set[str] = set()
     for node in ast.walk(skill_tree):
@@ -608,8 +662,11 @@ def _compile_skill_unit(
     skill_code: str,
     is_macro_module: bool = True,
 ) -> tuple[Any, list[str], frozenset[str]]:
+    from lox.lang.validator import normalize_skill_key
+
+    norm_name = normalize_skill_key(skill_name)
     with _SKILL_CACHE_LOCK:
-        return _compile_skill_unit_cached(skill_name, skill_code, is_macro_module)
+        return _compile_skill_unit_cached(norm_name, skill_code, is_macro_module)
 
 
 class CompiledPolicy:
@@ -664,10 +721,20 @@ class CompiledPolicy:
             self._macro_code_obj = compile(
                 macro_tree, filename="macros.py", mode="exec"
             )
-            for n in ast.walk(macro_tree):
-                if isinstance(n, ast.FunctionDef) and n.name != "__init__":
-                    if n.name not in self.macro_function_names:
+            for n in macro_tree.body:
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if n.name != "__init__" and n.name not in self.macro_function_names:
                         self.macro_function_names.append(n.name)
+                elif isinstance(n, ast.Assign):
+                    for tgt in n.targets:
+                        if (
+                            isinstance(tgt, ast.Name)
+                            and tgt.id not in self.macro_function_names
+                        ):
+                            self.macro_function_names.append(tgt.id)
+                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                    if n.target.id not in self.macro_function_names:
+                        self.macro_function_names.append(n.target.id)
         else:
             self._macro_code_obj = None
 
@@ -708,55 +775,22 @@ class CompiledPolicy:
                 max_loop_ticks=self.max_loop_ticks,
                 param_overrides=param_overrides,
             )
-            ns = _build_base_namespace(tracer)
-            # Register `lox_policy` in sys.modules so `@dataclass` with type annotations works inside policy code
-            mod_obj = sys.modules.get("lox_policy")
-            if mod_obj is None:
-                mod_obj = types.ModuleType("lox_policy")
-                sys.modules["lox_policy"] = mod_obj
+            scoped_modules: dict[str, types.ModuleType] = {}
+            ns = _build_base_namespace(tracer, scoped_modules=scoped_modules)
+            # Register a fresh `lox_policy` module in sys.modules so `@dataclass` works cleanly
+            # without leaking stale globals from previous compiled policies.
+            mod_obj = types.ModuleType("lox_policy")
+            sys.modules["lox_policy"] = mod_obj
             mod_obj.__dict__.update(ns)
 
             if self._macro_code_obj is not None:
                 exec(self._macro_code_obj, ns)
                 mod_obj.__dict__.update(ns)
 
-            # Purge any stale `skills.*` entries from sys.modules so worker processes
-            # never retain an old skill module bound to a previous episode's ExecutionTracer.
-            for mod_key in list(sys.modules.keys()):
-                if mod_key == "skills" or mod_key.startswith("skills."):
-                    sys.modules.pop(mod_key, None)
-
-            # Register and execute skills modules (supports both `skills.<mod>` and 2-level `skills.<domain>.<mod>`)
-            skills_pkg = types.ModuleType("skills")
-            skills_pkg.__path__ = []
-            sys.modules["skills"] = skills_pkg
-            ns["skills"] = skills_pkg
-
-            for s_name, s_code_obj in self._skill_code_objs.items():
-                parts = [p for p in str(s_name).split("/") if p]
-                mod_full = f"skills.{'.'.join(parts)}"
-                if len(parts) == 2:
-                    pkg_full = f"skills.{parts[0]}"
-                    pkg_mod = sys.modules.get(pkg_full)
-                    if pkg_mod is None:
-                        pkg_mod = types.ModuleType(pkg_full)
-                        pkg_mod.__path__ = []
-                        sys.modules[pkg_full] = pkg_mod
-                        setattr(skills_pkg, parts[0], pkg_mod)
-                s_mod = types.ModuleType(mod_full)
-                s_mod.__dict__.update(ns)
-                s_mod.__name__ = mod_full
-                s_mod.__package__ = (
-                    f"skills.{parts[0]}" if len(parts) == 2 else "skills"
-                )
-                sys.modules[mod_full] = s_mod
-                exec(s_code_obj, s_mod.__dict__)
-                if len(parts) == 2:
-                    setattr(sys.modules[f"skills.{parts[0]}"], parts[1], s_mod)
-                    ns[f"{parts[0]}_{parts[1]}"] = s_mod
-                else:
-                    setattr(skills_pkg, parts[0], s_mod)
-                    ns[parts[0]] = s_mod
+            # Register 1-level / 2-level skills modules into isolated per-runner `scoped_modules`
+            _exec_skills_into_namespace(
+                self._skill_code_objs, ns, scoped_modules=scoped_modules
+            )
 
             exec(self._policy_code_obj, ns)
             mod_obj.__dict__.update(ns)
@@ -857,37 +891,37 @@ def compile_bt_subtree(
         tree = PolicyInstrumentTransformer().visit(tree)
         ast.fix_missing_locations(tree)
         tracer = ExecutionTracer()
-        ns = _build_base_namespace(tracer)
-        mod_obj = sys.modules.get("lox_policy")
-        if mod_obj is None:
-            mod_obj = types.ModuleType("lox_policy")
-            sys.modules["lox_policy"] = mod_obj
+        scoped_modules: dict[str, types.ModuleType] = {}
+        ns = _build_base_namespace(tracer, scoped_modules=scoped_modules)
+        mod_obj = types.ModuleType("lox_policy")
+        sys.modules["lox_policy"] = mod_obj
         mod_obj.__dict__.update(ns)
 
         if skills:
-            skills_pkg = sys.modules.get("skills")
-            if skills_pkg is None:
-                skills_pkg = types.ModuleType("skills")
-                sys.modules["skills"] = skills_pkg
-            ns["skills"] = skills_pkg
+            norm_bt_skills = {
+                normalize_skill_key(k): v
+                for k, v in skills.items()
+                if k and str(v or "").strip()
+            }
+            known_bt_keys = set(norm_bt_skills.keys())
             bt_skill_deps: dict[str, set[str]] = {}
             bt_skill_objs: dict[str, Any] = {}
-            for s_name, s_code in skills.items():
-                if not s_code or not s_code.strip():
-                    continue
+            for s_name, s_code in norm_bt_skills.items():
                 c_obj, _fns, deps_fs = _compile_skill_unit(
                     s_name, s_code, is_macro_module=False
                 )
-                bt_skill_deps[s_name] = set(deps_fs)
+                bt_skill_deps[s_name] = {d for d in deps_fs if d in known_bt_keys}
                 bt_skill_objs[s_name] = c_obj
-            for s_name in _topological_skill_order(bt_skill_deps):
-                s_mod = types.ModuleType(f"skills.{s_name}")
-                s_mod.__dict__.update(ns)
-                s_mod.__name__ = f"skills.{s_name}"
-                exec(bt_skill_objs[s_name], s_mod.__dict__)
-                sys.modules[f"skills.{s_name}"] = s_mod
-                setattr(skills_pkg, s_name, s_mod)
-                ns[s_name] = s_mod
+            ordered_bt_objs = {
+                s_name: bt_skill_objs[s_name]
+                for s_name in _topological_skill_order(bt_skill_deps)
+                if s_name in bt_skill_objs
+            }
+            _exec_skills_into_namespace(
+                ordered_bt_objs, ns, scoped_modules=scoped_modules
+            )
+        else:
+            _purge_skills_modules()
 
         exec(compile(tree, filename=filename, mode="exec"), ns)
         mod_obj.__dict__.update(ns)

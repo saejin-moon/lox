@@ -202,7 +202,12 @@ def _get_numba_astar_kernel() -> Any:
             for i in range(n_dirs):
                 ny = sy + dys[i]
                 nx = sx + dxs[i]
-                if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] != -1:
+                if (
+                    0 <= ny < h
+                    and 0 <= nx < w
+                    and dist[ny, nx] != -1
+                    and passable[ny, nx]
+                ):
                     if i >= 4 and no_diag is not None:
                         if no_diag[sy, sx] or no_diag[ny, nx]:
                             continue

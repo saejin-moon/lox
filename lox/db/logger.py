@@ -8,7 +8,10 @@ Persists:
 from __future__ import annotations
 
 import datetime
+import functools
 import json
+import logging
+import threading
 from typing import Any
 
 import pyarrow as pa
@@ -21,6 +24,18 @@ from lox.core.contracts import (
 from lox.db.schema import DEFAULT_DB_PATH, compute_llm_cost, connect_db, init_db
 from lox.db.summarizer import compute_function_stats, mark_outlier_good_runs
 from lox.ui.console import ui
+
+_LOG = logging.getLogger(__name__)
+_DB_WRITE_LOCK = threading.RLock()
+
+
+def _db_write_locked(fn):
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        with _DB_WRITE_LOCK:
+            return fn(*args, **kwargs)
+
+    return _wrapper
 
 
 class BatchDatabaseLogger:
@@ -41,6 +56,7 @@ class BatchDatabaseLogger:
             con = init_db(self.db_path)
             con.close()
 
+    @_db_write_locked
     def save_batch(
         self,
         batch_id: str,
@@ -92,8 +108,8 @@ class BatchDatabaseLogger:
             if row_c:
                 total_cost_usd = float(row_c[0] or 0.0)
                 total_tokens = int(row_c[1] or 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("Cost aggregation query warning: %s", exc)
 
         try:
             con.execute("BEGIN TRANSACTION")
@@ -126,7 +142,9 @@ class BatchDatabaseLogger:
                     int(batch_metrics.get("max_score", 0)),
                     float(batch_metrics.get("avg_turns", 0.0)),
                     int(outlier_count),
-                    bool(verdict["passed"]) if verdict else True,
+                    bool(verdict.get("passed", False))
+                    if isinstance(verdict, dict) and verdict
+                    else (verdict is None),
                     float(verdict.get("wilcoxon_p", 1.0)) if verdict else 1.0,
                     float(verdict.get("ci_lower", 0.0)) if verdict else 0.0,
                     float(verdict.get("ci_upper", 0.0)) if verdict else 0.0,
@@ -175,7 +193,12 @@ class BatchDatabaseLogger:
                             r.get("milestones_json")
                             if isinstance(r.get("milestones_json"), str)
                             and not r.get("milestones")
-                            else json.dumps(r.get("milestones") or {})
+                            else json.dumps(
+                                r.get("milestones") or {},
+                                default=lambda o: (
+                                    sorted(o) if isinstance(o, set) else str(o)
+                                ),
+                            )
                         )
                         for r in runs
                     ],
@@ -186,26 +209,26 @@ class BatchDatabaseLogger:
                             else json.dumps(
                                 r.get("triggered_functions")
                                 if r.get("triggered_functions") is not None
-                                else r.get("functions_triggered", {})
+                                else (r.get("functions_triggered") or {})
                             )
                         )
                         for r in runs
                     ],
                     "last_active_function": [
-                        str(r.get("last_active_function", "root")) for r in runs
+                        str(r.get("last_active_function") or "root") for r in runs
                     ],
-                    "action_bytes": [bytes(r.get("action_bytes", b"")) for r in runs],
-                    "wall_ms": [float(r.get("wall_ms", 0.0)) for r in runs],
-                    "auto_esc_count": [int(r.get("auto_esc_count", 0)) for r in runs],
+                    "action_bytes": [bytes(r.get("action_bytes") or b"") for r in runs],
+                    "wall_ms": [float(r.get("wall_ms") or 0.0) for r in runs],
+                    "auto_esc_count": [int(r.get("auto_esc_count") or 0) for r in runs],
                     "subgen_preemptions": [
-                        int(r.get("subgen_preemptions", 0)) for r in runs
+                        int(r.get("subgen_preemptions") or 0) for r in runs
                     ],
                     "policy_exceptions": [
-                        int(r.get("policy_exceptions", 0)) for r in runs
+                        int(r.get("policy_exceptions") or 0) for r in runs
                     ],
-                    "unique_tiles": [int(r.get("unique_tiles", 0)) for r in runs],
-                    "pct_wait": [float(r.get("pct_wait", 0.0)) for r in runs],
-                    "pct_search": [float(r.get("pct_search", 0.0)) for r in runs],
+                    "unique_tiles": [int(r.get("unique_tiles") or 0) for r in runs],
+                    "pct_wait": [float(r.get("pct_wait") or 0.0) for r in runs],
+                    "pct_search": [float(r.get("pct_search") or 0.0) for r in runs],
                     "starved_with_food": [
                         bool(r.get("starved_with_food", False)) for r in runs
                     ],
@@ -311,6 +334,12 @@ class BatchDatabaseLogger:
                 if tick_cols["run_id"]:
                     tick_tbl = pa.Table.from_pydict(tick_cols)
                     tick_cols_str = ", ".join(tick_cols.keys())
+                    tick_rids = sorted(set(tick_cols["run_id"]))
+                    placeholders = ", ".join("?" for _ in tick_rids)
+                    con.execute(
+                        f"DELETE FROM ticks WHERE run_id IN ({placeholders})",
+                        tick_rids,
+                    )
                     con.register("_temp_ticks", tick_tbl)
                     con.execute(
                         f"INSERT INTO ticks ({tick_cols_str}) SELECT {tick_cols_str} FROM _temp_ticks"
@@ -412,10 +441,11 @@ class BatchDatabaseLogger:
             prom_macros_code = ""
             registered_params: dict[str, Any] = {}
 
+            prom_skills_json = "{}"
             if target_batch_id is None:
                 prom_row = con.execute(
                     """
-                    SELECT p.policy_id, p.policy_code, p.macros_code, p.params_json, b.batch_id, b.generation
+                    SELECT p.policy_id, p.policy_code, p.macros_code, p.params_json, p.skills_json, b.batch_id, b.generation
                     FROM policies p
                     JOIN batches b ON b.candidate_policy_id = p.policy_id
                     WHERE p.is_promoted = TRUE
@@ -430,6 +460,7 @@ class BatchDatabaseLogger:
                     prom_policy_code,
                     prom_macros_code,
                     prom_params_json,
+                    prom_skills_json,
                     target_batch_id,
                     target_gen,
                 ) = prom_row
@@ -441,7 +472,7 @@ class BatchDatabaseLogger:
             else:
                 pol_row = con.execute(
                     """
-                    SELECT p.policy_id, p.policy_code, p.macros_code, p.params_json, b.generation
+                    SELECT p.policy_id, p.policy_code, p.macros_code, p.params_json, p.skills_json, b.generation
                     FROM policies p
                     JOIN batches b ON b.candidate_policy_id = p.policy_id
                     WHERE b.batch_id = ?
@@ -455,6 +486,7 @@ class BatchDatabaseLogger:
                         prom_policy_code,
                         prom_macros_code,
                         prom_params_json,
+                        prom_skills_json,
                         target_gen,
                     ) = pol_row
                     if prom_params_json:
@@ -462,6 +494,15 @@ class BatchDatabaseLogger:
                             registered_params = json.loads(prom_params_json)
                         except Exception:
                             registered_params = {}
+            try:
+                parsed_skills = json.loads(str(prom_skills_json or "{}"))
+                prom_skills = (
+                    {str(k): str(v) for k, v in parsed_skills.items()}
+                    if isinstance(parsed_skills, dict)
+                    else {}
+                )
+            except Exception:
+                prom_skills = {}
 
             run_cur = con.execute(
                 """
@@ -568,6 +609,7 @@ class BatchDatabaseLogger:
                 "policy_id": prom_pol_id,
                 "policy_code": prom_policy_code,
                 "macros_code": prom_macros_code,
+                "skills": prom_skills,
                 "params": registered_params,
                 "baseline_runs": baseline_runs,
                 "fn_stats": fn_stats,
@@ -576,6 +618,7 @@ class BatchDatabaseLogger:
         finally:
             con.close()
 
+    @_db_write_locked
     def save_policy(
         self,
         policy_id: str,
@@ -640,6 +683,7 @@ class BatchDatabaseLogger:
         finally:
             con.close()
 
+    @_db_write_locked
     def save_experiment(
         self,
         experiment_id: str,
@@ -713,28 +757,34 @@ class BatchDatabaseLogger:
                 and mode not in ("PILOT", "SWARM")
                 and (hypothesis.get("verified_c_rule") or hypothesis.get("mechanism"))
             ):
-                try:
-                    self.save_discovery(
-                        discovery_id=f"disc_{batch_id}",
-                        generation=generation,
-                        batch_id=batch_id,
-                        mode=mode,
-                        target_functions=target_functions,
-                        binding_constraint=str(
-                            hypothesis.get("binding_constraint") or ""
-                        ),
-                        verified_c_rule=str(hypothesis.get("verified_c_rule") or ""),
-                        mechanism=str(hypothesis.get("mechanism") or ""),
-                        mean_delta=float(verdict.get("mean_delta", 0.0)),
-                        avg_depth=float(verdict.get("avg_depth", 1.0)),
-                        p90_depth=float(verdict.get("p90_depth", 1.0)),
-                        max_depth=int(verdict.get("max_depth", 1)),
-                    )
-                except Exception:
-                    pass
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO discoveries (
+                        discovery_id, generation, batch_id, mode, target_functions,
+                        binding_constraint, verified_c_rule, mechanism, mean_delta,
+                        avg_depth, p90_depth, max_depth, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        f"disc_{batch_id}",
+                        generation,
+                        batch_id,
+                        mode,
+                        json.dumps(target_functions),
+                        str(hypothesis.get("binding_constraint") or ""),
+                        str(hypothesis.get("verified_c_rule") or ""),
+                        str(hypothesis.get("mechanism") or ""),
+                        float(verdict.get("mean_delta", 0.0)),
+                        float(verdict.get("avg_depth", 1.0)),
+                        float(verdict.get("p90_depth", 1.0)),
+                        int(verdict.get("max_depth", 1)),
+                        datetime.datetime.now(),
+                    ],
+                )
         finally:
             con.close()
 
+    @_db_write_locked
     def save_discovery(
         self,
         discovery_id: str,
@@ -821,6 +871,7 @@ class BatchDatabaseLogger:
         finally:
             con.close()
 
+    @_db_write_locked
     def save_synthesis_log(
         self,
         log_id: str,
@@ -898,8 +949,8 @@ class BatchDatabaseLogger:
                     datetime.datetime.now(),
                 ],
             )
-        except Exception:
-            pass
+        except Exception as syn_exc:
+            _LOG.warning("Failed persisting synthesis log %s: %s", log_id, syn_exc)
         finally:
             con.close()
 
@@ -947,6 +998,7 @@ class BatchDatabaseLogger:
         finally:
             con.close()
 
+    @_db_write_locked
     def prune_old_telemetry(
         self,
         current_generation: int,
@@ -982,6 +1034,17 @@ class BatchDatabaseLogger:
             r_before = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
             con.execute(
                 """
+                DELETE FROM ticks
+                WHERE run_id IN (
+                    SELECT run_id FROM runs
+                    WHERE batch_id LIKE 'pilot_%'
+                      AND generation < ?
+                )
+                """,
+                (pilot_cutoff_gen,),
+            )
+            con.execute(
+                """
                 DELETE FROM runs
                 WHERE batch_id LIKE 'pilot_%'
                   AND generation < ?
@@ -998,6 +1061,7 @@ class BatchDatabaseLogger:
         finally:
             con.close()
 
+    @_db_write_locked
     def save_tournament_attempts(self, attempts: list[dict[str, Any]]) -> None:
         """Persists peer challenger / tournament outcomes into DuckDB `tournament_attempts`."""
         if not attempts:
@@ -1074,7 +1138,8 @@ class BatchDatabaseLogger:
             )
             con.unregister("_temp_ta")
             con.execute("COMMIT")
-        except Exception:
+        except Exception as exc:
+            ui.warn(f"Failed saving tournament_attempts ({len(attempts)} rows): {exc}")
             try:
                 con.execute("ROLLBACK")
             except Exception:

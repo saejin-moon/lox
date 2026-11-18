@@ -30,44 +30,40 @@ def progression_metric(run: dict[str, Any], benchmark: str | None = None) -> flo
         except Exception:
             pass
 
-    d = float(run.get("max_depth", run.get("depth", 1)))
+    d = float(run.get("max_depth") or run.get("depth") or 1)
     raw_xl = run.get("xp_level")
     if raw_xl is None:
-        raw_xl = run.get("final_xp_level", 1)
-    xl = max(0.0, min(float(raw_xl or 1), 30.0) - 1.0) * 0.14
-    ac_val = float(run.get("final_ac", 10))
+        raw_xl = run.get("final_xp_level")
+    xl = max(0.0, min(float(raw_xl if raw_xl is not None else 1), 30.0) - 1.0) * 0.14
+    raw_ac = run.get("final_ac")
+    ac_val = float(raw_ac if raw_ac is not None else 10)
     ac_bonus = max(0.0, 10.0 - ac_val) * 0.06
-    oprop_cnt = max(0, min(6, int(run.get("worn_oprop_count", 0) or 0)))
+    oprop_cnt = max(0, min(6, int(run.get("worn_oprop_count") or 0)))
     oprop_bonus = oprop_cnt * 0.10
-    branches_cnt = max(1, int(run.get("dungeons_visited", 1) or 1))
+    branches_cnt = max(1, int(run.get("dungeons_visited") or 1))
     branch_bonus = max(0, branches_cnt - 1) * 0.15
-    sc = math.log1p(max(0.0, float(run.get("score", 0)))) * 0.06
+    sc = math.log1p(max(0.0, float(run.get("score") or 0))) * 0.06
 
     # Intermediate exploration signals (critical on Dlvl 1 before descent)
+    ms_dict = run.get("milestones") if isinstance(run.get("milestones"), dict) else {}
     has_stairs = bool(
         run.get("stairs_down_found")
-        or (
-            isinstance(run.get("milestones"), dict)
-            and run["milestones"].get("stairs_down_found")
-        )
+        or ms_dict.get("stairs_down_found")
         or d > 1.0
-        or "'>'" in str(run.get("summary_digest", ""))
+        or "'>'" in str(run.get("summary_digest") or "")
     )
     stairs_bonus = 0.20 if has_stairs else 0.0
-    tiles = float(
-        run.get(
-            "unique_tiles",
-            run.get("milestones", {}).get("unique_tiles_d1", 0),
-        )
-    )
+    ms_tiles = ms_dict.get("unique_tiles_d1", 0)
+    raw_tiles = run.get("unique_tiles")
+    tiles = float(raw_tiles if raw_tiles is not None else (ms_tiles or 0))
     tiles_bonus = 0.10 * min(1.0, tiles / 60.0)
 
     shard_survival_bonus = (
         0.08
         if (
             run.get("is_shard")
-            and int(run.get("final_hp", 0)) > 0
-            and str(run.get("end_reason", "")) in ("max_steps", "ascended")
+            and int(run.get("final_hp") or 0) > 0
+            and str(run.get("end_reason") or "") in ("max_steps", "ascended")
         )
         else 0.0
     )
@@ -78,11 +74,11 @@ def progression_metric(run: dict[str, Any], benchmark: str | None = None) -> flo
         0.15
         if (
             not run.get("is_shard")
-            and str(run.get("end_reason", "")).strip().lower() == "max_steps"
+            and str(run.get("end_reason") or "").strip().lower() == "max_steps"
             and d <= 2.0
             and (
-                "CONFINEMENT_STALL" in str(run.get("summary_digest", ""))
-                or int(run.get("turns", 0) or 0) >= 2500
+                "CONFINEMENT_STALL" in str(run.get("summary_digest") or "")
+                or int(run.get("turns") or 0) >= 2500
             )
         )
         else 0.0
@@ -443,9 +439,11 @@ def evaluate_tournament_pair(
     `wins`, `losses`, `ties`, `seeds_gained`, `seeds_lost`, `paired_count`.
     """
     inc_by_key: dict[Any, dict[str, Any]] = {}
-    for r in incumbent_runs or []:
-        key = (str(r.get("shard_id") or "") if r.get("is_shard") else None) or int(
-            r.get("seed", 0) or 0
+    for idx_r, r in enumerate(incumbent_runs or []):
+        key = (
+            ("shard", str(r.get("shard_id") or r.get("seed") or idx_r))
+            if r.get("is_shard")
+            else ("seed", int(r.get("seed", 0) or 0))
         )
         inc_by_key[key] = r
 
@@ -455,9 +453,13 @@ def evaluate_tournament_pair(
     seeds_gained: list[int] = []
     seeds_lost: list[int] = []
 
-    for r in candidate_runs or []:
-        sd = int(r.get("seed", 0) or 0)
-        key = (str(r.get("shard_id") or "") if r.get("is_shard") else None) or sd
+    for idx_r, r in enumerate(candidate_runs or []):
+        sd = int(r.get("seed") or 0)
+        key = (
+            ("shard", str(r.get("shard_id") or sd or idx_r))
+            if r.get("is_shard")
+            else ("seed", sd)
+        )
         base_r = inc_by_key.get(key)
         if base_r is None:
             continue

@@ -170,14 +170,9 @@ class SwarmWorker:
     ) -> dict[str, str]:
         if explicit_skills is not None:
             return dict(explicit_skills)
-        skills_dir = Path(self.db_path).parent / "workspace" / "skills"
-        if skills_dir.exists():
-            return {
-                p.stem: p.read_text(encoding="utf-8")
-                for p in sorted(skills_dir.glob("*.py"))
-                if p.stem != "__init__"
-            }
-        return {}
+        from lox.lang.bundle import load_skills_dir
+
+        return load_skills_dir(Path(self.db_path).parent / "workspace" / "skills")
 
     def run_cycle(
         self,

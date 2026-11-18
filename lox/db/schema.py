@@ -12,14 +12,23 @@ Consolidates:
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import threading
 import time
 
 import duckdb
 
+_LOG = logging.getLogger(__name__)
+
 DEFAULT_DB_PATH = "data/lox.duckdb"
 _DB_CONN_LOCK = threading.RLock()
+
+# Canonical SQL predicate filtering out micro-shard evaluations from full-episode aggregations
+NON_SHARD_RUNS_SQL = (
+    "COALESCE(is_shard, FALSE) = FALSE AND COALESCE(run_id, '') NOT LIKE 'shard_%'"
+)
 
 
 def connect_db(
@@ -28,24 +37,28 @@ def connect_db(
     retries: int = 8,
 ) -> duckdb.DuckDBPyConnection:
     """
-    Connects to DuckDB with exponential backoff and in-process configuration alignment.
-    In DuckDB, opening `read_only=True` and `read_only=False` handles to the same file
-    concurrently within the same OS process raises a configuration conflict error;
-    attempting `read_only=False` first when the file exists keeps in-process connections uniform.
+    Connects to DuckDB with exponential backoff while honoring `read_only=True`.
+    If `read_only=True` collides with an active in-process read-write handle
+    ("different configuration"), falls back to `read_only=False` for that handle only.
     """
     if not read_only:
         os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
+    elif not os.path.exists(db_path):
+        raise FileNotFoundError(f"DuckDB database does not exist: {db_path}")
+
     delay = 0.05
     last_err: Exception | None = None
     for attempt in range(retries):
         with _DB_CONN_LOCK:
             try:
-                if read_only and os.path.exists(db_path):
+                if read_only:
                     try:
-                        return duckdb.connect(db_path, read_only=False)
-                    except Exception:
                         return duckdb.connect(db_path, read_only=True)
-                return duckdb.connect(db_path, read_only=read_only)
+                    except Exception as ro_exc:
+                        if "different configuration" in str(ro_exc).lower():
+                            return duckdb.connect(db_path, read_only=False)
+                        raise
+                return duckdb.connect(db_path, read_only=False)
             except Exception as exc:
                 last_err = exc
         if attempt < retries - 1:
@@ -361,6 +374,7 @@ WHERE batch_id = (
     ORDER BY generation DESC, created_at DESC
     LIMIT 1
 )
+AND COALESCE(is_shard, FALSE) = FALSE
 AND run_id NOT LIKE 'shard_%';
 
 CREATE OR REPLACE VIEW champion_function_stats AS
@@ -384,7 +398,9 @@ WHERE batch_id = (
     WHERE mode = 'PILOT'
     ORDER BY created_at DESC
     LIMIT 1
-);
+)
+AND COALESCE(is_shard, FALSE) = FALSE
+AND COALESCE(run_id, '') NOT LIKE 'shard_%';
 
 CREATE OR REPLACE VIEW latest_pilot_ticks AS
 SELECT * FROM ticks
@@ -609,8 +625,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                             )
                         except Exception:
                             pass
-        except Exception:
-            pass
+        except Exception as mig_exc:
+            _LOG.warning("DuckDB schema migration notice for %s: %s", db_path, mig_exc)
         con.execute(SCHEMA_SQL)
         try:
             for m_name, rates in DEFAULT_LLM_COST_RATES.items():
@@ -621,54 +637,96 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                     """,
                     [m_name, rates["prompt"], rates["completion"], rates["reasoning"]],
                 )
-        except Exception:
-            pass
+        except Exception as rate_exc:
+            _LOG.warning("Failed seeding llm_cost_rates: %s", rate_exc)
         _INITIALIZED_DBS.add(abs_path)
         return con
+
+
+def _parse_schema_tables(schema_sql: str) -> dict[str, list[tuple[str, str]]]:
+    """Programmatically extracts `{table_name: [(col, type), ...]}` directly from `SCHEMA_SQL`."""
+    tables: dict[str, list[tuple[str, str]]] = {}
+    for m in re.finditer(
+        r"CREATE TABLE IF NOT EXISTS\s+(\w+)\s*\((.*?)\);",
+        schema_sql,
+        flags=re.DOTALL | re.IGNORECASE,
+    ):
+        t_name = m.group(1)
+        cols: list[tuple[str, str]] = []
+        for raw_ln in m.group(2).splitlines():
+            ln = raw_ln.strip().rstrip(",")
+            if not ln or ln.upper().startswith(
+                ("PRIMARY KEY", "UNIQUE", "FOREIGN KEY", "CHECK")
+            ):
+                continue
+            parts = ln.split()
+            if len(parts) >= 2:
+                cols.append((parts[0], parts[1].upper()))
+        tables[t_name] = cols
+    return tables
 
 
 def get_schema_markdown(
     db_path: str = DEFAULT_DB_PATH,
     is_swarm: bool = False,
 ) -> str:
-    """Returns a concise DuckDB schema reference for Author System Prompts (telegraphic format)."""
+    """Programmatically generates a DuckDB schema reference from `SCHEMA_SQL` (and live columns if present)."""
+    parsed_tables = _parse_schema_tables(SCHEMA_SQL)
+    if db_path and os.path.exists(db_path):
+        try:
+            con = connect_db(db_path, read_only=True)
+            try:
+                for t_row in con.execute("SHOW TABLES").fetchall():
+                    t_nm = str(t_row[0])
+                    if t_nm in parsed_tables:
+                        live_cols = [
+                            (str(r[1]), str(r[2]))
+                            for r in con.execute(
+                                f"PRAGMA table_info('{t_nm}')"
+                            ).fetchall()
+                        ]
+                        if live_cols:
+                            parsed_tables[t_nm] = live_cols
+            finally:
+                con.close()
+        except Exception:
+            pass
+
+    def _fmt_cols(t_name: str, drop: set[str] | None = None) -> str:
+        cols = parsed_tables.get(t_name, [])
+        skip = drop or set()
+        return ", ".join(f"`{c}`" for c, _ in cols if c not in skip)
+
+    def _fmt_typed(t_name: str) -> str:
+        cols = parsed_tables.get(t_name, [])
+        return ", ".join(f"`{c}` ({tp})" for c, tp in cols)
+
     if is_swarm:
-        return """### DuckDB Schema (`query_db(sql)`)
-- Views: `champion_runs` / `champion_function_stats` / `champion_ticks` (latest promoted batch).
-- `runs`: `run_id`, `batch_id`, `generation`, `seed`, `role`, `depth`, `max_depth`, `score`, `turns`, `steps`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason`, `death_message`, `is_outlier_good`, `outlier_z_score`, `batch_percentile`, `summary_digest` (RLE+stalls), `game_log`, `milestones_json` (`stall_count`, `unworn_armor_in_pack`), `triggered_functions`, `last_active_function`, `auto_esc_count`, `subgen_preemptions`, `policy_exceptions`, `unique_tiles`, `pct_wait` (0..100), `pct_search` (0..100), `starved_with_food`, `died_unarmored`, `worn_oprop_count`, `dungeons_visited`, `is_shard`, `shard_id`, `created_at`. *(Note: `hunger_state` on `ticks`, `seed` on `runs`.)*
-- `ticks`: `run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `energy`, `ac`, `xp_level`, `hunger_state`, `condition_mask`, `y`, `x`, `action_name`, `raw_key`, `byte_offset`, `active_function`, `message`, `visible_monsters`, `inventory_summary`.
-- `batches`: `batch_id`, `generation`, `mode`, `parent_policy_id`, `candidate_policy_id`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `total_cost_usd`, `created_at`.
-- `policies`: `policy_id`, `generation`, `mode`, `policy_code`, `skills_json`, `avg_depth`, `max_depth`, `is_promoted`, `created_at`.
-- `function_stats`: `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, `ochiai_good_run_score`, `liblit_failure_score`, `stagnation_turns`, `stagnation_share`, `livelock_score`.
-- `theories`: `doc_id`, `generation`, `agent_role`, `doc_type`, `title`, `content`, `tags`, `verified_c_rule`, `metrics_json`, `created_at`.
-- `tournament_attempts`: `attempt_id`, `generation`, `peer_id`, `deficit_id`, `promoted`, `sandbox_passed`, `avg_depth`, `avg_ac`, `avg_xp_level`, `policy_exceptions`, `holdout_iqm_delta`, `holdout_rejected`, `seeds_gained_json`, `seeds_lost_json`, `top_tracebacks_json`.
-- `expert_runs` (`run_id`, `source`, `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason`, `summary_digest`, `game_log`, `milestones_json`) & `expert_ticks` (`run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `message`, `screen_ascii`)."""
-    core_schema = """### DuckDB Database Schema (`query_db(sql)`):
-- **Canonical Champion & Pilot Views**:
-  - `champion_runs`: All episodes from the latest promoted policy batch (`hypothesis_passed = TRUE`).
-  - `champion_function_stats`: Function stats from the latest promoted policy batch.
-  - `champion_ticks`: Tick-by-tick logs linked to `champion_runs`.
-- **`runs`** (Every evaluated episode):
-  `run_id` (VARCHAR), `batch_id` (VARCHAR), `generation` (INT), `seed` (BIGINT), `role` (VARCHAR), `depth` (INT), `max_depth` (INT), `score` (INT), `turns` (INT), `steps` (INT), `xp_level` (INT), `final_hp` (INT), `max_hp` (INT), `final_ac` (INT), `gold` (INT), `end_reason` (VARCHAR), `death_message` (VARCHAR), **`is_outlier_good` (BOOLEAN: True for statistical outlier good runs in that batch)**, `outlier_z_score` (DOUBLE), `batch_percentile` (DOUBLE), **`summary_digest` (TEXT: RLE timeline + inflection windows + stalls)**, **`game_log` (TEXT: chronological game messages)**, `milestones_json` (VARCHAR), `triggered_functions` (VARCHAR: JSON dict of function call counts), `last_active_function` (VARCHAR), **`auto_esc_count` (INT: times harness forced auto-ESC)**, **`subgen_preemptions` (INT)**, **`policy_exceptions` (INT)**, **`unique_tiles` (INT)**, **`pct_wait` (DOUBLE: 0..100)**, **`pct_search` (DOUBLE: 0..100)**, **`starved_with_food` (BOOLEAN)**, **`died_unarmored` (BOOLEAN)**, `worn_oprop_count` (INT), `dungeons_visited` (INT), `is_shard` (BOOLEAN), `shard_id` (VARCHAR), `created_at` (TIMESTAMP). *(Note: `hunger_state` is on `ticks`, not `runs`; `stall_count` & `unworn_armor_in_pack` are inside `milestones_json`; `seed` is on `runs`, not `ticks`.)*
-- **`ticks`** (Granular tick-by-tick log linked via `run_id` for outlier good runs, exemplars, and sampled runs):
-  `run_id` (VARCHAR), `turn` (INT), `step_idx` (INT), `depth` (INT), `dungeon_num` (INT), `hp` (INT), `max_hp` (INT), `energy` (INT), `ac` (INT), `xp_level` (INT), `hunger_state` (INT), `condition_mask` (INT), `y` (INT), `x` (INT), `action_name` (VARCHAR), `raw_key` (INT), `byte_offset` (INT), `active_function` (VARCHAR), `message` (VARCHAR), `visible_monsters` (VARCHAR), `inventory_summary` (VARCHAR).
-- **`batches`** (Per-generation batch overview):
-  `batch_id`, `generation`, `mode`, `parent_policy_id`, `candidate_policy_id`, `target_functions`, `episodes_recorded`, `episodes_discarded`, `avg_depth`, `p90_depth`, `max_depth`, `avg_score`, `max_score`, `avg_turns`, `outlier_count`, `hypothesis_passed`, `wilcoxon_p`, `ci_lower`, `ci_upper`, `seeds_evaluated` (INT), `is_early_stopped` (BOOLEAN), `pilot_best_delta` (DOUBLE), `total_cost_usd` (DOUBLE), `total_llm_tokens` (BIGINT), `created_at` (TIMESTAMP).
-- **`policies`** (Full source code & depth metrics for every generation's policy):
-  `policy_id` (VARCHAR), `generation` (INT), `mode` (VARCHAR), `policy_code` (TEXT), `skills_json` (TEXT: JSON map of `skills/*.py` modules), `avg_depth` (DOUBLE), `max_depth` (INT), `is_promoted` (BOOLEAN), `created_at` (TIMESTAMP).
-- **`function_stats`** (Per-function execution & statistical debugging metrics per batch):
-  `batch_id`, `generation`, `function_name`, `episodes_triggered`, `trigger_rate`, `total_calls`, `total_turns_active`, `avg_depth_when_triggered`, `death_rate_while_active`, **`ochiai_good_run_score`**, **`liblit_failure_score`**, **`stagnation_turns`**, **`stagnation_share`**, **`livelock_score`**.
-- **`archive_policies`** (`cell_id`, `depth_bin`, `caution_bin`, `resource_bin`, `fitness`, `selections`, `promotions`, `generation`, `metrics_json`)
-- **`theories`** (`doc_id`, `generation`, `agent_role`, `doc_type`, `title`, `content`, `tags`, `verified_c_rule`, `metrics_json`, `created_at`)
-- **`tournament_attempts`** (`attempt_id`, `generation`, `peer_id`, `deficit_id`, `promoted`, `sandbox_passed`, `avg_depth`, `avg_ac`, `avg_xp_level`, `policy_exceptions`, `seeds_gained_json`, `seeds_lost_json`, `top_tracebacks_json`)
-- **`expert_runs`** (`run_id`, `source`, `player`, `role`, `depth`, `max_depth`, `score`, `turns`, `xp_level`, `final_hp`, `max_hp`, `final_ac`, `gold`, `end_reason`, `summary_digest`, `game_log`, `milestones_json`) & **`expert_ticks`** (`run_id`, `turn`, `step_idx`, `depth`, `dungeon_num`, `hp`, `max_hp`, `ac`, `xp_level`, `hunger_state`, `y`, `x`, `action_name`, `raw_key`, `message`, `screen_ascii`)."""
-    return (
-        core_schema
-        + """
-- **Pilot Views & Legacy/Archive Tables**:
-  - `latest_pilot_runs`, `latest_pilot_ticks`
-  - `discoveries` (`discovery_id`, `generation`, `batch_id`, `mode`, `target_functions`, `binding_constraint`, `verified_c_rule`, `mechanism`, `mean_delta`, `avg_depth`, `p90_depth`, `max_depth`, `created_at`)
-  - `experiments` (`experiment_id`, `generation`, `mode`, `target_functions`, `observation_from_db`, `mechanism`, `passed`, `mean_delta`, `ci_lower`, `ci_upper`, `wilcoxon_p`, `wins`, `losses`, `ties`, `seeds_evaluated`, `is_early_stopped`, `pilot_best_delta`, `verdict_reason`)
-  - `synthesis_logs`, `llm_cost_rates`
-"""
-    )
+        return "\n".join(
+            [
+                "### DuckDB Schema (`query_db(sql)`)",
+                "- Views: `champion_runs` / `champion_function_stats` / `champion_ticks` (latest promoted batch), `latest_pilot_runs`, `latest_pilot_ticks`.",
+                f"- `runs`: {_fmt_cols('runs', {'action_bytes'})}. *(Notes: `hunger_state` on `ticks`; `seed` on `runs`; `pct_wait`/`pct_search` in 0..100; filter shards via `NOT is_shard`.)*",
+                f"- `ticks`: {_fmt_cols('ticks')}.",
+                f"- `batches`: {_fmt_cols('batches')}.",
+                f"- `policies`: {_fmt_cols('policies')}.",
+                f"- `function_stats`: {_fmt_cols('function_stats')}.",
+                f"- `theories`: {_fmt_cols('theories')}.",
+                f"- `tournament_attempts`: {_fmt_cols('tournament_attempts')}.",
+                f"- `expert_runs`: {_fmt_cols('expert_runs')}.",
+                f"- `expert_ticks`: {_fmt_cols('expert_ticks')}.",
+            ]
+        )
+
+    lines = [
+        "### DuckDB Database Schema (`query_db(sql)`):",
+        "- **Canonical Champion & Pilot Views**: `champion_runs`, `champion_function_stats`, `champion_ticks`, `latest_pilot_runs`, `latest_pilot_ticks`.",
+    ]
+    for tbl in parsed_tables:
+        if tbl == "runs":
+            lines.append(
+                f"- **`runs`**: {_fmt_typed('runs')}. *(Notes: `hunger_state` is on `ticks`; `stall_count` & `unworn_armor_in_pack` inside `milestones_json`; `pct_wait`/`pct_search` in 0..100.)*"
+            )
+        else:
+            lines.append(f"- **`{tbl}`**: {_fmt_typed(tbl)}")
+    return "\n".join(lines)

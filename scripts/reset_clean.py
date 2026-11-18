@@ -37,6 +37,20 @@ def reset_clean(
         os.remove(status_md)
         print(f"Removed {status_md}")
 
+    for extra_name in (
+        "checkpoints",
+        "frontier",
+        "nethack_scenarios",
+        "campaign_errors.log",
+    ):
+        extra_p = workspace_dir / extra_name
+        if extra_p.is_dir():
+            shutil.rmtree(extra_p)
+            print(f"Cleared {extra_p}")
+        elif extra_p.exists():
+            os.remove(extra_p)
+            print(f"Removed {extra_p}")
+
     skills_dir = workspace_dir / "skills"
     if skills_dir.exists():
         shutil.rmtree(skills_dir)
@@ -44,30 +58,27 @@ def reset_clean(
         print(f"Cleared {skills_dir}")
 
     if seed_starter:
+        from lox.lang.bundle import write_skills_dir
         from lox.lang.starter import build_clean_option_a_starter
-        from lox.lang.validator import skill_key_to_relpath
 
         starter_pol, starter_skills = build_clean_option_a_starter()
         Path(policy_path).parent.mkdir(parents=True, exist_ok=True)
         Path(policy_path).write_text(starter_pol, encoding="utf-8")
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        (skills_dir / "__init__.py").write_text("", encoding="utf-8")
-        for s_name, s_src in starter_skills.items():
-            dst = workspace_dir / skill_key_to_relpath(s_name)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.parent != skills_dir:
-                pkg_init = dst.parent / "__init__.py"
-                if not pkg_init.exists():
-                    pkg_init.write_text("", encoding="utf-8")
-            dst.write_text(s_src, encoding="utf-8")
+        write_skills_dir(
+            skills_dir, starter_skills, sync=True, ensure_trailing_newline=False
+        )
         print(f"Seeded bare Option-A Gen 0 starter ({len(starter_skills)} modules)")
 
-    t_path = (
-        Path(theories_path) if theories_path else (workspace_dir / "theories.lance")
-    )
-    if t_path.exists():
-        shutil.rmtree(t_path)
-        print(f"Cleared {t_path}")
+    for theory_p in (
+        Path(theories_path) if theories_path else (workspace_dir / "theories.lance"),
+        workspace_dir / "theories.duckdb",
+    ):
+        if theory_p.is_dir():
+            shutil.rmtree(theory_p)
+            print(f"Cleared {theory_p}")
+        elif theory_p.exists():
+            os.remove(theory_p)
+            print(f"Removed {theory_p}")
 
     if frontier_dir:
         f_path = Path(frontier_dir)
