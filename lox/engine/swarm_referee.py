@@ -706,24 +706,22 @@ class SwarmReferee:
                 if cb is not None:
                     stage1_stats_by_id[cand.peer_id] = (st, pr)
 
-            def _s1_score(cand: PeerCandidate) -> tuple[int, int, float, float]:
+            def _s1_score(cand: PeerCandidate) -> tuple[int, int, int, float, float]:
                 if cand.peer_id in stage1_stats_by_id:
                     st, pr = stage1_stats_by_id[cand.peer_id]
                 else:
                     st, pr = {}, {"iqm_delta": 0.0, "wins": 0, "losses": 0}
                 exc = 1 if int(st.get("policy_exceptions", 0) or 0) == 0 else 0
-                non_noop = (
-                    1
-                    if (
-                        not base_policy.strip()
-                        or int(pr.get("wins", 0) or 0) > 0
-                        or int(pr.get("losses", 0) or 0) > 0
-                    )
-                    else 0
+                w_s1 = int(pr.get("wins", 0) or 0)
+                l_s1 = int(pr.get("losses", 0) or 0)
+                non_noop = 1 if (not base_policy.strip() or w_s1 > 0 or l_s1 > 0) else 0
+                net_win_tier = (
+                    2 if (w_s1 > 0 and l_s1 == 0) else (1 if w_s1 > l_s1 else 0)
                 )
                 return (
                     exc,
                     non_noop,
+                    net_win_tier,
                     float(pr.get("iqm_delta", 0.0)),
                     float(st.get("avg_depth", 1.0)),
                 )
@@ -738,7 +736,16 @@ class SwarmReferee:
                 key=_s1_score,
                 reverse=True,
             )
-            survivors = indiv_fins[:2] + ortho_fins[:1]
+            top_indivs = list(indiv_fins[:2])
+            for c_zl in indiv_fins[2:]:
+                st_zl, pr_zl = stage1_stats_by_id.get(c_zl.peer_id, ({}, {}))
+                if (
+                    int(st_zl.get("policy_exceptions", 0) or 0) == 0
+                    and int(pr_zl.get("wins", 0) or 0) > 0
+                    and int(pr_zl.get("losses", 0) or 0) == 0
+                ):
+                    top_indivs.append(c_zl)
+            survivors = top_indivs + ortho_fins[:1]
             s2_pkgs: list[
                 tuple[str, str, dict[str, str], PeerCandidate | None, bool]
             ] = []
@@ -935,6 +942,7 @@ class SwarmReferee:
                 or float(cand_stats.get("avg_branches", 1.0))
                 > float(inc_stats.get("avg_branches", 1.0)) + 0.08
                 or (ac_improved and iqm_delta >= 0.0)
+                or (d_delta >= 0.08 and s_delta >= 25.0 and iqm_delta >= 0.05)
             )
             pareto_win_margin = (
                 wins > losses
@@ -972,9 +980,14 @@ class SwarmReferee:
                     or inc_zombie_rescue
                     or (
                         losses == 0
-                        and wins >= max(2, n_pairs // 16)
-                        and d_delta > 0.05
+                        and (
+                            wins >= 2
+                            or (wins == 1 and d_delta >= 0.05 and mean_p_delta >= 0.05)
+                        )
+                        and d_delta >= 0.04
                         and s_delta >= 0.0
+                        and iqm_delta >= 0.0
+                        and mean_p_delta >= 0.04
                         and ac_non_worse
                     )
                     or (

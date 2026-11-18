@@ -740,3 +740,180 @@ def test_climbing_regime_does_not_throttle_peers_to_two(tmp_path, monkeypatch):
         orch.close()
 
     assert len(seen_peers) == 4, seen_peers
+
+
+def test_g11_g12_surgical_zero_loss_and_pareto_depth_score_promotion():
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.engine.swarm_referee import SwarmReferee
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s): return Action.N\n"
+    )
+    seeds64 = [31000 + i for i in range(64)]
+
+    # 1. G12 scenario: 2W-0L-62T surgical fix (+0.16 depth, +50 score, +0.18 IQM, 0 losses) must promote
+    #    and must NOT be cut in Stage-1 racing behind net-losing 11W-12L churn candidates
+    class _SurgicalZeroLossPool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 500,
+                            "turns": 1500,
+                            "final_ac": 4,
+                            "xp_level": 3,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            if "peer_surgical" in batch_id:
+                # 1 win in Stage 1 (seed 31005: depth 3 -> 8) + 1 win in Stage 2 (seed 31040: depth 3 -> 8) = 2W-0L-62T
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"sg_{s}",
+                            "seed": s,
+                            "depth": 8 if s in (31005, 31040) else 3,
+                            "max_depth": 8 if s in (31005, 31040) else 3,
+                            "score": 2100 if s in (31005, 31040) else 500,
+                            "turns": 1500,
+                            "final_ac": 4,
+                            "xp_level": 3,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            # Noisy 11W-12L churn candidate
+            runs = []
+            for idx, s in enumerate(s_list):
+                d = 5 if idx < 11 else (1 if idx < 23 else 3)
+                runs.append(
+                    {
+                        "run_id": f"ch_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": 520,
+                        "turns": 1500,
+                        "final_ac": 4,
+                        "xp_level": 3,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    c_surg = PeerCandidate(
+        peer_id="peer_surgical",
+        claimed_deficit_id="slice_stalled",
+        claimed_label="surgical",
+        policy_code=base_pol + "\n_S = 1\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    c_churn1 = PeerCandidate(
+        peer_id="peer_churn1",
+        claimed_deficit_id="slice_early_terminations",
+        claimed_label="churn1",
+        policy_code=base_pol + "\n_C1 = 1\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    c_churn2 = PeerCandidate(
+        peer_id="peer_churn2",
+        claimed_deficit_id="slice_frontier_failures",
+        claimed_label="churn2",
+        policy_code=base_pol + "\n_C2 = 2\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    v_g12 = SwarmReferee().evaluate_tournament(
+        generation=12,
+        candidates=[c_churn1, c_churn2, c_surg],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_SurgicalZeroLossPool(),
+        seeds=seeds64,
+        race_seeds=32,
+    )
+    assert v_g12.promoted is True, v_g12.reason
+    assert v_g12.winner_id == "peer_surgical"
+
+    # 2. G11 scenario: 14W-10L-40T (+0.11 depth, +75 score, +0.098 IQM, integer p75 tied) promotes via pareto_axis_gain
+    class _G11ParetoPool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 585,
+                            "turns": 1500,
+                            "final_ac": 4,
+                            "xp_level": 3,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            runs = []
+            for idx, s in enumerate(s_list):
+                if idx < 14:
+                    d, sc = (5 if idx < 3 else 4), 950
+                elif idx < 24:
+                    d, sc = 2, 480
+                else:
+                    d, sc = 3, 585
+                runs.append(
+                    {
+                        "run_id": f"g11_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 1500,
+                        "final_ac": 4,
+                        "xp_level": 3,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    c_g11 = PeerCandidate(
+        peer_id="ortho_peer_2_peer_3",
+        claimed_deficit_id="slice_stalled+slice_early_terminations",
+        claimed_label="g11_ortho",
+        policy_code=base_pol + "\n_G11 = 1\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    v_g11 = SwarmReferee().evaluate_tournament(
+        generation=11,
+        candidates=[c_g11],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_G11ParetoPool(),
+        seeds=seeds64,
+    )
+    assert v_g11.promoted is True, v_g11.reason
+    assert v_g11.winner_id == "ortho_peer_2_peer_3"
