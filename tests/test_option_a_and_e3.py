@@ -181,16 +181,23 @@ def test_hybrid_side_cohesion_refactor_and_clean_split(tmp_path):
 
 def test_referee_closes_noop_and_significance_loopholes():
     from lox.author.swarm_peer import PeerCandidate
-    from lox.engine.swarm_referee import SwarmReferee, _is_wait_zombie_run
+    from lox.engine.swarm_referee import SwarmReferee
+    from lox.env.nethack.adapter import NetHackAdapter
 
-    # Zombie threshold lowered to 65%
+    # All-depth horizon waste replaces the Goodharted pct_wait zombie heuristic
+    adapter = NetHackAdapter()
     assert (
-        _is_wait_zombie_run({"turns": 200, "pct_wait": 72.0, "unique_tiles": 30})
+        adapter.is_horizon_waste(
+            {"depth": 4, "end_reason": "max_steps", "turns": 10000}
+        )
         is True
     )
     assert (
-        _is_wait_zombie_run({"turns": 200, "pct_wait": 40.0, "unique_tiles": 30})
-        is False
+        adapter.is_horizon_waste({"depth": 2, "end_reason": "stalled_zero_turn"})
+        is True
+    )
+    assert (
+        adapter.is_horizon_waste({"depth": 4, "end_reason": "killed by gnome"}) is False
     )
 
     base_pol = (
@@ -634,14 +641,14 @@ def test_outcome_clustering_strips_fn_blame_and_pareto_gate_blocks_one_seed_nois
     assert v_noise.promoted is False
     att = v_noise.attempts_summary[0]
     assert att["wins"] > att["losses"] and (att["wins"] - att["losses"]) < 4
-    assert att["reject_reason"] == "below_sig_or_pareto_gate"
+    assert att["reject_reason"] in ("cvar25_tail_regression", "below_sign_perm_alpha")
     BatchDatabaseLogger(db_path=dbp).save_tournament_attempts(v_noise.attempts_summary)
     con2 = connect_db(dbp, read_only=True)
     try:
         row = con2.execute(
             "SELECT wins, losses, reject_reason FROM tournament_attempts WHERE peer_id='peer_noisy_pareto'"
         ).fetchone()
-        assert row == (att["wins"], att["losses"], "below_sig_or_pareto_gate")
+        assert row == (att["wins"], att["losses"], att["reject_reason"])
     finally:
         con2.close()
 
@@ -751,11 +758,16 @@ def test_g11_g12_surgical_zero_loss_and_pareto_depth_score_promotion():
         "class Policy:\n"
         "    def step(self, s): return Action.N\n"
     )
-    seeds64 = [31000 + i for i in range(64)]
+    select32 = [131000 + i for i in range(32)]
+    confirm64 = [1031000 + i for i in range(64)]
 
-    # 1. G12 scenario: 2W-0L-62T surgical fix (+0.16 depth, +50 score, +0.18 IQM, 0 losses) must promote
-    #    and must NOT be cut in Stage-1 racing behind net-losing 11W-12L churn candidates
+    # 1. Genuine surgical fix: 1W-0L-31T on S_select (advances ahead of net-losing 11W-12L churn!)
+    #    and 5W-0L-59T on S_confirm (exact sign-perm p = 1/32 = 0.03125 < 0.05; OBF Look-1 p=0.03125
+    #    triggers +64 OBF or 6W-0L passes Look-1 p=0.0156 < 0.030 immediately!).
     class _SurgicalZeroLossPool:
+        def __init__(self, confirm_wins: int = 6):
+            self.confirm_wins = confirm_wins
+
         def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
             s_list = list(priority_seeds or [])
             if "_inc_" in batch_id:
@@ -777,22 +789,23 @@ def test_g11_g12_surgical_zero_loss_and_pareto_depth_score_promotion():
                     ],
                 }
             if "peer_surgical" in batch_id:
-                # 1 win in Stage 1 (seed 31005: depth 3 -> 8) + 1 win in Stage 2 (seed 31040: depth 3 -> 8) = 2W-0L-62T
+                is_sel = "_sel_" in batch_id
+                n_w = 1 if is_sel else self.confirm_wins
                 return {
                     "batch_id": batch_id,
                     "runs": [
                         {
                             "run_id": f"sg_{s}",
                             "seed": s,
-                            "depth": 8 if s in (31005, 31040) else 3,
-                            "max_depth": 8 if s in (31005, 31040) else 3,
-                            "score": 2100 if s in (31005, 31040) else 500,
+                            "depth": 8 if idx < n_w else 3,
+                            "max_depth": 8 if idx < n_w else 3,
+                            "score": 2100 if idx < n_w else 500,
                             "turns": 1500,
                             "final_ac": 4,
                             "xp_level": 3,
                             "end_reason": "killed",
                         }
-                        for s in s_list
+                        for idx, s in enumerate(s_list)
                     ],
                 }
             # Noisy 11W-12L churn candidate
@@ -846,14 +859,26 @@ def test_g11_g12_surgical_zero_loss_and_pareto_depth_score_promotion():
         candidates=[c_churn1, c_churn2, c_surg],
         base_policy=base_pol,
         base_skills={},
-        eval_pool=_SurgicalZeroLossPool(),
-        seeds=seeds64,
-        race_seeds=32,
+        eval_pool=_SurgicalZeroLossPool(confirm_wins=6),
+        select_seeds=select32,
+        seeds=confirm64,
     )
     assert v_g12.promoted is True, v_g12.reason
     assert v_g12.winner_id == "peer_surgical"
 
-    # 2. G11 scenario: 14W-10L-40T (+0.11 depth, +75 score, +0.098 IQM, integer p75 tied) promotes via pareto_axis_gain
+    # A 1W-0L fluke on S_confirm (p = 0.50) must NOT promote under v2!
+    v_fluke = SwarmReferee().evaluate_tournament(
+        generation=12,
+        candidates=[c_surg],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_SurgicalZeroLossPool(confirm_wins=1),
+        select_seeds=select32,
+        seeds=confirm64,
+    )
+    assert v_fluke.promoted is False
+
+    # 2. Old G11 pareto_axis_gain loophole (14W-10L-40T with tail collapse, p > 0.05) is now BLOCKED!
     class _G11ParetoPool:
         def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
             s_list = list(priority_seeds or [])
@@ -913,10 +938,11 @@ def test_g11_g12_surgical_zero_loss_and_pareto_depth_score_promotion():
         base_policy=base_pol,
         base_skills={},
         eval_pool=_G11ParetoPool(),
-        seeds=seeds64,
+        seeds=confirm64,
     )
-    assert v_g11.promoted is True, v_g11.reason
-    assert v_g11.winner_id == "ortho_peer_2_peer_3"
+    assert v_g11.promoted is False, (
+        "v2 deletes pareto_beats loophole on high-p/tail-risk candidates"
+    )
 
 
 def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_path):
@@ -1214,7 +1240,8 @@ def test_stage3_tiebreaker_extension_and_confinement_priority(tmp_path):
         "    def step(self, state):\n"
         "        return Action.WAIT\n"
     )
-    seeds64 = [13500 + i for i in range(64)]
+    select32 = [135000 + i for i in range(32)]
+    seeds64 = [1035000 + i for i in range(64)]
 
     class _Stage3Pool:
         def __init__(self, stage3_holds: bool):
@@ -1223,9 +1250,9 @@ def test_stage3_tiebreaker_extension_and_confinement_priority(tmp_path):
 
         def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
             s_list = list(priority_seeds or [])
-            if any(int(s) >= 200_000 for s in s_list):
+            if any(int(s) >= 20_000_000 for s in s_list):
                 self.s3_seen = True
-            # Realistic incumbent depth spread (Dlvl 2..6) so IQM moves smoothly on mid-quartile seeds
+            # Realistic incumbent depth spread (Dlvl 2..6)
             base_depths = [2 + (i % 5) for i in range(len(s_list))]
             if "_inc_" in batch_id:
                 return {
@@ -1245,13 +1272,13 @@ def test_stage3_tiebreaker_extension_and_confinement_priority(tmp_path):
                         for idx, s in enumerate(s_list)
                     ],
                 }
-            is_s3 = any(int(s) >= 200_000 for s in s_list)
+            is_obf = any(int(s) >= 20_000_000 for s in s_list)
             runs = []
             for idx, s in enumerate(s_list):
                 bd = base_depths[idx]
-                if not is_s3:
-                    # 64 seeds: 7W-4L-53T -> ΔD=+0.047, ΔS=+14, ΔIQM>0, p=0.0777 (exact surgical near-miss!)
-                    if idx < 7:
+                if not is_obf:
+                    # 64 seeds: 8W-3L-53T -> sign-perm p ~ 0.055 in [0.030, 0.120) -> triggers OBF +64!
+                    if idx < 8:
                         d, sc = bd + 1, 900
                     elif idx < 11:
                         d, sc = max(1, bd - 1), 580
@@ -1259,15 +1286,15 @@ def test_stage3_tiebreaker_extension_and_confinement_priority(tmp_path):
                         d, sc = bd, 700
                 else:
                     if self.stage3_holds:
-                        # Consistent +7W-4L on Stage-3 fresh seeds -> 14W-8L across 128 seeds (p=0.0187 < 0.05!)
-                        if idx < 7:
+                        # Holds consistently on +64 OBF seeds -> 16W-6L (p < 0.032) -> PROMOTES!
+                        if idx < 8:
                             d, sc = bd + 1, 900
                         elif idx < 11:
                             d, sc = max(1, bd - 1), 580
                         else:
                             d, sc = bd, 700
                     else:
-                        # Spurious near-miss collapses on Stage-3 seeds (2W-7L)
+                        # Spurious near-miss collapses on +64 OBF seeds (2W-7L) -> REJECTED!
                         if idx < 2:
                             d, sc = bd + 1, 900
                         elif idx < 9:
@@ -1305,10 +1332,12 @@ def test_stage3_tiebreaker_extension_and_confinement_priority(tmp_path):
         base_policy=base_pol,
         base_skills={},
         eval_pool=pool_pass,
+        select_seeds=select32,
         seeds=seeds64,
     )
     assert pool_pass.s3_seen is True
     assert v_pass.promoted is True, v_pass.reason
+    assert v_pass.best_pair.get("obf_extended") is True
     assert v_pass.winner_id == "peer_1"
 
     pool_fail = _Stage3Pool(stage3_holds=False)
@@ -1318,6 +1347,7 @@ def test_stage3_tiebreaker_extension_and_confinement_priority(tmp_path):
         base_policy=base_pol,
         base_skills={},
         eval_pool=pool_fail,
+        select_seeds=select32,
         seeds=seeds64,
     )
     assert pool_fail.s3_seen is True
@@ -1429,7 +1459,6 @@ def test_g38_deficit_window_recurring_outcomes_referee_stall_rate_and_dead_patch
         "    def step(self, state):\n"
         "        return Action.SEARCH\n"
     )
-    seeds64 = [13700 + i for i in range(64)]
 
     class _HighIqmNearMissPool:
         def __init__(self):
@@ -1437,7 +1466,7 @@ def test_g38_deficit_window_recurring_outcomes_referee_stall_rate_and_dead_patch
 
         def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
             s_list = list(priority_seeds or [])
-            is_s3 = any(int(s) >= 200_000 for s in s_list)
+            is_s3 = any(int(s) >= 20_000_000 for s in s_list)
             if is_s3:
                 self.s3_seen = True
             base_depths = [2 + (i % 5) for i in range(len(s_list))]
@@ -1507,16 +1536,18 @@ def test_g38_deficit_window_recurring_outcomes_referee_stall_rate_and_dead_patch
         sandbox_passed=True,
         loc_total=5,
     )
+    # Under v2 alpha-spent OBF (0.030 <= p < 0.12), a p=0.20 noise candidate does NOT peek/extend!
     v_hi = SwarmReferee().evaluate_tournament(
         generation=37,
         candidates=[cand_hi],
         base_policy=base_pol,
         base_skills={},
         eval_pool=hi_pool,
-        seeds=seeds64,
+        select_seeds=[137000 + i for i in range(32)],
+        seeds=[1037000 + i for i in range(64)],
     )
-    assert hi_pool.s3_seen is True
-    assert v_hi.promoted is True, v_hi.reason
+    assert hi_pool.s3_seen is False
+    assert v_hi.promoted is False
 
     # 4. incubate_candidate rejects 0-byte-divergence dead patch when >=2 target seeds have action_bytes
     class _ZeroDivPool:
@@ -1583,3 +1614,388 @@ def test_g38_deficit_window_recurring_outcomes_referee_stall_rate_and_dead_patch
     )
     assert res_dead.sandbox_passed is False
     assert "Zero behavioral divergence" in res_dead.error
+
+
+def test_promotion_gate_v2_split_sample_anti_goodhart_safety_and_craftax():
+    """Verifies every Promotion Gate v2 invariant:
+    1. Anti-Goodhart NetHackAdapter + CraftaxAdapter progression_metric.
+    2. Exact Paired Sign-Permutation & exact small-N Wilcoxon calibration (4W-0L=0.0625, 5W-0L=0.03125).
+    3. Split-Sample Select(32) -> Confirm(64): zero fallback leakage on noise winner, unbiased S_confirm logging.
+    4. 4 benchmark-agnostic safety invariants (horizon_waste_rate at D3+, auto_esc, cvar25) & AST bloat alpha bar.
+    5. Multi-benchmark Craftax SwarmReferee end-to-end promotion.
+    """
+    import numpy as np
+
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.engine.hypothesis import (
+        cvar_bottom_quantile,
+        exact_sign_permutation_p,
+        progression_metric,
+        wilcoxon_signed_rank_p,
+        winsorized_mean,
+    )
+    from lox.engine.swarm_referee import SwarmReferee
+    from lox.env.craftax.adapter import CraftaxAdapter
+
+    # 1. Anti-Goodhart NetHackAdapter & CraftaxAdapter progression_metric
+    for depth in (1, 2, 3, 4):
+        normal_run = {
+            "depth": depth,
+            "max_depth": depth,
+            "xp_level": 2,
+            "score": 180,
+            "final_ac": 5,
+            "end_reason": "killed by goblin",
+        }
+        camper_run = {
+            "depth": depth,
+            "max_depth": depth,
+            "xp_level": 6,
+            "score": 2500,
+            "final_ac": 1,
+            "turns": 10000,
+            "end_reason": "max_steps",
+        }
+        assert progression_metric(camper_run) < progression_metric(normal_run), (
+            f"D{depth} max_steps camper must score strictly below genuine D{depth} run"
+        )
+
+    craftax_adapter = CraftaxAdapter()
+    assert (
+        craftax_adapter.progression_metric({"achievements": 0, "steps": 10000}) == 0.0
+    )
+    assert (
+        craftax_adapter.progression_metric({"achievements": 1, "steps": 10000})
+        < 1.08 + 1e-9
+    )
+    assert progression_metric(
+        {"achievements": 3, "steps": 200}, benchmark="craftax"
+    ) > (progression_metric({"achievements": 2, "steps": 50000}, benchmark="craftax"))
+
+    # 2. Exact Paired Sign-Permutation & Exact Wilcoxon (fixes 4W-0L anti-conservative normal approx!)
+    p4, w4, l4, t4 = exact_sign_permutation_p(np.array([1.0, 1.0, 1.0, 1.0, 0.0, 0.0]))
+    assert (w4, l4, t4) == (4, 0, 2)
+    assert abs(p4 - 0.0625) < 1e-9
+    assert (
+        abs(wilcoxon_signed_rank_p(np.array([1.0, 1.0, 1.0, 1.0]))[0] - 0.0625) < 1e-9
+    )
+
+    p5, w5, l5, _ = exact_sign_permutation_p(np.array([1.0, 1.0, 1.0, 1.0, 1.0]))
+    assert (w5, l5) == (5, 0)
+    assert abs(p5 - 0.03125) < 1e-9
+    assert (
+        winsorized_mean([100.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 0.1) < 2.0
+    )
+    assert (
+        abs(cvar_bottom_quantile([1.0, 2.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], 0.25) - 1.5)
+        < 1e-9
+    )
+
+    # 3. Split-Sample Select(32) -> Confirm(64): zero fallback leakage when C* is noise on S_confirm
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.N\n"
+    )
+    select32 = [110000 + i for i in range(32)]
+    confirm64 = [10110000 + i for i in range(64)]
+
+    class _SplitNoFallbackPool:
+        def __init__(self):
+            self.confirm_evaluated: list[str] = []
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "_conf_" in batch_id and "_inc_" not in batch_id:
+                self.confirm_evaluated.append(batch_id)
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 500,
+                            "turns": 1500,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            is_sel = "_sel_" in batch_id
+            if "peer_overfit" in batch_id:
+                # Crushes S_select (+3 depth), completely null on S_confirm!
+                d = 6 if is_sel else 3
+                sc = 1800 if is_sel else 500
+            else:
+                # peer_runnerup: smaller gain on S_select (+1), strong on S_confirm (+2)
+                # Under strict split-sample, ONLY C* (peer_overfit) goes to S_confirm -> ZERO fallback!
+                d = 4 if is_sel else 5
+                sc = 900 if is_sel else 1400
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"c_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 1500,
+                        "end_reason": "killed",
+                    }
+                    for s in s_list
+                ],
+            }
+
+    c_overfit = PeerCandidate(
+        peer_id="peer_overfit",
+        claimed_deficit_id="d1",
+        claimed_label="overfit",
+        policy_code=base_pol + "\n_OF = 1\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    c_runner = PeerCandidate(
+        peer_id="peer_runnerup",
+        claimed_deficit_id="d2",
+        claimed_label="runnerup",
+        policy_code=base_pol + "\n_RU = 2\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    split_pool = _SplitNoFallbackPool()
+    v_split = SwarmReferee().evaluate_tournament(
+        generation=40,
+        candidates=[c_overfit, c_runner],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=split_pool,
+        select_seeds=select32,
+        seeds=confirm64,
+    )
+    assert v_split.promoted is False
+    assert len(split_pool.confirm_evaluated) == 1
+    assert "peer_overfit" in split_pool.confirm_evaluated[0]
+    assert len(v_split.winner_batch_eval["runs"]) == 64
+
+    # 4. Safety Invariants: D4 horizon_waste_rate regression & auto_esc_regression & AST bloat alpha bar
+    class _SafetyPool:
+        def __init__(self, mode: str):
+            self.mode = mode
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 500,
+                            "turns": 1500,
+                            "auto_esc_count": 0,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            runs = []
+            for idx, s in enumerate(s_list):
+                if self.mode == "horizon_waste_d4":
+                    # Wins 50 seeds to D4, but 8 seeds hit D4 max_steps (12.5% > 5% tol)
+                    er = "max_steps" if idx < 8 else "killed"
+                    runs.append(
+                        {
+                            "run_id": f"c_{s}",
+                            "seed": s,
+                            "depth": 4,
+                            "max_depth": 4,
+                            "score": 900,
+                            "turns": 10000 if er == "max_steps" else 1500,
+                            "auto_esc_count": 0,
+                            "end_reason": er,
+                        }
+                    )
+                elif self.mode == "auto_esc":
+                    runs.append(
+                        {
+                            "run_id": f"c_{s}",
+                            "seed": s,
+                            "depth": 4,
+                            "max_depth": 4,
+                            "score": 900,
+                            "turns": 1500,
+                            "auto_esc_count": 1 if idx < 5 else 0,
+                            "end_reason": "killed",
+                        }
+                    )
+                else:
+                    # AST bloat bar: 5W-0L (exact p = 0.03125): passes alpha=0.05, fails bloated eff_alpha=0.025!
+                    d = 5 if idx < 5 else 3
+                    runs.append(
+                        {
+                            "run_id": f"c_{s}",
+                            "seed": s,
+                            "depth": d,
+                            "max_depth": d,
+                            "score": 1200 if idx < 5 else 500,
+                            "turns": 1500,
+                            "auto_esc_count": 0,
+                            "end_reason": "killed",
+                        }
+                    )
+            return {"batch_id": batch_id, "runs": runs}
+
+    big_base = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        + "".join(f"        x_{i} = {i} + 1\n" for i in range(15))
+        + "        return Action.N\n"
+    )
+    bloated_cand_code = big_base + "".join(
+        f"_BLOAT_{i} = {i} * 2 + 1\n" for i in range(25)
+    )
+    lean_cand_code = big_base + "_LEAN = 1\n"
+
+    v_hw = SwarmReferee().evaluate_tournament(
+        generation=41,
+        candidates=[
+            PeerCandidate(
+                peer_id="p_hw",
+                claimed_deficit_id="d1",
+                claimed_label="hw",
+                policy_code=lean_cand_code,
+                skills={},
+                sandbox_passed=True,
+                loc_total=20,
+            )
+        ],
+        base_policy=big_base,
+        base_skills={},
+        eval_pool=_SafetyPool("horizon_waste_d4"),
+        seeds=confirm64,
+    )
+    assert v_hw.promoted is False
+    assert v_hw.attempts_summary[0]["reject_reason"] == "horizon_waste_regression"
+
+    v_esc = SwarmReferee().evaluate_tournament(
+        generation=41,
+        candidates=[
+            PeerCandidate(
+                peer_id="p_esc",
+                claimed_deficit_id="d1",
+                claimed_label="esc",
+                policy_code=lean_cand_code,
+                skills={},
+                sandbox_passed=True,
+                loc_total=20,
+            )
+        ],
+        base_policy=big_base,
+        base_skills={},
+        eval_pool=_SafetyPool("auto_esc"),
+        seeds=confirm64,
+    )
+    assert v_esc.promoted is False
+    assert v_esc.attempts_summary[0]["reject_reason"] == "auto_esc_regression"
+
+    # Lean 5W-0L (p=0.03125 < 0.05) promotes; bloated >+25% AST 5W-0L (0.03125 >= 0.025) is rejected!
+    v_lean = SwarmReferee().evaluate_tournament(
+        generation=41,
+        candidates=[
+            PeerCandidate(
+                peer_id="p_lean",
+                claimed_deficit_id="d1",
+                claimed_label="lean",
+                policy_code=lean_cand_code,
+                skills={},
+                sandbox_passed=True,
+                loc_total=20,
+            )
+        ],
+        base_policy=big_base,
+        base_skills={},
+        eval_pool=_SafetyPool("ast_bar"),
+        seeds=confirm64,
+    )
+    assert v_lean.promoted is True, v_lean.reason
+
+    v_bloat = SwarmReferee().evaluate_tournament(
+        generation=41,
+        candidates=[
+            PeerCandidate(
+                peer_id="p_bloat",
+                claimed_deficit_id="d1",
+                claimed_label="bloat",
+                policy_code=bloated_cand_code,
+                skills={},
+                sandbox_passed=True,
+                loc_total=45,
+            )
+        ],
+        base_policy=big_base,
+        base_skills={},
+        eval_pool=_SafetyPool("ast_bar"),
+        seeds=confirm64,
+    )
+    assert v_bloat.promoted is False
+    assert (
+        v_bloat.attempts_summary[0]["reject_reason"]
+        == "ast_bloat_below_tightened_alpha"
+    )
+
+    # 5. Multi-Benchmark Craftax SwarmReferee integrity (zero NetHack assumptions)
+    class _CraftaxPool:
+        benchmark = "craftax"
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            is_inc = "_inc_" in batch_id
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"{'inc' if is_inc else 'c'}_{s}",
+                        "seed": s,
+                        "achievements": 2 if is_inc else 4,
+                        "steps": 400,
+                        "depth": 1,
+                        "max_depth": 1,
+                        "score": 0,
+                        "end_reason": "died",
+                    }
+                    for s in s_list
+                ],
+            }
+
+    v_cx = SwarmReferee().evaluate_tournament(
+        generation=1,
+        candidates=[
+            PeerCandidate(
+                peer_id="p_cx",
+                claimed_deficit_id="d1",
+                claimed_label="craftax_ach",
+                policy_code=base_pol + "\n_CX = 1\n",
+                skills={},
+                sandbox_passed=True,
+                loc_total=5,
+            )
+        ],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_CraftaxPool(),
+        select_seeds=[100001 + i for i in range(8)],
+        seeds=[10000001 + i for i in range(16)],
+    )
+    assert v_cx.promoted is True, v_cx.reason
+    assert v_cx.best_pair["mean_delta"] >= 1.9

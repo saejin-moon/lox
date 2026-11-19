@@ -22,10 +22,12 @@ class CraftaxAdapter(BenchmarkAdapter):
         return CraftaxHarness(max_steps=max_steps)
 
     def progression_metric(self, run: dict[str, Any]) -> float:
-        """Composite score based on achievements unlocked, inventory tiers, and survival."""
-        achievements = float(run.get("achievements", 0))
-        steps = float(run.get("turns", run.get("steps", 0)))
-        return achievements * 100.0 + steps * 0.1
+        """Anti-Goodhart composite score: achievements anchor + tiny non-camping tiebreak."""
+        achievements = float(run.get("achievements", 0) or 0)
+        steps = float(run.get("turns", run.get("steps", 0)) or 0)
+        # Never allow idle step camping to outweigh even 0.1 of an achievement
+        step_tiebreak = min(0.08, steps * 1e-4) if achievements > 0 else 0.0
+        return achievements + step_tiebreak
 
     def extract_milestones_and_stalls(
         self, ticks: list[dict[str, Any]]

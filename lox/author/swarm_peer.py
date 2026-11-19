@@ -288,98 +288,89 @@ def incubate_candidate(
     try:
         with _COMPILE_EXEC_LOCK:
             compiled = compile_policy_package(code, "", skills=skills)
-            runner = compiled.create_runner()
+            _ = compiled.create_runner()
     except Exception as exc:
         candidate.sandbox_passed = False
         candidate.error = f"Compile/validation error: {type(exc).__name__}: {exc}"
         return candidate
 
-    # Fast local smoke + failure-fixture + frontier check reusing a single harness
-    smoke_harness = NetHackHarness(
+    # Benchmark-agnostic smoke check + failure-fixture + frontier probes
+    bm_name = str(getattr(eval_pool, "benchmark", "nethack") or "nethack")
+    from lox.env import get_adapter
+
+    adapter = get_adapter(bm_name)
+    smoke_err, smoke_m = adapter.smoke_check(
+        compiled,
+        seed=42,
         max_steps=60,
-        allow_menu_linger=policy_handles_menus(code, skills),
+        policy_code=code,
+        skills=skills,
     )
-    try:
+    if smoke_err is not None:
+        candidate.sandbox_passed = False
+        candidate.error = smoke_err
+        return candidate
+    wrapper_ratio = float(smoke_m.get("wrapper_ratio", 0.0))
+    fn_turns = Counter(smoke_m.get("fn_turns") or {})
+
+    frontier_survived = 0
+    frontier_depth_deltas: list[int] = []
+    has_probes = bool(
+        any(
+            bytes(fix.get("action_bytes") or b"")
+            for fix in claimed_deficit.replay_fixtures[:2]
+        )
+        or any(
+            bytes(getattr(cp, "action_bytes", b"") or b"")
+            for cp in (frontier_checkpoints or [])[:2]
+        )
+    )
+    if has_probes:
+        h_kwargs: dict[str, Any] = {"max_steps": 100}
+        if bm_name == "nethack":
+            h_kwargs["allow_menu_linger"] = policy_handles_menus(code, skills)
+        probe_harness = adapter.create_harness(**h_kwargs)
         try:
-            st = smoke_harness.reset(seed=42)
-            acts: list[str] = []
-            fn_turns: Counter[str] = Counter()
-            for _ in range(60):
-                act, active_fn = runner.next_action(st)
-                fn_turns[str(active_fn or "root")] += 1
-                st, done, info = smoke_harness.step(act)
-                acts.append(str(info.get("action_name", "")))
-                if done:
-                    break
-
-            leaf_errs = extract_runner_leaf_errors(runner)
-            if leaf_errs:
-                candidate.sandbox_passed = False
-                candidate.error = (
-                    f"Swallowed leaf error(s): {leaf_errs[0][0]} -> {leaf_errs[0][1]}"
+            for fix in claimed_deficit.replay_fixtures[:2]:
+                r_bytes = bytes(fix.get("action_bytes") or b"")
+                if not r_bytes:
+                    continue
+                stop_idx = int(fix.get("stop_at_byte_idx", max(1, len(r_bytes) - 25)))
+                _, _, _, err_msg = _run_replay_probe(
+                    compiled,
+                    seed=int(fix["seed"]),
+                    action_bytes=r_bytes,
+                    stop_at_byte_idx=stop_idx,
+                    live_steps=80,
+                    harness=probe_harness,
                 )
-                return candidate
+                if err_msg:
+                    candidate.sandbox_passed = False
+                    candidate.error = f"Failure-replay `{fix['run_id']}` {err_msg}"
+                    return candidate
 
-            non_wait = [a for a in acts if a != "WAIT"]
-            if len(acts) >= 20 and (
-                not non_wait or len(non_wait) <= max(1, len(acts) // 10)
-            ):
-                candidate.sandbox_passed = False
-                candidate.error = f"WAIT-dominant deadlock on smoke check ({len(non_wait)}/{len(acts)} non-WAIT actions)."
-                return candidate
-
-            total_t = sum(fn_turns.values())
-            wrapper_t = sum(
-                fn_turns.get(w, 0) for w in ("root", "wrapped", "_osc_gate")
-            )
-            wrapper_ratio = float(wrapper_t / max(1, total_t))
-        except Exception as exc:
-            candidate.sandbox_passed = False
-            candidate.error = f"Smoke runtime error: {type(exc).__name__}: {exc}"
-            return candidate
-
-        for fix in claimed_deficit.replay_fixtures[:2]:
-            r_bytes = bytes(fix.get("action_bytes") or b"")
-            if not r_bytes:
-                continue
-            stop_idx = int(fix.get("stop_at_byte_idx", max(1, len(r_bytes) - 25)))
-            _, _, _, err_msg = _run_replay_probe(
-                compiled,
-                seed=int(fix["seed"]),
-                action_bytes=r_bytes,
-                stop_at_byte_idx=stop_idx,
-                live_steps=80,
-                harness=smoke_harness,
-            )
-            if err_msg:
-                candidate.sandbox_passed = False
-                candidate.error = f"Failure-replay `{fix['run_id']}` {err_msg}"
-                return candidate
-
-        frontier_survived = 0
-        frontier_depth_deltas: list[int] = []
-        for cp in (frontier_checkpoints or [])[:2]:
-            cp_bytes = bytes(getattr(cp, "action_bytes", b"") or b"")
-            if not cp_bytes:
-                continue
-            f_surv, start_d, max_d, f_err = _run_replay_probe(
-                compiled,
-                seed=int(getattr(cp, "seed", 0)),
-                action_bytes=cp_bytes,
-                stop_at_byte_idx=None,
-                live_steps=100,
-                harness=smoke_harness,
-            )
-            if f_err:
-                cp_id = getattr(cp, "checkpoint_id", "frontier_cp")
-                candidate.sandbox_passed = False
-                candidate.error = f"Frontier `{cp_id}` {f_err}"
-                return candidate
-            if f_surv:
-                frontier_survived += 1
-            frontier_depth_deltas.append(max_d - start_d)
-    finally:
-        smoke_harness.close()
+            for cp in (frontier_checkpoints or [])[:2]:
+                cp_bytes = bytes(getattr(cp, "action_bytes", b"") or b"")
+                if not cp_bytes:
+                    continue
+                f_surv, start_d, max_d, f_err = _run_replay_probe(
+                    compiled,
+                    seed=int(getattr(cp, "seed", 0)),
+                    action_bytes=cp_bytes,
+                    stop_at_byte_idx=None,
+                    live_steps=100,
+                    harness=probe_harness,
+                )
+                if f_err:
+                    cp_id = getattr(cp, "checkpoint_id", "frontier_cp")
+                    candidate.sandbox_passed = False
+                    candidate.error = f"Frontier `{cp_id}` {f_err}"
+                    return candidate
+                if f_surv:
+                    frontier_survived += 1
+                frontier_depth_deltas.append(max_d - start_d)
+        finally:
+            probe_harness.close()
 
     metrics: dict[str, Any] = {
         "wrapper_ratio": round(wrapper_ratio, 4),
@@ -528,30 +519,6 @@ def incubate_candidate(
                     if guard_d_diffs:
                         g_delta = sum(guard_d_diffs) / len(guard_d_diffs)
                         metrics["guard_depth_delta"] = round(g_delta, 4)
-                        if (
-                            len(guard_d_diffs) >= 2
-                            and g_delta <= -1.5
-                            and metrics["depth_delta"] < -0.25
-                        ):
-                            candidate.sandbox_metrics = metrics
-                            candidate.sandbox_passed = False
-                            candidate.error = (
-                                f"Incubation guard regression: D_succ guard_delta={g_delta:+.2f}, "
-                                f"shard depth_delta={metrics['depth_delta']:+.2f}"
-                            )
-                            return candidate
-                    # Unconditional severe regression veto (prevents broken/stale elites entering 64-seed CRN)
-                    if metrics["depth_delta"] <= -0.25 or (
-                        metrics["depth_delta"] <= 0.0
-                        and metrics["score_delta"] <= -150.0
-                    ):
-                        candidate.sandbox_metrics = metrics
-                        candidate.sandbox_passed = False
-                        candidate.error = (
-                            f"Incubation regression veto: depth_delta={metrics['depth_delta']:+.2f}, "
-                            f"score_delta={metrics['score_delta']:+.1f}"
-                        )
-                        return candidate
         except Exception as exc:
             candidate.sandbox_passed = False
             candidate.error = f"Incubation shard failed: {type(exc).__name__}: {exc}"

@@ -17,85 +17,16 @@ import numpy as np
 
 def progression_metric(run: dict[str, Any], benchmark: str | None = None) -> float:
     """
-    Continuous composite progression metric for a run:
-    Delegates to benchmark adapter when specified, or evaluates composite depth/stat progression.
+    Single-source-of-truth composite progression metric:
+    Delegates 100% to `get_adapter(benchmark).progression_metric(run)` so NetHack,
+    Craftax, and future benchmarks share zero duplicated or drifted scoring code.
     """
-    bench = str(benchmark or run.get("benchmark") or "").lower()
-    if bench and bench != "nethack":
-        try:
-            from lox.env import get_adapter
-
-            adapter = get_adapter(bench)
-            return adapter.progression_metric(run)
-        except Exception:
-            pass
-
-    d = float(run.get("max_depth") or run.get("depth") or 1)
-    raw_xl = run.get("xp_level")
-    if raw_xl is None:
-        raw_xl = run.get("final_xp_level")
-    xl = max(0.0, min(float(raw_xl if raw_xl is not None else 1), 30.0) - 1.0) * 0.14
-    raw_ac = run.get("final_ac")
-    ac_val = float(raw_ac if raw_ac is not None else 10)
-    ac_bonus = max(0.0, 10.0 - ac_val) * 0.06
-    oprop_cnt = max(0, min(6, int(run.get("worn_oprop_count") or 0)))
-    oprop_bonus = oprop_cnt * 0.10
-    branches_cnt = max(1, int(run.get("dungeons_visited") or 1))
-    branch_bonus = max(0, branches_cnt - 1) * 0.15
-    sc = math.log1p(max(0.0, float(run.get("score") or 0))) * 0.06
-
-    # Intermediate exploration signals (critical on Dlvl 1 before descent)
-    ms_dict = run.get("milestones") if isinstance(run.get("milestones"), dict) else {}
-    has_stairs = bool(
-        run.get("stairs_down_found")
-        or ms_dict.get("stairs_down_found")
-        or d > 1.0
-        or "'>'" in str(run.get("summary_digest") or "")
+    bench = (
+        str(benchmark or run.get("benchmark") or "nethack").strip().lower() or "nethack"
     )
-    stairs_bonus = 0.20 if has_stairs else 0.0
-    ms_tiles = ms_dict.get("unique_tiles_d1", 0)
-    raw_tiles = run.get("unique_tiles")
-    tiles = float(raw_tiles if raw_tiles is not None else (ms_tiles or 0))
-    tiles_bonus = 0.10 * min(1.0, tiles / 60.0)
+    from lox.env import get_adapter
 
-    shard_survival_bonus = (
-        0.08
-        if (
-            run.get("is_shard")
-            and int(run.get("final_hp") or 0) > 0
-            and str(run.get("end_reason") or "") in ("max_steps", "ascended")
-        )
-        else 0.0
-    )
-
-    # Mildly discount low-depth max_steps confinement stalls so multi-thousand-turn
-    # room-camping does not inflate IQM over genuine descent/exploration progress.
-    confinement_penalty = (
-        0.15
-        if (
-            not run.get("is_shard")
-            and str(run.get("end_reason") or "").strip().lower() == "max_steps"
-            and d <= 2.0
-            and (
-                "CONFINEMENT_STALL" in str(run.get("summary_digest") or "")
-                or int(run.get("turns") or 0) >= 2500
-            )
-        )
-        else 0.0
-    )
-
-    return (
-        d
-        + xl
-        + ac_bonus
-        + oprop_bonus
-        + branch_bonus
-        + sc
-        + stairs_bonus
-        + tiles_bonus
-        + shard_survival_bonus
-        - confinement_penalty
-    )
+    return float(get_adapter(bench).progression_metric(run))
 
 
 def compute_confidence_sequence(
@@ -118,20 +49,19 @@ def compute_confidence_sequence(
     if std_d < 1e-9:
         return mean_d, mean_d, mean_d
 
-    # Time-uniform boundary factor adapting to sample size n
+    # Honest time-uniform anytime-valid boundary (no fixed-sample clip!)
     t_eff = max(2.0, float(n))
-    log_term = math.log(math.log(2.0 * t_eff) + 1.0) + 0.72 * math.log(10.4 / alpha)
+    a_safe = max(1e-6, min(0.5, float(alpha)))
+    log_term = math.log(math.log(2.0 * t_eff) + 1.0) + 0.72 * math.log(10.4 / a_safe)
     radius = std_d * math.sqrt(2.0 * log_term / t_eff)
-    # Blend with standard normal 1.96 SE for large fixed N so power remains high at full budget
-    se_95 = 1.96 * std_d / math.sqrt(t_eff)
-    half_width = min(radius, se_95 * 1.15)
-    return mean_d, mean_d - half_width, mean_d + half_width
+    return mean_d, mean_d - radius, mean_d + radius
 
 
 def wilcoxon_signed_rank_p(deltas: np.ndarray) -> tuple[float, int, int, int]:
     """
     Computes the one-sided Paired Wilcoxon Signed-Rank p-value testing H1: median(deltas) > 0,
     alongside `(wins, losses, ties)` counts.
+    Uses exact 2^n_z sign-flip enumeration for n_z <= 12 to avoid normal-approximation bias.
     """
     if len(deltas) == 0:
         return 1.0, 0, 0, 0
@@ -166,6 +96,16 @@ def wilcoxon_signed_rank_p(deltas: np.ndarray) -> tuple[float, int, int, int]:
         i = j + 1
 
     w_plus = float(np.sum(ranks[nz > 0]))
+    if n_z <= 12:
+        # Exact enumeration over all 2^n_z sign assignments
+        bits = (
+            np.arange(1 << n_z, dtype=np.uint32)[:, None]
+            >> np.arange(n_z, dtype=np.uint32)
+        ) & 1
+        perm_w = bits.astype(np.float64) @ ranks
+        p_exact = float(np.mean(perm_w >= w_plus - 1e-9))
+        return p_exact, wins, losses, ties
+
     mean_w = n_z * (n_z + 1.0) / 4.0
     var_w = (n_z * (n_z + 1.0) * (2.0 * n_z + 1.0) - 0.5 * tie_correction) / 24.0
     if var_w <= 1e-9:
@@ -175,6 +115,79 @@ def wilcoxon_signed_rank_p(deltas: np.ndarray) -> tuple[float, int, int, int]:
     # One-sided survival function 1 - Phi(z)
     p_one_sided = 0.5 * math.erfc(z / math.sqrt(2.0))
     return float(p_one_sided), wins, losses, ties
+
+
+def exact_sign_permutation_p(
+    deltas: np.ndarray,
+    seed: int = 0,
+    n_perms: int = 2000,
+) -> tuple[float, int, int, int]:
+    """
+    One-sided Paired Sign-Permutation Test on `mean(deltas) > 0` (exact finite-sample
+    calibration under both full and sparse tie-heavy nulls, higher surgical power than Wilcoxon).
+    - Uses exact 2^n_z enumeration for n_z <= 12.
+    - Uses deterministic seeded Monte Carlo sign flips for n_z > 12.
+    Returns `(p_one_sided, wins, losses, ties)`.
+    """
+    arr = np.asarray(deltas, dtype=np.float64)
+    if len(arr) == 0:
+        return 1.0, 0, 0, 0
+
+    wins = int(np.sum(arr > 1e-6))
+    losses = int(np.sum(arr < -1e-6))
+    ties = int(len(arr) - wins - losses)
+
+    nz = arr[np.abs(arr) > 1e-6]
+    n_z = len(nz)
+    if n_z == 0:
+        return 1.0, 0, 0, ties
+
+    obs_sum = float(np.sum(nz))
+    if obs_sum <= 0.0:
+        # Fast-path for non-positive mean: still compute exact/MC p for reporting
+        pass
+
+    if n_z <= 12:
+        bits = (
+            np.arange(1 << n_z, dtype=np.uint32)[:, None]
+            >> np.arange(n_z, dtype=np.uint32)
+        ) & 1
+        signs = bits.astype(np.float64) * 2.0 - 1.0
+        perm_sums = signs @ nz
+        p_val = float(np.mean(perm_sums >= obs_sum - 1e-12))
+        return p_val, wins, losses, ties
+
+    rng = np.random.default_rng(int(seed) & 0xFFFFFFFF)
+    signs = rng.choice((-1.0, 1.0), size=(int(n_perms), n_z))
+    perm_sums = signs @ nz
+    ge_cnt = int(np.sum(perm_sums >= obs_sum - 1e-12))
+    p_val = float((1 + ge_cnt) / (1 + int(n_perms)))
+    return p_val, wins, losses, ties
+
+
+def winsorized_mean(values: list[float] | np.ndarray, pct: float = 0.05) -> float:
+    """Symmetric `pct`-Winsorized mean: caps extreme outliers without discarding surgical tail fixes."""
+    arr = np.sort(np.asarray(values, dtype=np.float64))
+    n = len(arr)
+    if n == 0:
+        return 0.0
+    k = int(math.floor(n * max(0.0, min(0.25, float(pct)))))
+    if k <= 0 or 2 * k >= n:
+        return float(np.mean(arr))
+    w = arr.copy()
+    w[:k] = w[k]
+    w[n - k :] = w[n - k - 1]
+    return float(np.mean(w))
+
+
+def cvar_bottom_quantile(values: list[float] | np.ndarray, q: float = 0.25) -> float:
+    """Conditional Value-at-Risk (mean of the worst `q` fraction of runs — tail-risk safety metric)."""
+    arr = np.sort(np.asarray(values, dtype=np.float64))
+    n = len(arr)
+    if n == 0:
+        return 0.0
+    k = max(1, int(math.ceil(n * max(0.05, min(0.5, float(q))))))
+    return float(np.mean(arr[:k]))
 
 
 def should_stop_early_for_futility(
@@ -469,17 +482,10 @@ def evaluate_tournament_pair(
         inc_progs.append(ip)
         diff = cp - ip
         deltas.append(diff)
-        cd = float(max(int(r.get("depth", 1) or 1), int(r.get("max_depth", 1) or 1)))
-        bd = float(
-            max(int(base_r.get("depth", 1) or 1), int(base_r.get("max_depth", 1) or 1))
-        )
-        ca = float(r.get("final_ac", 10) if r.get("final_ac") is not None else 10)
-        ba = float(
-            base_r.get("final_ac", 10) if base_r.get("final_ac") is not None else 10
-        )
-        if cd - bd >= 1.0 or (cd == bd and ba - ca >= 2.0):
+        # Benchmark-agnostic gained/lost classification purely from progression_metric delta
+        if diff >= 0.50:
             seeds_gained.append(sd)
-        elif bd - cd >= 1.0 or (cd == bd and ca - ba >= 2.0):
+        elif diff <= -0.50:
             seeds_lost.append(sd)
 
     if not deltas:
@@ -488,9 +494,15 @@ def evaluate_tournament_pair(
             "iqm_inc": 0.0,
             "iqm_delta": 0.0,
             "mean_delta": 0.0,
+            "winsor_delta": 0.0,
+            "cvar25_cand": 0.0,
+            "cvar25_inc": 0.0,
+            "cvar25_delta": 0.0,
             "ci_lower": 0.0,
             "ci_upper": 0.0,
             "wilcoxon_p": 1.0,
+            "sign_perm_p": 1.0,
+            "frac_seeds_changed": 0.0,
             "wins": 0,
             "losses": 0,
             "ties": 0,
@@ -501,17 +513,28 @@ def evaluate_tournament_pair(
 
     arr = np.asarray(deltas, dtype=np.float64)
     mean_d, ci_low, ci_high = compute_confidence_sequence(arr, alpha=alpha)
-    p_val, wins, losses, ties = wilcoxon_signed_rank_p(arr)
+    p_wilc, wins, losses, ties = wilcoxon_signed_rank_p(arr)
+    p_perm, _pw, _pl, _pt = exact_sign_permutation_p(arr, seed=len(deltas) * 97 + wins)
     iqm_c = interquartile_mean(cand_progs)
     iqm_i = interquartile_mean(inc_progs)
+    cvar_c = cvar_bottom_quantile(cand_progs, q=0.25)
+    cvar_i = cvar_bottom_quantile(inc_progs, q=0.25)
+    win_d = winsorized_mean(arr, pct=0.05)
+    frac_changed = float((wins + losses) / max(1, len(deltas)))
     return {
         "iqm_cand": round(iqm_c, 4),
         "iqm_inc": round(iqm_i, 4),
         "iqm_delta": round(iqm_c - iqm_i, 4),
         "mean_delta": round(mean_d, 4),
+        "winsor_delta": round(win_d, 4),
+        "cvar25_cand": round(cvar_c, 4),
+        "cvar25_inc": round(cvar_i, 4),
+        "cvar25_delta": round(cvar_c - cvar_i, 4),
         "ci_lower": round(ci_low, 4),
         "ci_upper": round(ci_high, 4),
-        "wilcoxon_p": round(p_val, 5),
+        "wilcoxon_p": round(p_wilc, 5),
+        "sign_perm_p": round(p_perm, 5),
+        "frac_seeds_changed": round(frac_changed, 4),
         "wins": wins,
         "losses": losses,
         "ties": ties,

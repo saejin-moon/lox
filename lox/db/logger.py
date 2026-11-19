@@ -241,6 +241,7 @@ class BatchDatabaseLogger:
                     "dungeons_visited": [
                         max(1, int(r.get("dungeons_visited", 1) or 1)) for r in runs
                     ],
+                    "achievements": [int(r.get("achievements", 0) or 0) for r in runs],
                     "is_shard": [bool(r.get("is_shard", False)) for r in runs],
                     "shard_id": [str(r.get("shard_id", "")) for r in runs],
                     "created_at": [datetime.datetime.now()] * len(runs),

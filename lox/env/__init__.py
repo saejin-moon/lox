@@ -38,14 +38,23 @@ _ADAPTERS: dict[str, type[BenchmarkAdapter]] = {
 }
 
 
+_ADAPTER_CACHE: dict[str, BenchmarkAdapter] = {}
+
+
 def get_adapter(benchmark_name: str = "nethack", **kwargs: object) -> BenchmarkAdapter:
-    """Instantiates a BenchmarkAdapter for the given environment name."""
-    cls = _ADAPTERS.get(benchmark_name.lower())
+    """Instantiates (or returns cached default) BenchmarkAdapter for the given environment name."""
+    key = benchmark_name.lower()
+    if not kwargs and key in _ADAPTER_CACHE:
+        return _ADAPTER_CACHE[key]
+    cls = _ADAPTERS.get(key)
     if cls is None:
         raise ValueError(
             f"Unknown benchmark '{benchmark_name}'. Registered: {list(_ADAPTERS.keys())}"
         )
-    return cls(**kwargs)  # type: ignore[arg-type]
+    inst = cls(**kwargs)  # type: ignore[arg-type]
+    if not kwargs:
+        _ADAPTER_CACHE[key] = inst
+    return inst
 
 
 __all__ = [

@@ -380,53 +380,49 @@ class SwarmCampaignOrchestrator:
             f"Clusters={len(clusters)} (ortho={len(orthogonal_clusters)}) | Peers={active_peers} | MaxSteps={active_max_steps}"
         )
 
-        # 2. Shared Paired CRN Seeds (100% Fresh Per Generation) + Un-Memorized Holdout Seeds
+        # 2. Strictly Disjoint Paired CRN Seed Partitions (stride 10,000 -> zero cross-gen collision!)
+        # - D_dev (`shard_seeds`): historical D_succ + D_fail seeds ONLY (zero leakage from S_select/S_confirm)
+        # - S_select (`select_seeds`): N_select fresh in-sample selection seeds
+        # - S_confirm (`seeds`): N_confirm completely unseen out-of-sample confirmation seeds
         seeds = [
-            10_000 + int(generation) * 100 + i for i in range(self.seeds_per_batch)
+            10_000_000 + int(generation) * 10_000 + i
+            for i in range(self.seeds_per_batch)
         ]
-        n_holdout = max(4, min(16, int(self.seeds_per_batch)))
-        holdout_seeds = [100_000 + int(generation) * 100 + i for i in range(n_holdout)]
+        if self.race_seeds is not None and int(self.seeds_per_batch) >= 8:
+            n_select = max(4, min(int(self.race_seeds), int(self.seeds_per_batch)))
+        elif self.race_seeds is None and int(self.seeds_per_batch) >= 16:
+            n_select = max(4, min(32, int(self.seeds_per_batch) // 2))
+        else:
+            n_select = 0
+        select_seeds: list[int] | None = (
+            [100_000 + int(generation) * 10_000 + i for i in range(n_select)]
+            if n_select >= 4
+            else None
+        )
         raw_shard_seeds = list(
             dict.fromkeys(
                 deficit_report.d_succ_seeds[:2]
                 + [sd for cl in clusters for sd in cl.sample_seeds[:2]]
-                + seeds[:2]
             )
         )
+        if not raw_shard_seeds:
+            raw_shard_seeds = [1, 2]
         max_shard = min(10, max(2, int(self.seeds_per_batch)))
         shard_seeds = raw_shard_seeds[:max_shard]
         incumbent_shard_runs: dict[int, dict[str, Any]] = {}
         if current_policy.strip() and shard_seeds:
-            full_seeds_key = tuple(int(s) for s in seeds)
-            inc_fp = _package_fingerprint(current_policy, initial_skills)
-            cache_k = (
-                id(self.eval_pool),
-                inc_fp,
-                full_seeds_key,
-                int(active_max_steps),
+            inc_shard = self.eval_pool.evaluate_batch(
+                batch_id=f"incubate_inc_g{generation}_{int(time.time())}",
+                policy_code=current_policy,
+                macros_code="",
+                skills=initial_skills,
+                target_episodes=len(shard_seeds),
+                priority_seeds=shard_seeds,
+                max_steps=active_max_steps,
+                record_ticks=False,
             )
-            cached_pair = self.referee._incumbent_cache.get(cache_k)
-            if cached_pair is not None:
-                for r in cached_pair[0].get("runs", []) or []:
-                    sd_i = int(r.get("seed", 0))
-                    if sd_i in shard_seeds:
-                        incumbent_shard_runs[sd_i] = dict(r)
-            missing_shard_seeds = [
-                s for s in shard_seeds if s not in incumbent_shard_runs
-            ]
-            if missing_shard_seeds:
-                inc_shard = self.eval_pool.evaluate_batch(
-                    batch_id=f"incubate_inc_g{generation}_{int(time.time())}",
-                    policy_code=current_policy,
-                    macros_code="",
-                    skills=initial_skills,
-                    target_episodes=len(missing_shard_seeds),
-                    priority_seeds=missing_shard_seeds,
-                    max_steps=active_max_steps,
-                    record_ticks=False,
-                )
-                for r in inc_shard.get("runs", []) or []:
-                    incumbent_shard_runs[int(r.get("seed", 0))] = dict(r)
+            for r in inc_shard.get("runs", []) or []:
+                incumbent_shard_runs[int(r.get("seed", 0))] = dict(r)
 
         # 3. Concurrent Symmetric Peer Agents + E3 Semantic Crossover / Architect Slots (always synced with current incumbent!)
         import copy as _copy
@@ -570,15 +566,7 @@ class SwarmCampaignOrchestrator:
                 "aborting generation to avoid zombie incumbent rollouts."
             )
 
-        # Collect purely organic Tier-2 Frontier shards (campaign-saved Dlvl >= 3 byte prefixes; zero hardcoded benchmarks)
-        tier2_frontier_shards = [
-            sh
-            for sh in (getattr(deficit_report, "organic_shards", None) or [])
-            if getattr(sh, "trigger_context", "") == "frontier_deep"
-            and int(getattr(sh, "depth_at_cut", 1) or 1) >= 3
-        ][:6]
-
-        # 4. Deterministic CRN Tournament + AST 3-Way Composition + Fresh Holdout + Organic Tier-2 Frontier Check
+        # 4. Strict Split-Sample Paired CRN Tournament (Select on S_select -> Confirm single winner on S_confirm)
         verdict = self.referee.evaluate_tournament(
             generation=generation,
             candidates=peer_candidates,
@@ -586,11 +574,10 @@ class SwarmCampaignOrchestrator:
             base_skills=initial_skills,
             eval_pool=self.eval_pool,
             seeds=seeds,
+            select_seeds=select_seeds,
             max_steps=active_max_steps,
-            holdout_seeds=holdout_seeds,
             race_seeds=self.race_seeds,
             scenario_gate=self.scenario_gate,
-            frontier_shards=tier2_frontier_shards,
         )
 
         # 4b. Side Cohesion Refactor (post-promotion side maintenance ONLY — never forces promoted=True)

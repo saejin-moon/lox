@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS runs (
     died_unarmored BOOLEAN DEFAULT FALSE,
     worn_oprop_count INTEGER DEFAULT 0,
     dungeons_visited INTEGER DEFAULT 1,
+    achievements INTEGER DEFAULT 0,
     is_shard BOOLEAN DEFAULT FALSE,
     shard_id VARCHAR DEFAULT '',
     created_at TIMESTAMP
@@ -500,6 +501,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                     ("died_unarmored", "BOOLEAN DEFAULT FALSE"),
                     ("worn_oprop_count", "INTEGER DEFAULT 0"),
                     ("dungeons_visited", "INTEGER DEFAULT 1"),
+                    ("achievements", "INTEGER DEFAULT 0"),
                     ("created_at", "TIMESTAMP"),
                 ]:
                     if c_name not in cols_runs:

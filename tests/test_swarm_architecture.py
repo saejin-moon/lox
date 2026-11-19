@@ -3102,26 +3102,24 @@ def test_swarm_referee_stall_tol_holdout_telemetry_and_experiments_discoveries(
     )
     assert v_h.promoted is False
     assert v_h.holdout_rejected is True
-    assert "holdout gate rejected" in v_h.reason.lower()
+    assert "holdout" in v_h.reason.lower()
     BatchDatabaseLogger(db_path=db_p).save_tournament_attempts(v_h.attempts_summary)
     rep_h = DeficitAnalyzer(db_p).analyze(generation=6, current_policy=base_pol)
     assert any("HOLD_REJECTED" in line for line in rep_h.recent_attempts)
 
-    # 3. SwarmOrchestrator persists experiments & discoveries and rotates 16-seed holdout vault
-    seen_holdout_sets: list[list[int]] = []
+    # 3. SwarmOrchestrator persists experiments & discoveries and uses disjoint Split-Sample S_select -> S_confirm seeds
+    seen_select_sets: list[list[int]] = []
+    seen_confirm_sets: list[list[int]] = []
 
     class _OrchPool:
         def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
             s_list = list(priority_seeds or [])
-            if batch_id.startswith("holdout_") and "_inc_" not in batch_id:
-                seen_holdout_sets.append(list(s_list))
-            is_cand = ("p1" in batch_id) and not batch_id.startswith("holdout_")
-            d = (
-                3
-                if is_cand
-                or (batch_id.startswith("holdout_") and "_inc_" not in batch_id)
-                else 2
-            )
+            if "_sel_" in batch_id and "_inc_" not in batch_id:
+                seen_select_sets.append(list(s_list))
+            if "_conf_" in batch_id and "_inc_" not in batch_id:
+                seen_confirm_sets.append(list(s_list))
+            is_cand = "p1" in batch_id
+            d = 3 if is_cand else 2
             return {
                 "batch_id": batch_id,
                 "avg_depth": float(d),
@@ -3178,10 +3176,12 @@ def test_swarm_referee_stall_tol_holdout_telemetry_and_experiments_discoveries(
         ):
             orch.run(generations=2)
 
-    assert len(seen_holdout_sets) >= 1
-    assert len(seen_holdout_sets[0]) == 16
-    assert all(s >= 100_100 for s in seen_holdout_sets[0])
-    assert len(set(seen_holdout_sets[0])) == 16
+    assert len(seen_select_sets) >= 1
+    assert len(seen_confirm_sets) >= 1
+    assert len(seen_confirm_sets[0]) == 16
+    assert all(s >= 10_000_000 for s in seen_confirm_sets[0])
+    assert set(seen_select_sets[0]).isdisjoint(set(seen_confirm_sets[0]))
+    assert len(set(seen_confirm_sets[0])) == 16
     con2 = connect_db(db2, read_only=True)
     try:
         assert (
@@ -3247,7 +3247,7 @@ def test_map_elites_v2_calibration_deficits_confinement_and_private_symbols(tmp_
     )
     assert len({c1, c2, c3, c4}) == 4
 
-    # 2. progression_metric applies mild -0.15 confinement discount to low-depth max_steps stalls
+    # 2. Anti-Goodhart progression_metric strips farmable xl/score and applies -0.35 penalty on max_steps stalls
     norm_run = {
         "depth": 1,
         "max_depth": 1,
@@ -3265,9 +3265,23 @@ def test_map_elites_v2_calibration_deficits_confinement_and_private_symbols(tmp_
         "unique_tiles": 60,
         "summary_digest": "CONFINEMENT_STALL",
     }
-    assert (
-        abs((progression_metric(norm_run) - progression_metric(camp_run)) - 0.15) < 1e-6
-    )
+    assert progression_metric(norm_run) - progression_metric(camp_run) >= 0.35
+    # Even a high-XL / high-score D2 room-camper must score strictly below a genuine D2 run
+    norm_d2 = {
+        "depth": 2,
+        "max_depth": 2,
+        "score": 150,
+        "xp_level": 2,
+        "end_reason": "killed",
+    }
+    camp_d2 = {
+        "depth": 2,
+        "max_depth": 2,
+        "score": 1800,
+        "xp_level": 6,
+        "end_reason": "max_steps",
+    }
+    assert progression_metric(camp_d2) < progression_metric(norm_d2)
 
     # 3. DeficitAnalyzer isolates shallow max_steps confinement & surfaces raw game_log tail
     db_p = str(tmp_path / "confine.duckdb")

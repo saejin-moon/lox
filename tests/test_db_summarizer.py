@@ -393,7 +393,7 @@ def test_stall_cause_classification_and_progression_metrics():
         "unique_tiles": 50,
         "stairs_down_found": True,
     }
-    assert progression_metric(run_explored) > progression_metric(run_stalled) + 0.20
+    assert progression_metric(run_explored) > progression_metric(run_stalled) + 0.15
 
 
 def test_dynamic_failure_telemetry_digest():
