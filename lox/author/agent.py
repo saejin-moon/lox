@@ -1048,9 +1048,34 @@ class AuthorAgent:
             if canon_mode == "SWARM_PEER"
             else False
         )
+        prev_peer_pool = (
+            getattr(self.tools, "pool", None) if canon_mode == "SWARM_PEER" else None
+        )
+        prev_peer_baselines = (
+            list(getattr(self.tools, "baseline_runs", []) or [])
+            if canon_mode == "SWARM_PEER"
+            else None
+        )
+        prev_peer_guard_seeds = (
+            list(getattr(self.tools, "peer_guard_seeds", []) or [])
+            if canon_mode == "SWARM_PEER"
+            else None
+        )
+        prev_peer_target_seeds = (
+            list(getattr(self.tools, "peer_target_seeds", []) or [])
+            if canon_mode == "SWARM_PEER"
+            else None
+        )
+        prev_max_peer_micro_pilots = (
+            int(getattr(self.tools, "max_peer_micro_pilots", 2))
+            if canon_mode == "SWARM_PEER"
+            else 2
+        )
         self.tools.configure_generation(
-            pool=pool,
-            baseline_runs=baseline_runs,
+            pool=pool if pool is not None else prev_peer_pool,
+            baseline_runs=(
+                baseline_runs if baseline_runs is not None else prev_peer_baselines
+            ),
             max_pilot_runs=max_pilot_runs,
             pilot_episodes=pilot_episodes,
             skills=skills,
@@ -1061,6 +1086,9 @@ class AuthorAgent:
             swarm_checkpoint=prev_swarm_checkpoint,
             claimed_deficit=prev_claimed_deficit,
             scenario_gate=prev_scenario_gate,
+            peer_guard_seeds=prev_peer_guard_seeds,
+            peer_target_seeds=prev_peer_target_seeds,
+            max_peer_micro_pilots=prev_max_peer_micro_pilots,
         )
         if canon_mode == "SWARM_PEER":
             self.tools.enforce_peer_research_gate = prev_peer_research_gate
@@ -1072,6 +1100,7 @@ class AuthorAgent:
         sys_prompt = build_system_prompt(
             self.db_path,
             is_swarm=canon_mode in ("SWARM_WORKER", "SWARM_META", "SWARM_PEER"),
+            is_peer=(canon_mode == "SWARM_PEER"),
         )
         user_prompt = build_user_prompt(
             mode=mode,
@@ -1521,7 +1550,8 @@ class AuthorAgent:
                 )
 
             if (
-                turn_idx >= 4
+                turn_idx >= max(4, max_tool_turns - 3)
+                and not self.tools.last_dry_run_passed
                 and self.tools.pilot_runs_used == 0
                 and not any(
                     (tc.get("function") or {}).get("name") == "dry_run_policy"

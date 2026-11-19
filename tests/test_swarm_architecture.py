@@ -2532,7 +2532,7 @@ def test_more_yn_collision_opt_in_menu_linger_and_hypothesis_summary(tmp_path):
     assert "H-fix-more-yn-loop" in rep.recent_attempts[0]
     assert "binding_constraint" not in rep.recent_attempts[0]
 
-    # 4. enforce_peer_research_gate requires BOTH query_wiki and query_theories before dry_run_policy
+    # 4. enforce_peer_research_gate requires at least 1 empirical lookup (query_db, query_wiki, or query_theories) before dry_run_policy
     from lox.author.tools import AuthorToolRegistry
 
     class _FakeTheories:
@@ -2551,18 +2551,14 @@ def test_more_yn_collision_opt_in_menu_linger_and_hypothesis_summary(tmp_path):
     )
     msg_r1, st_r1 = reg.dry_run_policy(pol_code, seed=42, max_turns=15)
     assert st_r1 == "RESEARCH_REQUIRED"
-    assert "query_wiki" in msg_r1 and "query_theories" in msg_r1
+    assert (
+        "query_db" in msg_r1 and "query_wiki" in msg_r1 and "query_theories" in msg_r1
+    )
 
-    # Querying only theories is not enough; query_wiki is still required
+    # Running at least 1 empirical lookup (e.g. query_theories or query_db or query_wiki) unlocks dry_run_policy
     reg.query_theories("armor equip")
-    msg_r2, st_r2 = reg.dry_run_policy(pol_code, seed=42, max_turns=15)
-    assert st_r2 == "RESEARCH_REQUIRED"
-    assert "query_wiki" in msg_r2
-
-    # Once BOTH query_theories and query_wiki ran, dry_run_policy executes
-    reg.query_wiki("armor slot weight")
-    _msg_r3, st_r3 = reg.dry_run_policy(pol_code, seed=42, max_turns=15)
-    assert st_r3 != "RESEARCH_REQUIRED"
+    _msg_r2, st_r2 = reg.dry_run_policy(pol_code, seed=42, max_turns=15)
+    assert st_r2 != "RESEARCH_REQUIRED"
 
 
 def test_phase4_and_5_organic_scenarios_referee_composition_holdout_and_scoped_ochiai(

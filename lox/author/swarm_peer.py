@@ -640,10 +640,10 @@ class SwarmPeerAgent:
             self._record_peer_theory(generation, claimed_deficit, cand)
             return cand
 
-        # Configure isolated AuthorToolRegistry context (no live pool mutation, check-only dry_run_policy)
+        # Configure isolated AuthorToolRegistry context with paired CRN micro-pilot seeds
         self.author.tools.configure_generation(
-            pool=None,
-            baseline_runs=[],
+            pool=eval_pool,
+            baseline_runs=list((incumbent_shard_runs or {}).values()),
             skills=skills_copy,
             generation=generation,
             mode="SWARM_PEER",
@@ -651,9 +651,25 @@ class SwarmPeerAgent:
             swarm_checkpoint=sampled_frontier[0] if sampled_frontier else None,
             claimed_deficit=claimed_deficit,
             scenario_gate=getattr(self, "scenario_gate", "off"),
+            peer_guard_seeds=list(deficit_report.d_succ_seeds[:2]),
+            peer_target_seeds=list(claimed_deficit.sample_seeds[:2]),
+            max_peer_micro_pilots=2,
         )
         self.author.tools.enforce_peer_research_gate = self.provider != "mock"
         self.author.tools.current_policy_code = str(current_policy or "")
+
+        arch_block = ""
+        try:
+            arch_txt, _ = self.author.tools.architecture_map()
+            if arch_txt and arch_txt.strip():
+                if len(arch_txt) > 2500:
+                    arch_txt = (
+                        arch_txt[:2500]
+                        + "\n... [truncated; call `architecture_map()` for full listing]"
+                    )
+                arch_block = f"\n\n{arch_txt}"
+        except Exception:
+            arch_block = ""
 
         frontier_block = ""
         if sampled_frontier:
@@ -671,12 +687,13 @@ class SwarmPeerAgent:
             )
 
         extra_context = (
-            f"{deficit_report.format_brief()}\n\n"
+            f"{deficit_report.format_brief()}{arch_block}\n\n"
             f"### Your Claimed Target Deficit (`{self.peer_id}`):\n"
             f"- Cluster ID: `{claimed_deficit.cluster_id}` ({claimed_deficit.kind})\n"
             f"- Description: {claimed_deficit.label}\n"
             f"- Evidence: {claimed_deficit.evidence}\n"
             f"- Target Sample Seeds: {claimed_deficit.sample_seeds}\n"
+            f"- Guard Seeds (preserve ZERO DRIFT): {list(deficit_report.d_succ_seeds[:2])}\n"
             f"- Diagnosis Note: Inspect `champion_ticks` / `ticks` and workspace `skills/` directly to locate the true root cause across module boundaries."
             f"{frontier_block}\n"
         )

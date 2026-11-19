@@ -393,7 +393,7 @@ class SwarmCampaignOrchestrator:
                 + seeds[:2]
             )
         )
-        max_shard = min(6, max(2, int(self.seeds_per_batch)))
+        max_shard = min(10, max(2, int(self.seeds_per_batch)))
         shard_seeds = raw_shard_seeds[:max_shard]
         incumbent_shard_runs: dict[int, dict[str, Any]] = {}
         if current_policy.strip() and shard_seeds:
@@ -459,7 +459,7 @@ class SwarmCampaignOrchestrator:
             )
         sampled_elite_ids: list[str] = []
 
-        peer_tool_turns = max(6, int(self.turns_per_worker) * 3)
+        peer_tool_turns = max(12, int(self.turns_per_worker) * 4)
         peer_candidates: list[PeerCandidate] = []
 
         use_refactor_model_for_p1 = bool(

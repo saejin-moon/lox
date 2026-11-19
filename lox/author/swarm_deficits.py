@@ -744,6 +744,17 @@ class DeficitAnalyzer:
                     f"end=`{end_str}`, turns={turns}, Dlvl={max_depth}, tiles={unique_tiles}"
                     + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
                 )
+            elif (float(pct_search or 0.0) >= 35.0 and int(turns or 0) >= 1500) or (
+                end_str.lower() == "max_steps" and int(turns or 0) >= 2000
+            ):
+                _add_to_cluster(
+                    "slice_high_search_or_horizon_burn",
+                    "search_or_horizon_loop",
+                    "High search-action share or step-horizon burn without advancing floors",
+                    row,
+                    f"end=`{end_str}`, Dlvl={max_depth}, turns={turns}, pct_search={float(pct_search or 0):.1f}%, tiles={unique_tiles}"
+                    + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
+                )
             elif (
                 stall_count >= 25
                 or "CONFINEMENT_STALL" in digest_s

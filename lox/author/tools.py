@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 import re
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -50,6 +51,8 @@ from lox.lang.validator import (
     splice_functions_into_policy,
     validate_cross_module_contracts,
 )
+
+_PEER_MICRO_PILOT_LOCK = threading.Lock()
 
 
 def merge_skill_module_update(existing_src: str, candidate_src: str) -> str:
@@ -294,9 +297,14 @@ class AuthorToolRegistry:
         self._reusable_harness_benchmark: str = ""
         self.wiki_queries_run: int = 0
         self.theories_queries_run: int = 0
+        self.db_queries_run: int = 0
         self.enforce_peer_research_gate: bool = False
         self.claimed_deficit: Any = None
         self.scenario_gate: str = "off"
+        self.peer_guard_seeds: list[int] = []
+        self.peer_target_seeds: list[int] = []
+        self.peer_micro_pilots_used: int = 0
+        self.max_peer_micro_pilots: int = 2
 
     def _get_harness(self, max_steps: int, benchmark: str | None = None) -> Any:
         steps = max(10, int(max_steps))
@@ -402,6 +410,9 @@ class AuthorToolRegistry:
         swarm_scaffold_code: str = "",
         claimed_deficit: Any = None,
         scenario_gate: str = "off",
+        peer_guard_seeds: list[int] | None = None,
+        peer_target_seeds: list[int] | None = None,
+        max_peer_micro_pilots: int = 2,
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
         self.pool = pool
@@ -430,7 +441,12 @@ class AuthorToolRegistry:
         self.swarm_experiments = []
         self.wiki_queries_run = 0
         self.theories_queries_run = 0
+        self.db_queries_run = 0
         self.enforce_peer_research_gate = False
+        self.peer_guard_seeds = [int(s) for s in (peer_guard_seeds or [])]
+        self.peer_target_seeds = [int(s) for s in (peer_target_seeds or [])]
+        self.peer_micro_pilots_used = 0
+        self.max_peer_micro_pilots = max(0, int(max_peer_micro_pilots))
         if skills is not None:
             self.skills = dict(skills)
         if benchmark is not None:
@@ -512,6 +528,7 @@ class AuthorToolRegistry:
         con = connect_db(self.db_path, read_only=True)
         try:
             cur = con.execute(clean)
+            self.db_queries_run += 1
             text, count = _format_cursor_yaml(cur, max_rows=max_rows_cap)
             if count == 0:
                 hint = self._build_zero_row_hint(con, clean, low_no_literals)
@@ -1906,16 +1923,16 @@ class AuthorToolRegistry:
             and self.enforce_peer_research_gate
             and not smoke_only
         ):
-            missing_tools: list[str] = []
-            if self.wiki_queries_run == 0:
-                missing_tools.append("query_wiki")
-            if self.theories_store is not None and self.theories_queries_run == 0:
-                missing_tools.append("query_theories")
-            if missing_tools:
+            total_empirical = (
+                int(self.db_queries_run)
+                + int(self.wiki_queries_run)
+                + int(self.theories_queries_run)
+            )
+            if total_empirical == 0:
                 return (
-                    "RESEARCH_REQUIRED: Before calling `dry_run_policy`, call BOTH `query_theories(...)` "
-                    "and at least 1 NetHack rule lookup (`query_wiki(...)`, `query_monster(...)`, or `query_item(...)`) "
-                    f"to verify prior outcomes and exact rules (missing: {', '.join(missing_tools)}).",
+                    "RESEARCH_REQUIRED: Before calling `dry_run_policy`, run at least 1 empirical grounding lookup "
+                    "(`query_db(...)` on `champion_ticks`/`champion_runs`, `query_wiki(...)`/`query_monster(...)`/`query_item(...)`, "
+                    "or `query_theories(...)`) to verify the exact failure trace or rule before patching.",
                     "RESEARCH_REQUIRED",
                 )
 
@@ -2230,6 +2247,7 @@ class AuthorToolRegistry:
                 not is_macro
                 and not smoke_only
                 and not has_replay
+                and self.mode != "SWARM_PEER"
                 and self.pool is not None
                 and self.pilot_runs_used < self.max_pilot_runs
             ):
@@ -3131,6 +3149,19 @@ class AuthorToolRegistry:
                         )
                     warn_block += f"\n- SCENARIO_GATE ERROR: {sg_exc}"
 
+            micro_pilot_block = ""
+            if (
+                not smoke_only
+                and not has_replay
+                and self.mode == "SWARM_PEER"
+                and self.pool is not None
+            ):
+                micro_pilot_block = self._run_peer_paired_micro_pilot(
+                    policy_code=spliced_policy,
+                    cand_skills=cand_skills,
+                    macros_code=macros_code,
+                )
+
             self.last_passed_code = (
                 spliced_policy
                 if (
@@ -3155,7 +3186,7 @@ class AuthorToolRegistry:
                 f"- Functions Called: {{{fn_summary}}}\n"
                 f"- Action Breakdown: {{{act_counts}}}\n"
                 f"- Registered Params: {{{params_summary}}}\n"
-                f"- First 10 Actions: {sample_acts}{replay_checks_block}{warn_block}",
+                f"- First 10 Actions: {sample_acts}{replay_checks_block}{warn_block}{micro_pilot_block}",
                 f"PASSED ({harness.step_count} steps)",
             )
         except Exception as exc:
@@ -3176,6 +3207,214 @@ class AuthorToolRegistry:
                 f"Runtime Error during Dry-Run on seed {active_seed}:\n{type(exc).__name__}: {exc}\n{tb}{extra_hint}",
                 "RUNTIME_ERROR",
             )
+
+    @staticmethod
+    def _first_divergence_byte(a: bytes, b: bytes) -> int | None:
+        if a == b:
+            return None
+        lim = min(len(a), len(b))
+        for i in range(lim):
+            if a[i] != b[i]:
+                return i
+        return lim
+
+    def _run_peer_paired_micro_pilot(
+        self,
+        policy_code: str,
+        cand_skills: dict[str, str],
+        macros_code: str = "",
+    ) -> str:
+        """Runs a fast thread-safe 4-seed paired CRN micro-pilot (2 D_succ guards + 2 D_fail targets)."""
+        if self.pool is None or self.max_peer_micro_pilots <= 0:
+            return ""
+        if self.peer_micro_pilots_used >= self.max_peer_micro_pilots:
+            return (
+                f"\n- Paired Micro-Pilot: skipped (cap {self.peer_micro_pilots_used}/"
+                f"{self.max_peer_micro_pilots} reached; submit or refine without extra micro-pilots)."
+            )
+
+        guard_seeds = list(dict.fromkeys(int(s) for s in self.peer_guard_seeds[:2]))
+        raw_targets = list(self.peer_target_seeds[:2])
+        if not raw_targets and self.claimed_deficit is not None:
+            raw_targets = list(getattr(self.claimed_deficit, "sample_seeds", []) or [])[
+                :2
+            ]
+        target_seeds = [
+            int(s)
+            for s in dict.fromkeys(int(x) for x in raw_targets)
+            if int(s) not in guard_seeds
+        ]
+        all_seeds = guard_seeds + target_seeds
+        if not all_seeds:
+            return ""
+
+        pool_cap = int(
+            getattr(self.pool, "max_steps", self.max_steps) or self.max_steps
+        )
+        micro_max_steps = max(200, min(pool_cap, 4000))
+
+        base_by_seed: dict[int, dict[str, Any]] = {
+            int(r["seed"]): r
+            for r in (self.baseline_runs or [])
+            if isinstance(r, dict) and "seed" in r and not r.get("is_shard")
+        }
+        missing_base = [s for s in all_seeds if s not in base_by_seed]
+        try:
+            with _PEER_MICRO_PILOT_LOCK:
+                if missing_base and str(self.current_policy_code or "").strip():
+                    base_res = self.pool.evaluate_batch(
+                        batch_id=f"peer_mp_inc_g{self.generation}_{int(time.time() * 1000)}",
+                        policy_code=self.current_policy_code,
+                        macros_code=macros_code,
+                        skills=self.skills,
+                        target_episodes=len(missing_base),
+                        priority_seeds=missing_base,
+                        max_steps=micro_max_steps,
+                        record_ticks=False,
+                        show_progress=False,
+                    )
+                    for br in base_res.get("runs", []) or []:
+                        if isinstance(br, dict) and "seed" in br:
+                            sd_i = int(br["seed"])
+                            base_by_seed[sd_i] = dict(br)
+                            self.baseline_runs.append(dict(br))
+
+                cand_res = self.pool.evaluate_batch(
+                    batch_id=f"peer_mp_cand_g{self.generation}_{int(time.time() * 1000)}_{self.peer_micro_pilots_used}",
+                    policy_code=policy_code,
+                    macros_code=macros_code,
+                    skills=cand_skills,
+                    target_episodes=len(all_seeds),
+                    priority_seeds=all_seeds,
+                    max_steps=micro_max_steps,
+                    record_ticks=False,
+                    show_progress=False,
+                )
+        except Exception as exc:
+            return f"\n- Paired Micro-Pilot: unavailable ({type(exc).__name__}: {exc})"
+
+        self.peer_micro_pilots_used += 1
+        cand_by_seed = {
+            int(r["seed"]): r
+            for r in (cand_res.get("runs", []) or [])
+            if isinstance(r, dict) and "seed" in r
+        }
+        if not cand_by_seed:
+            return ""
+
+        lines: list[str] = [
+            f"\n### Paired Micro-Pilot Diff vs Incumbent ({self.peer_micro_pilots_used}/{self.max_peer_micro_pilots}, cap={micro_max_steps} steps)"
+        ]
+        guard_regressions: list[str] = []
+
+        def _fmt_row(role: str, sd: int) -> None:
+            cr = cand_by_seed.get(sd)
+            if cr is None:
+                return
+            br = base_by_seed.get(sd)
+            c_d = int(cr.get("max_depth", cr.get("depth", 1)) or 1)
+            c_sc = int(cr.get("score", 0) or 0)
+            c_t = int(cr.get("turns", 0) or 0)
+            c_end = str(cr.get("end_reason", "unknown") or "unknown")
+            c_srch = float(cr.get("pct_search", 0.0) or 0.0)
+            c_exc = int(cr.get("policy_exceptions", 0) or 0)
+            if br is None:
+                lines.append(
+                    f"  * {role} seed={sd}: Dlvl={c_d}, S={c_sc}, T={c_t}, end={c_end}, search={c_srch:.1f}%, exc={c_exc} (no incumbent cache)"
+                )
+                return
+
+            b_d = int(br.get("max_depth", br.get("depth", 1)) or 1)
+            b_sc = int(br.get("score", 0) or 0)
+            b_t = int(br.get("turns", 0) or 0)
+            b_end = str(br.get("end_reason", "unknown") or "unknown")
+            b_srch = float(br.get("pct_search", 0.0) or 0.0)
+            b_exc = int(br.get("policy_exceptions", 0) or 0)
+
+            b_bytes = bytes(br.get("action_bytes") or b"")
+            c_bytes = bytes(cr.get("action_bytes") or b"")
+            if b_bytes and c_bytes:
+                div_byte = self._first_divergence_byte(b_bytes, c_bytes)
+            else:
+                div_byte = (
+                    None
+                    if (
+                        c_d == b_d
+                        and c_sc == b_sc
+                        and c_t == b_t
+                        and c_end == b_end
+                        and c_exc == b_exc
+                    )
+                    else 0
+                )
+
+            exc_note = f", exc={b_exc}->{c_exc}" if (b_exc or c_exc) else ""
+            if role == "GUARD":
+                if div_byte is None:
+                    lines.append(
+                        f"  * GUARD seed={sd}: ZERO DRIFT (Dlvl {c_d}, S={c_sc}, T={c_t}, end={c_end})"
+                    )
+                else:
+                    regressed = (
+                        c_d < b_d
+                        or c_exc > b_exc
+                        or (c_d == b_d and c_sc <= b_sc - 100)
+                    )
+                    if regressed:
+                        guard_regressions.append(
+                            f"seed={sd} (drift @ byte {div_byte}: Dlvl {b_d}->{c_d}, S {b_sc}->{c_sc}{exc_note})"
+                        )
+                        lines.append(
+                            f"  * GUARD seed={sd}: ⚠️ REGRESSION (DRIFT @ byte {div_byte} -> Dlvl {b_d}->{c_d}, S={b_sc}->{c_sc}, end={b_end}->{c_end}{exc_note})"
+                        )
+                    else:
+                        lines.append(
+                            f"  * GUARD seed={sd}: DRIFT @ byte {div_byte} (Dlvl {b_d}->{c_d}, S={b_sc}->{c_sc}, end={b_end}->{c_end}{exc_note})"
+                        )
+            else:
+                stall_ends = {"stalled_zero_turn", "max_steps", "crash"}
+                improved = (
+                    c_d > b_d
+                    or (
+                        c_d == b_d
+                        and b_end in stall_ends
+                        and c_end not in stall_ends
+                        and c_exc <= b_exc
+                    )
+                    or (c_d == b_d and c_sc >= b_sc + 50 and c_exc <= b_exc)
+                    or (
+                        c_d == b_d
+                        and b_srch - c_srch >= 10.0
+                        and c_sc >= b_sc
+                        and c_exc <= b_exc
+                    )
+                )
+                regressed = c_d < b_d or c_exc > b_exc
+                div_txt = (
+                    "ZERO DRIFT" if div_byte is None else f"drift @ byte {div_byte}"
+                )
+                if improved:
+                    tag = "✅ RESCUED/IMPROVED"
+                elif regressed:
+                    tag = "⚠️ REGRESSED"
+                else:
+                    tag = "UNCHANGED" if div_byte is None else "FLAT"
+                lines.append(
+                    f"  * TARGET seed={sd}: {tag} ({div_txt} -> Dlvl {b_d}->{c_d}, S={b_sc}->{c_sc}, end={b_end}->{c_end}, search {b_srch:.1f}%->{c_srch:.1f}%{exc_note})"
+                )
+
+        for sd in guard_seeds:
+            _fmt_row("GUARD", sd)
+        for sd in target_seeds:
+            _fmt_row("TARGET", sd)
+
+        if guard_regressions:
+            lines.append(
+                "- ⚠️ GUARD DRIFT WARNING: Guard seed(s) regressed: "
+                + "; ".join(guard_regressions)
+                + ". Tighten your guard precondition so healthy D_succ guard seeds keep ZERO DRIFT, then re-test with `dry_run_policy`."
+            )
+        return "\n".join(lines)
 
 
 OPENAI_TOOL_SPECS: list[dict[str, Any]] = [

@@ -106,9 +106,46 @@ POLICY_LANG_DOCS = f"{GENERATOR_POLICY_DOCS}\n{_CORE_HARNESS_BODY}"
 
 
 def build_system_prompt(
-    db_path: str = "data/lox.duckdb", is_swarm: bool = False
+    db_path: str = "data/lox.duckdb",
+    is_swarm: bool = False,
+    is_peer: bool = False,
 ) -> str:
-    schema_md = get_schema_markdown(db_path, is_swarm=is_swarm)
+    schema_md = get_schema_markdown(db_path, is_swarm=is_swarm or is_peer)
+    if is_peer:
+        return f"""LOX Autonomous Synthesis Agent (Option-A Modular Goal & Domain Swarm Peer).
+Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, combat live in `policy.py` + `skills/**/*.py`.**
+
+{CORE_HARNESS_DOCS}
+
+{schema_md}
+
+### SQL Templates (`query_db`)
+1. `SELECT generation, candidate_policy_id, avg_depth, p90_depth, max_depth, avg_score, avg_turns, hypothesis_passed FROM batches ORDER BY generation DESC LIMIT 10;`
+2. `SELECT function_name, episodes_triggered, total_calls, total_turns_active, stagnation_share, livelock_score, liblit_failure_score, ochiai_good_run_score FROM champion_function_stats ORDER BY total_turns_active DESC LIMIT 20;`
+3. `SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, unique_tiles, policy_exceptions, last_active_function, end_reason, summary_digest FROM champion_runs ORDER BY max_depth ASC, turns DESC LIMIT 8;`
+4. `SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth FROM expert_runs;`
+
+### Option-A Subsystem Engineering & Zero-Drift Discipline
+1. **Zero-Drift Guard Scoping (CRITICAL for CRN Stability)**:
+   - NetHack RNG is chaotic: altering a single action on a healthy early turn forks the entire 4,000-turn trajectory and produces noisy ~20W/20L churn that fails statistical gating.
+   - Gate every new branch, interrupt, or fallback **tightly on the exact deficit precondition** (e.g., `consecutive_stalls >= N`, exact status condition/illness/fainting/encumbrance flag, per-floor search cap exceeded, or specific unhandled prompt) so healthy `D_succ` guard seeds keep **0-step action drift**.
+   - Inspect the **Paired Micro-Pilot Diff** returned by `dry_run_policy`: if any `GUARD` seed diverges early and regresses, tighten your guard precondition and re-verify before submitting.
+
+2. **Schema-Safe `ws.domain(...)` State (Zero `KeyError`s)**:
+   - Never assume keys exist in an existing `ws.domain(...)` dictionary when patching a function—existing domains may be initialized elsewhere or evolved incrementally.
+   - Prefer a typed `@dataclass` factory (`ws.domain("illness", IllnessState)`) for new subsystems, and ALWAYS use `.get(key, default)` / `setdefault(...)` when reading or updating dict-backed domains.
+
+3. **Clean Modular Subsystems vs. Core Bloat**:
+   - `Policy.step(state)` observes `self.ws = WorldState()`, checks prompts/survival/combat interrupts, and ticks/preempts committed goals in `GoalRunner` (`skills/goals/core.py`). Never fall through silently to `Action.WAIT`.
+   - **Surgical fix (<= 25 LOC)**: Patch only the owning function inside `<skill_code module="domain/submodule">` (e.g., `prompts`, `survival/core`, `goals/explore`) without rewriting unrelated helpers.
+   - **New capability (e.g., illness/corpse safety, encumbrance shedding, search bailout, ranged combat)**: Create a clean, self-contained 2-level module (`<skill_code module="survival/illness">...` or `<skill_code module="goals/search_bailout">...`, max depth 2, zero 5-LOC re-export facades) and wire it with a minimal hook in `register_goal(...)`, `policy.py`, or the owning dispatcher—never paste 150 lines of unrelated logic into `combat/core.py` or `survival/core.py`. Keep `policy.py` thin (`<= 80 LOC`).
+
+4. **Batch Empirical Research & Iterate on Micro-Pilot Feedback**:
+   - **Never Guess**: Check C rules via `query_wiki` / `read_wiki_article` / `query_monster` / `query_item` and inspect live traces/code via `query_db` / `query_theories` / `diff_policies` / `read_symbol` / ranged `read_skill(name, start_line, end_line)` / `find_references` / `grep_skills` / `benchmark_expert_parity`.
+   - Use the pre-injected `Architecture Map (Option A)` in your prompt instead of blindly reading every skill file; read only the 1–2 files/symbols you plan to modify.
+   - Batch your initial empirical research (`query_db` on `champion_ticks`, `query_wiki`/`query_theories`, and targeted `read_symbol`/`read_skill`) in Turns 1–2, then use `dry_run_policy` (Pyright + cross-module checks + claimed fixtures + `prompt_torture` + 4-seed Paired CRN Micro-Pilot) to verify rescue and eliminate guard drift before emitting your final YAML hypothesis + surgical XML `<skill_code module="domain/submodule">` / `<policy_code>` patches (omit unchanged functions; never put `<hypothesis>` inside `dry_run_policy(code=...)`).
+"""
+
     if is_swarm:
         return f"""LOX Autonomous Synthesis Agent (Hierarchical Behavior Tree Swarm).
 Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, combat live in `policy.py` + `skills/*.py`.**
@@ -519,8 +556,8 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
         return f"""### Gen {generation} — Mode: `SWARM_PEER`
 {digest_block}{existing_policy_block}{skills_block}
 ### Task (`SWARM_PEER`)
-- Research first (`query_theories`, `query_wiki`, `read_wiki_article`, `query_db`, `read_skill`, `read_symbol`, `architecture_map`); never repeat rejected ideas from `Recent Experiment & Rejection Memory`.
-- Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions).
+- Batch empirical research in Turns 1–2 (at least 1 empirical call: `query_db` on `champion_ticks`, `query_wiki`/`query_monster`/`query_item`, or `query_theories`); use the pre-injected `Architecture Map (Option A)` to read only the 1–2 target symbols/files (`read_symbol`, ranged `read_skill`). Never repeat rejected ideas from `Recent Experiment & Rejection Memory`.
+- Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions). Inspect the **Paired Micro-Pilot Diff**: if any `GUARD` seed drifts early and regresses, tighten your guard precondition and re-test before finalizing.
 - Output brief ```yaml``` hypothesis (plus optional `skills_to_prune: [...]`) and final `<skill_code module="...">` / `<policy_code>` XML blocks.
 """
 

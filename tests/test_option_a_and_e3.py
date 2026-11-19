@@ -917,3 +917,206 @@ def test_g11_g12_surgical_zero_loss_and_pareto_depth_score_promotion():
     )
     assert v_g11.promoted is True, v_g11.reason
     assert v_g11.winner_id == "ortho_peer_2_peer_3"
+
+
+def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_path):
+    """Verifies G16-G25 plateau breakthrough: clean Option-A peer prompt, paired CRN micro-pilot diff,
+    1-lookup empirical research gate, and high-search/horizon deficit slice."""
+    from lox.author.prompts import build_system_prompt
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import init_db
+
+    # 1. Option-A peer system prompt drops contradictory BehaviorTree docs & teaches Zero-Drift + Schema-Safe rules
+    peer_sys = build_system_prompt(is_swarm=True, is_peer=True)
+    assert "Zero-Drift Guard Scoping" in peer_sys
+    assert "Schema-Safe `ws.domain(...)`" in peer_sys
+    assert "Paired Micro-Pilot Diff" in peer_sys
+    assert "PrioritySelector" not in peer_sys
+    assert "ActionLeaf" not in peer_sys
+    assert "Blackboard" not in peer_sys
+
+    # Legacy is_swarm=True, is_peer=False remains backward-compatible
+    legacy_sys = build_system_prompt(is_swarm=True, is_peer=False)
+    assert "PrioritySelector" in legacy_sys
+
+    # 2. Relaxed RESEARCH_REQUIRED gate: 1 query_db lookup unlocks dry_run_policy
+    dbp = str(tmp_path / "mp.duckdb")
+    con = init_db(dbp)
+    con.execute(
+        """
+        INSERT INTO batches (batch_id, generation, mode, parent_policy_id, candidate_policy_id, avg_depth, max_depth, avg_score, avg_turns, hypothesis_passed)
+        VALUES ('b1', 18, 'SWARM', 'p0', 'p18', 2.5, 6, 420.0, 2200.0, TRUE)
+        """
+    )
+    # Seed 101: Dlvl 6 guard (healthy); Seed 202: high-search starvation at Dlvl 3; Seed 203: shallow max_steps confinement
+    con.execute(
+        """
+        INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, final_hp, max_hp, final_ac, xp_level, end_reason, pct_wait, pct_search, unique_tiles)
+        VALUES
+          ('r101', 'b1', 18, 101, 6, 6, 950, 1200, 1200, 18, 22, 2, 4, 'killed', 1.0, 4.0, 320),
+          ('r202', 'b1', 18, 202, 3, 3, 410, 6864, 6864, 0, 18, 4, 3, 'starved', 2.0, 44.5, 190),
+          ('r203', 'b1', 18, 203, 2, 2, 220, 4000, 4000, 16, 16, 4, 2, 'max_steps', 3.0, 52.0, 120)
+        """
+    )
+    con.close()
+
+    # 3. DeficitAnalyzer isolates pct_search >= 35%, turns >= 1500 into slice_high_search_or_horizon_burn
+    #    while keeping Dlvl <= 2 max_steps inside slice_max_steps_confinement
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=19, current_policy="class Policy: pass"
+    )
+    cluster_map = {c.cluster_id: c for c in rep.fail_clusters}
+    assert "slice_high_search_or_horizon_burn" in cluster_map
+    assert 202 in cluster_map["slice_high_search_or_horizon_burn"].sample_seeds
+    assert "slice_max_steps_confinement" in cluster_map
+    assert 203 in cluster_map["slice_max_steps_confinement"].sample_seeds
+
+    # 4. Paired CRN Micro-Pilot inside SWARM_PEER dry_run_policy (with exact first-divergence byte & 2-call cap)
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.SEARCH\n"
+    )
+    cand_pol_v1 = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n"
+    )
+    cand_pol_v2 = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.E\n"
+    )
+    cand_pol_v3 = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.W\n"
+    )
+
+    class _MockMicroPilotPool:
+        max_steps = 8000
+
+        def __init__(self):
+            self.calls = 0
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            self.calls += 1
+            assert kwargs.get("max_steps") == 4000
+            runs = []
+            for sd in priority_seeds or []:
+                if sd == 101:
+                    # Call 1 regresses guard seed with drift at byte 3; Call 2 has ZERO DRIFT
+                    if self.calls == 1:
+                        runs.append(
+                            {
+                                "seed": 101,
+                                "max_depth": 2,
+                                "score": 200,
+                                "turns": 400,
+                                "end_reason": "killed",
+                                "pct_search": 5.0,
+                                "policy_exceptions": 0,
+                                "action_bytes": b"abcXYZ",
+                            }
+                        )
+                    else:
+                        runs.append(
+                            {
+                                "seed": 101,
+                                "max_depth": 6,
+                                "score": 950,
+                                "turns": 1200,
+                                "end_reason": "killed",
+                                "pct_search": 4.0,
+                                "policy_exceptions": 0,
+                                "action_bytes": b"abcdef",
+                            }
+                        )
+                elif sd == 202:
+                    runs.append(
+                        {
+                            "seed": 202,
+                            "max_depth": 5,
+                            "score": 760,
+                            "turns": 1800,
+                            "end_reason": "killed",
+                            "pct_search": 12.0,
+                            "policy_exceptions": 0,
+                            "action_bytes": b"ssssNN",
+                        }
+                    )
+            return {"batch_id": batch_id, "runs": runs}
+
+    mp_pool = _MockMicroPilotPool()
+    baseline_runs = [
+        {
+            "seed": 101,
+            "max_depth": 6,
+            "score": 950,
+            "turns": 1200,
+            "end_reason": "killed",
+            "pct_search": 4.0,
+            "policy_exceptions": 0,
+            "action_bytes": b"abcdef",
+        },
+        {
+            "seed": 202,
+            "max_depth": 3,
+            "score": 410,
+            "turns": 6864,
+            "end_reason": "starved",
+            "pct_search": 44.5,
+            "policy_exceptions": 0,
+            "action_bytes": b"ssssss",
+        },
+    ]
+
+    reg = AuthorToolRegistry(db_path=dbp)
+    reg.configure_generation(
+        pool=mp_pool,
+        baseline_runs=baseline_runs,
+        generation=19,
+        mode="SWARM_PEER",
+        peer_guard_seeds=[101],
+        peer_target_seeds=[202],
+        max_peer_micro_pilots=2,
+    )
+    reg.current_policy_code = base_pol
+    reg.enforce_peer_research_gate = True
+
+    # Blocked before empirical lookup
+    _, st0 = reg.dry_run_policy(cand_pol_v1, seed=42, max_turns=15)
+    assert st0 == "RESEARCH_REQUIRED"
+
+    # Single query_db call unlocks dry_run_policy
+    _, db_st = reg.query_db("SELECT seed, max_depth FROM runs LIMIT 3")
+    assert "rows" in db_st
+
+    # Micro-pilot 1: detects GUARD regression @ byte 3 + TARGET rescue
+    out1, st1 = reg.dry_run_policy(cand_pol_v1, seed=42, max_turns=15)
+    assert st1.startswith("PASSED")
+    assert "Paired Micro-Pilot Diff vs Incumbent (1/2" in out1
+    assert "GUARD seed=101: ⚠️ REGRESSION (DRIFT @ byte 3 -> Dlvl 6->2" in out1
+    assert "GUARD DRIFT WARNING" in out1
+    assert "TARGET seed=202: ✅ RESCUED/IMPROVED (drift @ byte 4 -> Dlvl 3->5" in out1
+    assert mp_pool.calls == 1
+
+    # Micro-pilot 2: tightened guard achieves ZERO DRIFT on guard seed + keeps TARGET rescue
+    out2, st2 = reg.dry_run_policy(cand_pol_v2, seed=42, max_turns=15)
+    assert st2.startswith("PASSED")
+    assert "Paired Micro-Pilot Diff vs Incumbent (2/2" in out2
+    assert "GUARD seed=101: ZERO DRIFT (Dlvl 6" in out2
+    assert "GUARD DRIFT WARNING" not in out2
+    assert mp_pool.calls == 2
+
+    # Micro-pilot 3: respects 2-call cap (does not call eval_pool again)
+    out3, st3 = reg.dry_run_policy(cand_pol_v3, seed=42, max_turns=15)
+    assert st3.startswith("PASSED")
+    assert "cap 2/2 reached" in out3
+    assert mp_pool.calls == 2
+    reg.close()
