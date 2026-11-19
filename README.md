@@ -222,7 +222,7 @@ scripts/
 ├── modularize_policy.py       # Standalone AST policy modularizer CLI
 ├── reset_clean.py             # Resets campaign tables & workspace while preserving wiki/experts
 └── build_core.sh              # Builds & installs lox-core via maturin --release
-tests/                         # 182 automated unit & integration tests
+tests/                         # 183 automated unit & integration tests
 ```
 
 ---
@@ -236,7 +236,7 @@ uv sync
 ./scripts/build_core.sh          # compiles & installs lox_core (PyO3 release wheel)
 uv run ruff check .
 uv run ruff format --check .
-uv run pytest -v                 # 182 tests
+uv run pytest -v                 # 183 tests
 ```
 
 ### 2. Build Offline Wiki & Human Expert Corpus (One-Time Setup)

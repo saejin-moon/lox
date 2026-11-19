@@ -304,7 +304,7 @@ class AuthorToolRegistry:
         self.peer_guard_seeds: list[int] = []
         self.peer_target_seeds: list[int] = []
         self.peer_micro_pilots_used: int = 0
-        self.max_peer_micro_pilots: int = 2
+        self.max_peer_micro_pilots: int = 3
 
     def _get_harness(self, max_steps: int, benchmark: str | None = None) -> Any:
         steps = max(10, int(max_steps))
@@ -412,7 +412,7 @@ class AuthorToolRegistry:
         scenario_gate: str = "off",
         peer_guard_seeds: list[int] | None = None,
         peer_target_seeds: list[int] | None = None,
-        max_peer_micro_pilots: int = 2,
+        max_peer_micro_pilots: int = 3,
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
         self.pool = pool
@@ -3248,16 +3248,25 @@ class AuthorToolRegistry:
         if not all_seeds:
             return ""
 
-        pool_cap = int(
-            getattr(self.pool, "max_steps", self.max_steps) or self.max_steps
-        )
-        micro_max_steps = max(200, min(pool_cap, 4000))
-
         base_by_seed: dict[int, dict[str, Any]] = {
             int(r["seed"]): r
             for r in (self.baseline_runs or [])
             if isinstance(r, dict) and "seed" in r and not r.get("is_shard")
         }
+        target_turns_vals = [
+            int(base_by_seed[s].get("turns", 0) or 0)
+            for s in target_seeds
+            if s in base_by_seed
+        ]
+        if not target_turns_vals and self.claimed_deficit is not None:
+            target_turns_vals = [
+                int(getattr(self.claimed_deficit, "avg_turns", 0) or 0)
+            ]
+        long_horizon_target = any(t >= 4000 for t in target_turns_vals)
+        pool_cap = int(
+            getattr(self.pool, "max_steps", self.max_steps) or self.max_steps
+        )
+        micro_max_steps = max(200, min(pool_cap, 6500 if long_horizon_target else 4000))
         missing_base = [s for s in all_seeds if s not in base_by_seed]
         try:
             with _PEER_MICRO_PILOT_LOCK:
@@ -3306,8 +3315,11 @@ class AuthorToolRegistry:
             f"\n### Paired Micro-Pilot Diff vs Incumbent ({self.peer_micro_pilots_used}/{self.max_peer_micro_pilots}, cap={micro_max_steps} steps)"
         ]
         guard_regressions: list[str] = []
+        target_evaluated = 0
+        target_unchanged = 0
 
         def _fmt_row(role: str, sd: int) -> None:
+            nonlocal target_evaluated, target_unchanged
             cr = cand_by_seed.get(sd)
             if cr is None:
                 return
@@ -3369,9 +3381,12 @@ class AuthorToolRegistry:
                         )
                     else:
                         lines.append(
-                            f"  * GUARD seed={sd}: DRIFT @ byte {div_byte} (Dlvl {b_d}->{c_d}, S={b_sc}->{c_sc}, end={b_end}->{c_end}{exc_note})"
+                            f"  * GUARD seed={sd}: OK (non-regressing drift @ byte {div_byte} -> Dlvl {b_d}->{c_d}, S={b_sc}->{c_sc}, end={b_end}->{c_end}{exc_note}; do NOT over-tighten)"
                         )
             else:
+                target_evaluated += 1
+                if div_byte is None:
+                    target_unchanged += 1
                 stall_ends = {"stalled_zero_turn", "max_steps", "crash"}
                 improved = (
                     c_d > b_d
@@ -3412,7 +3427,12 @@ class AuthorToolRegistry:
             lines.append(
                 "- ⚠️ GUARD DRIFT WARNING: Guard seed(s) regressed: "
                 + "; ".join(guard_regressions)
-                + ". Tighten your guard precondition so healthy D_succ guard seeds keep ZERO DRIFT, then re-test with `dry_run_policy`."
+                + ". Tighten your guard precondition to prevent regression without overfitting to a single target seed, then re-test with `dry_run_policy`."
+            )
+        if target_evaluated > 0 and target_unchanged == target_evaluated:
+            lines.append(
+                "- ⚠️ DEAD-PATCH WARNING: All TARGET seed(s) were UNCHANGED (0-byte drift). "
+                "Your precondition is too narrow or unreachable — broaden it to the general failure mechanism and re-test before submitting."
             )
         return "\n".join(lines)
 

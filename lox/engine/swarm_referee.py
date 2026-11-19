@@ -827,9 +827,13 @@ class SwarmReferee:
                     }
                 )
 
-        def _passes_score_guard(cand_stats: dict[str, Any]) -> bool:
+        def _passes_score_guard(
+            cand_stats: dict[str, Any],
+            ref_inc_stats: dict[str, Any] | None = None,
+        ) -> bool:
             """Prevents runtime exception regressions, score collapses, or new hard stalls."""
-            inc_exc = int(inc_stats.get("policy_exceptions", 0) or 0)
+            ref_inc = ref_inc_stats if ref_inc_stats is not None else inc_stats
+            inc_exc = int(ref_inc.get("policy_exceptions", 0) or 0)
             cand_exc = int(cand_stats.get("policy_exceptions", 0) or 0)
             if cand_exc > 0 and (
                 not base_policy.strip() or inc_exc == 0 or cand_exc > inc_exc
@@ -837,18 +841,18 @@ class SwarmReferee:
                 return False
             if not base_policy.strip():
                 return True
-            inc_s = float(inc_stats["avg_score"])
+            inc_s = float(ref_inc["avg_score"])
             cand_s = float(cand_stats["avg_score"])
-            d_gain = float(cand_stats["avg_depth"]) - float(inc_stats["avg_depth"])
+            d_gain = float(cand_stats["avg_depth"]) - float(ref_inc["avg_depth"])
             if inc_s >= 50.0 and cand_s < inc_s * 0.70 and d_gain < 0.50:
                 return False
-            inc_hard = int(inc_stats.get("hard_stall_count", 0))
+            inc_hard = int(ref_inc.get("hard_stall_count", 0))
             cand_hard = int(cand_stats.get("hard_stall_count", 0))
             cand_n = max(1, int(cand_stats.get("run_count", 0) or 0))
             stall_tol = cand_n // 16
-            inc_zombie = float(inc_stats.get("pct_wait", 0.0) or 0.0) >= 65.0
+            inc_zombie = float(ref_inc.get("pct_wait", 0.0) or 0.0) >= 65.0
             cand_active = float(cand_stats.get("pct_wait", 0.0) or 0.0) <= 60.0
-            inc_ac = float(inc_stats.get("avg_ac", 10.0) or 10.0)
+            inc_ac = float(ref_inc.get("avg_ac", 10.0) or 10.0)
             cand_ac = float(cand_stats.get("avg_ac", 10.0) or 10.0)
             multi_axis_win = d_gain >= 0.05 and cand_s > inc_s and cand_ac <= inc_ac
             if cand_hard > inc_hard and not (
@@ -898,9 +902,11 @@ class SwarmReferee:
         def _evaluate_promotion_eligibility(
             cand_stats: dict[str, Any],
             pair_stats: dict[str, Any],
+            ref_inc_stats: dict[str, Any] | None = None,
         ) -> tuple[bool, float, float, bool]:
             """Returns `(beats_incumbent, d_delta, s_delta, guard_ok)` against incumbent."""
-            guard_ok = _passes_score_guard(cand_stats)
+            ref_inc = ref_inc_stats if ref_inc_stats is not None else inc_stats
+            guard_ok = _passes_score_guard(cand_stats, ref_inc_stats=ref_inc)
             if not base_policy.strip():
                 return (
                     guard_ok,
@@ -908,8 +914,8 @@ class SwarmReferee:
                     float(cand_stats["avg_score"]),
                     guard_ok,
                 )
-            d_delta = float(cand_stats["avg_depth"]) - float(inc_stats["avg_depth"])
-            s_delta = float(cand_stats["avg_score"]) - float(inc_stats["avg_score"])
+            d_delta = float(cand_stats["avg_depth"]) - float(ref_inc["avg_depth"])
+            s_delta = float(cand_stats["avg_score"]) - float(ref_inc["avg_score"])
             iqm_delta = float(pair_stats.get("iqm_delta", 0.0))
             mean_p_delta = float(pair_stats.get("mean_delta", 0.0))
             wins = int(pair_stats.get("wins", 0))
@@ -919,28 +925,28 @@ class SwarmReferee:
             ci_low = float(pair_stats.get("ci_lower", 0.0))
             ac_improved = (
                 float(cand_stats.get("avg_ac", 10.0))
-                < float(inc_stats.get("avg_ac", 10.0)) - 0.1
+                < float(ref_inc.get("avg_ac", 10.0)) - 0.1
             )
             ac_non_worse = (
                 float(cand_stats.get("avg_ac", 10.0))
-                <= float(inc_stats.get("avg_ac", 10.0)) + 0.5
+                <= float(ref_inc.get("avg_ac", 10.0)) + 0.5
             )
             pareto_non_regressing = (
                 d_delta >= -0.05
                 and iqm_delta >= -0.02
                 and ac_non_worse
                 and float(cand_stats.get("stall_rate", 0.0))
-                <= float(inc_stats.get("stall_rate", 0.0)) + 0.04
+                <= float(ref_inc.get("stall_rate", 0.0)) + 0.04
                 and float(cand_stats.get("early_blunder_rate", 0.0))
-                <= float(inc_stats.get("early_blunder_rate", 0.0)) + 0.04
+                <= float(ref_inc.get("early_blunder_rate", 0.0)) + 0.04
             )
             pareto_axis_gain = (
                 float(cand_stats.get("p75_depth", 1.0))
-                > float(inc_stats.get("p75_depth", 1.0)) + 0.25
+                > float(ref_inc.get("p75_depth", 1.0)) + 0.25
                 or float(cand_stats.get("avg_oprop", 0.0))
-                > float(inc_stats.get("avg_oprop", 0.0)) + 0.15
+                > float(ref_inc.get("avg_oprop", 0.0)) + 0.15
                 or float(cand_stats.get("avg_branches", 1.0))
-                > float(inc_stats.get("avg_branches", 1.0)) + 0.08
+                > float(ref_inc.get("avg_branches", 1.0)) + 0.08
                 or (ac_improved and iqm_delta >= 0.0)
                 or (d_delta >= 0.08 and s_delta >= 25.0 and iqm_delta >= 0.05)
             )
@@ -959,7 +965,7 @@ class SwarmReferee:
                 and s_delta >= 0.0
             )
             inc_zombie_rescue = (
-                float(inc_stats.get("pct_wait", 0.0) or 0.0) >= 65.0
+                float(ref_inc.get("pct_wait", 0.0) or 0.0) >= 65.0
                 and float(cand_stats.get("pct_wait", 0.0) or 0.0) <= 60.0
                 and d_delta > 0.05
                 and wins > losses
@@ -1045,6 +1051,103 @@ class SwarmReferee:
         best_cand, best_eval, best_stats = evaluated_entries[best_idx]
         best_pair = paired_by_idx[best_idx]
         beats_incumbent, d_delta, s_delta, guard_ok = eligibility_by_idx[best_idx]
+
+        # Stage-3 Tiebreaker Extension: when 0 candidates promote on Stage-2 seeds,
+        # extend ONLY the single top high-signal surgical near-miss + incumbent by +64 fresh
+        # CRN seeds (disjoint from main & holdout seed ranges) and re-run the exact same gates.
+        if (
+            not beats_incumbent
+            and guard_ok
+            and base_policy.strip()
+            and len(seeds) >= 32
+            and int(best_pair.get("wins", 0) or 0)
+            >= int(best_pair.get("losses", 0) or 0) + 3
+            and float(best_pair.get("iqm_delta", 0.0) or 0.0) >= 0.0
+            and float(best_pair.get("mean_delta", 0.0) or 0.0) > 0.0
+            and d_delta >= 0.04
+            and s_delta >= 0.0
+            and 0.05 <= float(best_pair.get("wilcoxon_p", 1.0) or 1.0) < 0.15
+        ):
+            ext_n = min(64, len(seeds))
+            s3_seeds = [200_000 + int(generation) * 100 + i for i in range(ext_n)]
+            ui.info(
+                f"Gen {generation} Stage-3 Tiebreaker: extending near-miss `{best_cand.peer_id}` "
+                f"({best_pair.get('wins')}W-{best_pair.get('losses')}L, p={float(best_pair.get('wilcoxon_p', 1.0)):.4f}, "
+                f"ΔD={d_delta:+.3f}, ΔIQM={float(best_pair.get('iqm_delta', 0.0)):+.4f}) by +{ext_n} fresh CRN seeds."
+            )
+            s3_batches = _run_batch_slice(
+                [
+                    ("inc", base_policy, base_skills, None, False),
+                    (
+                        best_cand.peer_id,
+                        best_cand.policy_code,
+                        best_cand.skills,
+                        best_cand,
+                        False,
+                    ),
+                ],
+                s3_seeds,
+                "s3_",
+            )
+            s3_inc = s3_batches.get("inc")
+            s3_cand = s3_batches.get(best_cand.peer_id)
+            if s3_inc is not None and s3_cand is not None:
+                comb_inc_runs = list(inc_runs_list) + list(s3_inc.get("runs", []) or [])
+                comb_cand_runs = list(best_eval.get("runs", []) or []) + list(
+                    s3_cand.get("runs", []) or []
+                )
+                comb_inc_eval = BatchEvaluation(
+                    {
+                        **(dict(inc_batch_eval) if inc_batch_eval is not None else {}),
+                        "runs": comb_inc_runs,
+                    }
+                )
+                comb_cand_eval = BatchEvaluation(
+                    {
+                        **dict(best_eval),
+                        "runs": comb_cand_runs,
+                    }
+                )
+                comb_inc_stats = _extract_eval_stats(
+                    comb_inc_eval, loc_total=inc_stats.get("loc_total", 0)
+                )
+                comb_cand_stats = _extract_eval_stats(
+                    comb_cand_eval, loc_total=best_cand.loc_total
+                )
+                comb_pair = evaluate_tournament_pair(
+                    comb_cand_runs,
+                    comb_inc_runs,
+                    benchmark=bm_name,
+                )
+                ext_beats, ext_d, ext_s, ext_guard = _evaluate_promotion_eligibility(
+                    comb_cand_stats,
+                    comb_pair,
+                    ref_inc_stats=comb_inc_stats,
+                )
+                best_eval = comb_cand_eval
+                best_stats = comb_cand_stats
+                best_pair = comb_pair
+                beats_incumbent = ext_beats
+                d_delta = ext_d
+                s_delta = ext_s
+                guard_ok = ext_guard
+                evaluated_entries[best_idx] = (best_cand, best_eval, best_stats)
+                paired_by_idx[best_idx] = best_pair
+                eligibility_by_idx[best_idx] = (
+                    beats_incumbent,
+                    d_delta,
+                    s_delta,
+                    guard_ok,
+                )
+                if beats_incumbent:
+                    inc_runs_list = comb_inc_runs
+                    inc_stats = comb_inc_stats
+                    ui.info(
+                        f"Gen {generation} Stage-3 Tiebreaker PASSED for `{best_cand.peer_id}`: "
+                        f"{best_pair.get('wins')}W-{best_pair.get('losses')}L, "
+                        f"p={float(best_pair.get('wilcoxon_p', 1.0)):.4f}, ΔD={d_delta:+.3f}, "
+                        f"ΔIQM={float(best_pair.get('iqm_delta', 0.0)):+.4f} across {len(comb_cand_runs)} seeds."
+                    )
 
         # N-Way Sequential Greedy Stacking across non-conflicting winning peers
         if beats_incumbent and base_policy.strip():

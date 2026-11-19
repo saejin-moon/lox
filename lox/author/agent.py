@@ -1067,9 +1067,9 @@ class AuthorAgent:
             else None
         )
         prev_max_peer_micro_pilots = (
-            int(getattr(self.tools, "max_peer_micro_pilots", 2))
+            int(getattr(self.tools, "max_peer_micro_pilots", 3))
             if canon_mode == "SWARM_PEER"
-            else 2
+            else 3
         )
         self.tools.configure_generation(
             pool=pool if pool is not None else prev_peer_pool,

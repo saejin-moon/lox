@@ -1006,11 +1006,12 @@ def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_pat
 
         def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
             self.calls += 1
-            assert kwargs.get("max_steps") == 4000
+            # Target seed 202 had turns=6864 (>= 4000), so long-horizon cap scales to 6500
+            assert kwargs.get("max_steps") == 6500
             runs = []
             for sd in priority_seeds or []:
                 if sd == 101:
-                    # Call 1 regresses guard seed with drift at byte 3; Call 2 has ZERO DRIFT
+                    # Call 1 regresses guard seed @ byte 3; Call 2 has non-regressing drift; Call 3 has ZERO DRIFT
                     if self.calls == 1:
                         runs.append(
                             {
@@ -1022,6 +1023,19 @@ def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_pat
                                 "pct_search": 5.0,
                                 "policy_exceptions": 0,
                                 "action_bytes": b"abcXYZ",
+                            }
+                        )
+                    elif self.calls == 2:
+                        runs.append(
+                            {
+                                "seed": 101,
+                                "max_depth": 6,
+                                "score": 960,
+                                "turns": 1200,
+                                "end_reason": "killed",
+                                "pct_search": 4.0,
+                                "policy_exceptions": 0,
+                                "action_bytes": b"abcdeZ",
                             }
                         )
                     else:
@@ -1038,18 +1052,33 @@ def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_pat
                             }
                         )
                 elif sd == 202:
-                    runs.append(
-                        {
-                            "seed": 202,
-                            "max_depth": 5,
-                            "score": 760,
-                            "turns": 1800,
-                            "end_reason": "killed",
-                            "pct_search": 12.0,
-                            "policy_exceptions": 0,
-                            "action_bytes": b"ssssNN",
-                        }
-                    )
+                    # Call 3 simulates an over-tightened dead patch (ZERO DRIFT on target)
+                    if self.calls == 3:
+                        runs.append(
+                            {
+                                "seed": 202,
+                                "max_depth": 3,
+                                "score": 410,
+                                "turns": 6864,
+                                "end_reason": "starved",
+                                "pct_search": 44.5,
+                                "policy_exceptions": 0,
+                                "action_bytes": b"ssssss",
+                            }
+                        )
+                    else:
+                        runs.append(
+                            {
+                                "seed": 202,
+                                "max_depth": 5,
+                                "score": 760,
+                                "turns": 1800,
+                                "end_reason": "killed",
+                                "pct_search": 12.0,
+                                "policy_exceptions": 0,
+                                "action_bytes": b"ssssNN",
+                            }
+                        )
             return {"batch_id": batch_id, "runs": runs}
 
     mp_pool = _MockMicroPilotPool()
@@ -1084,7 +1113,7 @@ def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_pat
         mode="SWARM_PEER",
         peer_guard_seeds=[101],
         peer_target_seeds=[202],
-        max_peer_micro_pilots=2,
+        max_peer_micro_pilots=3,
     )
     reg.current_policy_code = base_pol
     reg.enforce_peer_research_gate = True
@@ -1100,23 +1129,187 @@ def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_pat
     # Micro-pilot 1: detects GUARD regression @ byte 3 + TARGET rescue
     out1, st1 = reg.dry_run_policy(cand_pol_v1, seed=42, max_turns=15)
     assert st1.startswith("PASSED")
-    assert "Paired Micro-Pilot Diff vs Incumbent (1/2" in out1
+    assert "Paired Micro-Pilot Diff vs Incumbent (1/3" in out1
     assert "GUARD seed=101: ⚠️ REGRESSION (DRIFT @ byte 3 -> Dlvl 6->2" in out1
     assert "GUARD DRIFT WARNING" in out1
     assert "TARGET seed=202: ✅ RESCUED/IMPROVED (drift @ byte 4 -> Dlvl 3->5" in out1
     assert mp_pool.calls == 1
 
-    # Micro-pilot 2: tightened guard achieves ZERO DRIFT on guard seed + keeps TARGET rescue
+    # Micro-pilot 2: non-regressing guard drift explicitly marked OK (do NOT over-tighten)
     out2, st2 = reg.dry_run_policy(cand_pol_v2, seed=42, max_turns=15)
     assert st2.startswith("PASSED")
-    assert "Paired Micro-Pilot Diff vs Incumbent (2/2" in out2
-    assert "GUARD seed=101: ZERO DRIFT (Dlvl 6" in out2
+    assert "Paired Micro-Pilot Diff vs Incumbent (2/3" in out2
+    assert "GUARD seed=101: OK (non-regressing drift @ byte 5" in out2
+    assert "do NOT over-tighten" in out2
     assert "GUARD DRIFT WARNING" not in out2
     assert mp_pool.calls == 2
 
-    # Micro-pilot 3: respects 2-call cap (does not call eval_pool again)
+    # Micro-pilot 3: over-tightened dead patch triggers DEAD-PATCH WARNING
     out3, st3 = reg.dry_run_policy(cand_pol_v3, seed=42, max_turns=15)
     assert st3.startswith("PASSED")
-    assert "cap 2/2 reached" in out3
-    assert mp_pool.calls == 2
+    assert "Paired Micro-Pilot Diff vs Incumbent (3/3" in out3
+    assert "GUARD seed=101: ZERO DRIFT (Dlvl 6" in out3
+    assert "DEAD-PATCH WARNING" in out3
+    assert mp_pool.calls == 3
+
+    # Micro-pilot 4: respects 3-call cap (does not call eval_pool again)
+    out4, st4 = reg.dry_run_policy(
+        cand_pol_v3 + "\n# cap check\n", seed=42, max_turns=15
+    )
+    assert st4.startswith("PASSED")
+    assert "cap 3/3 reached" in out4
+    assert mp_pool.calls == 3
     reg.close()
+
+
+def test_stage3_tiebreaker_extension_and_confinement_priority(tmp_path):
+    """Verifies Stage-3 +64-seed tiebreaker extension promotes genuine 8W-3L surgical near-misses
+    while rejecting spurious near-misses, and verifies confinement_horizon priority weighting."""
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.db.schema import init_db
+    from lox.engine.swarm_referee import SwarmReferee
+
+    # 1. Confinement priority: 8 max_steps Dlvl<=2 runs outrank 10 generic early-termination runs
+    dbp = str(tmp_path / "conf_prio.duckdb")
+    con = init_db(dbp)
+    con.execute(
+        "INSERT INTO batches (batch_id, generation, mode, hypothesis_passed) VALUES ('b35', 35, 'SWARM', TRUE)"
+    )
+    for i in range(8):
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, end_reason, pct_search, unique_tiles)
+            VALUES (?, 'b35', 35, ?, 2, 2, 400, 9500, 10000, 'max_steps', 65.0, 180)
+            """,
+            [f"m_{i}", 13500 + i],
+        )
+    for i in range(10):
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, end_reason, pct_search, unique_tiles)
+            VALUES (?, 'b35', 35, ?, 2, 2, 150, 180, 180, 'killed', 5.0, 90)
+            """,
+            [f"e_{i}", 13600 + i],
+        )
+    con.close()
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=36, current_policy="class Policy: pass"
+    )
+    assert rep.fail_clusters[0].cluster_id == "slice_max_steps_confinement"
+
+    # 2. Stage-3 Tiebreaker Extension: 8W-3L (p~0.084) on 64 seeds extends by +64 seeds (200_000+) -> 16W-6L (p<0.05) -> promotes!
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n"
+    )
+    seeds64 = [13500 + i for i in range(64)]
+
+    class _Stage3Pool:
+        def __init__(self, stage3_holds: bool):
+            self.stage3_holds = stage3_holds
+            self.s3_seen = False
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if any(int(s) >= 200_000 for s in s_list):
+                self.s3_seen = True
+            # Realistic incumbent depth spread (Dlvl 2..6) so IQM moves smoothly on mid-quartile seeds
+            base_depths = [2 + (i % 5) for i in range(len(s_list))]
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": base_depths[idx],
+                            "max_depth": base_depths[idx],
+                            "score": 700,
+                            "turns": 2000,
+                            "final_ac": 4,
+                            "xp_level": 3,
+                            "end_reason": "killed",
+                        }
+                        for idx, s in enumerate(s_list)
+                    ],
+                }
+            is_s3 = any(int(s) >= 200_000 for s in s_list)
+            runs = []
+            for idx, s in enumerate(s_list):
+                bd = base_depths[idx]
+                if not is_s3:
+                    # 64 seeds: 7W-4L-53T -> ΔD=+0.047, ΔS=+14, ΔIQM>0, p=0.0777 (exact surgical near-miss!)
+                    if idx < 7:
+                        d, sc = bd + 1, 900
+                    elif idx < 11:
+                        d, sc = max(1, bd - 1), 580
+                    else:
+                        d, sc = bd, 700
+                else:
+                    if self.stage3_holds:
+                        # Consistent +7W-4L on Stage-3 fresh seeds -> 14W-8L across 128 seeds (p=0.0187 < 0.05!)
+                        if idx < 7:
+                            d, sc = bd + 1, 900
+                        elif idx < 11:
+                            d, sc = max(1, bd - 1), 580
+                        else:
+                            d, sc = bd, 700
+                    else:
+                        # Spurious near-miss collapses on Stage-3 seeds (2W-7L)
+                        if idx < 2:
+                            d, sc = bd + 1, 900
+                        elif idx < 9:
+                            d, sc = max(1, bd - 1), 580
+                        else:
+                            d, sc = bd, 700
+                runs.append(
+                    {
+                        "run_id": f"c_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 2000,
+                        "final_ac": 4,
+                        "xp_level": 3,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    cand = PeerCandidate(
+        peer_id="peer_1",
+        claimed_deficit_id="slice_median_outcomes",
+        claimed_label="surgical_fix",
+        policy_code=base_pol + "\n_S3 = 1\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    pool_pass = _Stage3Pool(stage3_holds=True)
+    v_pass = SwarmReferee().evaluate_tournament(
+        generation=35,
+        candidates=[cand],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=pool_pass,
+        seeds=seeds64,
+    )
+    assert pool_pass.s3_seen is True
+    assert v_pass.promoted is True, v_pass.reason
+    assert v_pass.winner_id == "peer_1"
+
+    pool_fail = _Stage3Pool(stage3_holds=False)
+    v_fail = SwarmReferee().evaluate_tournament(
+        generation=35,
+        candidates=[cand],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=pool_fail,
+        seeds=seeds64,
+    )
+    assert pool_fail.s3_seen is True
+    assert v_fail.promoted is False

@@ -126,10 +126,13 @@ Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, comb
 4. `SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth FROM expert_runs;`
 
 ### Option-A Subsystem Engineering & Zero-Drift Discipline
-1. **Zero-Drift Guard Scoping (CRITICAL for CRN Stability)**:
-   - NetHack RNG is chaotic: altering a single action on a healthy early turn forks the entire 4,000-turn trajectory and produces noisy ~20W/20L churn that fails statistical gating.
-   - Gate every new branch, interrupt, or fallback **tightly on the exact deficit precondition** (e.g., `consecutive_stalls >= N`, exact status condition/illness/fainting/encumbrance flag, per-floor search cap exceeded, or specific unhandled prompt) so healthy `D_succ` guard seeds keep **0-step action drift**.
-   - Inspect the **Paired Micro-Pilot Diff** returned by `dry_run_policy`: if any `GUARD` seed diverges early and regresses, tighten your guard precondition and re-verify before submitting.
+1. **Zero-Drift Guard Scoping & Generality (CRITICAL for CRN Stability)**:
+   - NetHack RNG is chaotic: altering a single action on a healthy early turn forks the trajectory and produces noisy ~20W/20L churn that fails statistical gating.
+   - Gate every new branch, interrupt, or fallback **cleanly on the general deficit precondition** (e.g., `consecutive_stalls >= N`, exact status condition/illness/fainting/encumbrance flag, per-floor search cap exceeded, or specific unhandled prompt) so you fix the **entire failure class** without disrupting unrelated early play.
+   - Inspect the **Paired Micro-Pilot Diff** returned by `dry_run_policy`:
+     - If a `GUARD` seed shows **`⚠️ REGRESSION`**, tighten your guard precondition and re-verify before submitting.
+     - If a `GUARD` seed shows **`OK (non-regressing drift)`**, **do NOT over-tighten** — over-narrowing to a single seed's exact geometry produces `0W–0L` dead patches that never fire on fresh tournament seeds!
+     - If **`TARGET` seeds are `UNCHANGED` (`DEAD-PATCH WARNING`)**, your precondition is too narrow or unreachable—broaden it to the general root cause and re-test before submitting.
 
 2. **Schema-Safe `ws.domain(...)` State (Zero `KeyError`s)**:
    - Never assume keys exist in an existing `ws.domain(...)` dictionary when patching a function—existing domains may be initialized elsewhere or evolved incrementally.
@@ -557,7 +560,7 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
 {digest_block}{existing_policy_block}{skills_block}
 ### Task (`SWARM_PEER`)
 - Batch empirical research in Turns 1–2 (at least 1 empirical call: `query_db` on `champion_ticks`, `query_wiki`/`query_monster`/`query_item`, or `query_theories`); use the pre-injected `Architecture Map (Option A)` to read only the 1–2 target symbols/files (`read_symbol`, ranged `read_skill`). Never repeat rejected ideas from `Recent Experiment & Rejection Memory`.
-- Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions). Inspect the **Paired Micro-Pilot Diff**: if any `GUARD` seed drifts early and regresses, tighten your guard precondition and re-test before finalizing.
+- Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions). Inspect the **Paired Micro-Pilot Diff**: tighten only if a `GUARD` seed shows `⚠️ REGRESSION` (never over-tighten on `OK (non-regressing drift)`), and broaden if `TARGET` seeds are `UNCHANGED` so your patch actually fires on fresh tournament seeds.
 - Output brief ```yaml``` hypothesis (plus optional `skills_to_prune: [...]`) and final `<skill_code module="...">` / `<policy_code>` XML blocks.
 """
 

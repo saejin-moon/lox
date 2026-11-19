@@ -862,7 +862,18 @@ class DeficitAnalyzer:
 
         built: list[DeficitCluster] = []
         for cid, data in sorted(
-            clusters.items(), key=lambda kv: len(kv[1]["rows"]), reverse=True
+            clusters.items(),
+            key=lambda kv: (
+                len(kv[1]["rows"])
+                * (
+                    1.5
+                    if kv[1]["kind"]
+                    in ("confinement_horizon", "search_or_horizon_loop")
+                    else 1.0
+                ),
+                len(kv[1]["rows"]),
+            ),
+            reverse=True,
         ):
             dom_fns = [
                 fn
