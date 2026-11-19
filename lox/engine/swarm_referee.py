@@ -203,6 +203,12 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
         for r in runs
         if "stalled" in str(r.get("end_reason", "")).lower() or _is_wait_zombie_run(r)
     )
+    shallow_max_steps = sum(
+        1
+        for r in runs
+        if str(r.get("end_reason", "")).strip().lower() == "max_steps"
+        and int(r.get("max_depth", r.get("depth", 1)) or 1) <= 2
+    )
     early_blunders = sum(
         1
         for r in runs
@@ -252,7 +258,7 @@ def _extract_eval_stats(batch_eval: BatchEvaluation, loc_total: int) -> dict[str
         "iqm_prog": interquartile_mean(progs),
         "stall_count": confinement_stalls,
         "hard_stall_count": hard_stalls,
-        "stall_rate": (confinement_stalls + hard_stalls) / n,
+        "stall_rate": (hard_stalls + shallow_max_steps) / n,
         "early_blunder_rate": early_blunders / n,
         "policy_exceptions": exc_total,
         "exc_runs": exc_runs,
@@ -738,11 +744,14 @@ class SwarmReferee:
             )
             top_indivs = list(indiv_fins[:2])
             for c_zl in indiv_fins[2:]:
+                if len(top_indivs) >= 4:
+                    break
                 st_zl, pr_zl = stage1_stats_by_id.get(c_zl.peer_id, ({}, {}))
-                if (
-                    int(st_zl.get("policy_exceptions", 0) or 0) == 0
-                    and int(pr_zl.get("wins", 0) or 0) > 0
-                    and int(pr_zl.get("losses", 0) or 0) == 0
+                w_zl = int(pr_zl.get("wins", 0) or 0)
+                l_zl = int(pr_zl.get("losses", 0) or 0)
+                iqm_zl = float(pr_zl.get("iqm_delta", 0.0) or 0.0)
+                if int(st_zl.get("policy_exceptions", 0) or 0) == 0 and (
+                    (w_zl > 0 and l_zl == 0) or (w_zl >= l_zl + 3 and iqm_zl > 0.05)
                 ):
                     top_indivs.append(c_zl)
             survivors = top_indivs + ortho_fins[:1]
@@ -858,10 +867,17 @@ class SwarmReferee:
             if cand_hard > inc_hard and not (
                 inc_zombie and cand_active and d_gain > 0.0
             ):
-                if d_gain < 0.05 and cand_s <= inc_s:
+                soft_tol = max(1, cand_n // 32) if cand_n >= 32 else 0
+                if (
+                    cand_hard > inc_hard + soft_tol
+                    and d_gain < 0.05
+                    and cand_s <= inc_s
+                ):
                     return False
                 hard_cap = inc_hard + (
-                    max(2, cand_n // 8) if multi_axis_win else stall_tol
+                    max(4, cand_n // 12)
+                    if (multi_axis_win or d_gain >= 0.15)
+                    else max(2, stall_tol)
                 )
                 if cand_hard > hard_cap and d_gain < 0.25:
                     return False
@@ -1066,7 +1082,13 @@ class SwarmReferee:
             and float(best_pair.get("mean_delta", 0.0) or 0.0) > 0.0
             and d_delta >= 0.04
             and s_delta >= 0.0
-            and 0.05 <= float(best_pair.get("wilcoxon_p", 1.0) or 1.0) < 0.15
+            and (
+                (0.05 <= float(best_pair.get("wilcoxon_p", 1.0) or 1.0) < 0.15)
+                or (
+                    float(best_pair.get("iqm_delta", 0.0) or 0.0) >= 0.08
+                    and float(best_pair.get("wilcoxon_p", 1.0) or 1.0) < 0.35
+                )
+            )
         ):
             ext_n = min(64, len(seeds))
             s3_seeds = [200_000 + int(generation) * 100 + i for i in range(ext_n)]

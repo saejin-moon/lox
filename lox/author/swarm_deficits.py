@@ -611,7 +611,8 @@ class DeficitAnalyzer:
     @classmethod
     def _populate_d_fail_clusters(cls, con: Any, report: DeficitReport) -> None:
         where_runs = cls._valid_runs_clause(con)
-        # Fetch up to 64 runs from the latest batch/window without dropping short-turn early deaths!
+        # Prefer the complete latest generation batch (0 dropped max_steps / high-turn runs!).
+        # Fall back to the latest 64 runs across recent generations only when the latest batch is tiny (<16 runs).
         raw_rows = con.execute(
             f"""
             SELECT run_id, seed, depth, max_depth, turns, end_reason,
@@ -627,22 +628,45 @@ class DeficitAnalyzer:
                    COALESCE(RIGHT(game_log, 600), '') AS game_log_tail
             FROM runs
             WHERE {where_runs}
-            ORDER BY generation DESC, turns ASC
-            LIMIT 96
+              AND generation = (SELECT MAX(generation) FROM runs WHERE {where_runs})
+            ORDER BY run_id ASC
             """
         ).fetchall()
+        if len(raw_rows) < 16:
+            raw_rows = con.execute(
+                f"""
+                SELECT run_id, seed, depth, max_depth, turns, end_reason,
+                       unique_tiles, pct_wait, pct_search,
+                       COALESCE(starved_with_food, FALSE) AS starved_with_food,
+                       COALESCE(died_unarmored, FALSE) AS died_unarmored,
+                       COALESCE(auto_esc_count, 0) AS auto_esc_count,
+                       COALESCE(policy_exceptions, 0) AS policy_exceptions,
+                       COALESCE(last_active_function, '') AS last_active_fn,
+                       COALESCE(summary_digest, '') AS summary_digest,
+                       action_bytes,
+                       milestones_json,
+                       COALESCE(RIGHT(game_log, 600), '') AS game_log_tail
+                FROM runs
+                WHERE {where_runs}
+                ORDER BY generation DESC, run_id ASC
+                LIMIT 64
+                """
+            ).fetchall()
         if not raw_rows:
             return
         if len(raw_rows) <= 64:
             rows = list(raw_rows)
         else:
-            # Stratified across shortest early deaths/stalls (16), median (16), deepest/longest (16), + remaining recent
+            # Symmetrically stratify across all 4 tails (shortest, longest/max_steps, deepest, median)
             by_turns = sorted(raw_rows, key=lambda x: int(x[4] or 0))
             by_depth = sorted(raw_rows, key=lambda x: int(x[3] or 1), reverse=True)
             mid_start = max(0, (len(by_turns) // 2) - 8)
             picked: dict[str, tuple[Any, ...]] = {}
             for r in (
-                by_turns[:20] + by_turns[mid_start : mid_start + 16] + by_depth[:16]
+                by_turns[:16]
+                + by_turns[-16:]
+                + by_depth[:16]
+                + by_turns[mid_start : mid_start + 16]
             ):
                 picked[str(r[0])] = r
             for r in raw_rows:
@@ -694,6 +718,32 @@ class DeficitAnalyzer:
         median_turn = turns_all[len(turns_all) // 2] if turns_all else 300
         high_depth_cut = depths_all[int(len(depths_all) * 0.70)] if depths_all else 2.0
 
+        # Domain-agnostic recurring terminal states (zero hardcoded game strings):
+        # any specific non-generic end_reason repeating on >= max(4, n//16) runs gets its own clean slice.
+        _generic_ends = {
+            "",
+            "unknown",
+            "killed",
+            "max_steps",
+            "stalled_zero_turn",
+            "ascended",
+            "escaped",
+            "ended",
+        }
+        recurring_end_min = max(4, len(rows) // 16)
+        recurring_end_ranks: dict[str, int] = {}
+        for er_label, er_ds in sorted(
+            end_counts.items(), key=lambda kv: len(kv[1]), reverse=True
+        ):
+            er_low = er_label.strip().lower()
+            if (
+                er_low not in _generic_ends
+                and "stalled" not in er_low
+                and len(er_ds) >= recurring_end_min
+                and len(recurring_end_ranks) < 3
+            ):
+                recurring_end_ranks[er_low] = len(recurring_end_ranks) + 1
+
         for row in rows:
             (
                 run_id,
@@ -717,7 +767,8 @@ class DeficitAnalyzer:
             ) = row
 
             end_str = str(end_reason or "unknown").strip() or "unknown"
-            if end_str in ("ascended", "escaped"):
+            end_low = end_str.lower()
+            if end_low in ("ascended", "escaped"):
                 continue
             digest_s = str(digest or "")
             gl_lines = [
@@ -735,17 +786,27 @@ class DeficitAnalyzer:
                     stall_count = 0
 
             # Purely domain-agnostic trajectory-outcome & capability slices (zero NetHack keywords)
-            if end_str.lower() == "max_steps" and int(max_depth or 1) <= 2:
+            if end_low == "max_steps" and int(max_depth or 1) <= 2:
                 _add_to_cluster(
                     "slice_max_steps_confinement",
                     "confinement_horizon",
                     "Horizon limit reached at shallow depth (Dlvl <= 2)",
                     row,
-                    f"end=`{end_str}`, turns={turns}, Dlvl={max_depth}, tiles={unique_tiles}"
+                    f"end=`{end_str}`, turns={turns}, Dlvl={max_depth}, pct_search={float(pct_search or 0):.1f}%, tiles={unique_tiles}"
+                    + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
+                )
+            elif end_low in recurring_end_ranks and int(turns or 0) >= 400:
+                r_idx = recurring_end_ranks[end_low]
+                _add_to_cluster(
+                    f"slice_recurring_outcome_{r_idx}",
+                    "recurring_terminal_state",
+                    f"Recurring terminal outcome: `{end_str[:64]}`",
+                    row,
+                    f"end=`{end_str}`, Dlvl={max_depth}, turns={turns}, pct_search={float(pct_search or 0):.1f}%, tiles={unique_tiles}"
                     + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
                 )
             elif (float(pct_search or 0.0) >= 35.0 and int(turns or 0) >= 1500) or (
-                end_str.lower() == "max_steps" and int(turns or 0) >= 2000
+                end_low == "max_steps" and int(turns or 0) >= 2000
             ):
                 _add_to_cluster(
                     "slice_high_search_or_horizon_burn",
@@ -757,10 +818,17 @@ class DeficitAnalyzer:
                 )
             elif (
                 stall_count >= 25
-                or "CONFINEMENT_STALL" in digest_s
-                or "stalled" in end_str.lower()
-                or "max_steps" in end_str.lower()
+                or "stalled" in end_low
+                or "max_steps" in end_low
                 or (float(pct_wait or 0.0) + float(pct_search or 0.0) >= 65.0)
+                or (
+                    "CONFINEMENT_STALL" in digest_s
+                    and int(max_depth or 1) <= 2
+                    and (
+                        float(pct_wait or 0.0) + float(pct_search or 0.0) >= 35.0
+                        or int(unique_tiles or 0) <= 120
+                    )
+                )
                 or (
                     int(turns or 0) >= 400
                     and int(max_depth or 1) <= 1
@@ -869,7 +937,7 @@ class DeficitAnalyzer:
                     1.5
                     if kv[1]["kind"]
                     in ("confinement_horizon", "search_or_horizon_loop")
-                    else 1.0
+                    else (1.2 if kv[1]["kind"] == "recurring_terminal_state" else 1.0)
                 ),
                 len(kv[1]["rows"]),
             ),

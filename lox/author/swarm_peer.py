@@ -465,6 +465,13 @@ def incubate_candidate(
                     paired_s_diffs: list[float] = []
                     guard_d_diffs: list[float] = []
                     d_succ_set = set(deficit_report.d_succ_seeds)
+                    target_seed_set = {
+                        int(s)
+                        for s in (getattr(claimed_deficit, "sample_seeds", []) or [])
+                    }
+                    target_bytes_checked = 0
+                    total_bytes_checked = 0
+                    total_bytes_diverged = 0
                     for r in c_runs:
                         if r.get("is_shard"):
                             continue
@@ -472,6 +479,14 @@ def incubate_candidate(
                         base_r = incumbent_shard_runs.get(sd)
                         if not base_r:
                             continue
+                        c_ab = bytes(r.get("action_bytes") or b"")
+                        b_ab = bytes(base_r.get("action_bytes") or b"")
+                        if c_ab and b_ab:
+                            total_bytes_checked += 1
+                            if sd in target_seed_set:
+                                target_bytes_checked += 1
+                            if c_ab != b_ab:
+                                total_bytes_diverged += 1
                         cd = float(
                             max(int(r.get("depth", 1)), int(r.get("max_depth", 1)))
                         )
@@ -487,6 +502,20 @@ def incubate_candidate(
                         paired_s_diffs.append(cs - bs)
                         if sd in d_succ_set:
                             guard_d_diffs.append(cd - bd)
+
+                    if (
+                        target_bytes_checked >= 2
+                        and total_bytes_checked >= 2
+                        and total_bytes_diverged == 0
+                    ):
+                        metrics["zero_shard_divergence"] = True
+                        candidate.sandbox_metrics = metrics
+                        candidate.sandbox_passed = False
+                        candidate.error = (
+                            f"Zero behavioral divergence across all {total_bytes_checked} evaluated "
+                            f"guard/target shard seeds ({target_bytes_checked} target seeds unchanged; dead patch)"
+                        )
+                        return candidate
 
                     if paired_d_diffs:
                         metrics["depth_delta"] = round(

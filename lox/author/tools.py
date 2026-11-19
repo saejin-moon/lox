@@ -305,6 +305,7 @@ class AuthorToolRegistry:
         self.peer_target_seeds: list[int] = []
         self.peer_micro_pilots_used: int = 0
         self.max_peer_micro_pilots: int = 3
+        self._dead_patch_bonus_granted: bool = False
 
     def _get_harness(self, max_steps: int, benchmark: str | None = None) -> Any:
         steps = max(10, int(max_steps))
@@ -447,6 +448,7 @@ class AuthorToolRegistry:
         self.peer_target_seeds = [int(s) for s in (peer_target_seeds or [])]
         self.peer_micro_pilots_used = 0
         self.max_peer_micro_pilots = max(0, int(max_peer_micro_pilots))
+        self._dead_patch_bonus_granted = False
         if skills is not None:
             self.skills = dict(skills)
         if benchmark is not None:
@@ -3430,9 +3432,21 @@ class AuthorToolRegistry:
                 + ". Tighten your guard precondition to prevent regression without overfitting to a single target seed, then re-test with `dry_run_policy`."
             )
         if target_evaluated > 0 and target_unchanged == target_evaluated:
+            bonus_note = ""
+            if (
+                self.peer_micro_pilots_used >= self.max_peer_micro_pilots
+                and not self._dead_patch_bonus_granted
+            ):
+                self._dead_patch_bonus_granted = True
+                self.max_peer_micro_pilots += 1
+                bonus_note = (
+                    f" (+1 bonus micro-pilot granted -> {self.peer_micro_pilots_used}/"
+                    f"{self.max_peer_micro_pilots} so you can verify the broadened fix.)"
+                )
             lines.append(
                 "- ⚠️ DEAD-PATCH WARNING: All TARGET seed(s) were UNCHANGED (0-byte drift). "
                 "Your precondition is too narrow or unreachable — broaden it to the general failure mechanism and re-test before submitting."
+                + bonus_note
             )
         return "\n".join(lines)
 

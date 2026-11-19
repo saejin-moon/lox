@@ -433,24 +433,31 @@ class SwarmCampaignOrchestrator:
 
         peer_assignments: list[tuple[str, Any, str, dict[str, str], str | None]] = []
         use_crossover = (
-            self._plateau_streak >= 2
+            self._plateau_streak >= 4
             and bool(self._near_misses)
             and bool(current_policy.strip())
         )
-        crossover_slots = max(1, active_peers // 2) if use_crossover else 0
+        crossover_slots = 1 if use_crossover else 0
         for i in range(active_peers):
             cl = _copy.copy(
                 orthogonal_clusters[(generation + i) % len(orthogonal_clusters)]
             )
             if i < crossover_slots:
                 nm = self._near_misses[i % len(self._near_misses)]
+                diff_snip = str(nm.get("diff_preview", "") or "").strip()
+                diff_part = (
+                    f"\nNear-Miss Unified Diff Preview:\n```diff\n{diff_snip}\n```"
+                    if diff_snip
+                    else ""
+                )
                 nm_note = (
-                    f"SEMANTIC CROSSOVER / ARCHITECT PASS: Combine current incumbent's early stability "
-                    f"with near-miss `{nm['peer_id']}` from Gen {nm['generation']} "
+                    f"SEMANTIC CROSSOVER / ARCHITECT PASS: Combine current incumbent's stability "
+                    f"with positive near-miss `{nm['peer_id']}` from Gen {nm['generation']} "
                     f"(D={nm['avg_depth']:.2f}, maxD={nm['max_depth']}, S={nm['avg_score']:.0f}, "
+                    f"W/L={nm.get('wins', 0)}/{nm.get('losses', 0)}, ΔIQM={nm.get('iqm_delta', 0.0):+.4f}, "
                     f"gained={nm['seeds_gained'][:5]}, lost={nm['seeds_lost'][:5]}, "
                     f"touched={sorted(nm['touched_skills'])[:4]}, mechanism=`{nm['mechanism'][:140]}`). "
-                    f"Use `read_skill`/`diff_policies` on current workspace; preserve early survival while capturing gained seeds."
+                    f"Preserve incumbent guard stability while capturing gained seeds.{diff_part}"
                 )
                 cl.evidence = f"{cl.evidence} | {nm_note}" if cl.evidence else nm_note
                 cl.label = f"[Semantic Crossover] {cl.label}"
@@ -617,24 +624,64 @@ class SwarmCampaignOrchestrator:
                         batch_eval=verdict.winner_batch_eval,
                     )
 
-        # Record healthy frontier-moving near-misses for E3 Semantic Crossover
+        # Record ONLY positive, net-winning, guard-passing near-misses (with inline diff) for E3 Semantic Crossover
         if not verdict.promoted:
+            import difflib as _difflib
+
             cand_by_id = {c.peer_id: c for c in peer_candidates}
             for att in verdict.attempts_summary or []:
                 pid = str(att.get("peer_id", ""))
                 c_obj = cand_by_id.get(pid)
                 if c_obj is None or int(att.get("policy_exceptions", 0) or 0) > 0:
                     continue
+                if str(att.get("reject_reason", "") or "") == "guard_failed":
+                    continue
                 att_d = float(att.get("avg_depth", 1.0) or 1.0)
                 att_md = int(att.get("max_depth", 1) or 1)
                 att_s = float(att.get("avg_score", 0.0) or 0.0)
+                att_w = int(att.get("wins", 0) or 0)
+                att_l = int(att.get("losses", 0) or 0)
+                att_iqm = float(att.get("iqm_delta", 0.0) or 0.0)
                 gained = list(att.get("seeds_gained") or [])
                 lost = list(att.get("seeds_lost") or [])
-                if gained and (
-                    att_d > verdict.incumbent_avg_depth - 0.10
-                    or att_md > int(verdict.winner_batch_eval.get("max_depth", 1) or 1)
-                    or att_s > verdict.incumbent_avg_score
+                if (
+                    gained
+                    and att_w > att_l
+                    and att_iqm > 0.0
+                    and att_d >= verdict.incumbent_avg_depth
                 ):
+                    diff_chunks: list[str] = []
+                    cand_sks = dict(c_obj.skills or {})
+                    for sk_k in sorted(set(initial_skills) | set(cand_sks)):
+                        old_s = str(initial_skills.get(sk_k, "") or "")
+                        new_s = str(cand_sks.get(sk_k, "") or "")
+                        if old_s != new_s:
+                            u_diff = list(
+                                _difflib.unified_diff(
+                                    old_s.splitlines(),
+                                    new_s.splitlines(),
+                                    fromfile=f"inc/{sk_k}.py",
+                                    tofile=f"{pid}/{sk_k}.py",
+                                    lineterm="",
+                                    n=1,
+                                )
+                            )
+                            if u_diff:
+                                diff_chunks.append("\n".join(u_diff[:30]))
+                    if not diff_chunks and c_obj.policy_code != current_policy:
+                        u_pol = list(
+                            _difflib.unified_diff(
+                                current_policy.splitlines(),
+                                c_obj.policy_code.splitlines(),
+                                fromfile="inc/policy.py",
+                                tofile=f"{pid}/policy.py",
+                                lineterm="",
+                                n=1,
+                            )
+                        )
+                        if u_pol:
+                            diff_chunks.append("\n".join(u_pol[:30]))
+                    diff_preview = "\n".join(diff_chunks)[:1200]
                     hyp = getattr(c_obj, "hypothesis_yaml", {}) or {}
                     self._near_misses.append(
                         {
@@ -644,6 +691,9 @@ class SwarmCampaignOrchestrator:
                             "max_depth": att_md,
                             "avg_score": att_s,
                             "avg_ac": float(att.get("avg_ac", 10.0) or 10.0),
+                            "wins": att_w,
+                            "losses": att_l,
+                            "iqm_delta": att_iqm,
                             "seeds_gained": gained,
                             "seeds_lost": lost,
                             "touched_skills": set(
@@ -652,12 +702,17 @@ class SwarmCampaignOrchestrator:
                             "mechanism": str(
                                 hyp.get("mechanism", "") or c_obj.claimed_label
                             ),
+                            "diff_preview": diff_preview,
                             "policy_code": c_obj.policy_code,
-                            "skills": dict(c_obj.skills or {}),
+                            "skills": cand_sks,
                         }
                     )
             self._near_misses.sort(
-                key=lambda nm: (nm["avg_depth"], nm["max_depth"], nm["avg_score"]),
+                key=lambda nm: (
+                    float(nm.get("iqm_delta", 0.0)),
+                    nm["avg_depth"],
+                    nm["avg_score"],
+                ),
                 reverse=True,
             )
             self._near_misses = self._near_misses[:4]

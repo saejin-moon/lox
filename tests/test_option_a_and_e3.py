@@ -1144,21 +1144,30 @@ def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_pat
     assert "GUARD DRIFT WARNING" not in out2
     assert mp_pool.calls == 2
 
-    # Micro-pilot 3: over-tightened dead patch triggers DEAD-PATCH WARNING
+    # Micro-pilot 3: over-tightened dead patch triggers DEAD-PATCH WARNING + 1 bonus retry (3 -> 4)
     out3, st3 = reg.dry_run_policy(cand_pol_v3, seed=42, max_turns=15)
     assert st3.startswith("PASSED")
     assert "Paired Micro-Pilot Diff vs Incumbent (3/3" in out3
     assert "GUARD seed=101: ZERO DRIFT (Dlvl 6" in out3
     assert "DEAD-PATCH WARNING" in out3
+    assert "+1 bonus micro-pilot granted" in out3
     assert mp_pool.calls == 3
 
-    # Micro-pilot 4: respects 3-call cap (does not call eval_pool again)
+    # Micro-pilot 4: uses the 1 bonus retry
     out4, st4 = reg.dry_run_policy(
-        cand_pol_v3 + "\n# cap check\n", seed=42, max_turns=15
+        cand_pol_v3 + "\n# bonus retry\n", seed=42, max_turns=15
     )
     assert st4.startswith("PASSED")
-    assert "cap 3/3 reached" in out4
-    assert mp_pool.calls == 3
+    assert "Paired Micro-Pilot Diff vs Incumbent (4/4" in out4
+    assert mp_pool.calls == 4
+
+    # Micro-pilot 5: respects cap 4/4 (does not call eval_pool again)
+    out5, st5 = reg.dry_run_policy(
+        cand_pol_v3 + "\n# cap check\n", seed=42, max_turns=15
+    )
+    assert st5.startswith("PASSED")
+    assert "cap 4/4 reached" in out5
+    assert mp_pool.calls == 4
     reg.close()
 
 
@@ -1313,3 +1322,264 @@ def test_stage3_tiebreaker_extension_and_confinement_priority(tmp_path):
     )
     assert pool_fail.s3_seen is True
     assert v_fail.promoted is False
+
+
+def test_g38_deficit_window_recurring_outcomes_referee_stall_rate_and_dead_patch_incubation(
+    tmp_path,
+):
+    """Verifies G38 fixes:
+    1. DeficitAnalyzer keeps all 64 runs of the latest generation (never drops max_steps/long runs),
+       does not dump deep CONFINEMENT_STALL combat deaths into slice_stalled, and surfaces recurring
+       terminal states dynamically with zero hardcoded NetHack strings.
+    2. SwarmReferee stall_rate ignores non-terminal CONFINEMENT_STALL noise and Stage-3 admits
+       high-IQM near-misses (iqm_delta >= 0.08, p < 0.35).
+    3. incubate_candidate rejects 0-byte-divergence dead patches across evaluated target shards.
+    """
+    from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import PeerCandidate, incubate_candidate
+    from lox.db.schema import init_db
+    from lox.engine.swarm_referee import SwarmReferee, _extract_eval_stats
+
+    dbp = str(tmp_path / "g38.duckdb")
+    con = init_db(dbp)
+    con.execute(
+        "INSERT INTO batches (batch_id, generation, mode, hypothesis_passed) VALUES ('b37', 37, 'SWARM', TRUE), ('b38', 38, 'SWARM', TRUE)"
+    )
+    # 64 short runs in Gen 37 (previously poisoned the LIMIT 96 turns-ASC stratifier!)
+    for i in range(64):
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, end_reason, pct_search, unique_tiles)
+            VALUES (?, 'b37', 37, ?, 2, 2, 120, 150, 150, 'killed', 5.0, 80)
+            """,
+            [f"g37_{i}", 13700 + i],
+        )
+    # 64 realistic G38 runs: 9 max_steps Dlvl<=2, 7 recurring A, 6 recurring B, 42 deep combat deaths WITH CONFINEMENT_STALL
+    for i in range(9):
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, end_reason, pct_search, unique_tiles, summary_digest)
+            VALUES (?, 'b38', 38, ?, 2, 2, 500, 9900, 10000, 'max_steps', 65.0, 200, 'CONFINEMENT_STALL on Dlvl 2')
+            """,
+            [f"g38_ms_{i}", 13800 + i],
+        )
+    for i in range(7):
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, end_reason, pct_search, unique_tiles, summary_digest)
+            VALUES (?, 'b38', 38, ?, 2, 2, 400, 6200, 5800, 'Recurring terminal outcome A', 45.0, 250, 'CONFINEMENT_STALL on Dlvl 1')
+            """,
+            [f"g38_ra_{i}", 13810 + i],
+        )
+    for i in range(6):
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, end_reason, pct_search, unique_tiles, summary_digest)
+            VALUES (?, 'b38', 38, ?, 4, 4, 750, 3900, 3800, 'Recurring terminal outcome B', 20.0, 500, 'CONFINEMENT_STALL on Dlvl 3')
+            """,
+            [f"g38_rb_{i}", 13820 + i],
+        )
+    for i in range(42):
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, steps, end_reason, pct_search, unique_tiles, summary_digest)
+            VALUES (?, 'b38', 38, ?, 5, 5, 850, 2400, 2400, 'combat_death_unique', 18.0, 750, 'CONFINEMENT_STALL on Dlvl 2')
+            """,
+            [f"g38_cb_{i}", 13830 + i],
+        )
+    con.close()
+
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=39, current_policy="class Policy: pass"
+    )
+    cmap = {c.cluster_id: c for c in rep.fail_clusters}
+    # All 9 max_steps runs preserved (not dropped by stratifier!)
+    assert "slice_max_steps_confinement" in cmap
+    assert cmap["slice_max_steps_confinement"].run_count == 9
+    # Recurring terminal outcomes surfaced dynamically
+    rec_clusters = [
+        c for c in rep.fail_clusters if c.kind == "recurring_terminal_state"
+    ]
+    assert len(rec_clusters) >= 2
+    assert any("Recurring terminal outcome A" in c.label for c in rec_clusters)
+    assert any("Recurring terminal outcome B" in c.label for c in rec_clusters)
+    # Deep CONFINEMENT_STALL combat deaths are NOT dumped into slice_stalled
+    assert cmap.get("slice_stalled") is None or cmap["slice_stalled"].run_count < 5
+
+    # 2. _extract_eval_stats stall_rate ignores non-terminal CONFINEMENT_STALL on deep runs
+    fake_runs = [
+        {
+            "depth": 5,
+            "max_depth": 5,
+            "score": 800,
+            "turns": 2000,
+            "end_reason": "killed",
+            "summary_digest": "CONFINEMENT_STALL on Dlvl 2",
+        }
+        for _ in range(10)
+    ]
+    st = _extract_eval_stats({"runs": fake_runs}, loc_total=10)
+    assert st["stall_count"] == 10
+    assert st["stall_rate"] == 0.0
+
+    # 3. Stage-3 triggers on high-IQM near-miss (iqm_delta >= 0.08, 0.15 <= p < 0.35)
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.SEARCH\n"
+    )
+    seeds64 = [13700 + i for i in range(64)]
+
+    class _HighIqmNearMissPool:
+        def __init__(self):
+            self.s3_seen = False
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            is_s3 = any(int(s) >= 200_000 for s in s_list)
+            if is_s3:
+                self.s3_seen = True
+            base_depths = [2 + (i % 5) for i in range(len(s_list))]
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": base_depths[idx],
+                            "max_depth": base_depths[idx],
+                            "score": 680,
+                            "turns": 2000,
+                            "final_ac": 4,
+                            "xp_level": 3,
+                            "end_reason": "killed",
+                        }
+                        for idx, s in enumerate(s_list)
+                    ],
+                }
+            runs = []
+            for idx, s in enumerate(s_list):
+                bd = base_depths[idx]
+                if not is_s3:
+                    # Exact G37 peer_2 profile: 11W-7L, ΔD=+0.0625, ΔS=+36, ΔIQM>=+0.10, p in [0.15, 0.35)
+                    if idx < 3:
+                        d, sc = bd + 2, 1050
+                    elif idx < 11:
+                        d, sc = bd + 1, 900
+                    elif idx < 13:
+                        d, sc = max(1, bd - 2), 300
+                    elif idx < 18:
+                        d, sc = max(1, bd - 1), 620
+                    else:
+                        d, sc = bd, 680
+                else:
+                    # Holds strongly on Stage-3 fresh seeds -> 10W-2L -> promotes across 128 seeds
+                    if idx < 10:
+                        d, sc = bd + 1, 950
+                    elif idx < 12:
+                        d, sc = max(1, bd - 1), 620
+                    else:
+                        d, sc = bd, 680
+                runs.append(
+                    {
+                        "run_id": f"c_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 2000,
+                        "final_ac": 4,
+                        "xp_level": 3,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    hi_pool = _HighIqmNearMissPool()
+    cand_hi = PeerCandidate(
+        peer_id="peer_2",
+        claimed_deficit_id="slice_early_terminations",
+        claimed_label="high_iqm_nearmiss",
+        policy_code=base_pol + "\n_HI = 1\n",
+        skills={},
+        sandbox_passed=True,
+        loc_total=5,
+    )
+    v_hi = SwarmReferee().evaluate_tournament(
+        generation=37,
+        candidates=[cand_hi],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=hi_pool,
+        seeds=seeds64,
+    )
+    assert hi_pool.s3_seen is True
+    assert v_hi.promoted is True, v_hi.reason
+
+    # 4. incubate_candidate rejects 0-byte-divergence dead patch when >=2 target seeds have action_bytes
+    class _ZeroDivPool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "seed": s,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 100,
+                        "policy_exceptions": 0,
+                        "action_bytes": b"identical_trace",
+                    }
+                    for s in (priority_seeds or [])
+                ],
+            }
+
+    inc_shards = {
+        101: {
+            "seed": 101,
+            "depth": 2,
+            "max_depth": 2,
+            "score": 100,
+            "action_bytes": b"identical_trace",
+        },
+        201: {
+            "seed": 201,
+            "depth": 2,
+            "max_depth": 2,
+            "score": 100,
+            "action_bytes": b"identical_trace",
+        },
+        202: {
+            "seed": 202,
+            "depth": 2,
+            "max_depth": 2,
+            "score": 100,
+            "action_bytes": b"identical_trace",
+        },
+    }
+    dead_cand = PeerCandidate(
+        peer_id="peer_dead",
+        claimed_deficit_id="slice_stalled",
+        claimed_label="dead",
+        policy_code=base_pol,
+        skills={},
+    )
+    res_dead = incubate_candidate(
+        dead_cand,
+        deficit_report=DeficitReport(
+            generation=39, regime="STAGNATING", d_succ_seeds=[101]
+        ),
+        claimed_deficit=DeficitCluster(
+            cluster_id="slice_stalled",
+            kind="stalled",
+            label="stalled",
+            sample_seeds=[201, 202],
+        ),
+        eval_pool=_ZeroDivPool(),
+        incumbent_shard_runs=inc_shards,
+        shard_seeds=[101, 201, 202],
+    )
+    assert res_dead.sandbox_passed is False
+    assert "Zero behavioral divergence" in res_dead.error
