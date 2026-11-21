@@ -180,6 +180,43 @@ def winsorized_mean(values: list[float] | np.ndarray, pct: float = 0.05) -> floa
     return float(np.mean(w))
 
 
+def sparse_winsorized_stats(
+    values: list[float] | np.ndarray, pct: float = 0.05
+) -> tuple[float, float]:
+    """
+    Sparsity-preserving symmetric `pct`-Winsorized paired delta mean and standard error.
+    Winsorizes ONLY decisive non-zero paired deltas (`|d| > 1e-6`) before normalizing by full `N`,
+    so outliers in broad edits are capped identically to standard Winsorization while sparse
+    surgical wins (e.g. 3W/0L/61T) are never clipped to 0.0.
+    Returns `(winsor_mean, winsor_se)`.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    n = len(arr)
+    if n == 0:
+        return 0.0, 0.0
+    nz = np.sort(arr[np.abs(arr) > 1e-6])
+    n_z = len(nz)
+    if n_z == 0:
+        return 0.0, 0.0
+    k = int(math.floor(n_z * max(0.0, min(0.25, float(pct)))))
+    w_nz = nz.copy()
+    if k > 0 and 2 * k < n_z:
+        w_nz[:k] = w_nz[k]
+        w_nz[n_z - k :] = w_nz[n_z - k - 1]
+    w_full = np.zeros(n, dtype=np.float64)
+    w_full[:n_z] = w_nz
+    mean_w = float(np.mean(w_full))
+    se_w = float(np.std(w_full, ddof=1) / math.sqrt(n)) if n >= 2 else 0.0
+    return mean_w, se_w
+
+
+def sparse_winsorized_mean(
+    values: list[float] | np.ndarray, pct: float = 0.05
+) -> float:
+    """Sparsity-preserving symmetric `pct`-Winsorized mean for paired deltas."""
+    return sparse_winsorized_stats(values, pct=pct)[0]
+
+
 def cvar_bottom_quantile(values: list[float] | np.ndarray, q: float = 0.25) -> float:
     """Conditional Value-at-Risk (mean of the worst `q` fraction of runs — tail-risk safety metric)."""
     arr = np.sort(np.asarray(values, dtype=np.float64))
@@ -495,6 +532,8 @@ def evaluate_tournament_pair(
             "iqm_delta": 0.0,
             "mean_delta": 0.0,
             "winsor_delta": 0.0,
+            "winsor_se": 0.0,
+            "lcb_score": 0.0,
             "cvar25_cand": 0.0,
             "cvar25_inc": 0.0,
             "cvar25_delta": 0.0,
@@ -519,7 +558,8 @@ def evaluate_tournament_pair(
     iqm_i = interquartile_mean(inc_progs)
     cvar_c = cvar_bottom_quantile(cand_progs, q=0.25)
     cvar_i = cvar_bottom_quantile(inc_progs, q=0.25)
-    win_d = winsorized_mean(arr, pct=0.05)
+    win_d, win_se = sparse_winsorized_stats(arr, pct=0.05)
+    lcb_score = win_d - 0.5 * win_se
     frac_changed = float((wins + losses) / max(1, len(deltas)))
     return {
         "iqm_cand": round(iqm_c, 4),
@@ -527,6 +567,8 @@ def evaluate_tournament_pair(
         "iqm_delta": round(iqm_c - iqm_i, 4),
         "mean_delta": round(mean_d, 4),
         "winsor_delta": round(win_d, 4),
+        "winsor_se": round(win_se, 4),
+        "lcb_score": round(lcb_score, 4),
         "cvar25_cand": round(cvar_c, 4),
         "cvar25_inc": round(cvar_i, 4),
         "cvar25_delta": round(cvar_c - cvar_i, 4),

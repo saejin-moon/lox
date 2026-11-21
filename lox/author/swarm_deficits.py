@@ -62,6 +62,8 @@ class DeficitReport:
     bloat_warning: bool = False
     skill_bloat_notes: list[str] = field(default_factory=list)
     vital_summary: str = ""
+    efficiency_summary: str = ""
+    plateau_streak: int = 0
     recent_attempts: list[str] = field(default_factory=list)
     recent_theories: list[str] = field(default_factory=list)
     organic_shards: list[Any] = field(default_factory=list)
@@ -84,6 +86,10 @@ class DeficitReport:
         if self.vital_summary:
             lines.append(
                 f"- Incumbent Vital & Capability Telemetry: {self.vital_summary}"
+            )
+        if self.efficiency_summary:
+            lines.append(
+                f"- Floor Residence & Action Concentration Telemetry: {self.efficiency_summary}"
             )
         if self.latest_completed_gen > 0:
             ticks_note = (
@@ -194,6 +200,7 @@ class DeficitAnalyzer:
             self._populate_telemetry_window(con, report)
             self._populate_plateau_signal(con, report)
             self._populate_vital_summary(con, report)
+            self._populate_efficiency_telemetry(con, report)
             self._populate_recent_attempts(con, report)
             self._populate_d_succ_and_branches(con, report, raw_branches)
             self._populate_d_fail_clusters(con, report)
@@ -331,6 +338,119 @@ class DeficitAnalyzer:
                     f"starved_with_food={int(row[6] or 0)}, unworn_armor_deaths={int(row[7] or 0) or int(row[8] or 0)}, "
                     f"auto_esc={int(row[9] or 0)}, policy_exc={int(row[10] or 0)}"
                 )
+        except Exception:
+            pass
+
+    @classmethod
+    def _populate_efficiency_telemetry(cls, con: Any, report: DeficitReport) -> None:
+        """
+        Domain-agnostic per-depth residence & action-concentration summary from `ticks`
+        (and optional `expert_ticks` residence parity when available). Zero hardcoded action names.
+        """
+        try:
+            where_sql = cls._valid_runs_clause(con)
+            latest_row = con.execute(
+                f"SELECT MAX(generation) FROM runs WHERE {where_sql}"
+            ).fetchone()
+            lat_gen = int(latest_row[0] or 0) if latest_row else 0
+            if lat_gen <= 0:
+                return
+
+            depth_rows = con.execute(
+                f"""
+                WITH gen_runs AS (
+                    SELECT run_id FROM runs
+                    WHERE {where_sql} AND generation = ?
+                ),
+                per_run_depth AS (
+                    SELECT t.run_id, t.depth, COUNT(*) AS n_ticks
+                    FROM ticks t
+                    JOIN gen_runs r ON t.run_id = r.run_id
+                    WHERE t.depth IS NOT NULL AND t.depth BETWEEN 1 AND 5
+                    GROUP BY t.run_id, t.depth
+                )
+                SELECT depth, COUNT(*) AS n_runs, ROUND(AVG(n_ticks), 0) AS avg_ticks
+                FROM per_run_depth
+                GROUP BY depth
+                ORDER BY depth ASC
+                LIMIT 4
+                """,
+                [lat_gen],
+            ).fetchall()
+            if not depth_rows:
+                return
+
+            act_rows = con.execute(
+                f"""
+                WITH gen_runs AS (
+                    SELECT run_id FROM runs
+                    WHERE {where_sql} AND generation = ?
+                ),
+                counts AS (
+                    SELECT t.depth, COALESCE(t.action_name, 'UNKNOWN') AS act, COUNT(*) AS cnt
+                    FROM ticks t
+                    JOIN gen_runs r ON t.run_id = r.run_id
+                    WHERE t.depth IS NOT NULL AND t.depth BETWEEN 1 AND 5
+                    GROUP BY t.depth, act
+                ),
+                totals AS (
+                    SELECT depth, SUM(cnt) AS tot FROM counts GROUP BY depth
+                ),
+                ranked AS (
+                    SELECT c.depth, c.act, 100.0 * c.cnt / NULLIF(t.tot, 0) AS pct,
+                           ROW_NUMBER() OVER (PARTITION BY c.depth ORDER BY c.cnt DESC) AS rn
+                    FROM counts c
+                    JOIN totals t ON c.depth = t.depth
+                )
+                SELECT depth, act, ROUND(pct, 1)
+                FROM ranked
+                WHERE rn <= 2
+                ORDER BY depth ASC, rn ASC
+                """,
+                [lat_gen],
+            ).fetchall()
+            top_acts: dict[int, list[str]] = {}
+            for d_val, act_nm, pct_val in act_rows:
+                top_acts.setdefault(int(d_val), []).append(
+                    f"{act_nm} {float(pct_val or 0.0):.1f}%"
+                )
+
+            expert_res: dict[int, float] = {}
+            try:
+                exp_rows = con.execute(
+                    """
+                    WITH per_exp AS (
+                        SELECT run_id, depth, MAX(turn) - MIN(turn) AS span
+                        FROM expert_ticks
+                        WHERE depth IS NOT NULL AND depth BETWEEN 1 AND 5
+                        GROUP BY run_id, depth
+                    )
+                    SELECT depth, ROUND(AVG(span), 0)
+                    FROM per_exp
+                    GROUP BY depth
+                    """
+                ).fetchall()
+                for ed, es in exp_rows:
+                    if es is not None and float(es) > 0:
+                        expert_res[int(ed)] = float(es)
+            except Exception:
+                pass
+
+            parts: list[str] = []
+            for d_val, n_r, avg_t in depth_rows:
+                d_int = int(d_val)
+                acts_str = ", ".join(top_acts.get(d_int, []))
+                exp_note = (
+                    f" vs expert ~{int(expert_res[d_int])}t"
+                    if d_int in expert_res
+                    else ""
+                )
+                act_part = f" [top: {acts_str}]" if acts_str else ""
+                parts.append(
+                    f"D{d_int} (n={int(n_r)}): {int(avg_t or 0)}t/run{act_part}{exp_note}"
+                )
+            if parts:
+                report.efficiency_summary = " | ".join(parts)
         except Exception:
             pass
 
@@ -785,6 +905,29 @@ class DeficitAnalyzer:
                 except Exception:
                     stall_count = 0
 
+            # Cross-cutting upstream efficiency slice: collect high action-burn runs NON-exclusively
+            # so recurring terminal-state symptoms (e.g. starvation/exhaustion) never hide the
+            # upstream repetitive action loop, while still allowing distinct peers to tackle both.
+            is_high_burn = (
+                (float(pct_search or 0.0) >= 35.0 and int(turns or 0) >= 1500)
+                or (
+                    float(pct_search or 0.0) + float(pct_wait or 0.0) >= 50.0
+                    and int(turns or 0) >= 1200
+                )
+                or (end_low == "max_steps" and int(turns or 0) >= 2000)
+            )
+            if is_high_burn and not (
+                end_low == "max_steps" and int(max_depth or 1) <= 2
+            ):
+                _add_to_cluster(
+                    "slice_high_search_or_horizon_burn",
+                    "search_or_horizon_loop",
+                    "High repetitive action-burn share or step-horizon burn without advancing floors",
+                    row,
+                    f"end=`{end_str}`, Dlvl={max_depth}, turns={turns}, pct_search={float(pct_search or 0):.1f}%, pct_wait={float(pct_wait or 0):.1f}%, tiles={unique_tiles}"
+                    + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
+                )
+
             # Purely domain-agnostic trajectory-outcome & capability slices (zero NetHack keywords)
             if end_low == "max_steps" and int(max_depth or 1) <= 2:
                 _add_to_cluster(
@@ -805,17 +948,9 @@ class DeficitAnalyzer:
                     f"end=`{end_str}`, Dlvl={max_depth}, turns={turns}, pct_search={float(pct_search or 0):.1f}%, tiles={unique_tiles}"
                     + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
                 )
-            elif (float(pct_search or 0.0) >= 35.0 and int(turns or 0) >= 1500) or (
-                end_low == "max_steps" and int(turns or 0) >= 2000
-            ):
-                _add_to_cluster(
-                    "slice_high_search_or_horizon_burn",
-                    "search_or_horizon_loop",
-                    "High search-action share or step-horizon burn without advancing floors",
-                    row,
-                    f"end=`{end_str}`, Dlvl={max_depth}, turns={turns}, pct_search={float(pct_search or 0):.1f}%, tiles={unique_tiles}"
-                    + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
-                )
+            elif is_high_burn:
+                # Already recorded above in `slice_high_search_or_horizon_burn`
+                pass
             elif (
                 stall_count >= 25
                 or "stalled" in end_low

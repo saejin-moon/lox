@@ -303,6 +303,7 @@ class AuthorToolRegistry:
         self.scenario_gate: str = "off"
         self.peer_guard_seeds: list[int] = []
         self.peer_target_seeds: list[int] = []
+        self.peer_probe_seeds: list[int] = []
         self.peer_micro_pilots_used: int = 0
         self.max_peer_micro_pilots: int = 3
         self._dead_patch_bonus_granted: bool = False
@@ -413,6 +414,7 @@ class AuthorToolRegistry:
         scenario_gate: str = "off",
         peer_guard_seeds: list[int] | None = None,
         peer_target_seeds: list[int] | None = None,
+        peer_probe_seeds: list[int] | None = None,
         max_peer_micro_pilots: int = 3,
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
@@ -446,6 +448,7 @@ class AuthorToolRegistry:
         self.enforce_peer_research_gate = False
         self.peer_guard_seeds = [int(s) for s in (peer_guard_seeds or [])]
         self.peer_target_seeds = [int(s) for s in (peer_target_seeds or [])]
+        self.peer_probe_seeds = [int(s) for s in (peer_probe_seeds or [])]
         self.peer_micro_pilots_used = 0
         self.max_peer_micro_pilots = max(0, int(max_peer_micro_pilots))
         self._dead_patch_bonus_granted = False
@@ -3246,7 +3249,12 @@ class AuthorToolRegistry:
             for s in dict.fromkeys(int(x) for x in raw_targets)
             if int(s) not in guard_seeds
         ]
-        all_seeds = guard_seeds + target_seeds
+        probe_seeds = [
+            int(s)
+            for s in dict.fromkeys(int(x) for x in self.peer_probe_seeds[:2])
+            if int(s) not in guard_seeds and int(s) not in target_seeds
+        ]
+        all_seeds = guard_seeds + target_seeds + probe_seeds
         if not all_seeds:
             return ""
 
@@ -3385,6 +3393,24 @@ class AuthorToolRegistry:
                         lines.append(
                             f"  * GUARD seed={sd}: OK (non-regressing drift @ byte {div_byte} -> Dlvl {b_d}->{c_d}, S={b_sc}->{c_sc}, end={b_end}->{c_end}{exc_note}; do NOT over-tighten)"
                         )
+            elif role == "PROBE":
+                div_txt = (
+                    "UNCHANGED (0-byte drift)"
+                    if div_byte is None
+                    else f"GENERALIZED (drift @ byte {div_byte})"
+                )
+                regressed = c_d < b_d or c_exc > b_exc
+                improved = c_d > b_d or (
+                    c_d == b_d and c_sc >= b_sc + 50 and c_exc <= b_exc
+                )
+                status_tag = (
+                    "✅ IMPROVED"
+                    if improved
+                    else ("⚠️ REGRESSED" if regressed else div_txt)
+                )
+                lines.append(
+                    f"  * PROBE seed={sd}: {status_tag} (Dlvl {b_d}->{c_d}, S={b_sc}->{c_sc}, end={b_end}->{c_end}, search {b_srch:.1f}%->{c_srch:.1f}%{exc_note})"
+                )
             else:
                 target_evaluated += 1
                 if div_byte is None:
@@ -3424,6 +3450,8 @@ class AuthorToolRegistry:
             _fmt_row("GUARD", sd)
         for sd in target_seeds:
             _fmt_row("TARGET", sd)
+        for sd in probe_seeds:
+            _fmt_row("PROBE", sd)
 
         if guard_regressions:
             lines.append(

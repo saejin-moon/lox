@@ -346,6 +346,7 @@ class SwarmCampaignOrchestrator:
         except Exception:
             deficit_report.organic_shards = []
 
+        deficit_report.plateau_streak = int(self._plateau_streak)
         if self._plateau_streak >= 2 and deficit_report.regime != "BOOTSTRAP":
             deficit_report.regime = "PLATEAU"
         if self._plateau_streak >= 2 and self._near_misses:
@@ -399,6 +400,15 @@ class SwarmCampaignOrchestrator:
             if n_select >= 4
             else None
         )
+        used_eval_seeds = set(seeds) | set(select_seeds or [])
+        probe_seeds: list[int] = []
+        if int(self.seeds_per_batch) >= 6:
+            p_cand = 5_000_000 + int(generation) * 10_000
+            while len(probe_seeds) < 2:
+                if p_cand not in used_eval_seeds:
+                    probe_seeds.append(p_cand)
+                    used_eval_seeds.add(p_cand)
+                p_cand += 1
         raw_shard_seeds = list(
             dict.fromkeys(
                 deficit_report.d_succ_seeds[:2]
@@ -407,8 +417,11 @@ class SwarmCampaignOrchestrator:
         )
         if not raw_shard_seeds:
             raw_shard_seeds = [1, 2]
-        max_shard = min(10, max(2, int(self.seeds_per_batch)))
-        shard_seeds = raw_shard_seeds[:max_shard]
+        max_shard = min(12, max(2, int(self.seeds_per_batch)))
+        hist_cap = max(2, max_shard - len(probe_seeds))
+        shard_seeds = list(dict.fromkeys(raw_shard_seeds[:hist_cap] + probe_seeds))[
+            :max_shard
+        ]
         incumbent_shard_runs: dict[int, dict[str, Any]] = {}
         if current_policy.strip() and shard_seeds:
             inc_shard = self.eval_pool.evaluate_batch(
@@ -510,6 +523,7 @@ class SwarmCampaignOrchestrator:
                 incumbent_shard_runs=incumbent_shard_runs,
                 shard_seeds=shard_seeds,
                 frontier=self.frontier,
+                probe_seeds=probe_seeds,
             )
 
         peer_errors: list[tuple[str, BaseException]] = []
@@ -621,7 +635,14 @@ class SwarmCampaignOrchestrator:
                 c_obj = cand_by_id.get(pid)
                 if c_obj is None or int(att.get("policy_exceptions", 0) or 0) > 0:
                     continue
-                if str(att.get("reject_reason", "") or "") == "guard_failed":
+                rej_r = str(att.get("reject_reason", "") or "")
+                if rej_r in (
+                    "guard_failed",
+                    "policy_exceptions_regression",
+                    "auto_esc_regression",
+                    "horizon_waste_regression",
+                    "cvar25_tail_regression",
+                ):
                     continue
                 att_d = float(att.get("avg_depth", 1.0) or 1.0)
                 att_md = int(att.get("max_depth", 1) or 1)
@@ -629,12 +650,13 @@ class SwarmCampaignOrchestrator:
                 att_w = int(att.get("wins", 0) or 0)
                 att_l = int(att.get("losses", 0) or 0)
                 att_iqm = float(att.get("iqm_delta", 0.0) or 0.0)
+                att_win = float(att.get("winsor_delta", att_iqm) or 0.0)
                 gained = list(att.get("seeds_gained") or [])
                 lost = list(att.get("seeds_lost") or [])
                 if (
                     gained
                     and att_w > att_l
-                    and att_iqm > 0.0
+                    and (att_win > 0.0 or att_iqm > 0.0)
                     and att_d >= verdict.incumbent_avg_depth
                 ):
                     diff_chunks: list[str] = []

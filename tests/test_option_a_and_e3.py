@@ -1999,3 +1999,428 @@ def test_promotion_gate_v2_split_sample_anti_goodhart_safety_and_craftax():
     )
     assert v_cx.promoted is True, v_cx.reason
     assert v_cx.best_pair["mean_delta"] >= 1.9
+
+
+def test_plateau_fixes_gate_telemetry_and_probes(tmp_path):
+    """
+    Verifies all three plateau-breaking pillars:
+    1. Sparsity-preserving Winsorized delta preserves 3W/0L/61T while capping dense outliers.
+    2. Split-Sample Referee eliminates unsafe pre-merge (Gen 42 regression), ranks credible
+       surgical winners over noisy coin-flips, builds safe stacks from individually safe winners,
+       and widens OBF Look-1 extension band to p < 0.16 (3W/0L -> +64 extension).
+    3. DeficitAnalyzer reports domain-agnostic per-depth residence & action concentration
+       telemetry (with expert parity) and prioritizes high action-burn above recurring symptom slices.
+    4. Paired Micro-Pilot displays informational PROBE rows without false dead-patch warnings.
+    """
+    import numpy as np
+
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.hypothesis import (
+        sparse_winsorized_mean,
+        sparse_winsorized_stats,
+        winsorized_mean,
+    )
+    from lox.engine.swarm_referee import SwarmReferee
+
+    # 1. Sparse Winsorized Delta vs naive Winsorization
+    sparse_3w = np.array([2.0, 2.0, 2.0] + [0.0] * 61, dtype=np.float64)
+    assert (
+        winsorized_mean(sparse_3w, 0.05) == 0.0
+    )  # Old naive winsor clipped 3W/0L to 0
+    sw_mean, sw_se = sparse_winsorized_stats(sparse_3w, 0.05)
+    assert sw_mean > 0.09
+    assert sw_se > 0.0
+    assert (
+        sparse_winsorized_mean(
+            [100.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 0.1
+        )
+        < 2.0
+    )
+
+    # 2A. Gen 42 Regression: No unsafe pre-merge & precision-aware S_select ranking
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.N\n"
+    )
+    base_skills = {
+        "combat/core": "def fight(s):\n    return 1\n",
+        "goals/explore": "def explore(s):\n    return 1\n",
+        "survival/core": "def heal(s):\n    return 1\n",
+    }
+    select32 = [142000 + i for i in range(32)]
+    confirm64 = [10142000 + i for i in range(64)]
+
+    class _Gen42Pool:
+        def __init__(self):
+            self.seen_batches: list[str] = []
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            self.seen_batches.append(batch_id)
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 500,
+                            "turns": 1500,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            is_sel = "_sel_" in batch_id
+            runs = []
+            for idx, s in enumerate(s_list):
+                if "peer_toxic" in batch_id:
+                    # Fails cvar25_tail_regression badly on bottom quartile
+                    d = 1 if idx < 10 else 4
+                    sc = 100 if idx < 10 else 900
+                elif "peer_noisy" in batch_id:
+                    # High-variance 16W/14L coin flip on S_select (p > 0.25), slightly positive raw mean
+                    if is_sel:
+                        if idx < 16:
+                            d, sc = 5, 1100
+                        elif idx < 30:
+                            d, sc = 1, 200
+                        else:
+                            d, sc = 3, 500
+                    else:
+                        d, sc = 3, 500
+                elif "peer_clean" in batch_id:
+                    # Surgical 7W/1L on S_select (p < 0.04) and strong 8W/0L on S_confirm!
+                    if is_sel:
+                        if idx < 7:
+                            d, sc = 5, 1100
+                        elif idx == 7:
+                            d, sc = 2, 300
+                        else:
+                            d, sc = 3, 500
+                    else:
+                        d, sc = (5, 1100) if idx < 8 else (3, 500)
+                else:
+                    d, sc = 3, 500
+                runs.append(
+                    {
+                        "run_id": f"c_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 1500,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    p_clean = PeerCandidate(
+        peer_id="peer_clean",
+        claimed_deficit_id="d1",
+        claimed_label="clean_fix",
+        policy_code=base_pol,
+        skills={
+            **base_skills,
+            "combat/core": "def fight(s):\n    return 2\n",
+        },
+        touched_skills={"combat/core"},
+        touched_skill_symbols={"combat/core": {"fight"}},
+        sandbox_passed=True,
+        loc_total=12,
+    )
+    p_toxic = PeerCandidate(
+        peer_id="peer_toxic",
+        claimed_deficit_id="d2",
+        claimed_label="toxic_fix",
+        policy_code=base_pol,
+        skills={
+            **base_skills,
+            "goals/explore": "def explore(s):\n    return 2\n",
+        },
+        touched_skills={"goals/explore"},
+        touched_skill_symbols={"goals/explore": {"explore"}},
+        sandbox_passed=True,
+        loc_total=12,
+    )
+    p_noisy = PeerCandidate(
+        peer_id="peer_noisy",
+        claimed_deficit_id="d3",
+        claimed_label="noisy_fix",
+        policy_code=base_pol,
+        skills={
+            **base_skills,
+            "survival/core": "def heal(s):\n    return 2\n",
+        },
+        touched_skills={"survival/core"},
+        touched_skill_symbols={"survival/core": {"heal"}},
+        sandbox_passed=True,
+        loc_total=12,
+    )
+    g42_pool = _Gen42Pool()
+    v42 = SwarmReferee(max_tournament_peers=3).evaluate_tournament(
+        generation=42,
+        candidates=[p_toxic, p_noisy, p_clean],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=g42_pool,
+        select_seeds=select32,
+        seeds=confirm64,
+    )
+    assert not any("ortho_" in bid for bid in g42_pool.seen_batches), (
+        f"Mode A must NOT pre-merge unverified ortho pairs: {g42_pool.seen_batches}"
+    )
+    assert not any(
+        "peer_toxic" in bid and "stack_" in bid for bid in g42_pool.seen_batches
+    )
+    assert v42.promoted is True, v42.reason
+    assert v42.winner_id == "peer_clean"
+
+    # 2B. Safe stack IS built when 2 individually safe positive winners exist
+    class _SafeStackPool:
+        def __init__(self):
+            self.seen_batches: list[str] = []
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            self.seen_batches.append(batch_id)
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                d_val = 3
+            elif "stack_" in batch_id:
+                d_val = 6
+            else:
+                d_val = 4
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"r_{s}",
+                        "seed": s,
+                        "depth": d_val,
+                        "max_depth": d_val,
+                        "score": 400 * d_val,
+                        "turns": 1500,
+                        "end_reason": "killed",
+                    }
+                    for s in s_list
+                ],
+            }
+
+    p_safe2 = PeerCandidate(
+        peer_id="peer_safe2",
+        claimed_deficit_id="d2",
+        claimed_label="safe2",
+        policy_code=base_pol,
+        skills={
+            **base_skills,
+            "goals/explore": "def explore(s):\n    return 3\n",
+        },
+        touched_skills={"goals/explore"},
+        touched_skill_symbols={"goals/explore": {"explore"}},
+        sandbox_passed=True,
+        loc_total=12,
+    )
+    stk_pool = _SafeStackPool()
+    v_stk = SwarmReferee(max_tournament_peers=3).evaluate_tournament(
+        generation=43,
+        candidates=[p_clean, p_safe2],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=stk_pool,
+        select_seeds=select32[:8],
+        seeds=confirm64[:16],
+    )
+    assert any("stack_" in bid for bid in stk_pool.seen_batches)
+    assert v_stk.promoted is True
+    assert v_stk.winner_id.startswith("stack_")
+
+    # 2C. Widened OBF Look-1 trigger (3W/0L -> p=0.125 < 0.16 triggers +64 OBF extension!)
+    class _ObfSparsePool:
+        def __init__(self):
+            self.obf_called = False
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "_obf_" in batch_id:
+                self.obf_called = True
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 500,
+                            "turns": 1500,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            # 3W/0L on S_confirm (p=0.125), +4W/0L on OBF extension (pooled 7W/0L -> p=0.0078 < 0.032!)
+            win_n = 4 if "_obf_" in batch_id else (6 if "_sel_" in batch_id else 3)
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"c_{s}",
+                        "seed": s,
+                        "depth": 5 if idx < win_n else 3,
+                        "max_depth": 5 if idx < win_n else 3,
+                        "score": 1100 if idx < win_n else 500,
+                        "turns": 1500,
+                        "end_reason": "killed",
+                    }
+                    for idx, s in enumerate(s_list)
+                ],
+            }
+
+    obf_pool = _ObfSparsePool()
+    v_obf = SwarmReferee().evaluate_tournament(
+        generation=44,
+        candidates=[p_clean],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=obf_pool,
+        select_seeds=select32,
+        seeds=confirm64,
+    )
+    assert obf_pool.obf_called is True
+    assert v_obf.promoted is True, v_obf.reason
+    assert v_obf.best_pair.get("obf_extended") is True
+
+    # 3. Domain-agnostic efficiency telemetry & upstream action-burn priority over recurring symptoms
+    db_path = str(tmp_path / "eff_test.duckdb")
+    init_db(db_path)
+    con = connect_db(db_path, read_only=False)
+    try:
+        con.execute(
+            """
+            INSERT INTO batches (batch_id, generation, mode, avg_depth, max_depth, avg_score, hypothesis_passed)
+            VALUES ('b_g10', 10, 'SWARM', 2.5, 4, 400.0, TRUE)
+            """
+        )
+        for i in range(4):
+            con.execute(
+                """
+                INSERT INTO runs (
+                    run_id, batch_id, generation, seed, depth, max_depth, turns,
+                    score, end_reason, unique_tiles, pct_wait, pct_search,
+                    starved_with_food, died_unarmored, auto_esc_count, policy_exceptions,
+                    last_active_function, summary_digest, is_shard
+                )
+                VALUES (?, 'b_g10', 10, ?, 2, 2, 2600, 300, 'fainted from exhaustion', 80, 2.0, 54.0,
+                        FALSE, FALSE, 0, 0, 'loop_fn', '', FALSE)
+                """,
+                [f"r_{i}", 300 + i],
+            )
+            # 10 ticks on depth 1: 6 ACT_SCAN, 4 ACT_STEP
+            for step_i in range(10):
+                act = "ACT_SCAN" if step_i < 6 else "ACT_STEP"
+                con.execute(
+                    """
+                    INSERT INTO ticks (run_id, step_idx, turn, depth, hp, max_hp, action_name, active_function, message)
+                    VALUES (?, ?, ?, 1, 12, 12, ?, 'loop_fn', '')
+                    """,
+                    [f"r_{i}", step_i, step_i, act],
+                )
+        # Expert ticks parity on depth 1 (span = 120 turns)
+        con.execute(
+            """
+            INSERT INTO expert_ticks (run_id, step_idx, turn, depth, hp, max_hp, action_name)
+            VALUES ('exp_1', 0, 1, 1, 14, 14, 'ACT_STEP'),
+                   ('exp_1', 1, 121, 1, 14, 14, 'ACT_STEP')
+            """
+        )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(db_path).analyze(generation=11, current_policy=base_pol)
+    assert "D1" in rep.efficiency_summary
+    assert "ACT_SCAN 60.0%" in rep.efficiency_summary
+    assert "vs expert ~120t" in rep.efficiency_summary
+    assert "Floor Residence & Action Concentration Telemetry" in rep.format_brief()
+    cluster_ids = [c.cluster_id for c in rep.fail_clusters]
+    assert "slice_high_search_or_horizon_burn" in cluster_ids
+    assert cluster_ids[0] == "slice_high_search_or_horizon_burn"
+    assert any(cid.startswith("slice_recurring_outcome_") for cid in cluster_ids)
+
+    # 4. Micro-Pilot PROBE rows (informational only; no spurious dead-patch warning)
+    class _MicroProbePool:
+        max_steps = 1000
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"mp_{s}",
+                        "seed": s,
+                        "depth": 4 if s == 20 else 3,
+                        "max_depth": 4 if s == 20 else 3,
+                        "score": 700 if s == 20 else 500,
+                        "turns": 500,
+                        "pct_search": 10.0,
+                        "end_reason": "killed",
+                        "action_bytes": b"XY" if s == 20 else b"AA",
+                    }
+                    for s in s_list
+                ],
+            }
+
+    reg = AuthorToolRegistry(db_path=db_path)
+    reg.current_policy_code = base_pol
+    reg.configure_generation(
+        pool=_MicroProbePool(),
+        baseline_runs=[
+            {
+                "seed": 10,
+                "depth": 3,
+                "max_depth": 3,
+                "score": 500,
+                "turns": 500,
+                "pct_search": 10.0,
+                "end_reason": "killed",
+                "action_bytes": b"AA",
+            },
+            {
+                "seed": 20,
+                "depth": 2,
+                "max_depth": 2,
+                "score": 300,
+                "turns": 500,
+                "pct_search": 40.0,
+                "end_reason": "killed",
+                "action_bytes": b"AA",
+            },
+            {
+                "seed": 5000010,
+                "depth": 3,
+                "max_depth": 3,
+                "score": 500,
+                "turns": 500,
+                "pct_search": 10.0,
+                "end_reason": "killed",
+                "action_bytes": b"AA",
+            },
+        ],
+        peer_guard_seeds=[10],
+        peer_target_seeds=[20],
+        peer_probe_seeds=[5000010],
+        max_peer_micro_pilots=2,
+    )
+    mp_out = reg._run_peer_paired_micro_pilot(base_pol, {})
+    assert "GUARD seed=10: ZERO DRIFT" in mp_out
+    assert "TARGET seed=20: ✅ RESCUED/IMPROVED" in mp_out
+    assert "PROBE seed=5000010: UNCHANGED" in mp_out
+    assert "DEAD-PATCH WARNING" not in mp_out

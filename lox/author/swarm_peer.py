@@ -266,6 +266,7 @@ def incubate_candidate(
     incumbent_shard_runs: dict[int, dict[str, Any]] | None = None,
     shard_seeds: list[int] | None = None,
     frontier_checkpoints: list[Any] | None = None,
+    probe_seeds: list[int] | None = None,
 ) -> PeerCandidate:
     """
     Isolated Sandbox Incubation (`tau_iso`):
@@ -460,9 +461,11 @@ def incubate_candidate(
                         int(s)
                         for s in (getattr(claimed_deficit, "sample_seeds", []) or [])
                     }
+                    probe_seed_set = {int(s) for s in (probe_seeds or [])}
                     target_bytes_checked = 0
                     total_bytes_checked = 0
                     total_bytes_diverged = 0
+                    probe_diverged = 0
                     for r in c_runs:
                         if r.get("is_shard"):
                             continue
@@ -478,6 +481,8 @@ def incubate_candidate(
                                 target_bytes_checked += 1
                             if c_ab != b_ab:
                                 total_bytes_diverged += 1
+                                if sd in probe_seed_set:
+                                    probe_diverged += 1
                         cd = float(
                             max(int(r.get("depth", 1)), int(r.get("max_depth", 1)))
                         )
@@ -508,6 +513,7 @@ def incubate_candidate(
                         )
                         return candidate
 
+                    metrics["probe_diverged"] = probe_diverged
                     if paired_d_diffs:
                         metrics["depth_delta"] = round(
                             sum(paired_d_diffs) / len(paired_d_diffs), 4
@@ -575,6 +581,7 @@ class SwarmPeerAgent:
         incumbent_shard_runs: dict[int, dict[str, Any]] | None = None,
         shard_seeds: list[int] | None = None,
         frontier: Any = None,
+        probe_seeds: list[int] | None = None,
     ) -> PeerCandidate:
         skills_copy = dict(current_skills or {})
         sampled_frontier: list[Any] = []
@@ -632,6 +639,7 @@ class SwarmPeerAgent:
                 incumbent_shard_runs=incumbent_shard_runs,
                 shard_seeds=shard_seeds,
                 frontier_checkpoints=sampled_frontier,
+                probe_seeds=probe_seeds,
             )
             self._record_peer_theory(generation, claimed_deficit, cand)
             return cand
@@ -649,6 +657,7 @@ class SwarmPeerAgent:
             scenario_gate=getattr(self, "scenario_gate", "off"),
             peer_guard_seeds=list(deficit_report.d_succ_seeds[:2]),
             peer_target_seeds=list(claimed_deficit.sample_seeds[:2]),
+            peer_probe_seeds=list((probe_seeds or [])[:2]),
             max_peer_micro_pilots=3,
         )
         self.author.tools.enforce_peer_research_gate = self.provider != "mock"
@@ -682,14 +691,27 @@ class SwarmPeerAgent:
                 + "\n".join(f_lines)
             )
 
+        plateau_directive = ""
+        if str(deficit_report.regime or "").upper() == "PLATEAU":
+            streak_n = int(getattr(deficit_report, "plateau_streak", 0) or 0)
+            streak_txt = f" (streak={streak_n} gens)" if streak_n > 0 else ""
+            plateau_directive = (
+                f"\n### Plateau Regime Directive{streak_txt}:\n"
+                "- Progression has plateaued; avoid narrow single-seed band-aids that trigger 0W/0L on unseen seeds.\n"
+                "- Inspect Floor Residence & Action Concentration Telemetry and `champion_ticks` to target upstream "
+                "efficiency, loop-termination, or capability bottlenecks across the owning subsystem.\n"
+                "- Non-regressing drift (`OK`) on `GUARD` seeds is expected and healthy for systemic improvements.\n"
+            )
+
         extra_context = (
-            f"{deficit_report.format_brief()}{arch_block}\n\n"
+            f"{deficit_report.format_brief()}{arch_block}{plateau_directive}\n\n"
             f"### Your Claimed Target Deficit (`{self.peer_id}`):\n"
             f"- Cluster ID: `{claimed_deficit.cluster_id}` ({claimed_deficit.kind})\n"
             f"- Description: {claimed_deficit.label}\n"
             f"- Evidence: {claimed_deficit.evidence}\n"
             f"- Target Sample Seeds: {claimed_deficit.sample_seeds}\n"
             f"- Guard Seeds (preserve non-regression; do NOT over-tighten on neutral drift): {list(deficit_report.d_succ_seeds[:2])}\n"
+            f"- Unseen Probe Seeds (informational generalization check in `dry_run_policy`): {list((probe_seeds or [])[:2])}\n"
             f"- Diagnosis Note: Inspect `champion_ticks` / `ticks` and workspace `skills/` directly to locate the true root cause across module boundaries."
             f"{frontier_block}\n"
         )
@@ -796,6 +818,7 @@ class SwarmPeerAgent:
             incumbent_shard_runs=incumbent_shard_runs,
             shard_seeds=shard_seeds,
             frontier_checkpoints=sampled_frontier,
+            probe_seeds=probe_seeds,
         )
 
         status_lbl = (

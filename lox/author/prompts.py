@@ -125,14 +125,15 @@ Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, comb
 3. `SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, unique_tiles, policy_exceptions, last_active_function, end_reason, summary_digest FROM champion_runs ORDER BY max_depth ASC, turns DESC LIMIT 8;`
 4. `SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth FROM expert_runs;`
 
-### Option-A Subsystem Engineering & Zero-Drift Discipline
-1. **Zero-Drift Guard Scoping & Generality (CRITICAL for CRN Stability)**:
-   - NetHack RNG is chaotic: altering a single action on a healthy early turn forks the trajectory and produces noisy ~20W/20L churn that fails statistical gating.
-   - Gate every new branch, interrupt, or fallback **cleanly on the general deficit precondition** (e.g., `consecutive_stalls >= N`, exact status condition/illness/fainting/encumbrance flag, per-floor search cap exceeded, or specific unhandled prompt) so you fix the **entire failure class** without disrupting unrelated early play.
+### Option-A Subsystem Engineering & Adaptive Guard Discipline
+1. **Zero-Drift Guard Scoping & Adaptive Scope (Surgical vs. Systemic)**:
+   - **Surgical Failure Fix (`CLIMBING` / isolated failure class)**: NetHack RNG is chaotic; altering unrelated early turns can create noisy churn. Gate new interrupts, prompts, or fallbacks **cleanly on the general deficit precondition** (e.g., `consecutive_stalls >= N`, exact status condition/encumbrance flag, or unhandled prompt) so you fix the **entire failure class** without disrupting healthy early play.
+   - **Systemic Efficiency / Bottleneck Redesign (`PLATEAU` or high action-burn / floor-residence gap in telemetry)**: When `DeficitReport` shows excessive per-floor residence or a dominant repetitive action share, redesigning the core loop, termination condition, or budget logic of the owning subsystem is **encouraged and expected**. Do NOT wrap systemic inefficiency loops in narrow single-seed micro-guards — those produce `0W/0L` dead patches.
    - Inspect the **Paired Micro-Pilot Diff** returned by `dry_run_policy`:
-     - If a `GUARD` seed shows **`⚠️ REGRESSION`**, tighten your guard precondition and re-verify before submitting.
-     - If a `GUARD` seed shows **`OK (non-regressing drift)`**, **do NOT over-tighten** — over-narrowing to a single seed's exact geometry produces `0W–0L` dead patches that never fire on fresh tournament seeds!
-     - If **`TARGET` seeds are `UNCHANGED` (`DEAD-PATCH WARNING`)**, your precondition is too narrow or unreachable—broaden it to the general root cause and re-test before submitting.
+     - If a `GUARD` seed shows **`⚠️ REGRESSION`**, tighten or fix the regressing logic and re-verify before submitting.
+     - If a `GUARD` seed shows **`OK (non-regressing drift)`**, **do NOT over-tighten** — neutral/improving drift on guards is healthy and expected for general fixes.
+     - Inspect **`PROBE`** seeds (unseen games) to check whether your change generalizes beyond historical `TARGET` seeds.
+     - If **`TARGET` seeds are `UNCHANGED` (`DEAD-PATCH WARNING`)**, your precondition is too narrow or unreachable — broaden it to the general root cause and re-test before submitting.
 
 2. **Schema-Safe `ws.domain(...)` State (Zero `KeyError`s)**:
    - Never assume keys exist in an existing `ws.domain(...)` dictionary when patching a function—existing domains may be initialized elsewhere or evolved incrementally.

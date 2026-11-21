@@ -364,14 +364,32 @@ def _evaluate_confirmation(
 
 def _selection_rank_key(
     cand_stats: dict[str, Any], pair_stats: dict[str, Any]
-) -> tuple[float, float, int]:
-    """Sole v2 selection ranker: 5%-Winsorized paired mean delta, mean delta, -ast_nodes."""
+) -> tuple[int, float, float, float, int]:
+    """
+    Precision-aware v2.1 selection ranker:
+      1. Credibility tier (`sign_perm_p < 0.15` and `wins > losses`) so high-precision surgical
+         winners outrank high-variance coin-flip edits.
+      2. Lower-confidence-adjusted Winsorized delta (`lcb_score = winsor_delta - 0.5 * winsor_se`).
+      3. Statistical confidence (`-sign_perm_p`).
+      4. Point Winsorized delta (`winsor_delta`).
+      5. Simplicity tie-breaker (`-ast_nodes`).
+    """
+    wins = int(pair_stats.get("wins", 0) or 0)
+    losses = int(pair_stats.get("losses", 0) or 0)
+    sign_p = float(pair_stats.get("sign_perm_p", 1.0) or 1.0)
     winsor_d = float(
         pair_stats.get("winsor_delta", pair_stats.get("mean_delta", 0.0)) or 0.0
     )
-    mean_d = float(pair_stats.get("mean_delta", 0.0) or 0.0)
+    lcb = float(pair_stats.get("lcb_score", winsor_d) or 0.0)
+    is_credible = 1 if (sign_p < 0.15 and wins > losses) else 0
     ast_n = int(cand_stats.get("ast_nodes", 0) or 0)
-    return (round(winsor_d, 4), round(mean_d, 4), -ast_n)
+    return (
+        is_credible,
+        round(lcb, 4),
+        round(-sign_p, 4),
+        round(winsor_d, 4),
+        -ast_n,
+    )
 
 
 class SwarmReferee:
@@ -437,6 +455,7 @@ class SwarmReferee:
                 float(c.sandbox_metrics.get("frontier_depth_delta", 0.0)),
                 int(c.sandbox_metrics.get("frontier_survived", 0)),
                 float(c.sandbox_metrics.get("score_delta", 0.0)),
+                int(c.sandbox_metrics.get("probe_diverged", 0)),
                 -float(c.sandbox_metrics.get("wrapper_ratio", 0.0)),
                 -int(c.loc_total),
             ),
@@ -624,11 +643,6 @@ class SwarmReferee:
         has_base = bool(base_policy.strip())
 
         finalists = self.select_finalists(candidates, base_policy, base_skills)
-        orthos = self.build_orthogonal_candidates(
-            finalists, base_policy, base_skills, max_combos=2
-        )
-        if orthos:
-            finalists.extend(orthos)
 
         base_loc = len(base_policy.splitlines()) + sum(
             len(v.splitlines()) for v in base_skills.values()
@@ -643,6 +657,15 @@ class SwarmReferee:
         use_split_sample = bool(select_seeds) or (
             race_seeds is not None and 4 <= int(race_seeds) < len(seeds)
         )
+        # In Mode A (Split-Sample), NEVER pre-merge unverified parents before S_select safety
+        # checks — stacks are composed ONLY from individually safe positive S_select winners.
+        # In Mode B (single-stage direct), preserve pre-merge orthogonal compositions.
+        if not use_split_sample:
+            orthos = self.build_orthogonal_candidates(
+                finalists, base_policy, base_skills, max_combos=2
+            )
+            if orthos:
+                finalists.extend(orthos)
         if use_split_sample:
             if select_seeds:
                 s_select = [int(s) for s in select_seeds]
@@ -1005,65 +1028,98 @@ class SwarmReferee:
                 )
                 sel_entries.append((cand, cb, st, pr, s_ok, s_reason))
 
-            # Optional In-Sample 2-Way Greedy Stack on S_select (zero Stage-3 leakage!)
+            # Safe In-Sample 2-Way Stacks on S_select (ONLY from individually safe positive winners!)
             safe_indiv_winners = [
                 (c, st, pr)
                 for (c, _cb, st, pr, s_ok, _sr) in sel_entries
                 if s_ok
                 and not c.peer_id.startswith("ortho_")
+                and not c.peer_id.startswith("stack_")
                 and (not has_base or _has_positive_dominance(pr))
             ]
             safe_indiv_winners.sort(
                 key=lambda item: _selection_rank_key(item[1], item[2]), reverse=True
             )
+            stack_parent_p: dict[str, float] = {}
             if has_base and len(safe_indiv_winners) >= 2:
-                top_a, top_b = safe_indiv_winners[0][0], safe_indiv_winners[1][0]
-                cand_stack = self._compose_two_packages(
-                    base_policy,
-                    base_skills,
-                    top_a,
-                    top_b,
-                    peer_id=f"stack_{top_a.peer_id}_{top_b.peer_id}",
-                    claimed_label=f"In-sample stack: {top_a.peer_id} + {top_b.peer_id}",
-                    check_symbol_disjoint=False,
-                )
-                if cand_stack is not None:
-                    stk_fp = _package_fingerprint(
-                        cand_stack.policy_code, cand_stack.skills
-                    )
-                    if stk_fp not in sel_seen_fps:
-                        stk_batches = _run_batch_slice(
-                            [
-                                (
-                                    cand_stack.peer_id,
-                                    cand_stack.policy_code,
-                                    cand_stack.skills,
-                                    cand_stack,
-                                    False,
-                                )
-                            ],
-                            s_select,
-                            "sel_stk_",
+                stack_cands: list[PeerCandidate] = []
+                scan_safe = safe_indiv_winners[:4]
+                for idx_i in range(len(scan_safe)):
+                    if len(stack_cands) >= 2:
+                        break
+                    for idx_j in range(idx_i + 1, len(scan_safe)):
+                        if len(stack_cands) >= 2:
+                            break
+                        top_a, _st_a, pr_a = scan_safe[idx_i]
+                        top_b, _st_b, pr_b = scan_safe[idx_j]
+                        cand_stack = self._compose_two_packages(
+                            base_policy,
+                            base_skills,
+                            top_a,
+                            top_b,
+                            peer_id=f"stack_{top_a.peer_id}_{top_b.peer_id}",
+                            claimed_label=f"In-sample stack: {top_a.peer_id} + {top_b.peer_id}",
+                            check_symbol_disjoint=True,
                         )
+                        if cand_stack is None and idx_i == 0 and idx_j == 1:
+                            cand_stack = self._compose_two_packages(
+                                base_policy,
+                                base_skills,
+                                top_a,
+                                top_b,
+                                peer_id=f"stack_{top_a.peer_id}_{top_b.peer_id}",
+                                claimed_label=f"In-sample stack: {top_a.peer_id} + {top_b.peer_id}",
+                                check_symbol_disjoint=False,
+                            )
+                        if cand_stack is None:
+                            continue
+                        stk_fp = _package_fingerprint(
+                            cand_stack.policy_code, cand_stack.skills
+                        )
+                        if stk_fp in sel_seen_fps:
+                            continue
+                        sel_seen_fps.add(stk_fp)
+                        stack_cands.append(cand_stack)
+                        stack_parent_p[cand_stack.peer_id] = min(
+                            float(pr_a.get("sign_perm_p", 1.0) or 1.0),
+                            float(pr_b.get("sign_perm_p", 1.0) or 1.0),
+                        )
+                if stack_cands:
+                    stk_batches = _run_batch_slice(
+                        [
+                            (sc.peer_id, sc.policy_code, sc.skills, sc, False)
+                            for sc in stack_cands
+                        ],
+                        s_select,
+                        "sel_stk_",
+                    )
+                    for cand_stack in stack_cands:
                         stk_be = stk_batches.get(cand_stack.peer_id)
-                        if stk_be is not None:
-                            stk_st = _extract_stats(
-                                stk_be,
-                                cand_stack.policy_code,
-                                cand_stack.skills,
-                                loc_override=cand_stack.loc_total,
-                            )
-                            stk_pr = evaluate_tournament_pair(
-                                stk_be.get("runs", []) or [],
-                                sel_inc_runs,
-                                benchmark=bm_name,
-                            )
-                            stk_ok, stk_reason = _passes_safety_invariants(
-                                stk_st, sel_inc_stats, has_base=True
-                            )
-                            sel_entries.append(
-                                (cand_stack, stk_be, stk_st, stk_pr, stk_ok, stk_reason)
-                            )
+                        if stk_be is None:
+                            continue
+                        stk_st = _extract_stats(
+                            stk_be,
+                            cand_stack.policy_code,
+                            cand_stack.skills,
+                            loc_override=cand_stack.loc_total,
+                        )
+                        stk_pr = evaluate_tournament_pair(
+                            stk_be.get("runs", []) or [],
+                            sel_inc_runs,
+                            benchmark=bm_name,
+                        )
+                        stk_ok, stk_reason = _passes_safety_invariants(
+                            stk_st, sel_inc_stats, has_base=True
+                        )
+                        # Guard against noisy stacks diluting a cleaner individual parent
+                        stk_p = float(stk_pr.get("sign_perm_p", 1.0) or 1.0)
+                        parent_p = stack_parent_p.get(cand_stack.peer_id, 1.0)
+                        if stk_ok and stk_p > max(parent_p * 1.5, 0.10):
+                            stk_ok = False
+                            stk_reason = "stack_precision_degraded"
+                        sel_entries.append(
+                            (cand_stack, stk_be, stk_st, stk_pr, stk_ok, stk_reason)
+                        )
 
             # Choose single #1 winner C* from S_select
             eligible_sel = [
@@ -1246,7 +1302,7 @@ class SwarmReferee:
                     not beats_incumbent
                     and guard_ok
                     and _has_positive_dominance(best_pair)
-                    and eff_a1 <= look1_p < 0.12
+                    and eff_a1 <= look1_p < 0.16
                 ):
                     ext_n = min(64, len(s_confirm))
                     used_seeds = set(s_select) | set(s_confirm)
@@ -1259,7 +1315,7 @@ class SwarmReferee:
                         cand_sd += 1
                     ui.info(
                         f"Gen {generation}: OBF Stage-3b extension on `{best_cand.peer_id}` "
-                        f"(look1 p={look1_p:.4f} in [{eff_a1:.3f}, 0.120), +{len(s_obf)} unseen seeds)..."
+                        f"(look1 p={look1_p:.4f} in [{eff_a1:.3f}, 0.160), +{len(s_obf)} unseen seeds)..."
                     )
                     obf_batches = _run_batch_slice(
                         [
