@@ -538,7 +538,7 @@ class SwarmCampaignOrchestrator:
             )
         sampled_elite_ids: list[str] = []
 
-        peer_tool_turns = max(12, int(self.turns_per_worker) * 4)
+        peer_tool_turns = max(16, int(self.turns_per_worker) * 5)
         peer_candidates: list[PeerCandidate] = []
 
         use_refactor_model_for_p1 = bool(

@@ -3155,12 +3155,7 @@ class AuthorToolRegistry:
                     warn_block += f"\n- SCENARIO_GATE ERROR: {sg_exc}"
 
             micro_pilot_block = ""
-            if (
-                not smoke_only
-                and not has_replay
-                and self.mode == "SWARM_PEER"
-                and self.pool is not None
-            ):
+            if not smoke_only and self.mode == "SWARM_PEER" and self.pool is not None:
                 micro_pilot_block = self._run_peer_paired_micro_pilot(
                     policy_code=spliced_policy,
                     cand_skills=cand_skills,
@@ -3357,9 +3352,11 @@ class AuthorToolRegistry:
             c_end = str(cr.get("end_reason", "unknown") or "unknown")
             c_srch = float(cr.get("pct_search", 0.0) or 0.0)
             c_exc = int(cr.get("policy_exceptions", 0) or 0)
+            c_esc = int(cr.get("auto_esc_count", 0) or 0)
             if br is None:
+                esc_s = f", auto_esc={c_esc}" if c_esc else ""
                 lines.append(
-                    f"  * {role} seed={sd}: Dlvl={c_d}, S={c_sc}, T={c_t}, end={c_end}, search={c_srch:.1f}%, exc={c_exc} (no incumbent cache)"
+                    f"  * {role} seed={sd}: Dlvl={c_d}, S={c_sc}, T={c_t}, end={c_end}, search={c_srch:.1f}%, exc={c_exc}{esc_s} (no incumbent cache)"
                 )
                 return
 
@@ -3369,6 +3366,7 @@ class AuthorToolRegistry:
             b_end = str(br.get("end_reason", "unknown") or "unknown")
             b_srch = float(br.get("pct_search", 0.0) or 0.0)
             b_exc = int(br.get("policy_exceptions", 0) or 0)
+            b_esc = int(br.get("auto_esc_count", 0) or 0)
 
             b_bytes = bytes(br.get("action_bytes") or b"")
             c_bytes = bytes(cr.get("action_bytes") or b"")
@@ -3388,11 +3386,18 @@ class AuthorToolRegistry:
                 )
 
             exc_note = f", exc={b_exc}->{c_exc}" if (b_exc or c_exc) else ""
+            if c_esc > b_esc:
+                exc_note += f", auto_esc={b_esc}->{c_esc}"
             d_diff = float(c_d - b_d)
             depth_deltas_all.append(d_diff)
-            if c_d > b_d or (c_d == b_d and c_sc >= b_sc + 50 and c_exc <= b_exc):
+            if c_d > b_d or (
+                c_d == b_d
+                and c_sc >= b_sc + 50
+                and c_exc <= b_exc
+                and c_esc <= b_esc + 1
+            ):
                 net_wins += 1
-            elif c_d < b_d or c_exc > b_exc:
+            elif c_d < b_d or c_exc > b_exc or c_esc > b_esc + 1:
                 net_losses += 1
             else:
                 net_ties += 1
@@ -3407,6 +3412,7 @@ class AuthorToolRegistry:
                     regressed = (
                         c_d < b_d
                         or c_exc > b_exc
+                        or c_esc > b_esc + 1
                         or (c_end in stall_ends and b_end not in stall_ends)
                     )
                     if regressed:
@@ -3432,11 +3438,12 @@ class AuthorToolRegistry:
                 regressed = (
                     c_d < b_d
                     or c_exc > b_exc
+                    or c_esc > b_esc + 1
                     or (c_end in stall_ends and b_end not in stall_ends)
                 )
-                improved = c_d > b_d or (
-                    c_d == b_d and c_sc >= b_sc + 50 and c_exc <= b_exc
-                )
+                improved = (
+                    c_d > b_d or (c_d == b_d and c_sc >= b_sc + 50 and c_exc <= b_exc)
+                ) and c_esc <= b_esc + 1
                 if improved:
                     probe_improved += 1
                 elif regressed:

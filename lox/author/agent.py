@@ -1550,7 +1550,7 @@ class AuthorAgent:
                 )
 
             if (
-                turn_idx >= max(4, max_tool_turns - 3)
+                turn_idx >= max(4, min(max_tool_turns - 3, max_tool_turns // 2))
                 and not self.tools.last_dry_run_passed
                 and self.tools.pilot_runs_used == 0
                 and not any(

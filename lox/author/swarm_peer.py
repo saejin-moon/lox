@@ -669,7 +669,7 @@ class SwarmPeerAgent:
             peer_guard_seeds=list(deficit_report.d_succ_seeds[:2]),
             peer_target_seeds=list(claimed_deficit.sample_seeds[:2]),
             peer_probe_seeds=list((probe_seeds or [])[:6]),
-            max_peer_micro_pilots=3,
+            max_peer_micro_pilots=4,
         )
         self.author.tools.enforce_peer_research_gate = self.provider != "mock"
         self.author.tools.current_policy_code = str(current_policy or "")

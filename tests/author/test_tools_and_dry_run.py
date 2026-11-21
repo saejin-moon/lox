@@ -844,3 +844,98 @@ def test_micro_pilot_6_probes_net_summary_and_guard_jitter(tmp_path):
     out_zero = reg_zero._run_peer_paired_micro_pilot(base_pol, {})
     assert "PROBE diverged=0/6, regressed=0/6" in out_zero
     assert "ZERO-PROBE-DRIFT NOTE" in out_zero
+
+
+def test_dry_run_replay_runs_micro_pilot_and_flags_auto_esc_spike(tmp_path):
+    """
+    Verifies Gen 63-64 fixes:
+    1. dry_run_policy(..., replay_run_id=...) in SWARM_PEER mode STILL runs the Paired Micro-Pilot
+       instead of silently skipping it.
+    2. _run_peer_paired_micro_pilot surfaces auto_esc spikes and flags them as regressions.
+    """
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import connect_db, init_db
+    from lox.env.actions import Action
+
+    dbp = str(tmp_path / "replay_mp.duckdb")
+    init_db(dbp)
+    con = connect_db(dbp, read_only=False)
+    try:
+        con.execute(
+            "INSERT INTO batches (batch_id, generation, mode, hypothesis_passed) VALUES ('b64', 64, 'SWARM', TRUE)"
+        )
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, turns, score, end_reason, action_bytes, is_shard)
+            VALUES ('run_r64', 'b64', 64, 42, 1, 1, 10, 0, 'killed', ?, FALSE)
+            """,
+            [bytes([int(Action.SEARCH)] * 6)],
+        )
+    finally:
+        con.close()
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.SEARCH\n"
+    )
+
+    class _EscPool:
+        max_steps = 1000
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"e_{s}",
+                        "seed": s,
+                        "depth": 3,
+                        "max_depth": 3,
+                        "score": 500,
+                        "turns": 500,
+                        "pct_search": 10.0,
+                        "auto_esc_count": 4 if s == 5000001 else 0,
+                        "end_reason": "killed",
+                        "action_bytes": b"XY",
+                    }
+                    for s in s_list
+                ],
+            }
+
+    reg = AuthorToolRegistry(db_path=dbp)
+    reg.current_policy_code = base_pol
+    reg.configure_generation(
+        pool=_EscPool(),
+        mode="SWARM_PEER",
+        baseline_runs=[
+            {
+                "seed": s,
+                "depth": 3,
+                "max_depth": 3,
+                "score": 500,
+                "turns": 500,
+                "pct_search": 10.0,
+                "auto_esc_count": 0,
+                "end_reason": "killed",
+                "action_bytes": b"AA",
+            }
+            for s in (10, 20, 5000001)
+        ],
+        peer_guard_seeds=[10],
+        peer_target_seeds=[20],
+        peer_probe_seeds=[5000001],
+        max_peer_micro_pilots=4,
+    )
+    out_txt, status = reg.dry_run_policy(
+        code=base_pol,
+        max_turns=10,
+        replay_run_id="run_r64",
+        replay_steps=3,
+    )
+    assert "PASSED" in status
+    assert "Paired Micro-Pilot Diff vs Incumbent" in out_txt
+    assert "PROBE seed=5000001: ⚠️ REGRESSED" in out_txt
+    assert "auto_esc=0->4" in out_txt
