@@ -1059,8 +1059,10 @@ class SwarmReferee:
                         top_b, _st_b, pr_b = scan_safe[idx_j]
                         pa = float(pr_a.get("sign_perm_p", 1.0) or 1.0)
                         pb = float(pr_b.get("sign_perm_p", 1.0) or 1.0)
-                        # Never dilute a strong p < 0.05 winner with a noisy (p >= 0.25) second parent
-                        if pa < 0.05 and pb >= 0.25:
+                        lb = int(pr_b.get("losses", 0) or 0)
+                        # Never dilute a strong p < 0.05 winner with a noisy (p > 0.25 or lossy p >= 0.25) second parent,
+                        # while still allowing clean zero-loss 2W/0L (p == 0.25) fixes to stack.
+                        if pa < 0.05 and (pb > 0.25 or (pb >= 0.25 and lb > 0)):
                             continue
                         cand_stack = self._compose_two_packages(
                             base_policy,

@@ -2892,3 +2892,143 @@ def test_gen60_rejection_memory_mech_and_tight_incubation_guard(tmp_path):
         shard_seeds=list(range(1, 5)),  # 1 seed -1 depth across 4 -> avg -0.25 > -0.35
     )
     assert c4.sandbox_passed is True
+
+
+def test_gen62_single_mechanism_prompt_phrase_grouping_and_zero_loss_stack(tmp_path):
+    """
+    Verifies Gen 62 fixes:
+    1. Peer system prompt instructs Single-Mechanism Isolation (no 3-4 sub-fix bundles).
+    2. DeficitAnalyzer groups split terminal phrasings sharing `the <phrase>` (e.g. 3+3=6 runs)
+       into a single `recurring_terminal_state` cluster.
+    3. SwarmReferee allows a clean zero-loss 2W/0L (p=0.25) candidate to stack onto a p<0.05 winner.
+    """
+    from lox.author.prompts import build_system_prompt
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.swarm_referee import SwarmReferee
+
+    # 1. Single-Mechanism Isolation prompt rule
+    sys_p = build_system_prompt(is_swarm=True, is_peer=True)
+    assert "Single-Mechanism Isolation" in sys_p
+
+    # 2. Split phrase grouping in DeficitAnalyzer (3 + 3 = 6 runs >= recurring_end_min=4)
+    dbp = str(tmp_path / "phrase_group.duckdb")
+    init_db(dbp)
+    con = connect_db(dbp, read_only=False)
+    try:
+        con.execute(
+            "INSERT INTO batches (batch_id, generation, mode, hypothesis_passed) VALUES ('b62', 62, 'SWARM', TRUE)"
+        )
+        for i in range(3):
+            con.execute(
+                """
+                INSERT INTO runs (
+                    run_id, batch_id, generation, seed, depth, max_depth, turns,
+                    score, end_reason, unique_tiles, pct_wait, pct_search, is_shard
+                )
+                VALUES (?, 'b62', 62, ?, 3, 3, 1200, 400, 'You miss the crystal sentinel', 250, 0.0, 15.0, FALSE)
+                """,
+                [f"m_{i}", 6200 + i],
+            )
+            con.execute(
+                """
+                INSERT INTO runs (
+                    run_id, batch_id, generation, seed, depth, max_depth, turns,
+                    score, end_reason, unique_tiles, pct_wait, pct_search, is_shard
+                )
+                VALUES (?, 'b62', 62, ?, 3, 3, 1250, 420, 'You hit the crystal sentinel! You are stunned!', 260, 0.0, 15.0, FALSE)
+                """,
+                [f"h_{i}", 6210 + i],
+            )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=63, current_policy="class Policy: pass"
+    )
+    rec_cs = [c for c in rep.fail_clusters if c.kind == "recurring_terminal_state"]
+    assert len(rec_cs) == 1
+    assert rec_cs[0].run_count == 6
+    assert "crystal sentinel" in rec_cs[0].label
+
+    # 3. Clean zero-loss 2W/0L (p=0.25) stacks cleanly onto a 7W/0L (p=0.0078) winner -> 9W/0L stack wins!
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.N\n"
+    )
+    base_skills = {
+        "survival/avoid": "def avoid(s):\n    return 1\n",
+        "goals/gear": "def equip(s):\n    return 1\n",
+    }
+    select32 = [162000 + i for i in range(32)]
+    confirm64 = [10162000 + i for i in range(64)]
+
+    class _ZeroLossStackPool:
+        def __init__(self):
+            self.seen_batches: list[str] = []
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            self.seen_batches.append(batch_id)
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                win_n = 0
+            elif "stack_" in batch_id:
+                win_n = 9
+            elif "peer_a" in batch_id:
+                win_n = 7
+            else:
+                win_n = 2
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"r_{s}",
+                        "seed": s,
+                        "depth": 5 if idx < win_n else 3,
+                        "max_depth": 5 if idx < win_n else 3,
+                        "score": 1100 if idx < win_n else 500,
+                        "turns": 1500,
+                        "end_reason": "killed",
+                    }
+                    for idx, s in enumerate(s_list)
+                ],
+            }
+
+    p_a = PeerCandidate(
+        peer_id="peer_a",
+        claimed_deficit_id="d1",
+        claimed_label="a",
+        policy_code=base_pol,
+        skills={**base_skills, "survival/avoid": "def avoid(s):\n    return 2\n"},
+        touched_skills={"survival/avoid"},
+        touched_skill_symbols={"survival/avoid": {"avoid"}},
+        sandbox_passed=True,
+        loc_total=10,
+    )
+    p_b = PeerCandidate(
+        peer_id="peer_b",
+        claimed_deficit_id="d2",
+        claimed_label="b",
+        policy_code=base_pol,
+        skills={**base_skills, "goals/gear": "def equip(s):\n    return 2\n"},
+        touched_skills={"goals/gear"},
+        touched_skill_symbols={"goals/gear": {"equip"}},
+        sandbox_passed=True,
+        loc_total=10,
+    )
+    zpool = _ZeroLossStackPool()
+    v62 = SwarmReferee().evaluate_tournament(
+        generation=62,
+        candidates=[p_a, p_b],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=zpool,
+        select_seeds=select32,
+        seeds=confirm64,
+    )
+    assert any("stack_" in b for b in zpool.seen_batches)
+    assert v62.promoted is True, v62.reason
+    assert v62.winner_id == "stack_peer_a_peer_b"

@@ -873,7 +873,11 @@ class DeficitAnalyzer:
         high_depth_cut = depths_all[int(len(depths_all) * 0.70)] if depths_all else 2.0
 
         # Domain-agnostic recurring terminal states (zero hardcoded game strings):
-        # any specific non-generic end_reason repeating on >= max(4, n//16) runs gets its own clean slice.
+        # 1) Exact non-generic end_reason repeating on >= max(4, n//16) runs.
+        # 2) Generic phrase grouping (e.g. `You miss the <X>` + `You hit the <X>! ...`)
+        #    when >= 2 distinct phrasings share a recurring `the <1-2 word phrase>` across >= max(4, n//16) runs.
+        import re as _re
+
         _generic_ends = {
             "",
             "unknown",
@@ -886,6 +890,7 @@ class DeficitAnalyzer:
         }
         recurring_end_min = max(4, len(rows) // 16)
         recurring_end_ranks: dict[str, int] = {}
+        recurring_end_labels: dict[int, str] = {}
         for er_label, er_ds in sorted(
             end_counts.items(), key=lambda kv: len(kv[1]), reverse=True
         ):
@@ -896,7 +901,40 @@ class DeficitAnalyzer:
                 and len(er_ds) >= recurring_end_min
                 and len(recurring_end_ranks) < 3
             ):
-                recurring_end_ranks[er_low] = len(recurring_end_ranks) + 1
+                r_idx = len(recurring_end_ranks) + 1
+                recurring_end_ranks[er_low] = r_idx
+                recurring_end_labels[r_idx] = er_label.strip()[:64]
+
+        # Group split phrasings sharing a recurring `the <phrase>` subject when slots remain
+        if len(recurring_end_labels) < 3:
+            phrase_to_ers: dict[str, list[tuple[str, int]]] = {}
+            for er_label, er_ds in end_counts.items():
+                er_low = er_label.strip().lower()
+                if (
+                    er_low in _generic_ends
+                    or "stalled" in er_low
+                    or er_low in recurring_end_ranks
+                ):
+                    continue
+                first_clause = _re.split(r"[|!.?]", er_low, maxsplit=1)[0].strip()
+                m_ph = _re.search(r"\bthe\s+([a-z]+(?:\s+[a-z]+)?)", first_clause)
+                if m_ph:
+                    ph = m_ph.group(1).strip()
+                    if len(ph) >= 4:
+                        phrase_to_ers.setdefault(ph, []).append((er_low, len(er_ds)))
+            for ph, er_list in sorted(
+                phrase_to_ers.items(),
+                key=lambda kv: sum(cnt for _, cnt in kv[1]),
+                reverse=True,
+            ):
+                if len(recurring_end_labels) >= 3:
+                    break
+                tot_cnt = sum(cnt for _, cnt in er_list)
+                if len(er_list) >= 2 and tot_cnt >= recurring_end_min:
+                    r_idx = len(recurring_end_labels) + 1
+                    recurring_end_labels[r_idx] = f"recurring phrase `{ph}`"
+                    for er_low, _ in er_list:
+                        recurring_end_ranks[er_low] = r_idx
 
         for row in rows:
             (
@@ -974,10 +1012,11 @@ class DeficitAnalyzer:
                 )
             elif end_low in recurring_end_ranks and int(turns or 0) >= 400:
                 r_idx = recurring_end_ranks[end_low]
+                rec_lbl = recurring_end_labels.get(r_idx, end_str[:64])
                 _add_to_cluster(
                     f"slice_recurring_outcome_{r_idx}",
                     "recurring_terminal_state",
-                    f"Recurring terminal outcome: `{end_str[:64]}`",
+                    f"Recurring terminal outcome: `{rec_lbl}`",
                     row,
                     f"end=`{end_str}`, Dlvl={max_depth}, turns={turns}, pct_search={float(pct_search or 0):.1f}%, tiles={unique_tiles}"
                     + (f", last_msg=`{gl_tail}`" if gl_tail else ""),

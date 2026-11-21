@@ -129,6 +129,9 @@ Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, comb
 1. **Zero-Drift Guard Scoping & Adaptive Scope (Surgical vs. Systemic)**:
    - **Surgical Failure Fix (`CLIMBING` / isolated failure class)**: NetHack RNG is chaotic; altering unrelated early turns can create noisy churn. Gate new interrupts, prompts, or fallbacks **cleanly on the general deficit precondition** (e.g., `consecutive_stalls >= N`, exact status condition/encumbrance flag, or unhandled prompt) so you fix the **entire failure class** without disrupting healthy early play.
    - **Systemic Efficiency / Bottleneck Redesign (`PLATEAU` or high action-burn / floor-residence gap in telemetry)**: When `DeficitReport` shows excessive per-floor residence or a dominant repetitive action share, redesigning the core loop, termination condition, or budget logic of the owning subsystem is **encouraged and expected**. Do NOT wrap systemic inefficiency loops in narrow single-seed micro-guards — those produce `0W/0L` dead patches.
+   - **Single-Mechanism Isolation (CRITICAL for Promotion & Stacking)**:
+     - Implement **ONE** clean, coherent mechanism per candidate targeting a high-frequency failure class (>= 4-5% of runs).
+     - **NEVER bundle 3–4 unrelated sub-fixes** into one candidate: a single buggy or noisy sub-change contaminates the whole diff and sinks `S_select` (`10W/11L` or `2W/6L`). Keep your patch focused on one hypothesis; the tournament AST stacker automatically composes independent clean winners after proving each one individually.
    - Inspect the **Paired Micro-Pilot Diff** returned by `dry_run_policy`:
      - If a `GUARD` seed shows **`⚠️ REGRESSION`** (depth/exception/stall regression), fix the regressing logic and re-verify before submitting.
      - If a `GUARD` seed shows **`OK (non-regressing drift)`**, **do NOT over-tighten** — NEVER add artificial `depth <= X` or `xp_level <= Y` caps solely to silence benign `GUARD` byte-drift.
