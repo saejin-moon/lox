@@ -1,7 +1,4 @@
-"""
-Tests for the 1-to-1 NetHackHarness, Action mapping, lazy GameState queries,
-Numba BFS/A* pathfinding, deterministic replay_bytes, and stepping throughput.
-"""
+"""Domain-scoped tests for LOX."""
 
 from __future__ import annotations
 
@@ -9,6 +6,8 @@ import time
 
 import numpy as np
 
+from lox.author.tools import AuthorToolRegistry
+from lox.db.schema import init_db
 from lox.env.actions import (
     ACTION_BY_CHAR,
     DIR_DELTAS,
@@ -78,68 +77,6 @@ def test_one_to_one_action_mapping():
     assert "seq(" in name
     assert DIR_DELTAS[(-1, 0)] == Action.N
     assert ACTION_BY_CHAR[ord(".")] == "WAIT"
-
-
-def test_gamestate_queries_and_pathfinding():
-    harness = NetHackHarness(max_steps=200)
-    try:
-        state = harness.reset(seed=42)
-        assert state.depth == 1
-        assert state.deepest_level_reached == 1
-        assert state.internal_hunger >= 0
-        assert state.is_in_moveloop is True
-        assert state.hp > 0
-        assert state.max_hp >= state.hp
-        assert 0 <= state.y < 21
-        assert 0 <= state.x < 79
-        assert state.char_at(state.y, state.x) != ""
-        assert len(state.ascii_map().splitlines()) == 21
-        assert len(state.tty_lines) == 24
-        assert len(state.tty_text.splitlines()) == 24
-        assert len(state.description_at(state.y, state.x)) > 0
-        assert len(state.terrain_at(state.y, state.x)) > 0
-
-        # Inventory should be populated from initial reset with typed properties
-        inv = state.inventory()
-        assert len(inv) > 0
-        assert any(it.letter == "a" for it in inv)
-        # Verify item.char is not '?' and typed properties work
-        assert any(it.is_weapon and it.char == ")" for it in inv)
-        assert any(it.is_armor and it.char == "[" for it in inv)
-        assert any(it.is_food and it.char == "%" for it in inv)
-
-        # Monster and object queries
-        mons = state.visible_monsters()
-        objs = state.visible_objects()
-        assert isinstance(mons, list)
-        assert isinstance(objs, list)
-        if len(mons) > 0:
-            m = mons[0]
-            assert hasattr(m, "is_pet")
-            assert hasattr(m, "name")
-            assert len(m.name) > 0
-
-        # BFS distances and A* path step
-        passable = (
-            (state.chars == ord("."))
-            | (state.chars == ord("#"))
-            | (state.chars == ord(">"))
-            | (state.chars == ord("<"))
-            | (state.chars == ord("+"))
-        )
-        dists = state.bfs_distances(passable)
-        assert dists.shape == (21, 79)
-        assert dists[state.y, state.x] == 0
-
-        # Find any reachable tile at distance >= 1 and verify path_step returns a valid step
-        reachable = np.argwhere(dists > 0)
-        if len(reachable) > 0:
-            ty, tx = int(reachable[0][0]), int(reachable[0][1])
-            dy, dx = state.path_step(passable, (ty, tx))
-            assert (dy, dx) != (0, 0)
-            assert abs(dy) <= 1 and abs(dx) <= 1
-    finally:
-        harness.close()
 
 
 def test_deterministic_replay_bytes_and_throughput():
@@ -348,3 +285,172 @@ def test_phase1_lossless_memory_traps_prompts_and_seq_abort() -> None:
         assert len(harness.action_bytes) == bytes_before + 1
     finally:
         harness.close()
+
+
+def test_harness_mid_sequence_more_dismissal_and_prompt_properties():
+    harness = NetHackHarness(role="val-hum-law-fem")
+    state = harness.reset(seed=42)
+
+    # Check prompt state properties
+    assert hasattr(state, "in_moveloop")
+    assert hasattr(state, "in_yn_prompt")
+    assert hasattr(state, "in_text_prompt")
+    assert state.in_moveloop is True
+    assert state.in_yn_prompt is False
+    assert state.in_text_prompt is False
+
+    # Execute a multi-keystroke sequence (e.g. search 3 times)
+    multi_action = seq(Action.SEARCH, Action.SEARCH, Action.SEARCH)
+    next_state, done, info = harness.step(multi_action)
+    assert next_state is not None
+    assert harness.step_count == 1
+    # Check that bytes are recorded in action_bytes
+    assert len(harness.action_bytes) >= 3
+
+    # Check deterministic replay matches position and step count
+    replayed = harness.replay_bytes(seed=42, recorded_bytes=bytes(harness.action_bytes))
+    assert replayed.step_count == harness.step_count
+    assert replayed.y == next_state.y and replayed.x == next_state.x
+    assert (
+        replayed.dungeon_num == next_state.dungeon_num
+        and replayed.level_num == next_state.level_num
+    )
+
+
+def test_world_memory_and_byte_replay() -> None:
+    """3. WorldMemory searched_counts, stair_graph, and exact byte-replay alignment."""
+    harness = NetHackHarness(max_steps=200)
+    try:
+        st0 = harness.reset(seed=12345)
+        # Verify searched_counts initially 0
+        assert np.all(st0.mem.searched_counts == 0)
+
+        # Execute Action.SEARCH
+        st1, _, _ = harness.step(Action.SEARCH)
+        # Player position and 8-neighborhood should be 1
+        assert st1.mem.searched_counts[st1.y, st1.x] == 1
+        assert st1.mem.searched_counts[max(0, st1.y - 1), max(0, st1.x - 1)] == 1
+
+        # Execute multi-byte sequence
+        kick_east = seq(Action.KICK, Action.EAST)
+        st2, _, _ = harness.step(kick_east)
+        cut_offset = len(harness.action_bytes)
+        assert cut_offset > 0
+
+        # Simulate stair transition
+        st2.mem.pos_history.append((0, 1, 10, 20))
+
+        class MockFloor2State:
+            dungeon_num = 0
+            level_num = 2
+            y = 12
+            x = 22
+
+        st2.mem.update(MockFloor2State())
+        assert (0, 1, 10, 20) in st2.mem.stair_graph
+        assert st2.mem.stair_graph[(0, 1, 10, 20)] == (0, 2, 12, 22)
+        assert st2.mem.stair_graph[(0, 2, 12, 22)] == (0, 1, 10, 20)
+
+        # Replay bytes up to cut_offset
+        replayed_st = harness.replay_bytes(
+            seed=12345,
+            recorded_bytes=bytes(harness.action_bytes),
+            stop_at_byte_idx=cut_offset,
+        )
+        assert replayed_st.y == st2.y
+        assert replayed_st.x == st2.x
+        assert replayed_st.depth == st2.depth
+        assert replayed_st.turn == st2.turn
+        assert replayed_st.mem.searched_counts[st1.y, st1.x] == 1
+    finally:
+        harness.close()
+
+
+def test_more_yn_collision_opt_in_menu_linger_and_hypothesis_summary(tmp_path):
+    import numpy as np
+
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.env.actions import Action
+    from lox.env.harness import NetHackHarness, policy_handles_menus
+    from lox.env.state import GameState
+
+    # 1. Opt-in menu linger detection
+    assert policy_handles_menus("def step(self, s): return Action.WAIT", {}) is False
+    assert policy_handles_menus("def step(self, s): return s.in_menu", {}) is True
+    assert (
+        policy_handles_menus("class Policy: pass", {"m": "if s.in_menu: pass"}) is True
+    )
+
+    h = NetHackHarness(max_steps=20, allow_menu_linger=False)
+    try:
+        st0 = h.reset(42)
+        raw = list(h._last_raw_tuple)
+        obs_keys = list(h._obs_keys)
+        idx_map = dict(h._idx_map)
+        assert st0.depth == 1
+        st1, done1, _ = h.step(Action.INVENTORY)
+        assert not done1
+        # Unhandled menus are cleanly auto-dismissed when allow_menu_linger=False
+        assert st1.in_menu is False
+    finally:
+        h.close()
+
+    # 2. in_yn_prompt must yield False when `--More--` is on row 0 while waiting_for_space
+    idx_int = idx_map["internal"]
+    idx_tty = idx_map["tty_chars"]
+    raw[idx_int] = raw[idx_int].copy()
+    raw[idx_int][1] = 1
+    raw[idx_int][3] = 1
+    raw[idx_tty] = raw[idx_tty].copy()
+    banner = b"You open the tin. It smells like orcs.--More--"
+    raw[idx_tty][0, :] = ord(" ")
+    raw[idx_tty][0, : len(banner)] = np.frombuffer(banner, dtype=np.uint8)
+    collided = GameState(tuple(raw), obs_keys=obs_keys, obs_idx_map=idx_map)
+    assert collided.in_yn_prompt is False
+
+    # 3. DeficitAnalyzer._populate_recent_attempts surfaces hypothesis/cluster over binding_constraint
+    dbp = str(tmp_path / "rec.duckdb")
+    con = init_db(dbp)
+    con.execute(
+        "INSERT INTO policies (policy_id, generation, mode, policy_code, avg_depth, max_depth, is_promoted) VALUES ('p1', 1, 'SWARM', 'class Policy: pass', 4.5, 9, TRUE)"
+    )
+    con.execute(
+        "INSERT INTO batches (batch_id, generation, mode, parent_policy_id, candidate_policy_id, episodes_recorded, episodes_discarded, avg_depth, max_depth, avg_score, hypothesis_passed) VALUES ('b1', 2, 'SWARM', 'p1', 'p2', 24, 0, 4.75, 11, 700.0, TRUE)"
+    )
+    con.execute(
+        "INSERT INTO synthesis_logs (log_id, generation, agent_role, turn_index, turn_type, hypothesis_yaml) VALUES ('s1', 2, 'peer_1', 3, 'SMOKE_CHECK', 'binding_constraint: long boilerplate\ncluster: slice_stalled\nhypothesis: H-fix-more-yn-loop')"
+    )
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=3, current_policy="class Policy: pass"
+    )
+    con.close()
+    assert rep.recent_attempts
+    assert "H-fix-more-yn-loop" in rep.recent_attempts[0]
+    assert "binding_constraint" not in rep.recent_attempts[0]
+
+    # 4. enforce_peer_research_gate requires at least 1 empirical lookup (query_db, query_wiki, or query_theories) before dry_run_policy
+
+    class _FakeTheories:
+        def search_theories(self, query, limit=6, doc_type=None):
+            return []
+
+    reg = AuthorToolRegistry(db_path=dbp)
+    reg.theories_store = _FakeTheories()
+    reg.configure_generation(generation=3, mode="SWARM_PEER")
+    reg.enforce_peer_research_gate = True
+    pol_code = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.SEARCH\n"
+    )
+    msg_r1, st_r1 = reg.dry_run_policy(pol_code, seed=42, max_turns=15)
+    assert st_r1 == "RESEARCH_REQUIRED"
+    assert (
+        "query_db" in msg_r1 and "query_wiki" in msg_r1 and "query_theories" in msg_r1
+    )
+
+    # Running at least 1 empirical lookup (e.g. query_theories or query_db or query_wiki) unlocks dry_run_policy
+    reg.query_theories("armor equip")
+    _msg_r2, st_r2 = reg.dry_run_policy(pol_code, seed=42, max_turns=15)
+    assert st_r2 != "RESEARCH_REQUIRED"

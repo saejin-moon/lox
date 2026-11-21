@@ -1,19 +1,21 @@
-"""
-Tests for Multi-Table DuckDB Schema, RLE + Inflection Summarizer,
-Statistical Outlier Good-Run Detection (`is_outlier_good`), Ochiai/Liblit Function Stats,
-Smart Tail-Based Tick Sampling, and AuthorToolRegistry (`query_db`, `query_wiki`, `query_policy_docs`, `dry_run_policy`).
-"""
+"""Domain-scoped tests for LOX."""
 
 from __future__ import annotations
 
 from lox.author.tools import AuthorToolRegistry
-from lox.datasets.download_experts import ingest_expert_runs_into_duckdb
 from lox.db.logger import BatchDatabaseLogger
-from lox.db.schema import init_db
+from lox.db.schema import connect_db, init_db
 from lox.db.summarizer import (
+    build_batch_contrast_digest,
     compute_function_stats,
     mark_outlier_good_runs,
     summarize_episode_ticks,
+)
+from lox.engine.hypothesis import progression_metric
+from lox.env.harness import NetHackHarness
+from lox.lang.compiler import compile_policy_package
+from lox.lang.validator import (
+    audit_policy_ast_hygiene,
 )
 
 
@@ -136,216 +138,8 @@ def test_rle_summarizer_and_outlier_good_marker():
     assert by_name["bad_panic"]["liblit_fail_importance"] > 0.0
 
 
-def test_duckdb_logger_and_author_tools(tmp_path):
-    db_file = str(tmp_path / "test_lox.duckdb")
-    macros_file = str(tmp_path / "macros.py")
-    con = init_db(db_file)
-    con.close()
-
-    # Ingest expert runs into test DB
-    ingest_expert_runs_into_duckdb(db_path=db_file, max_ascensions=5, fetch_dumplogs=0)
-
-    logger = BatchDatabaseLogger(db_path=db_file, max_tick_runs_per_batch=5)
-    sample_ticks = [
-        {
-            "run_id": "b1_s1",
-            "turn": t,
-            "step_idx": t,
-            "depth": 1 if t < 15 else 3,
-            "dungeon_num": 0,
-            "hp": 16,
-            "max_hp": 16,
-            "ac": 6,
-            "xp_level": 1,
-            "hunger_state": 1,
-            "y": 10,
-            "x": 10,
-            "action_name": "WAIT",
-            "raw_key": ord("."),
-            "active_function": "run",
-            "message": "",
-            "screen_ascii": "",
-        }
-        for t in range(1, 21)
-    ]
-    runs = [
-        {
-            "run_id": f"b1_s{i}",
-            "seed": i,
-            "depth": 6 if i == 10 else 1,
-            "max_depth": 6 if i == 10 else 1,
-            "score": 1200 if i == 10 else 20,
-            "turns": 20,
-            "steps": 20,
-            "xp_level": 4 if i == 10 else 1,
-            "final_hp": 16,
-            "max_hp": 16,
-            "final_ac": 2,
-            "gold": 10,
-            "hunger_state": 1,
-            "end_reason": "killed by an orc",
-            "death_message": "killed by an orc",
-            "summary_digest": "Overview: test",
-            "game_log": "test log",
-            "milestones_json": "{}",
-            "functions_triggered": {"run": 1},
-            "function_turns": {"run": 20},
-            "action_bytes": b"s.",
-            "ticks": sample_ticks,
-        }
-        for i in range(1, 11)
-    ]
-    verdict = {
-        "passed": True,
-        "mean_delta": 1.5,
-        "ci_lower": 0.4,
-        "ci_upper": 2.6,
-        "wilcoxon_p": 0.01,
-    }
-    logger.save_batch(
-        batch_id="b1",
-        generation=0,
-        mode="FULL_WRITE",
-        parent_policy_id="none",
-        candidate_policy_id="pol_b1",
-        target_functions=[],
-        runs=runs,
-        episodes_discarded=0,
-        batch_metrics={
-            "episodes_recorded": 10,
-            "avg_depth": 1.5,
-            "max_depth": 6,
-            "p90_depth": 6.0,
-            "avg_score": 138.0,
-            "avg_turns": 20.0,
-            "wall_sec": 0.5,
-        },
-        verdict=verdict,
-    )
-
-    # Test AuthorToolRegistry tools
-    tools = AuthorToolRegistry(db_path=db_file, macros_path=macros_file)
-
-    # 1. query_db on runs (outlier good runs) and expert_runs
-    out_good, _ = tools.query_db(
-        "SELECT run_id, max_depth, is_outlier_good FROM runs WHERE is_outlier_good = TRUE"
-    )
-    assert "b1_s10" in out_good
-
-    out_exp, _ = tools.query_db(
-        "SELECT player, role, max_depth, end_reason FROM expert_runs LIMIT 5"
-    )
-    assert "ascended" in out_exp
-
-    # Read-only guardrail blocks DROP/DELETE
-    blocked, status = tools.query_db("DROP TABLE runs")
-    assert status == "error"
-    assert "forbidden" in blocked.lower()
-
-    # 2. query_wiki
-    wiki_res, _ = tools.query_wiki("Excalibur fountain dip")
-    assert "Excalibur" in wiki_res
-
-    # 3. query_policy_docs
-    docs_res, _ = tools.query_policy_docs("actions")
-    assert "Action.N" in docs_res
-
-    # 4. dry_run_policy
-    dry_res, dry_status = tools.dry_run_policy(
-        code="""
-class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.SEARCH
-""",
-    )
-    assert "PASSED" in dry_status
-    assert "Dry-Run PASSED" in dry_res
-
-
-def test_save_batch_throughput_150_runs(tmp_path):
-    """Verifies that persisting 150 runs with full telemetry completes in under 1 second."""
-    import time
-
-    db_file = str(tmp_path / "bench_lox.duckdb")
-    logger = BatchDatabaseLogger(db_path=db_file, max_tick_runs_per_batch=25)
-
-    sample_ticks = [
-        {
-            "run_id": f"run_{r}",
-            "turn": t,
-            "step_idx": t,
-            "depth": 1,
-            "dungeon_num": 0,
-            "hp": 16,
-            "max_hp": 16,
-            "ac": 10,
-            "xp_level": 1,
-            "hunger_state": 1,
-            "condition_mask": 0,
-            "y": 10,
-            "x": 10,
-            "action_name": "WAIT",
-            "raw_key": ord("."),
-            "active_function": "explore",
-            "message": "",
-            "visible_monsters": "",
-            "inventory_summary": "",
-        }
-        for r in range(25)
-        for t in range(1, 200)
-    ]
-
-    runs = [
-        {
-            "run_id": f"run_{i}",
-            "seed": i,
-            "role": "val-hum-law-fem",
-            "depth": 3 if i == 0 else 1,
-            "max_depth": 3 if i == 0 else 1,
-            "score": 500 if i == 0 else 20,
-            "turns": 200,
-            "steps": 200,
-            "xp_level": 1,
-            "final_hp": 16,
-            "max_hp": 16,
-            "final_ac": 10,
-            "gold": 0,
-            "end_reason": "died",
-            "death_message": "killed by a jackal",
-            "summary_digest": "Phase Timeline: explore (100%)",
-            "game_log": "T1: started\nT200: died",
-            "milestones": {},
-            "triggered_functions": {"explore": 200},
-            "last_active_function": "explore",
-            "action_bytes": b"....",
-            "wall_ms": 15.0,
-            "ticks": sample_ticks if i < 25 else [],
-        }
-        for i in range(150)
-    ]
-
-    t0 = time.perf_counter()
-    logger.save_batch(
-        batch_id="bench_batch",
-        generation=0,
-        mode="FULL_WRITE",
-        parent_policy_id="none",
-        candidate_policy_id="bench_pol",
-        target_functions=["explore"],
-        runs=runs,
-        episodes_discarded=0,
-        batch_metrics={"avg_depth": 1.0, "max_depth": 3, "avg_score": 25.0},
-    )
-    elapsed = time.perf_counter() - t0
-    assert elapsed < 1.0, (
-        f"save_batch took {elapsed:.2f}s for 150 runs (expected < 1.0s)"
-    )
-
-
 def test_stall_cause_classification_and_progression_metrics():
     from lox.db.summarizer import summarize_episode_ticks
-    from lox.engine.hypothesis import progression_metric
 
     # Simulate ticks with pet displacement loop
     pet_ticks = [
@@ -571,19 +365,6 @@ def test_livelock_failure_attribution():
     assert nutrition_stat["liblit_failure_score"] == 0.0
 
 
-def test_two_stage_pilot_sign_test():
-    """Verify that Exact Sign Test filters out noisy 10W/9L coin flips while passing decisive 12W/5L."""
-    import scipy.stats as sp_stats
-
-    # Coin flip: 10 wins, 9 losses (n=19) -> p ~ 0.50 -> must fail
-    p_coin = float(sp_stats.binom.sf(10 - 1, 19, 0.5))
-    assert p_coin > 0.15
-
-    # Decisive: 12 wins, 5 losses (n=17) -> p ~ 0.07 -> passes alpha=0.15 hurdle
-    p_decisive = float(sp_stats.binom.sf(12 - 1, 17, 0.5))
-    assert p_decisive <= 0.15
-
-
 def test_floor_residence_and_staircase_utilization_telemetry():
     """Verify that floor residence distribution and staircase utilization at timeout are accurately computed."""
     from lox.db.summarizer import build_batch_contrast_digest
@@ -750,13 +531,9 @@ def test_autonomous_intelligence_and_deductive_parity_overhaul(tmp_path):
     """Verify all 10 components of the Autonomous Intelligence & Deductive Parity Overhaul."""
 
     from lox.author.prompts import _format_context_scoped_policy
-    from lox.db.logger import BatchDatabaseLogger
     from lox.db.schema import connect_db, init_db
     from lox.db.summarizer import build_batch_contrast_digest, summarize_episode_ticks
-    from lox.env.harness import NetHackHarness
-    from lox.lang.compiler import compile_policy_package
     from lox.lang.validator import (
-        audit_policy_ast_hygiene,
         normalize_mode,
         prune_extracted_skill_functions,
         splice_functions_into_policy,
@@ -1014,3 +791,124 @@ def test_confinement_stall_detects_multi_leaf_oscillation():
     assert "Stalls: None" not in digest
     assert milestones["stall_count"] >= 1
     assert "explore_ew_leaf" in milestones["stall_functions"]
+
+
+def test_floor_aware_summarizer_and_killers():
+    ticks = []
+    # Walk on floor 1 then descend to floor 2 and revisit same (10, 20) coordinates
+    for i in range(1, 31):
+        d = 1 if i <= 15 else 2
+        y = 10
+        x = 20 + (i % 4)
+        ticks.append(
+            {
+                "turn": i,
+                "step_idx": i,
+                "depth": d,
+                "dungeon_num": 0,
+                "hp": 10,
+                "max_hp": 10,
+                "ac": 10,
+                "xp_level": 1,
+                "score": i,
+                "y": y,
+                "x": x,
+                "action_name": "EAST",
+                "active_function": "explore",
+                "message": "",
+            }
+        )
+    digest, _log, ms = summarize_episode_ticks(ticks)
+    assert "CONFINEMENT_STALL" not in digest
+    assert ms["max_depth"] == 2
+
+    contrast = build_batch_contrast_digest(
+        {"batch_id": "b1", "avg_depth": 1.0, "p90_depth": 1.0, "max_depth": 1},
+        [
+            {
+                "run_id": "r_kill_1",
+                "seed": 42,
+                "max_depth": 1,
+                "score": 10,
+                "turns": 20,
+                "end_reason": "killed by a jackal",
+                "death_message": "Killed by a jackal.",
+                "summary_digest": "",
+            }
+        ],
+        [],
+    )
+    assert "Top Lethal Monsters/Hazards" in contrast
+    assert "Killed by a jackal." in contrast
+
+
+def test_summarizer_level_stall_vs_livelock():
+    """Verify that build_batch_contrast_digest attributes level stalls to stair descent rather than innocent prompt handlers."""
+    from lox.db.summarizer import build_batch_contrast_digest
+
+    batch_stats = {
+        "batch_id": "gen_018_champ",
+        "avg_depth": 1.1,
+        "p90_depth": 2.0,
+        "max_depth": 6,
+        "episodes_recorded": 100,
+    }
+    # 50 runs end in max_steps, but explored multiple tiles (recurrence < 0.85)
+    runs = [
+        {
+            "run_id": f"r_{i}",
+            "seed": i,
+            "max_depth": 1,
+            "steps": 5000,
+            "turns": 5000,
+            "score": 100,
+            "end_reason": "max_steps",
+            "milestones": {
+                "stagnation_ratio": 0.8,
+                "recurrence_rate": 0.35,  # Low recurrence = wandering across level
+            },
+        }
+        for i in range(50)
+    ]
+    fn_stats = [
+        {
+            "function_name": "handle_prompt",
+            "trigger_rate": 0.9,
+            "total_turns_active": 30000,
+            "avg_depth_when_triggered": 1.0,
+            "death_rate_while_active": 0.0,
+            "ochiai_good_run_score": 0.1,
+            "liblit_failure_score": 0.0,
+            "stagnation_turns": 25000,
+            "stagnation_share": 0.5,
+            "livelock_score": 0.45,
+        }
+    ]
+
+    digest = build_batch_contrast_digest(batch_stats, runs, fn_stats)
+    assert "Chronic Stagnation Rate" in digest
+    assert "Max-Steps Timeout Rate" in digest
+    assert "State Recurrence Rate during Stagnation" in digest
+    assert "handle_prompt" in digest
+    assert "PRIMARY BOTTLENECK" not in digest
+
+
+def test_benchmark_expert_parity_populated_db(tmp_path):
+    db_path = str(tmp_path / "parity.duckdb")
+    init_db(db_path).close()
+    con = connect_db(db_path, read_only=False)
+    try:
+        con.execute(
+            """
+            INSERT INTO expert_runs (run_id, source, player, role, depth, max_depth, score, turns, summary_digest)
+            VALUES ('exp_1', 'nao', 'alice', 'Val', 12, 12, 50000, 12000, 'Ascended cleanly')
+            """
+        )
+    finally:
+        con.close()
+
+    reg = AuthorToolRegistry(db_path=db_path)
+    out, status = reg.benchmark_expert_parity(top_n=5)
+    assert status == "parity ok"
+    assert "exp_1" in out
+    assert "Ascended cleanly" in out

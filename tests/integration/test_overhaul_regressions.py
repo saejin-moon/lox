@@ -1,712 +1,224 @@
-"""
-LOX Overhaul End-to-End Verification Suite.
-Validates all 7 sections of TODO.md:
-1. NetHackAdapter extract_milestones_and_stalls & search_knowledge_base
-2. Real Craftax benchmark with >= 4 achievements across worker pool
-3. WorldMemory searched_counts, stair_graph, and exact byte-replay alignment
-4. CampaignOrchestrator DuckDB policy foreign-key integrity (zero dangling FKs)
-"""
+"""Domain-scoped tests for LOX."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import numpy as np
+import pytest
 
-from lox.author.agent import AuthorAgent, SynthesisProposal
-from lox.author.tools import AuthorToolRegistry
+from lox.author.agent import AuthorAgent
+from lox.author.prompts import build_user_prompt
+from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster
+from lox.author.swarm_peer import PeerCandidate
+from lox.author.tools import AuthorToolRegistry, get_tool_specs
+from lox.core.contracts import EpisodeRun
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import connect_db, init_db
-from lox.db.shards import extract_shards_from_db
+from lox.db.theories import TheoryDocumentStore
 from lox.engine.hypothesis import (
-    evaluate_paired_hypothesis,
-    should_stop_early_for_futility,
+    progression_metric,
 )
-from lox.env.actions import Action, seq
-from lox.env.craftax.actions import CraftaxAction
-from lox.env.craftax.harness import CraftaxHarness
+from lox.engine.map_elites import MAPElitesArchive
+from lox.engine.swarm_referee import SwarmReferee
+from lox.env import get_adapter
+from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
-from lox.env.nethack.adapter import NetHackAdapter
-from lox.lang.compiler import compile_policy_and_macros
+from lox.lang.compiler import compile_policy_and_macros, compile_policy_package
+from lox.lang.validator import (
+    PolicyValidationError,
+    check_evolve_block_bounds,
+    run_pyright_on_package,
+    validate_cross_module_contracts,
+)
 from lox.runner.pool import PersistentEvalPool
+from lox.ui.console import ConsoleUI
 
 
-def test_nethack_adapter_methods() -> None:
-    """1. NetHackAdapter extract_milestones_and_stalls & search_knowledge_base."""
-    adapter = NetHackAdapter()
+def test_phase3_unified_duckdb_prefix_cache_tier1_and_multiseed_smoke(tmp_path):
 
-    # extract_milestones_and_stalls
-    sample_ticks = [
-        {
-            "turn": 1,
-            "step_idx": 1,
-            "depth": 1,
-            "hp": 16,
-            "max_hp": 16,
-            "score": 0,
-            "ac": 10,
-            "xp_level": 1,
-        },
-        {
-            "turn": 5,
-            "step_idx": 5,
-            "depth": 1,
-            "hp": 16,
-            "max_hp": 16,
-            "score": 20,
-            "ac": 10,
-            "xp_level": 1,
-        },
-    ]
-    summary_digest, game_log, milestones = adapter.extract_milestones_and_stalls(
-        sample_ticks
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+
+    db_path = str(tmp_path / "p3.duckdb")
+    init_db(db_path).close()
+
+    # 1. Unified DuckDB `theories` + `tournament_attempts`
+    tstore = TheoryDocumentStore(db_path=db_path)
+    tstore.save_document(
+        generation=5,
+        agent_role="peer_1",
+        doc_type="THEORY",
+        title="Shop Theft Prevention",
+        content="noautopickup avoids unpaid shop theft warnings.",
+        tags=["shop", "autopickup"],
     )
-    assert isinstance(summary_digest, str)
-    assert isinstance(game_log, str)
-    assert isinstance(milestones, dict)
+    hits = tstore.search_theories("shop autopickup", limit=3)
+    assert hits and hits[0]["title"] == "Shop Theft Prevention"
 
-    # search_knowledge_base
-    kb_res = adapter.search_knowledge_base("door")
-    assert isinstance(kb_res, str)
-    assert len(kb_res) > 0
-
-
-def test_craftax_benchmark_and_achievements() -> None:
-    """2. Real Craftax benchmark with >= 4 achievements across worker pool."""
-    # Test directly on harness first
-    harness = CraftaxHarness(max_steps=50)
-    st = harness.reset(seed=42)
-    st.inventory["wood"] = 3
-    # Step 1: move East to (24, 25) facing East
-    st, _, _ = harness.step(CraftaxAction.RIGHT)
-    # Step 2: mine wood at (24, 26)
-    st, _, _ = harness.step(CraftaxAction.DO)
-    assert "collect_wood" in st.achievements
-    # Step 3: place table at (24, 26)
-    st, _, _ = harness.step(CraftaxAction.PLACE_TABLE)
-    assert "place_table" in st.achievements
-    # Step 4: craft wood pickaxe near table
-    st, _, _ = harness.step(CraftaxAction.MAKE_WOOD_PICKAXE)
-    assert "make_wood_pickaxe" in st.achievements
-    # Step 5: move back West to (24, 24)
-    st, _, _ = harness.step(CraftaxAction.LEFT)
-    # Step 6: move North to (23, 24) facing North
-    st, _, _ = harness.step(CraftaxAction.UP)
-    # Step 7: mine stone at (22, 24) with wood pickaxe
-    st, _, _ = harness.step(CraftaxAction.DO)
-    assert "collect_stone" in st.achievements
-    # Step 8: sleep
-    st, _, _ = harness.step(CraftaxAction.SLEEP)
-    assert "wake_up" in st.achievements
-    assert len(st.achievements) >= 5
-
-    # Now test through PersistentEvalPool with workers=2 on benchmark="craftax"
-    pool = PersistentEvalPool(workers=2, max_steps=60, benchmark="craftax")
-    test_policy = """
-class Policy:
-    def __init__(self):
-        self.step_idx = 0
-
-    def run(self, state):
-        self.step_idx += 1
-        if self.step_idx == 1:
-            state.inventory["wood"] = 3
-            return 2  # RIGHT (move to 24, 25 facing East)
-        elif self.step_idx == 2:
-            return 5  # DO (chop tree at 24, 26 -> collect_wood)
-        elif self.step_idx == 3:
-            return 8  # PLACE_TABLE (place table at 24, 26 -> place_table)
-        elif self.step_idx == 4:
-            return 11 # MAKE_WOOD_PICKAXE (craft pickaxe -> make_wood_pickaxe)
-        elif self.step_idx == 5:
-            return 1  # LEFT (move to 24, 24)
-        elif self.step_idx == 6:
-            return 3  # UP (move to 23, 24 facing North)
-        elif self.step_idx == 7:
-            return 5  # DO (mine stone at 22, 24 -> collect_stone)
-        elif self.step_idx == 8:
-            return 6  # SLEEP (sleep -> wake_up)
-        return 0
-"""
-    try:
-        eval_res = pool.evaluate_batch(
-            batch_id="test_craftax_batch",
-            policy_code=test_policy,
-            macros_code="",
-            target_episodes=4,
-            benchmark="craftax",
-            record_ticks=True,
-            show_progress=False,
-        )
-        assert eval_res["episodes_recorded"] == 4
-        assert len(eval_res["runs"]) == 4
-        for r in eval_res["runs"]:
-            assert r["achievements"] >= 4
-    finally:
-        pool.close()
-
-
-def test_world_memory_and_byte_replay() -> None:
-    """3. WorldMemory searched_counts, stair_graph, and exact byte-replay alignment."""
-    harness = NetHackHarness(max_steps=200)
-    try:
-        st0 = harness.reset(seed=12345)
-        # Verify searched_counts initially 0
-        assert np.all(st0.mem.searched_counts == 0)
-
-        # Execute Action.SEARCH
-        st1, _, _ = harness.step(Action.SEARCH)
-        # Player position and 8-neighborhood should be 1
-        assert st1.mem.searched_counts[st1.y, st1.x] == 1
-        assert st1.mem.searched_counts[max(0, st1.y - 1), max(0, st1.x - 1)] == 1
-
-        # Execute multi-byte sequence
-        kick_east = seq(Action.KICK, Action.EAST)
-        st2, _, _ = harness.step(kick_east)
-        cut_offset = len(harness.action_bytes)
-        assert cut_offset > 0
-
-        # Simulate stair transition
-        st2.mem.pos_history.append((0, 1, 10, 20))
-
-        class MockFloor2State:
-            dungeon_num = 0
-            level_num = 2
-            y = 12
-            x = 22
-
-        st2.mem.update(MockFloor2State())
-        assert (0, 1, 10, 20) in st2.mem.stair_graph
-        assert st2.mem.stair_graph[(0, 1, 10, 20)] == (0, 2, 12, 22)
-        assert st2.mem.stair_graph[(0, 2, 12, 22)] == (0, 1, 10, 20)
-
-        # Replay bytes up to cut_offset
-        replayed_st = harness.replay_bytes(
-            seed=12345,
-            recorded_bytes=bytes(harness.action_bytes),
-            stop_at_byte_idx=cut_offset,
-        )
-        assert replayed_st.y == st2.y
-        assert replayed_st.x == st2.x
-        assert replayed_st.depth == st2.depth
-        assert replayed_st.turn == st2.turn
-        assert replayed_st.mem.searched_counts[st1.y, st1.x] == 1
-    finally:
-        harness.close()
-
-
-def test_duckdb_foreign_keys_and_logging_completeness(tmp_path: Path) -> None:
-    """4. DuckDB logging completeness: 100% of candidate_policy_ids exist in policies table."""
-    db_path = str(tmp_path / "test_lox.duckdb")
-    init_db(db_path)
     logger = BatchDatabaseLogger(db_path=db_path)
-
-    # 1. Warm-start policy & batch
-    logger.save_policy(
-        policy_id="pol_gen000",
-        generation=0,
-        mode="FULL_WRITE",
-        policy_code="class Policy: pass",
-        macros_code="",
-        params={},
-        avg_depth=1.5,
-        max_depth=2,
-        is_promoted=True,
+    logger.save_tournament_attempts(
+        [
+            {
+                "attempt_id": "att_g5_peer_1",
+                "generation": 5,
+                "peer_id": "peer_1",
+                "deficit_id": "slice_early",
+                "candidate_fp": "fp_abc",
+                "promoted": False,
+                "sandbox_passed": True,
+                "avg_depth": 4.2,
+                "max_depth": 8,
+                "avg_score": 180.0,
+                "avg_ac": 5.5,
+                "avg_xp_level": 3.0,
+                "policy_exceptions": 0,
+                "seeds_gained": [1001, 1002],
+                "seeds_lost": [1005],
+                "top_tracebacks": [],
+            }
+        ]
     )
-    logger.save_batch(
-        batch_id="batch_warm_000",
-        generation=0,
-        mode="FULL_WRITE",
-        parent_policy_id="none",
-        candidate_policy_id="pol_gen000",
-        target_functions=[],
-        runs=[],
-        episodes_discarded=0,
-        batch_metrics={"avg_depth": 1.5, "max_depth": 2},
-    )
-
-    # 2. Rejected PARAM_TUNE batch & policy
-    cand_tune = "pol_batch_tune_001"
-    logger.save_policy(
-        policy_id=cand_tune,
-        generation=1,
-        mode="PARAM_TUNE",
-        policy_code="class Policy: pass",
-        macros_code="",
-        params={"flee_hp": 0.3},
-        avg_depth=1.2,
-        max_depth=2,
-        is_promoted=False,
-    )
-    logger.save_batch(
-        batch_id="batch_tune_001",
-        generation=1,
-        mode="PARAM_TUNE",
-        parent_policy_id="pol_gen000",
-        candidate_policy_id=cand_tune,
-        target_functions=["flee_hp"],
-        runs=[],
-        episodes_discarded=0,
-        batch_metrics={"avg_depth": 1.2, "max_depth": 2},
-        verdict={"passed": False, "mean_delta": -0.3},
-    )
-
-    # 3. MACRO_WRITE policy
-    cand_macro = "pol_batch_macro_002"
-    logger.save_policy(
-        policy_id=cand_macro,
-        generation=2,
-        mode="MACRO_WRITE",
-        policy_code="class Policy: pass",
-        macros_code="def helper(): pass",
-        params={},
-        avg_depth=1.5,
-        max_depth=2,
-        is_promoted=True,
-    )
-
-    # 4. Pilot evaluation experiment logged to DuckDB
-    AuthorToolRegistry(db_path=db_path)
-    # Save a pilot experiment directly through logger
-    logger.save_experiment(
-        experiment_id="exp_pilot_1_12345",
-        generation=0,
-        batch_id="pilot_1_12345",
-        mode="PILOT",
-        target_functions=["handle_nutrition"],
-        hypothesis={
-            "observation_from_db": "Starvation death",
-            "mechanism": "Eat earlier",
-        },
-        verdict={
-            "passed": True,
-            "mean_delta": 0.25,
-            "wins": 15,
-            "losses": 5,
-            "ties": 10,
-        },
-    )
-
-    # Query foreign key integrity: NO batches should point to missing candidate_policy_id
     con = connect_db(db_path, read_only=True)
     try:
-        missing_fks = con.execute(
-            """
-            SELECT COUNT(*)
-            FROM batches b
-            LEFT JOIN policies p ON b.candidate_policy_id = p.policy_id
-            WHERE p.policy_id IS NULL
-            """
-        ).fetchone()[0]
-        assert missing_fks == 0, (
-            f"Found {missing_fks} dangling foreign keys in batches!"
-        )
-
-        # Query experiments table has pilot entry
-        pilot_count = con.execute(
-            "SELECT COUNT(*) FROM experiments WHERE mode = 'PILOT'"
-        ).fetchone()[0]
-        assert pilot_count >= 1
+        cnt = con.execute("SELECT COUNT(*) FROM tournament_attempts").fetchone()[0]
+        t_cnt = con.execute("SELECT COUNT(*) FROM theories").fetchone()[0]
+        assert cnt == 1
+        assert t_cnt >= 2
     finally:
         con.close()
 
-
-def test_pass2_bug1_shards_paired_apples_to_apples() -> None:
-    """Pass 2 Bug 1: 200-step shards must be paired strictly against baseline shards, never 25k full runs."""
-    cand_runs = []
-    base_runs = []
-
-    # 10 shards
-    for i in range(10):
-        cand_runs.append(
-            {
-                "run_id": f"c_sh_{i}",
-                "shard_id": f"sh_{i}",
-                "seed": 100 + i,
-                "is_shard": True,
-                "depth": 1,
-                "max_depth": 1,
-                "score": 50,
-                "turns": 200,
-            }
-        )
-        base_runs.append(
-            {
-                "run_id": f"b_sh_{i}",
-                "shard_id": f"sh_{i}",
-                "seed": 100 + i,
-                "is_shard": True,
-                "depth": 1,
-                "max_depth": 1,
-                "score": 30,
-                "turns": 200,
-            }
-        )
-
-    # 10 full runs
-    for i in range(10):
-        cand_runs.append(
-            {
-                "run_id": f"c_full_{i}",
-                "seed": 200 + i,
-                "is_shard": False,
-                "depth": 2,
-                "max_depth": 2,
-                "score": 500,
-                "turns": 5000,
-            }
-        )
-        base_runs.append(
-            {
-                "run_id": f"b_full_{i}",
-                "seed": 200 + i,
-                "is_shard": False,
-                "depth": 2,
-                "max_depth": 2,
-                "score": 450,
-                "turns": 5000,
-            }
-        )
-
-    # Add a 25k-step full run for seed 100 into baseline (simulating a baseline full run with same seed as shard)
-    base_runs.append(
-        {
-            "run_id": "b_full_100",
-            "seed": 100,
-            "is_shard": False,
-            "depth": 5,
-            "max_depth": 5,
-            "score": 25000,
-            "turns": 25000,
-        }
+    # 2. Tier-1 manifest & non-duplicated BT docs in SWARM_PEER prompt
+    long_policy = "\n".join(
+        [
+            "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector",
+            "class Policy:",
+        ]
+        + [f"    def helper_{i}(self, s): return None" for i in range(70)]
     )
-
-    verdict = evaluate_paired_hypothesis(cand_runs, base_runs)
-    # Both shards and full runs improved, so all 20 paired deltas must be positive
-    assert verdict["paired_count"] == 20
-    assert verdict["wins"] == 20
-    assert verdict["losses"] == 0
-    assert verdict["mean_delta"] > 0.0
-
-    # Test should_stop_early_for_futility handles both dict and list baseline without pairing shards against full
-    futility_list = should_stop_early_for_futility(cand_runs, base_runs, min_pairs=10)
-    assert not futility_list
-
-    base_map = {int(r["seed"]): r for r in base_runs if not r.get("is_shard")}
-    for r in base_runs:
-        if r.get("is_shard"):
-            base_map[r["shard_id"]] = r
-    futility_dict = should_stop_early_for_futility(cand_runs, base_map, min_pairs=10)
-    assert not futility_dict
-
-    # Test baseline overwrite guard: promoting candidate runs ignores is_shard
-    baseline_by_seed = {100: base_runs[-1]}  # 25k full run
-    for r in cand_runs:
-        if not r.get("is_shard"):
-            baseline_by_seed[int(r["seed"])] = r
-    # Seed 100 should still be the 25k full run, NOT overwritten by candidate shard!
-    assert baseline_by_seed[100]["turns"] == 25000
-
-
-def test_pass2_bug2_world_memory_craftax_bounds() -> None:
-    """Pass 2 Bug 2: WorldMemory must handle Craftax (48, 48) grid without clipping at y >= 21."""
-    harness = CraftaxHarness(max_steps=50)
-    try:
-        st = harness.reset(seed=42)
-        # Craftax player spawns at (24, 24)
-        assert st.y == 24
-        assert st.x == 24
-        assert st.mem.visited[24, 24]
-        assert st.mem.visit_count[24, 24] >= 1
-        assert st.mem.pos_history[-1] == (0, 1, 24, 24)
-
-        # Move RIGHT to (24, 25)
-        st, _, _ = harness.step(CraftaxAction.RIGHT)
-        assert st.y == 24
-        assert st.x == 25
-        assert st.mem.visited[24, 25]
-        assert st.mem.visit_count[24, 25] >= 1
-
-        # Move LEFT to (24, 24)
-        st, _, _ = harness.step(CraftaxAction.LEFT)
-        assert st.mem.visit_count[24, 24] >= 2
-
-        # Move UP to (23, 24)
-        st, _, _ = harness.step(CraftaxAction.UP)
-        assert st.mem.visited[23, 24]
-        assert st.mem.visit_count[23, 24] >= 1
-    finally:
-        harness.close()
-
-
-def test_pass2_bug3_synthesis_proposal_skill_code_wiring() -> None:
-    """Pass 2 Bug 3: SynthesisProposal must preserve skill_code extracted from AuthorAgent."""
-    hyp = {
-        "mode": "FUNC_MOD_ADD",
-        "target_functions": ["handle_combat"],
-        "skill_module": "combat_tactics",
+    large_skills = {
+        "combat": "\n".join([f"def fight_{i}(s, bb): return None" for i in range(40)]),
+        "equip": "\n".join([f"def wear_{i}(s, bb): return None" for i in range(40)]),
     }
-    content = """
-Here is my plan to improve combat survivability:
+    peer_prompt = build_user_prompt(
+        mode="SWARM_PEER",
+        generation=5,
+        current_policy=long_policy,
+        batch_digest="Gen 5 deficits",
+        skills=large_skills,
+    )
+    assert "### Behavior Tree Primitives" not in peer_prompt
+    assert "Domain Skill Tree" in peer_prompt
+    assert "`skills/combat.py` (40 LOC)" in peer_prompt
+    assert "def fight_39" not in peer_prompt
+    assert "def helper_59" not in peer_prompt
 
-```python:combat_tactics
-def evade_trap(state):
-    return Action.WAIT
-```
+    # 3. 3-seed smoke sweep catches error triggered ONLY on seed 1000
+    reg = AuthorToolRegistry(db_path=db_path)
+    reg.configure_generation(
+        pool=None, baseline_runs=[], generation=5, mode="SWARM_PEER"
+    )
+    cand_seed1000_bug = """
+from lox.env.actions import Action
+from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
 
-```python
-def handle_combat(self, state):
-    return self.explore_step(state)
-```
+def conditional_bug(st, bb):
+    # Triggers ONLY after several turns when seed != 42 (using seeded randomness on st.step_count == 5)
+    if st.step_count == 5 and st.y != 11:
+        # Force deterministic failure on non-seed-42 coordinates if reached or always raise when x > 0 on step 5 except mock check
+        return 1 / 0
+    return Action.SEARCH
+
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(conditional_bug, name='bug')]), blackboard=self.blackboard)
+    def step(self, st):
+        return self.tree.tick(st) or Action.WAIT
 """
-    skill = AuthorAgent.extract_skill_code(content, hyp)
-    assert "def evade_trap(state):" in skill
-
-    # Test hypothesis with direct skill_code key
-    hyp_direct = {
-        "mode": "FUNC_MOD_ADD",
-        "skill_module": "trap_nav",
-        "skill_code": "def avoid_trap(): pass",
-    }
-    skill_direct = AuthorAgent.extract_skill_code("", hyp_direct)
-    assert skill_direct == "def avoid_trap(): pass"
-
-    proposal = SynthesisProposal(
-        mode="FUNC_MOD_ADD",
-        hypothesis=hyp,
-        raw_code_patch="def handle_combat(self, state): pass",
-        full_policy_code="class Policy: pass",
-        full_macros_code="",
-        target_functions=["handle_combat"],
-        skill_code=skill,
+    diag, status = reg.dry_run_policy(
+        code=cand_seed1000_bug, seed=42, max_turns=60, smoke_only=True
     )
-    assert proposal.skill_code == skill
+    # Whether raised on seed 42 or seed 1000, multi-seed smoke catches it with RUNTIME_ERROR!
+    assert status == "RUNTIME_ERROR"
 
+    # 4. Append-only messages + static tools payload check in AuthorAgent
+    import httpx
 
-def test_pass2_bug4_extract_shards_from_db_and_pilot_logging(tmp_path: Path) -> None:
-    """Pass 2 Bug 4: extract_shards_from_db must parse milestones_json & turns, and pilot saves policies/batches."""
-    db_path = str(tmp_path / "test_shards.duckdb")
-    init_db(db_path)
-    logger = BatchDatabaseLogger(db_path=db_path)
-
-    # 1. Save a policy and batch to allow runs insertion
-    logger.save_policy(
-        policy_id="pol_base",
-        generation=0,
-        mode="FULL_WRITE",
-        policy_code="class Policy: pass",
-        macros_code="",
-        params={},
-        avg_depth=2.0,
-        max_depth=3,
-        is_promoted=True,
+    ag = AuthorAgent(
+        provider="openrouter", api_key="test-key", db_path=db_path, agent_role="peer_1"
     )
+    seen_prefixes: list[tuple[bool, str, list[str]]] = []
 
-    # Build dummy runs with milestones_json and turns (no steps)
-    action_bytes = b"k" * 200
-    m_json = json.dumps({"depth_first_turn": {"2": 50, "3": 120}})
-    runs = [
-        {
-            "run_id": "run_001",
-            "batch_id": "batch_base",
-            "generation": 0,
-            "seed": 1234,
-            "depth": 3,
-            "max_depth": 3,
-            "score": 150,
-            "turns": 180,
-            "xp_level": 2,
-            "final_hp": 0,
-            "max_hp": 15,
-            "final_ac": 10,
-            "gold": 0,
-            "end_reason": "killed_by_jackal",
-            "death_message": "jackal",
-            "is_outlier_good": False,
-            "outlier_z_score": 0.0,
-            "batch_percentile": 50.0,
-            "summary_digest": "Overview: Dlvl=3 | Steps=180",
-            "game_log": "jackal bit you",
-            "milestones_json": m_json,
-            "triggered_functions": "{}",
-            "last_active_function": "handle_combat",
-            "action_bytes": action_bytes,
-            "wall_ms": 10.0,
-        }
-    ]
-    logger.save_batch(
-        batch_id="batch_base",
-        generation=0,
-        mode="FULL_WRITE",
-        parent_policy_id="none",
-        candidate_policy_id="pol_base",
-        target_functions=[],
-        runs=runs,
-        episodes_discarded=0,
-        batch_metrics={"avg_depth": 3.0, "max_depth": 3},
-    )
+    def fake_post(self_client, url, headers=None, json=None, **kwargs):
+        import json as _json
 
-    shards = extract_shards_from_db(db_path, "batch_base")
-    # Must extract pre-death shard and floor entry shards (Dlvl 2 and Dlvl 3)
-    assert len(shards) >= 2
-    shard_types = [s.trigger_context for s in shards]
-    assert any("pre_death" in t for t in shard_types)
-    assert any("floor_entry:2" in t for t in shard_types)
-    assert any("floor_entry:3" in t for t in shard_types)
-
-    # 2. Test pilot evaluation DuckDB saving completeness via AuthorToolRegistry
-    pool = PersistentEvalPool(workers=2, max_steps=10)
-    try:
-        tools = AuthorToolRegistry(db_path=db_path)
-        tools.configure_generation(
-            pool=pool,
-            baseline_runs=runs,
-            max_pilot_runs=3,
-            pilot_episodes=10,
-            generation=1,
-        )
-        # Test valid code dry run
-        code = """class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.WAIT
-"""
-        diag, status = tools.dry_run_policy(code=code, is_macro=False)
-        assert "PASSED" in status or "PILOT" in status
-
-        # Verify DuckDB has policies, batches, and experiments rows with generation=1
-        con = connect_db(db_path, read_only=True)
-        try:
-            cand_count = con.execute(
-                "SELECT COUNT(*) FROM policies WHERE mode = 'PILOT'"
-            ).fetchone()[0]
-            assert cand_count >= 1
-            batch_count = con.execute(
-                "SELECT COUNT(*) FROM batches WHERE mode = 'PILOT'"
-            ).fetchone()[0]
-            assert batch_count >= 1
-            exp_count = con.execute(
-                "SELECT COUNT(*) FROM experiments WHERE mode = 'PILOT'"
-            ).fetchone()[0]
-            assert exp_count >= 1
-            gen_val = con.execute(
-                "SELECT generation FROM experiments WHERE mode = 'PILOT'"
-            ).fetchone()[0]
-            assert gen_val == 1
-        finally:
-            con.close()
-    finally:
-        pool.close()
-
-
-def test_pass3_pilot_delta_depth_and_exact_batch_capacity(tmp_path: Path) -> None:
-    """Pass 3: No false negative pilot delta_depth with shards and exact batch dispatch."""
-    db_path = str(tmp_path / "pass3_test.duckdb")
-    pool = PersistentEvalPool(workers=2, max_steps=15)
-    try:
-        tools = AuthorToolRegistry(db_path=db_path)
-
-        # 1. No False Negative in dry_run_policy When Shards Have Lower Depth Than Full Runs
-        # 10 runs are Dlvl 1 failures (with action_bytes = b"k" * 20, max_depth = 1, score = 10)
-        # and 20 runs have max_depth = 2, score = 20
-        baseline_runs = []
-        for i in range(1, 11):
-            baseline_runs.append(
-                {
-                    "run_id": f"base_fail_{i}",
-                    "seed": i,
-                    "max_depth": 1,
-                    "depth": 1,
-                    "score": 10,
-                    "steps": 20,
-                    "turns": 20,
-                    "action_bytes": b"k" * 20,
-                    "end_reason": "killed_by_jackal",
-                    "summary_digest": f"Overview: Dlvl=1 | Steps=20 | Seed={i}",
-                }
+        seen_prefixes.append(
+            (
+                "tools" in json,
+                str(json.get("tool_choice", "")),
+                [m["role"] for m in json["messages"]],
             )
-        for i in range(11, 31):
-            baseline_runs.append(
-                {
-                    "run_id": f"base_norm_{i}",
-                    "seed": i,
-                    "max_depth": 2,
-                    "depth": 2,
-                    "score": 20,
-                    "steps": 40,
-                    "turns": 40,
-                    "action_bytes": b"k" * 40,
-                    "end_reason": "ascended",
-                    "summary_digest": f"Overview: Dlvl=2 | Steps=40 | Seed={i}",
+        )
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self_resp):
+                if len(seen_prefixes) == 1:
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "",
+                                    "tool_calls": [
+                                        {
+                                            "id": "c1",
+                                            "function": {
+                                                "name": "query_wiki",
+                                                "arguments": _json.dumps(
+                                                    {"query": "shop"}
+                                                ),
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ],
+                        "usage": {},
+                    }
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "```python\nclass Policy:\n    def step(self, s): return Action.WAIT\n```"
+                            }
+                        }
+                    ],
+                    "usage": {},
                 }
-            )
 
-        tools.configure_generation(
-            pool=pool,
-            baseline_runs=baseline_runs,
-            max_pilot_runs=3,
-            pilot_episodes=30,
-            generation=1,
-        )
+        return _Resp()
 
-        cand_policy = """class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.WAIT
-"""
-
-        orig_eval = pool.evaluate_batch
-
-        def mock_eval(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            res = orig_eval(*args, **kwargs)
-            # Candidate full runs achieve higher score/progression while shards stay at max_depth=1
-            for r in res.get("runs", []):
-                if not r.get("is_shard"):
-                    r["max_depth"] = 2
-                    r["score"] = 25
-                else:
-                    r["max_depth"] = 1
-                    r["score"] = 10
-            return res
-
-        pool.evaluate_batch = mock_eval
-
-        try:
-            diag, status = tools.dry_run_policy(code=cand_policy, is_macro=False)
-        finally:
-            pool.evaluate_batch = orig_eval
-
-        # Assert tools.last_pilot_improved is True
-        assert tools.last_pilot_improved is True
-        assert "PASSED" in status
-
-        # Assert Δ= in tools.last_pilot_summary is >= 0.0 (not negative!)
-        assert "Δ=" in tools.last_pilot_summary
-        delta_str = tools.last_pilot_summary.split("Δ=")[-1].split()[0]
-        delta_val = float(delta_str)
-        assert delta_val >= 0.0, f"Expected non-negative delta, got {delta_val}"
-
-        # Assert cand_depths / base_depths were paired 1-to-1
-        assert len(tools.last_cand_depths) > 0
-        assert len(tools.last_cand_depths) == len(tools.last_base_depths)
-
-        # 2. Exact Task Dispatch in evaluate_batch When Priority Seeds / Shards Cover target_episodes
-        exact_seeds = list(range(100, 115))
-        res = pool.evaluate_batch(
-            batch_id="test_exact_dispatch",
-            policy_code=cand_policy,
-            target_episodes=10,
-            target_functions=["run"],
-            priority_seeds=exact_seeds,
-        )
-        assert res["raw_episodes_run"] == 10
-        assert len(res["runs"]) == 10
-        run_seeds = [r["seed"] for r in res["runs"]]
-        assert set(run_seeds).issubset(set(exact_seeds))
+    old_post = httpx.Client.post
+    httpx.Client.post = fake_post  # type: ignore[method-assign]
+    try:
+        ag.synthesize(mode="CREATE", generation=1, current_policy="", max_tool_turns=1)
     finally:
-        pool.close()
+        httpx.Client.post = old_post  # type: ignore[method-assign]
+
+    assert len(seen_prefixes) >= 2
+    assert all(has_tools for has_tools, _, _ in seen_prefixes)
+    assert seen_prefixes[0][1] == "auto"
+    assert seen_prefixes[-1][1] == "none"
+    # Every prefix of turn i messages matches turn i-1
+    assert seen_prefixes[1][2][: len(seen_prefixes[0][2])] == seen_prefixes[0][2]
 
 
 def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
@@ -967,7 +479,6 @@ def test_pass6_overnight_audit_fixes(tmp_path: Path) -> None:
     """Pass 6: Overnight Campaign & Runtime Audit Overhaul Verification."""
     from lox.engine.scheduler import ModeScheduler
     from lox.lang.validator import splice_functions_into_policy
-    from lox.ui.console import ConsoleUI
 
     # 1. ExecutionTracer attributes turns to handle_combat (not leaf helper get_passable_mask)
     #    and counts boolean macro calls returning False
@@ -1532,7 +1043,6 @@ def test_pass9_debugging_telemetry_and_rollout_metrics(tmp_path: Path) -> None:
     """Pass 9: Comprehensive verification of safety, behavioral, blunder, and efficiency telemetry."""
     from lox.db.logger import BatchDatabaseLogger
     from lox.db.schema import get_schema_markdown, init_db
-    from lox.lang.compiler import compile_policy_package
     from lox.runner.pool import PersistentEvalPool
 
     db_path = str(tmp_path / "test_telemetry.duckdb")
@@ -1730,98 +1240,602 @@ class Policy:
         pool.close()
 
 
-def test_gen0_logging_and_campaign_on_migrated_schema(tmp_path):
-    """Verifies that save_batch, save_experiment, and full Gen 0 execution succeed
+def test_phase2_pyright_contracts_evolve_block_tools_and_deficits(tmp_path):
+    # Cross-module & pyright catching real mistakes
+    bad_pol = """from skills.missing_mod import helper
+class Policy:
+    def run(self, state: GameState):
+        yield state.not_a_real_field
+"""
+    with pytest.raises(PolicyValidationError):
+        validate_cross_module_contracts(bad_pol, skills={})
 
-    even when ALTER TABLE ADD COLUMN has appended telemetry columns after created_at TIMESTAMP.
-    """
-    import shutil
-    from pathlib import Path
+    py_errs = run_pyright_on_package(bad_pol, skills={})
+    assert any("missing_mod" in e or "not_a_real_field" in e for e in py_errs)
 
-    from lox.db.logger import BatchDatabaseLogger
-    from lox.db.schema import connect_db, init_db
-    from lox.engine.orchestrator import CampaignOrchestrator
+    good_pol = """from lox.env.actions import Action
+from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
 
-    db_file = str(tmp_path / "migrated_test.duckdb")
-    if Path("data/lox.duckdb").exists():
-        shutil.copy2("data/lox.duckdb", db_file)
-    else:
-        init_db(db_file)
+def step_wait(st, bb):
+    return Action.WAIT
 
-    # 1. Verify BatchDatabaseLogger can insert without positional TIMESTAMP cast error
-    logger = BatchDatabaseLogger(db_file)
-    logger.save_batch(
-        batch_id="b_migrated_001",
-        generation=0,
-        mode="FULL_WRITE",
-        parent_policy_id="none",
-        candidate_policy_id="pol_001",
-        target_functions=["run"],
-        runs=[],
-        episodes_discarded=0,
-        batch_metrics={
-            "avg_depth": 1.5,
-            "p90_depth": 2.0,
-            "max_depth": 2,
-            "avg_score": 20.0,
-            "max_score": 30,
-            "avg_turns": 50.0,
-            "outliers": 0,
-            "seeds_evaluated": 25,
-            "is_early_stopped": True,
-            "pilot_best_delta": 0.45,
-        },
-        verdict={
-            "passed": True,
-            "wilcoxon_p": 0.01,
-            "ci_lower": 0.1,
-            "ci_upper": 0.5,
-            "mean_delta": 0.3,
-            "wins": 20,
-            "losses": 5,
-            "ties": 0,
-            "seeds_evaluated": 25,
-            "is_early_stopped": True,
-            "pilot_best_delta": 0.45,
-            "reason": "Test migration",
-        },
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(step_wait, name='w')]), blackboard=self.blackboard)
+    def step(self, state):
+        return self.tree.tick(state) or Action.WAIT
+"""
+    assert run_pyright_on_package(good_pol, skills={}) == []
+
+    # #EVOLVE-BLOCK bounds check
+    scaffold = "# keep\nX = 1\n# EVOLVE-BLOCK: core\ndef foo():\n    return 1\n# END-EVOLVE-BLOCK\n"
+    ok_cand = "# keep\nX = 1\n# EVOLVE-BLOCK: core\ndef foo():\n    return 2\n# END-EVOLVE-BLOCK\n"
+    bad_cand = "# changed\nX = 2\n# EVOLVE-BLOCK: core\ndef foo():\n    return 2\n# END-EVOLVE-BLOCK\n"
+    assert check_evolve_block_bounds(scaffold, ok_cand) is None
+    assert check_evolve_block_bounds(scaffold, bad_cand) is not None
+
+    # Repo-intel tools + filtered SWARM_PEER tool schema
+    db_path = str(tmp_path / "test_p2.duckdb")
+    init_db(db_path).close()
+    reg = AuthorToolRegistry(db_path=db_path)
+    reg.current_policy_code = good_pol
+    reg.skills = {
+        "nav": "def move_dir(st, bb):\n    bb.nav_target = (1, 2)\n    return bb.nav_target\n"
+    }
+    reg.configure_generation(
+        pool=None, skills=reg.skills, generation=1, mode="SWARM_PEER"
     )
+    ref_out, _ = reg.find_references("step_wait")
+    assert "policy.py" in ref_out
+    grep_out, _ = reg.grep_skills("nav_target")
+    assert "skills/nav.py" in grep_out
+    bb_out, _ = reg.blackboard_map()
+    assert "nav_target" in bb_out
+    parity_out, _ = reg.benchmark_expert_parity(top_n=5)
+    assert "Parity" in parity_out
 
-    con = connect_db(db_file, read_only=True)
-    b_row = con.execute(
-        "SELECT seeds_evaluated, is_early_stopped, pilot_best_delta, created_at FROM batches WHERE batch_id='b_migrated_001'"
-    ).fetchone()
-    assert b_row[0] == 25
-    assert b_row[1] is True
-    assert abs(b_row[2] - 0.45) < 1e-6
-    assert b_row[3] is not None
+    peer_specs = get_tool_specs("SWARM_PEER")
+    peer_tool_names = {s["function"]["name"] for s in peer_specs}
+    assert "query_policy_docs" not in peer_tool_names
+    assert "read_wiki_article" in peer_tool_names
+    assert "blackboard_map" in peer_tool_names
+    dry_props = next(
+        s["function"]["parameters"]["properties"]
+        for s in peer_specs
+        if s["function"]["name"] == "dry_run_policy"
+    )
+    assert "hypothesis" not in dry_props and "is_macro" not in dry_props
+
+    # Pre-mortem ticks + THEORY priority + sample_run_ids[:1]
+    logger = BatchDatabaseLogger(db_path)
+    logger.save_policy(
+        policy_id="pol_g1",
+        generation=1,
+        mode="SWARM",
+        policy_code=good_pol,
+        macros_code="",
+        params={},
+        avg_depth=1.0,
+        max_depth=1,
+        skills=reg.skills,
+        is_promoted=True,
+    )
+    run_rec = EpisodeRun(
+        run_id="run_pm_1",
+        seed=42,
+        role="val-hum-law-fem",
+        max_depth=1,
+        depth=1,
+        turns=15,
+        score=5,
+        end_reason="died_by_newt",
+        action_bytes=b"..",
+        ticks=[
+            {
+                "step_idx": i,
+                "depth": 1,
+                "turn": i + 1,
+                "hp": 10 - i,
+                "max_hp": 14,
+                "action_name": "WAIT",
+                "active_function": "step_wait",
+                "message": "The newt bites!" if i == 3 else "",
+            }
+            for i in range(4)
+        ],
+    )
+    logger.save_batch(
+        batch_id="batch_g1",
+        generation=1,
+        mode="SWARM",
+        parent_policy_id="pol_g1",
+        candidate_policy_id="pol_g1",
+        target_functions=[],
+        runs=[run_rec],
+        episodes_discarded=0,
+        batch_metrics={"avg_depth": 1.0, "max_depth": 1},
+        verdict={"passed": True, "mean_delta": 0.1},
+    )
+    con = connect_db(db_path)
+    con.execute(
+        "INSERT INTO theories (doc_id, generation, agent_role, doc_type, title, content, tags, verified_c_rule) "
+        "VALUES ('th_log', 2, 'SWARM_REFEREE', 'REFEREE_LOG', 'Ref note', '', '', '')"
+    )
+    con.execute(
+        "INSERT INTO theories (doc_id, generation, agent_role, doc_type, title, content, tags, verified_c_rule) "
+        "VALUES ('th_real', 1, 'peer_1', 'THEORY', 'Real C Theory', '', '', 'Rule')"
+    )
     con.close()
 
-    # 2. Now run an end-to-end Generation 0 Campaign on this DB
-    pol_file = str(tmp_path / "policy.py")
-    orch = CampaignOrchestrator(
-        provider="mock",
-        model="mock-model",
-        db_path=db_file,
-        policy_path=pol_file,
-        workers=2,
-        max_steps=30,
-        full_write_episodes=4,
+    rep = DeficitAnalyzer(db_path).analyze(
+        generation=2, current_policy=good_pol, skills=reg.skills
     )
+    brief = rep.format_brief()
+    assert "run_ids=['run_pm_1']" in brief
+    assert "pre_mortem=[" in brief
+    assert rep.recent_theories[0].startswith("[Gen 1 | peer_1] Real C Theory")
+
+    # TRIGGER_MISS check when edited skill function never executes on claimed deficit fixtures
+    h = NetHackHarness(max_steps=40)
     try:
-        res = orch.run_campaign(
-            max_generations=1, forced_mode="FULL_WRITE", seed_base=123
-        )
-        assert res["active_policy_code"] != ""
-        con = connect_db(db_file, read_only=True)
-        gen0_batches = con.execute(
-            "SELECT COUNT(*) FROM batches WHERE generation=0"
-        ).fetchone()[0]
-        gen0_exps = con.execute(
-            "SELECT COUNT(*) FROM experiments WHERE generation=0"
-        ).fetchone()[0]
-        assert gen0_batches >= 1
-        assert gen0_exps >= 1
-        con.close()
+        h.reset(seed=7)
+        h.step(Action.S)
+        raw_bytes = bytes(h.action_bytes)
     finally:
-        orch.pool.close()
+        h.close()
+    claim = DeficitCluster(
+        cluster_id="c1",
+        kind="early_trajectory",
+        label="test",
+        run_count=2,
+        avg_depth=1.0,
+        avg_turns=10.0,
+        replay_fixtures=[
+            {
+                "run_id": "r1",
+                "seed": 7,
+                "action_bytes": raw_bytes,
+                "stop_at_byte_idx": 1,
+            }
+        ],
+    )
+    reg2 = AuthorToolRegistry(db_path=db_path)
+    reg2.skills = {"nav": "def helper(st, bb):\n    return Action.WAIT\n"}
+    reg2.configure_generation(
+        pool=None,
+        skills=reg2.skills,
+        generation=2,
+        mode="SWARM_PEER",
+        claimed_deficit=claim,
+    )
+    reg2.current_policy_code = good_pol
+    dead_patch = '<skill_code module="nav">\ndef dead_never_called(st, bb):\n    return Action.DOWN\n</skill_code>'
+    diag_tm, status_tm = reg2.dry_run_policy(
+        code=dead_patch, seed=42, max_turns=25, smoke_only=False
+    )
+    assert status_tm.startswith("PASSED")
+    assert "TRIGGER_MISS WARNING" in diag_tm
+
+
+def test_phase3_metric_racing_pareto_stacking_and_caution_reseed():
+    adapter = get_adapter("nethack")
+    r_sample = {
+        "max_depth": 3,
+        "xp_level": 4,
+        "final_ac": 4,
+        "worn_oprop_count": 2,
+        "dungeons_visited": 2,
+        "score": 400,
+        "unique_tiles": 50,
+    }
+    assert pytest.approx(
+        progression_metric(r_sample), rel=1e-6
+    ) == adapter.progression_metric(r_sample)
+    # Caution reseed in MAP-Elites
+    arch = MAPElitesArchive()
+    arch.cells["a"] = type(
+        "E",
+        (),
+        {
+            "cell_id": "a",
+            "caution_bin": 0,
+            "fitness": 9.0,
+            "policy_code": "p1",
+            "skills": {},
+        },
+    )()  # type: ignore[assignment]
+    arch.cells["b"] = type(
+        "E",
+        (),
+        {
+            "cell_id": "b",
+            "caution_bin": 3,
+            "fitness": 4.0,
+            "policy_code": "p2",
+            "skills": {},
+        },
+    )()  # type: ignore[assignment]
+    picked = arch.sample_elite(strategy="caution")
+    assert picked is not None and picked.cell_id == "b"
+
+    # Two-Stage Seed Racing + N-Way Sequential Greedy Stacking mock tournament
+    base_pol = (
+        "from skills import a_sk, b_sk\n"
+        "class Policy:\n"
+        "    def step(self, st):\n"
+        "        return a_sk.act_a(st) or b_sk.act_b(st) or Action.WAIT\n"
+    )
+    base_skills = {
+        "a_sk": "def act_a(st):\n    return None\n",
+        "b_sk": "def act_b(st):\n    return None\n",
+    }
+    p1_skills = {
+        "a_sk": "def act_a(st):\n    return Action.N\n",
+        "b_sk": "def act_b(st):\n    return None\n",
+    }
+    p2_skills = {
+        "a_sk": "def act_a(st):\n    return None\n",
+        "b_sk": "def act_b(st):\n    return Action.S\n",
+    }
+    p3_skills = {
+        "a_sk": "def act_a(st):\n    return Action.E\n",
+        "b_sk": "def act_b(st):\n    return None\n",
+    }
+
+    c1 = PeerCandidate(
+        peer_id="peer_1",
+        claimed_deficit_id="d1",
+        claimed_label="p1",
+        hypothesis_yaml={},
+        policy_code=base_pol,
+        skills=p1_skills,
+        touched_skills={"a_sk"},
+        touched_skill_symbols={"a_sk": {"act_a"}},
+        sandbox_passed=True,
+        sandbox_metrics={"avg_depth": 2.0, "avg_score": 50.0},
+    )
+    c2 = PeerCandidate(
+        peer_id="peer_2",
+        claimed_deficit_id="d2",
+        claimed_label="p2",
+        hypothesis_yaml={},
+        policy_code=base_pol,
+        skills=p2_skills,
+        touched_skills={"b_sk"},
+        touched_skill_symbols={"b_sk": {"act_b"}},
+        sandbox_passed=True,
+        sandbox_metrics={"avg_depth": 1.8, "avg_score": 40.0},
+    )
+    c3 = PeerCandidate(
+        peer_id="peer_3",
+        claimed_deficit_id="d3",
+        claimed_label="p3",
+        hypothesis_yaml={},
+        policy_code=base_pol,
+        skills=p3_skills,
+        touched_skills={"a_sk"},
+        touched_skill_symbols={"a_sk": {"act_a"}},
+        sandbox_passed=True,
+        sandbox_metrics={"avg_depth": 1.0, "avg_score": 5.0},
+    )
+
+    class _FakePool:
+        role = "val-hum-law-fem"
+        benchmark = "nethack"
+        max_steps = 50
+
+        def __init__(self):
+            self.tasks_seen = 0
+
+        def evaluate_tasks(self, tasks):
+            self.tasks_seen += len(tasks)
+            out = []
+            for t in tasks:
+                sd = int(t["seed"])
+                sk = t["skills"]
+                has_a = "Action.N" in sk.get("a_sk", "")
+                has_b = "Action.S" in sk.get("b_sk", "")
+                has_bad = "Action.E" in sk.get("a_sk", "")
+                if has_bad:
+                    d = 1
+                elif has_a and has_b:
+                    d = 5
+                elif has_a:
+                    d = 3
+                elif has_b:
+                    d = 2
+                else:
+                    d = 1
+                out.append(
+                    EpisodeRun(
+                        run_id=t["run_id"],
+                        seed=sd,
+                        role=self.role,
+                        max_depth=d,
+                        depth=d,
+                        score=d * 20,
+                        turns=50,
+                        end_reason="max_steps",
+                    )
+                )
+            return out
+
+    pool = _FakePool()
+    ref = SwarmReferee(max_tournament_peers=3)
+    verdict = ref.evaluate_tournament(
+        generation=1,
+        candidates=[c1, c2, c3],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=pool,
+        seeds=list(range(1, 9)),  # 8 seeds with race_seeds=4
+        race_seeds=4,
+    )
+    assert verdict.promoted is True
+    assert verdict.winner_avg_depth >= 4.9  # Merged a_sk + b_sk won!
+    # 6 packages (inc + 3 finalists + 2 orthos) * 8 seeds = 48 without racing -> 40 with 2-stage racing
+    assert pool.tasks_seen < 48
+
+
+def test_phase4_and_5_organic_scenarios_referee_composition_holdout_and_scoped_ochiai(
+    tmp_path,
+):
+
+    from lox.author.swarm_deficits import DeficitAnalyzer, DeficitReport
+    from lox.author.swarm_peer import (
+        PeerCandidate,
+        compute_candidate_skill_symbols,
+        incubate_candidate,
+    )
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.db.shards import mine_organic_scenarios
+    from lox.db.summarizer import compute_function_stats
+    from lox.engine.frontier import FrontierArchive
+    from lox.engine.swarm_referee import SwarmReferee
+
+    db_path = str(tmp_path / "p45.duckdb")
+    f_dir = str(tmp_path / "frontier")
+    init_db(db_path).close()
+
+    # 1. FrontierArchive inverse-visit visit_count persistence
+    fa = FrontierArchive(frontier_dir=f_dir)
+    fa.add_checkpoint(
+        seed=10,
+        depth=6,
+        milestone="dlvl_6",
+        turns=500,
+        action_bytes=b"llllkjjjjhhh" * 2,
+    )
+    fa.add_checkpoint(
+        seed=11,
+        depth=6,
+        milestone="dlvl_6",
+        turns=520,
+        action_bytes=b"kkkkhhhhllll" * 2,
+    )
+    cp = fa.sample_checkpoint(min_depth=4)
+    assert cp is not None and cp.visit_count == 1
+    fa_reloaded = FrontierArchive(frontier_dir=f_dir)
+    assert any(c.visit_count == 1 for c in fa_reloaded.checkpoints.values())
+
+    # 2. mine_organic_scenarios across structural buckets
+    con = connect_db(db_path, read_only=False)
+    ab_long = b"l" * 120
+    con.execute(
+        """
+        INSERT INTO runs (
+            run_id, batch_id, generation, seed, role, depth, max_depth, score, turns, steps,
+            end_reason, auto_esc_count, starved_with_food, died_unarmored, is_shard, action_bytes, milestones_json
+        ) VALUES
+        ('r_deep', 'b1', 1, 2001, 'val', 5, 5, 400, 1200, 1200, 'killed by ant', 0, FALSE, FALSE, FALSE, ?, '{"depth_first_turn":{"2":200}}'),
+        ('r_stall', 'b1', 1, 2002, 'val', 1, 1, 10, 80, 200, 'stalled_zero_turn', 3, FALSE, FALSE, FALSE, ?, '{}'),
+        ('r_unarm', 'b1', 1, 2003, 'val', 2, 2, 80, 400, 400, 'killed by orc', 0, FALSE, TRUE, FALSE, ?, '{"unworn_armor_in_pack":true,"depth_first_turn":{"2":250}}'),
+        ('r_ill', 'b1', 1, 2004, 'val', 2, 2, 70, 500, 500, 'died of terminal illness', 0, TRUE, FALSE, FALSE, ?, '{}')
+        """,
+        [ab_long, ab_long, ab_long, ab_long],
+    )
+    con.close()
+    mined = mine_organic_scenarios(db_path, frontier_dir=f_dir, max_total=10)
+    buckets = {sh.trigger_context for sh in mined}
+    assert "frontier_deep" in buckets
+    assert "stall_or_prompt" in buckets
+    assert "unequipped_crisis" in buckets
+    assert "resource_or_mortality" in buckets
+
+    # 3. Hard exception rejection during incubate_candidate
+    base_pol = """
+from lox.env.actions import Action
+from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
+from skills.sub import h_base
+
+class Policy:
+    def __init__(self):
+        self.blackboard = Blackboard()
+        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(h_base, name='base')]), blackboard=self.blackboard)
+    def step(self, state):
+        return self.tree.tick(state) or Action.WAIT
+"""
+    base_skills = {
+        "sub": "from lox.env.actions import Action\ndef h_base(s, bb):\n    return Action.SEARCH\n"
+    }
+    cand_exc = PeerCandidate(
+        peer_id="p_exc",
+        claimed_deficit_id="c1",
+        claimed_label="raises in pool",
+        policy_code=base_pol,
+        skills=base_skills,
+    )
+
+    class _ExcPool:
+        def evaluate_batch(self, **kwargs):
+            return {
+                "runs": [
+                    {
+                        "run_id": "x1",
+                        "seed": 42,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 50,
+                        "turns": 100,
+                        "policy_exceptions": 2,
+                        "end_reason": "policy_error:KeyError",
+                        "milestones_json": json.dumps(
+                            {"exception_tracebacks": ["sub.py:5: KeyError: 'k'"]}
+                        ),
+                    }
+                ]
+            }
+
+    rep_inc = DeficitReport(generation=2, regime="PLATEAU")
+    inc_out = incubate_candidate(
+        cand_exc,
+        deficit_report=rep_inc,
+        claimed_deficit=DeficitAnalyzer._bootstrap_clusters()[0],
+        eval_pool=_ExcPool(),
+        shard_seeds=[42],
+    )
+    assert inc_out.sandbox_passed is False
+    assert "exception" in inc_out.error.lower()
+
+    # 4. Top-K 3-way AST composition inside the SAME skill module + Hidden Holdout audit cancellation
+    sk_a = base_skills["sub"] + "\ndef h_alpha(s, bb):\n    return Action.EAST\n"
+    sk_b = base_skills["sub"] + "\ndef h_beta(s, bb):\n    return Action.WEST\n"
+    pol_a = base_pol.replace(
+        "from skills.sub import h_base", "from skills.sub import h_alpha, h_base"
+    ).replace(
+        "ActionLeaf(h_base, name='base')",
+        "ActionLeaf(h_alpha, name='alpha'), ActionLeaf(h_base, name='base')",
+    )
+    pol_b = base_pol.replace(
+        "from skills.sub import h_base", "from skills.sub import h_base, h_beta"
+    ).replace(
+        "ActionLeaf(h_base, name='base')",
+        "ActionLeaf(h_base, name='base'), ActionLeaf(h_beta, name='beta')",
+    )
+    ca = PeerCandidate(
+        peer_id="pA",
+        claimed_deficit_id="da",
+        claimed_label="alpha",
+        policy_code=pol_a,
+        skills={"sub": sk_a},
+        touched_skills={"sub"},
+        touched_branches={"alpha"},
+        touched_skill_symbols=compute_candidate_skill_symbols(
+            {"sub": sk_a}, base_skills
+        ),
+        sandbox_passed=True,
+    )
+    cb = PeerCandidate(
+        peer_id="pB",
+        claimed_deficit_id="db",
+        claimed_label="beta",
+        policy_code=pol_b,
+        skills={"sub": sk_b},
+        touched_skills={"sub"},
+        touched_branches={"beta"},
+        touched_skill_symbols=compute_candidate_skill_symbols(
+            {"sub": sk_b}, base_skills
+        ),
+        sandbox_passed=True,
+    )
+    combos = SwarmReferee.build_orthogonal_candidates([ca, cb], base_pol, base_skills)
+    assert len(combos) == 1
+    assert "h_alpha" in combos[0].skills["sub"] and "h_beta" in combos[0].skills["sub"]
+    assert "h_alpha" in combos[0].policy_code and "h_beta" in combos[0].policy_code
+
+    # Holdout cancellation check
+    class _HoldoutFailPool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [1, 2])
+            if batch_id.startswith("holdout_") and "_inc_" not in batch_id:
+                return {
+                    "runs": [
+                        {
+                            "run_id": f"hr_{s}",
+                            "seed": s,
+                            "depth": 1,
+                            "max_depth": 1,
+                            "score": 0,
+                            "turns": 50,
+                            "final_ac": 10,
+                            "xp_level": 1,
+                        }
+                        for s in s_list
+                    ]
+                }
+            if "_inc_" in batch_id:
+                return {
+                    "runs": [
+                        {
+                            "run_id": f"ir_{s}",
+                            "seed": s,
+                            "depth": 2,
+                            "max_depth": 2,
+                            "score": 100,
+                            "turns": 200,
+                            "final_ac": 9,
+                            "xp_level": 2,
+                        }
+                        for s in s_list
+                    ]
+                }
+            return {
+                "runs": [
+                    {
+                        "run_id": f"cr_{s}",
+                        "seed": s,
+                        "depth": 4,
+                        "max_depth": 4,
+                        "score": 300,
+                        "turns": 500,
+                        "final_ac": 6,
+                        "xp_level": 3,
+                    }
+                    for s in s_list
+                ]
+            }
+
+    ref = SwarmReferee()
+    hv = ref.evaluate_tournament(
+        generation=10,
+        candidates=[ca],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=_HoldoutFailPool(),
+        seeds=[1001, 1002, 1003, 1004],
+        holdout_seeds=[100000, 100001, 100002, 100003],
+    )
+    assert hv.promoted is False
+    assert hv.holdout_iqm_delta is not None and hv.holdout_iqm_delta < -0.15
+    assert len(hv.attempts_summary) >= 1
+
+    # 5. Stagnation-discounted Ochiai + tournament_attempts surfaced by DeficitAnalyzer
+    fn_stats = compute_function_stats(
+        "b_stag",
+        10,
+        [
+            {
+                "run_id": "r_g",
+                "is_outlier_good": True,
+                "max_depth": 5,
+                "turns": 100,
+                "end_reason": "killed",
+                "triggered_functions": json.dumps({"good_fn": 20, "wait_stag": 10}),
+                "milestones": {"stagnation_fn_turns": {"wait_stag": 85}},
+                "summary_digest": "Stalls: wait_stag stalled (T5..T90 (85 turns))",
+            }
+        ],
+    )
+    by_fn_st = {row["function_name"]: row for row in fn_stats}
+    assert (
+        by_fn_st["wait_stag"]["ochiai_good_run_score"]
+        < by_fn_st["good_fn"]["ochiai_good_run_score"]
+    )
+
+    BatchDatabaseLogger(db_path=db_path).save_tournament_attempts(hv.attempts_summary)
+    rep_after = DeficitAnalyzer(db_path).analyze(generation=11, current_policy=base_pol)
+    assert any(
+        "REJECTED" in line and "pA" in line for line in rep_after.recent_attempts
+    )

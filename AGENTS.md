@@ -73,12 +73,15 @@ scripts/
 ├── download_experts.py     # Populates expert_runs and expert_ticks in data/lox.duckdb
 └── build_wiki_db.py        # Builds data/wiki_index.db from data/nethackwikidata.json
 tests/
-├── test_harness_speed.py   # 1-to-1 actions, GameState queries, replay bit-identity, throughput
-├── test_lang_instrument.py # Python 3.11+ features, sandbox security, tracer, loop guard, splicing
-├── test_db_summarizer.py   # RLE summarizer, outlier marker, Ochiai/Liblit, DuckDB logger & tools
-├── test_modes_and_eval.py  # Trigger filtering, unreachable circuit breaker, hypothesis CS, SPSA, mock campaign
-├── test_codebase_hardening.py # Typed contracts, alias synchronization, zero shard leakage, MAP-Elites isolation
-└── test_author_and_ui.py   # Author YAML/code parser, macro execution tracing, ConsoleUI rendering
+├── conftest.py             # Shared pytest fixtures (`repo_root`)
+├── core/                   # Typed contracts (`test_contracts.py`) & Rust core (`test_rust_core.py`)
+├── env/                    # Harness/replay, GameState/symbols, stalls/prompts, NetHack & Craftax adapters
+├── lang/                   # Compiler/sandbox, skills/splicing/macros, BehaviorTree, modularizer & starter
+├── db/                     # DuckDB schema/logger, RLE summarizer/telemetry, TheoryStore & shards
+├── author/                 # Agent/prompts, tools/dry_run/micro-pilot, DeficitAnalyzer, SwarmPeerAgent
+├── engine/                 # Hypothesis/pilot, worker pool/modes, archives, SwarmReferee gate & stacking, orchestrator
+├── ui/                     # ConsoleUI rendering (`test_console_ui.py`)
+└── integration/            # Multi-subsystem end-to-end audit sweeps (`test_overhaul_regressions.py`)
 ```
 
 ---

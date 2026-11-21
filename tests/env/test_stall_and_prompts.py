@@ -1,15 +1,10 @@
-"""
-Unit and integration tests for:
-1. Zero-turn action awareness (turn_advanced, consecutive_stalls, time_delta)
-2. Interactive decision prompt passthrough and safety watchdog
-3. Zero-turn runaway stall truncation (stalled_zero_turn)
-4. Lean observation keys throughput and GameState compatibility
-"""
+"""Domain-scoped tests for LOX."""
 
 from __future__ import annotations
 
 from lox.env import Action, NetHackHarness
 from lox.env.state import GameState
+from lox.lang.compiler import compile_policy_package
 
 
 def test_turn_advanced_and_consecutive_stalls():
@@ -126,3 +121,63 @@ def test_yn_prompt_clears_after_n_reply_no_se_loop():
     }
     assert GameState(obs_active).in_yn_prompt is True
     assert GameState(obs_echoed).in_yn_prompt is False
+
+
+# ---------------------------------------------------------------------------
+# 5. Environment & Execution Purification ("Hard Code Nothing") Tests
+# ---------------------------------------------------------------------------
+def test_environment_purification_no_auto_esc():
+    """PolicyRunner must NOT silently replace actions with ESC when in a text prompt."""
+    pol_code = """
+class Policy:
+    def step(self, state):
+        return Action.WAIT
+"""
+    compiled = compile_policy_package(pol_code)
+    runner = compiled.create_runner()
+
+    class DummyPromptState:
+        hp = 20
+        max_hp = 20
+        turn = 1
+        in_text_prompt = True
+        in_yn_prompt = False
+
+    st = DummyPromptState()
+
+    # Call next_action multiple times: Action.WAIT must NOT be rewritten to ESC
+    for _ in range(5):
+        act, _ = runner.next_action(st)
+        assert act == Action.WAIT
+    assert runner.auto_esc_count == 0
+
+
+def test_environment_purification_no_low_hp_preemption():
+    """PolicyRunner must NOT cancel active subgenerators solely because HP is low."""
+    pol_code = """
+class Policy:
+    def subgen(self, state):
+        while True:
+            yield Action.SEARCH
+
+    def run(self, state):
+        yield from self.subgen(state)
+"""
+    compiled = compile_policy_package(pol_code)
+    runner = compiled.create_runner()
+
+    class DummyLowHpState:
+        hp = 1
+        max_hp = 20
+        turn = 1
+        in_text_prompt = False
+        in_yn_prompt = False
+
+    st = DummyLowHpState()
+
+    act1, fn1 = runner.next_action(st)
+    assert act1 == Action.SEARCH
+
+    act2, fn2 = runner.next_action(st)
+    assert act2 == Action.SEARCH
+    assert runner.subgen_preemptions == 0

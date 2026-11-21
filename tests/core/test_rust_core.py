@@ -1,8 +1,4 @@
-"""
-Unit & Integration Tests for lox-core PyO3 Rust Acceleration Crate.
-Verifies native Behavior Tree traversal, typed Blackboard operations,
-21x79 grid BFS distance transforms, and A* shortest path steps.
-"""
+"""Domain-scoped tests for LOX."""
 
 from __future__ import annotations
 
@@ -11,6 +7,14 @@ import numpy as np
 
 from lox.env.actions import Action
 from lox.env.grid_utils import _numba_astar_next_step, _numba_bfs_distance_grid
+from lox.env.harness import NetHackHarness
+from lox.env.state import FloorMemory
+from lox.lang.bt import (
+    ActionLeaf,
+    BehaviorTree,
+    Blackboard,
+    PrioritySelector,
+)
 
 
 def test_rust_blackboard():
@@ -123,3 +127,57 @@ def test_rust_bfs_and_astar_equivalence():
     )
     step_numba = _numba_astar_next_step(passable, 10, 40, 15, 60, allow_diagonal=True)
     assert step_rust == step_numba
+
+
+def test_phase0_rust_and_bt_preempt_and_blacklist():
+    bb = Blackboard()
+    h = NetHackHarness(max_steps=40)
+    try:
+        st = h.reset(seed=42)
+        assert isinstance(st.adjacent_closed_doors(), list)
+        frontier = st.unexplored_frontier_mask()
+        assert frontier.shape == (21, 79) and frontier.dtype == np.bool_
+
+        bb.floor_blacklist_add(st, (5, 5), ttl=3)
+        assert bb.floor_is_blacklisted(st, (5, 5)) is True
+
+        # Preempt_if interrupts min_commit immediately
+        ticks = {"explore": 0, "escape": 0}
+        danger = {"active": False}
+
+        def do_escape(s, _bb):
+            if danger["active"]:
+                ticks["escape"] += 1
+                return Action.WAIT
+            return None
+
+        def do_explore(s, _bb):
+            ticks["explore"] += 1
+            return Action.S
+
+        tree = BehaviorTree(
+            PrioritySelector(
+                [
+                    ActionLeaf(do_escape, name="escape"),
+                    ActionLeaf(
+                        do_explore,
+                        name="explore",
+                        min_commit=5,
+                        preempt_if=lambda _s, _bb: danger["active"],
+                    ),
+                ],
+                name="root",
+            ),
+            blackboard=bb,
+        )
+        tree.tick(st)
+        assert ticks["explore"] == 1
+        danger["active"] = True
+        act = tree.tick(st)
+        assert act == Action.WAIT and ticks["escape"] == 1
+    finally:
+        h.close()
+
+    fm = FloorMemory()
+    assert fm.passable_mask.flags.writeable is False
+    assert fm.copy_passable_mask().flags.writeable is True

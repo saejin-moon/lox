@@ -1,21 +1,12 @@
-"""
-Tests for the 3 Modification Modes (`CREATE`, `WRITE`, `REFACTOR`),
-Conditional Episode Trigger Filtering (discarding untriggered episodes),
-Unreachable Function Circuit Breaker, Parameter-Free Hypothesis Evaluator
-(Confidence Sequences + Wilcoxon Signed-Rank + Early Futility Stopping),
-and End-to-End Mock Campaign Orchestration.
-"""
+"""Domain-scoped tests for LOX."""
 
 from __future__ import annotations
 
 from lox.db.schema import connect_db
-from lox.engine.hypothesis import (
-    evaluate_paired_hypothesis,
-    should_stop_early_for_futility,
-)
 from lox.engine.orchestrator import CampaignOrchestrator
 from lox.engine.scheduler import ModeScheduler
-from lox.runner.pool import PersistentEvalPool
+from lox.lang.compiler import compile_policy_and_macros
+from lox.runner.pool import PersistentEvalPool, run_single_episode
 
 
 def test_conditional_episode_trigger_filtering_and_unreachable_circuit_breaker():
@@ -74,84 +65,6 @@ class Policy:
         pool.close()
 
 
-def test_parameter_free_hypothesis_testing_and_early_stopping():
-    # Clear improvement on paired seeds
-    base_runs = [
-        {
-            "seed": i,
-            "max_depth": 2,
-            "final_ac": 5,
-            "xp_level": 2,
-            "score": 100,
-            "turns": 200,
-        }
-        for i in range(1, 31)
-    ]
-    cand_runs_good = [
-        {
-            "seed": i,
-            "max_depth": 4 if i <= 22 else 2,
-            "final_ac": 1 if i <= 22 else 5,
-            "xp_level": 4 if i <= 22 else 2,
-            "score": 400 if i <= 22 else 100,
-            "turns": 350 if i <= 22 else 200,
-        }
-        for i in range(1, 31)
-    ]
-    verdict_good = evaluate_paired_hypothesis(cand_runs_good, base_runs)
-    assert verdict_good["passed"] is True
-    assert verdict_good["mean_delta"] > 0.5
-    assert verdict_good["ci_lower"] > 0.0
-    assert verdict_good["wilcoxon_p"] < 0.05
-    assert verdict_good["wins"] == 22
-
-    # Regression on paired seeds should be rejected and trigger early futility stop
-    cand_runs_bad = [
-        {
-            "seed": i,
-            "max_depth": 1,
-            "final_ac": 8,
-            "xp_level": 1,
-            "score": 20,
-            "turns": 50,
-        }
-        for i in range(1, 31)
-    ]
-    verdict_bad = evaluate_paired_hypothesis(cand_runs_bad, base_runs)
-    assert verdict_bad["passed"] is False
-    assert verdict_bad["ci_upper"] < 0.0
-    base_by_seed = {r["seed"]: r for r in base_runs}
-    assert (
-        should_stop_early_for_futility(cand_runs_bad, base_by_seed, min_pairs=20)
-        is True
-    )
-
-    # Neutral/modular refactoring (mostly ties, zero mean delta):
-    # Fails under FUNC_MOD_ADD (requires p < 0.05), but passes under STRUCTURAL_REFACTOR
-    cand_runs_refactor_neutral = [dict(base_runs[i]) for i in range(len(base_runs))]
-    # Small neutral fluctuation on 2 seeds
-    cand_runs_refactor_neutral[0]["score"] += 10
-    cand_runs_refactor_neutral[1]["score"] -= 10
-    verdict_func_mod = evaluate_paired_hypothesis(
-        cand_runs_refactor_neutral, base_runs, mode="FUNC_MOD_ADD"
-    )
-    assert (
-        verdict_func_mod["passed"] is False
-    )  # p is ~1.0, not statistically significant
-
-    verdict_refactor = evaluate_paired_hypothesis(
-        cand_runs_refactor_neutral, base_runs, mode="STRUCTURAL_REFACTOR"
-    )
-    assert verdict_refactor["passed"] is True
-    assert "Refactor non-regression verified" in verdict_refactor["reason"]
-
-    # Truly regressive refactoring fails even under STRUCTURAL_REFACTOR
-    verdict_bad_refactor = evaluate_paired_hypothesis(
-        cand_runs_bad, base_runs, mode="STRUCTURAL_REFACTOR"
-    )
-    assert verdict_bad_refactor["passed"] is False
-
-
 def test_mode_scheduler_refactor_cadence_and_line_count():
     sched = ModeScheduler()
     # Gen 0 bootstraps
@@ -203,3 +116,100 @@ def test_mode_scheduler_and_end_to_end_mock_campaign(tmp_path):
         assert n_exps == 3
     finally:
         con.close()
+
+
+def test_pool_unique_tiles_floor_aware():
+    pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.SEARCH\n"
+    )
+    res = run_single_episode(
+        {
+            "seed": 42,
+            "run_id": "test_floor_tiles",
+            "policy_code": pol,
+            "max_steps": 10,
+            "record_ticks": False,
+        }
+    )
+    assert res["triggered"] is True
+    assert res["unique_tiles"] >= 1
+    assert res["dungeons_visited"] >= 1
+
+
+def test_pool_preserves_last_depth_on_terminal_death():
+    from lox.runner.pool import run_single_episode
+
+    suicidal_pol = (
+        "from lox.env.actions import Action, extcmd, key\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        if state.in_yn_prompt:\n"
+        "            return key('y')\n"
+        "        return extcmd('pray')\n"
+    )
+    res = run_single_episode(
+        {
+            "seed": 12304,
+            "run_id": "test_death_depth",
+            "role": "val-hum-law-fem",
+            "max_steps": 120,
+            "policy_code": suicidal_pol,
+            "macros_code": "",
+            "skills": {},
+            "record_ticks": False,
+        }
+    )
+    assert res["depth"] >= 1
+    assert res["max_depth"] >= 1
+
+
+def test_selection_bias_elimination_priority_seeds():
+    # Policy with an avoided low-HP emergency state
+    policy_code = """
+class Policy:
+    def handle_emergency(self, state):
+        yield Action.WAIT
+
+    def run(self, state):
+        while True:
+            # Avoid ever calling handle_emergency
+            state = yield Action.SEARCH
+"""
+    _ = compile_policy_and_macros(policy_code, "")
+
+    # Priority seed task (baseline called handle_emergency, candidate avoids it)
+    task_priority = {
+        "seed": 101,
+        "run_id": "p_task_01",
+        "role": "val-hum-law-fem",
+        "max_steps": 10,
+        "policy_code": policy_code,
+        "macros_code": "",
+        "target_functions": ["handle_emergency"],
+        "is_priority_seed": True,
+        "enforce_trigger": False,
+        "record_ticks": False,
+    }
+    res_priority = run_single_episode(task_priority)
+    # Must NOT be discarded
+    assert res_priority.get("triggered") is not False
+    assert res_priority.get("steps") is not None
+
+    # Random fresh seed task (untriggered should be discarded)
+    task_fresh = {
+        "seed": 102,
+        "run_id": "fresh_task_01",
+        "role": "val-hum-law-fem",
+        "max_steps": 10,
+        "policy_code": policy_code,
+        "macros_code": "",
+        "target_functions": ["handle_emergency"],
+        "is_priority_seed": False,
+        "enforce_trigger": True,
+        "record_ticks": False,
+    }
+    res_fresh = run_single_episode(task_fresh)
+    assert res_fresh.get("triggered") is False

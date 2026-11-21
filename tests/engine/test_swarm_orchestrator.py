@@ -1,0 +1,648 @@
+"""Domain-scoped tests for LOX."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import duckdb
+import pytest
+
+from lox.author.prompts import build_system_prompt, build_user_prompt
+from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster
+from lox.author.swarm_peer import PeerCandidate
+from lox.author.swarm_worker import SwarmWorker
+from lox.author.tools import AuthorToolRegistry
+from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
+from lox.db.schema import connect_db, init_db
+from lox.db.theories import TheoryDocumentStore
+from lox.env.actions import Action
+from lox.env.harness import NetHackHarness
+from lox.lang.validator import (
+    PolicyValidationError,
+    validate_cross_module_contracts,
+)
+
+
+def test_swarm_campaign_orchestrator_end_to_end(tmp_path):
+    workspace = tmp_path / "workspace"
+    frontier = tmp_path / "frontier"
+    db_path = str(tmp_path / "swarm_test.duckdb")
+
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+
+    orchestrator = SwarmCampaignOrchestrator(
+        db_path=db_path,
+        workspace_dir=str(workspace),
+        frontier_dir=str(frontier),
+        provider="mock",
+        num_workers=2,
+        turns_per_worker=1,
+        seeds_per_batch=2,
+    )
+    try:
+        history = orchestrator.run(generations=1)
+        assert len(history) == 1
+        assert history[0]["generation"] == 1
+        assert history[0]["avg_depth"] >= 1.0
+
+        con = duckdb.connect(db_path, read_only=True)
+        batches_cnt = con.execute("SELECT count(*) FROM batches").fetchone()[0]
+        runs_cnt = con.execute("SELECT count(*) FROM runs").fetchone()[0]
+        assert batches_cnt == 1
+        assert runs_cnt == 2
+        con.close()
+    finally:
+        orchestrator.close()
+
+
+def test_run_swarm_clean_resets_campaign_while_preserving_experts(tmp_path):
+    import subprocess
+    import sys
+
+    db_path = tmp_path / "clean_test.duckdb"
+    workspace = tmp_path / "workspace"
+    frontier = tmp_path / "frontier"
+    (workspace / "skills").mkdir(parents=True)
+    (workspace / "skills" / "legacy.py").write_text("x = 1\n")
+    (workspace / "policy.py").write_text("from skills.legacy import x\n")
+    (workspace / "macros.py").write_text("def m(): pass\n")
+    (workspace / "STATUS.md").write_text("stale status\n")
+    frontier.mkdir(parents=True)
+    (frontier / "stale_cp.json").write_text("{}")
+
+    store = TheoryDocumentStore(db_path=str(workspace / "theories.lance"))
+    store.save_document(
+        generation=99,
+        agent_role="stale_worker",
+        doc_type="THEORY",
+        title="Stale Theory",
+        content="Should be removed by --clean",
+    )
+
+    con = init_db(str(db_path))
+    con.execute(
+        "INSERT INTO policies (policy_id, generation, mode, policy_code, is_promoted) "
+        "VALUES ('pol_stale', 99, 'WRITE', 'stale', TRUE)"
+    )
+    con.execute(
+        "INSERT INTO batches (batch_id, generation, mode, candidate_policy_id, episodes_recorded, avg_depth, max_depth) "
+        "VALUES ('b_stale', 99, 'WRITE', 'pol_stale', 1, 1.0, 1)"
+    )
+    con.execute(
+        "INSERT INTO expert_runs (run_id, source, role, max_depth, turns) "
+        "VALUES ('exp_keep_1', 'nao', 'Val', 20, 5000)"
+    )
+    con.close()
+
+    repo_root = Path(__file__).resolve().parents[2]
+    res = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_swarm.py",
+            "--clean",
+            "--provider",
+            "mock",
+            "--generations",
+            "1",
+            "--workers",
+            "1",
+            "--turns-per-worker",
+            "1",
+            "--seeds",
+            "1",
+            "--db-path",
+            str(db_path),
+            "--workspace-dir",
+            str(workspace),
+            "--frontier-dir",
+            str(frontier),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert res.returncode == 0, res.stderr + "\n" + res.stdout
+    assert (workspace / "STATUS.md").exists()
+    status_txt = (workspace / "STATUS.md").read_text(encoding="utf-8")
+    assert "stale status" not in status_txt
+    assert "LOX Campaign Status Dashboard" in status_txt
+    assert not (workspace / "skills" / "legacy.py").exists()
+    assert not (frontier / "stale_cp.json").exists()
+
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        stale_pol = con.execute(
+            "SELECT COUNT(*) FROM policies WHERE policy_id = 'pol_stale'"
+        ).fetchone()[0]
+        stale_batch = con.execute(
+            "SELECT COUNT(*) FROM batches WHERE batch_id = 'b_stale'"
+        ).fetchone()[0]
+        kept_expert = con.execute(
+            "SELECT COUNT(*) FROM expert_runs WHERE run_id = 'exp_keep_1'"
+        ).fetchone()[0]
+        fresh_batches = con.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+        fresh_policies = con.execute("SELECT COUNT(*) FROM policies").fetchone()[0]
+        assert stale_pol == 0
+        assert stale_batch == 0
+        assert kept_expert == 1
+        assert fresh_batches == 1
+        assert fresh_policies == 1
+    finally:
+        con.close()
+
+
+def test_swarm_gen2_with_frontier_checkpoint_brief_and_replay(tmp_path):
+    from lox.engine.frontier import FrontierArchive
+
+    theories_path = str(tmp_path / "theories.lance")
+    frontier_dir = str(tmp_path / "frontier")
+    db_path = str(tmp_path / "test_cp_gen2.duckdb")
+    con = init_db(db_path)
+    con.close()
+
+    # Build a real action trace and save as FrontierCheckpoint (mimics Gen 1 extraction)
+    h = NetHackHarness(max_steps=40)
+    try:
+        st = h.reset(seed=42)
+        for _ in range(10):
+            st, done, _ = h.step(Action.SEARCH)
+            if done:
+                break
+        act_bytes = bytes(h.action_bytes)
+        archive = FrontierArchive(frontier_dir=frontier_dir)
+        cp = archive.add_checkpoint(
+            seed=42,
+            depth=2,
+            milestone="dlvl_2",
+            turns=int(st.turn),
+            action_bytes=act_bytes,
+            game_log="Explored room.",
+            checkpoint_id="fc_dlvl_2_seed42_g1",
+        )
+    finally:
+        h.close()
+
+    worker = SwarmWorker(
+        role="threat",
+        provider="mock",
+        db_path=db_path,
+        theories_path=theories_path,
+        frontier_dir=frontier_dir,
+        max_turns=1,
+    )
+    brief = worker._build_worker_brief(
+        generation=2,
+        checkpoint=cp,
+    )
+    assert "fc_dlvl_2_seed42_g1" in brief
+    assert "Dlvl 2" in brief
+
+    res = worker.run_cycle(generation=2, checkpoint=cp)
+    assert res["role"] == "threat"
+
+
+def test_climbing_regime_does_not_throttle_peers_to_two(tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    from lox.author.swarm_deficits import DeficitReport
+    from lox.db.schema import init_db
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+
+    dbp = str(tmp_path / "climb.duckdb")
+    init_db(dbp).close()
+    ws = tmp_path / "ws"
+    fr = tmp_path / "fr"
+    orch = SwarmCampaignOrchestrator(
+        db_path=dbp,
+        workspace_dir=str(ws),
+        frontier_dir=str(fr),
+        provider="mock",
+        num_workers=4,
+        seeds_per_batch=4,
+        race_seeds=2,
+    )
+    seen_peers: list[str] = []
+
+    class _FakePool:
+        benchmark = "nethack"
+        max_steps = 100
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"{batch_id}_{s}",
+                        "seed": s,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 100,
+                        "turns": 100,
+                        "final_ac": 6,
+                        "xp_level": 2,
+                        "end_reason": "killed",
+                    }
+                    for s in (priority_seeds or [1])
+                ],
+            }
+
+        def close(self):
+            pass
+
+    orch.eval_pool = _FakePool()
+
+    def _fake_analyze(self, generation, current_policy="", skills=None):
+        return DeficitReport(
+            generation=generation,
+            regime="CLIMBING",
+            fail_clusters=[
+                DeficitCluster("c1", "k1", "l1", run_count=5, sample_seeds=[100]),
+                DeficitCluster("c2", "k2", "l2", run_count=5, sample_seeds=[101]),
+            ],
+        )
+
+    def _fake_synth(
+        self,
+        generation,
+        current_policy,
+        current_skills,
+        deficit_report,
+        claimed_deficit,
+        **kwargs,
+    ):
+        seen_peers.append(self.peer_id)
+        return PeerCandidate(
+            peer_id=self.peer_id,
+            claimed_deficit_id=claimed_deficit.cluster_id,
+            claimed_label=claimed_deficit.label,
+            policy_code=current_policy,
+            skills=dict(current_skills),
+            sandbox_passed=False,
+            error="stop",
+        )
+
+    try:
+        with (
+            patch("lox.author.swarm_deficits.DeficitAnalyzer.analyze", _fake_analyze),
+            patch(
+                "lox.author.swarm_peer.SwarmPeerAgent.run_cycle",
+                _fake_synth,
+            ),
+        ):
+            orch.run_generation(6)
+    finally:
+        orch.close()
+
+    assert len(seen_peers) == 4, seen_peers
+
+
+def test_swarm_orchestrator_permission_error_fast_fail_and_all_peer_crash_abort(
+    tmp_path, monkeypatch
+):
+    from unittest.mock import patch
+
+    from lox.db.schema import init_db
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+
+    db_p = str(tmp_path / "perm.duckdb")
+    ws_p = tmp_path / "ws"
+    ws_p.mkdir()
+    fr_p = str(tmp_path / "frontier")
+    init_db(db_p)
+
+    # Seed Gen 1 policy so Gen 2 exercises peer generation path without Gen 1 empty-incumbent fallback
+    (ws_p / "policy.py").write_text(
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n",
+        encoding="utf-8",
+    )
+
+    class _NoRolloutPool:
+        def evaluate_batch(self, batch_id="", priority_seeds=None, **kwargs):
+            if str(batch_id).startswith("incubate_inc_"):
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 1,
+                            "max_depth": 1,
+                            "score": 10,
+                            "turns": 50,
+                        }
+                        for s in (priority_seeds or [10000, 10001])
+                    ],
+                }
+            raise AssertionError(
+                f"Zombie tournament/incumbent evaluation `{batch_id}` should not run after peer failure!"
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "lox.engine.swarm_orchestrator.PersistentEvalPool",
+        lambda *a, **k: _NoRolloutPool(),
+    )
+
+    # 1. PermissionError in any peer aborts campaign immediately and writes campaign_errors.log
+    orch = SwarmCampaignOrchestrator(
+        db_path=db_p,
+        workspace_dir=str(ws_p),
+        frontier_dir=fr_p,
+        provider="mock",
+        model="mock-model",
+        num_workers=2,
+        seeds_per_batch=4,
+    )
+    with patch(
+        "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+        side_effect=PermissionError("HTTP 402 Insufficient credits"),
+    ):
+        with pytest.raises(PermissionError, match="Insufficient credits"):
+            orch.run(generations=3)
+
+    err_log = (ws_p / "campaign_errors.log").read_text(encoding="utf-8")
+    assert "PermissionError" in err_log
+    con = connect_db(db_p, read_only=True)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM policies").fetchone()[0] == 0
+    finally:
+        con.close()
+
+    # 2. HTTP 402 string wrapped in RuntimeError also escalates to PermissionError immediately
+    orch2 = SwarmCampaignOrchestrator(
+        db_path=db_p,
+        workspace_dir=str(ws_p),
+        frontier_dir=fr_p,
+        provider="mock",
+        model="mock-model",
+        num_workers=2,
+        seeds_per_batch=4,
+    )
+    with patch(
+        "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+        side_effect=RuntimeError("OpenRouter returned HTTP 402: out of credits"),
+    ):
+        with pytest.raises(PermissionError):
+            orch2.run(generations=2)
+
+    # 3. Non-PermissionError crash across ALL peers aborts generation and breaks campaign after 3 failures
+    orch3 = SwarmCampaignOrchestrator(
+        db_path=db_p,
+        workspace_dir=str(ws_p),
+        frontier_dir=fr_p,
+        provider="mock",
+        model="mock-model",
+        num_workers=2,
+        seeds_per_batch=4,
+    )
+    with patch(
+        "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+        side_effect=ValueError("Transient upstream outage"),
+    ) as m_peer:
+        hist = orch3.run(generations=6)
+    assert hist == []
+    assert m_peer.call_count <= 3 * orch3.num_workers
+
+
+def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp_path):
+    import json
+
+    from lox.author.tools import merge_skill_module_update
+    from lox.db.schema import init_db
+    from lox.engine.scheduler import ModeScheduler
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+    from lox.lang.modularize import maybe_auto_modularize
+
+    # 1. ModeScheduler enters REFACTOR on bloated skills even when policy.py is small
+    sched = ModeScheduler()
+    sched.gens_since_refactor = 3
+    assert (
+        sched.select_mode(
+            generation=4,
+            has_policy=True,
+            policy_line_count=34,
+            max_skill_lines=320,
+            total_lines=354,
+        )
+        == "REFACTOR"
+    )
+    assert (
+        sched.select_mode(
+            generation=5,
+            has_policy=True,
+            policy_line_count=34,
+            max_skill_lines=320,
+            total_lines=354,
+        )
+        == "WRITE"
+    )
+
+    # 2. DeficitAnalyzer flags skill bloat at >=250 / >=300 LOC
+    dbp = str(tmp_path / "refactor_thresh.duckdb")
+    init_db(dbp)
+    thin_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.E\n"
+    )
+    bloated_skill = "\n".join([f"def h_{i}():\n    return {i}" for i in range(160)])
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=16, current_policy=thin_pol, skills={"exploration": bloated_skill}
+    )
+    assert rep.bloat_warning is True
+    assert any("exploration" in note for note in rep.skill_bloat_notes)
+
+    # 3. merge_skill_module_update preserves intentional split introducing a new skills.* import
+    split_parent = "from skills.exploration_nav import h_0\ndef h_1():\n    return 1\n"
+    merged = merge_skill_module_update(bloated_skill, split_parent)
+    assert "from skills.exploration_nav import h_0" in merged
+    assert "def h_150" not in merged
+
+    # 4. Option A: maybe_auto_modularize deterministically splits a bloated skill >= 450 LOC
+    ws = tmp_path / "ws_ref"
+    (ws / "skills").mkdir(parents=True, exist_ok=True)
+    skill_pol = (
+        "import skills.exploration as exploration\n"
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return exploration.search_step(state) or exploration.explore_step(state) or Action.E\n"
+    )
+    bloated_real_skill = (
+        "from lox.env.actions import Action\n"
+        "STEP_CONST = 1\n\n"
+        "def _shared_ok(state):\n"
+        "    return state.hp >= STEP_CONST\n\n"
+        + "\n".join(
+            f"def _pad_a_{i}():\n    return {i if i == 0 else f'_pad_a_{i - 1}()'}\n"
+            for i in range(120)
+        )
+        + "\n".join(
+            f"def _pad_b_{i}():\n    return {i if i == 0 else f'_pad_b_{i - 1}()'}\n"
+            for i in range(120)
+        )
+        + "def search_step(state):\n"
+        "    if _shared_ok(state) and _pad_a_119() >= 0 and state.step_count % 2 == 0:\n"
+        "        return Action.SEARCH\n"
+        "    return None\n\n"
+        "def explore_step(state):\n"
+        "    if _shared_ok(state) and _pad_b_119() >= 0:\n"
+        "        return Action.E\n"
+        "    return None\n"
+    )
+    changed, _new_pol, new_skills, mod_msg = maybe_auto_modularize(
+        skill_pol,
+        {"exploration": bloated_real_skill},
+        verify_seeds=[1000, 1001],
+        verify_steps=40,
+    )
+    assert changed is True, mod_msg
+    assert len(new_skills["exploration"].splitlines()) < 30
+    assert len(new_skills) >= 3
+    assert "skill/exploration" in mod_msg
+
+    # 5. SwarmCampaignOrchestrator applies Option A bit-identical skill split on disk & DuckDB
+    (ws / "policy.py").write_text(skill_pol, encoding="utf-8")
+    (ws / "skills" / "exploration.py").write_text(bloated_real_skill, encoding="utf-8")
+    orch = SwarmCampaignOrchestrator(
+        db_path=dbp,
+        workspace_dir=str(ws),
+        frontier_dir=str(tmp_path / "fr_ref"),
+        provider="mock",
+        num_workers=2,
+        eval_workers=2,
+        seeds_per_batch=2,
+        swarm_architecture="peer",
+    )
+    try:
+        res = orch.run_generation(16)
+        assert res["promoted"] is False
+        disk_skills = {
+            str(p.relative_to(ws / "skills"))
+            .removesuffix(".py")
+            .replace("\\", "/"): p.read_text(encoding="utf-8")
+            for p in (ws / "skills").rglob("*.py")
+            if p.name != "__init__.py"
+        }
+        assert len(disk_skills) >= 2
+        assert "exploration/core" in disk_skills
+        assert len(disk_skills["exploration/core"].splitlines()) < len(
+            bloated_real_skill.splitlines()
+        )
+        con = connect_db(dbp, read_only=True)
+        try:
+            row = con.execute(
+                "SELECT skills_json FROM policies WHERE generation=16"
+            ).fetchone()
+            assert row is not None and len(json.loads(row[0])) == len(disk_skills)
+        finally:
+            con.close()
+    finally:
+        orch.close()
+
+    # 6. validate_cross_module_contracts & dry_run_policy accept facade re-exports (e.g. from split skills)
+
+    facade_skills = {
+        **new_skills,
+        "combat": (
+            "from skills.exploration import search_step\n"
+            "def _can_fight():\n"
+            "    return True\n"
+            "def attack_or_search(state):\n"
+            "    return search_step(state) if _can_fight() else None\n"
+        ),
+    }
+    validate_cross_module_contracts(skill_pol, facade_skills)
+
+    # Arity check still fires transitively through the facade
+    bad_arity_skills = {
+        **new_skills,
+        "combat": (
+            "from skills.exploration import search_step\n"
+            "def attack_or_search(state):\n"
+            "    return search_step(state, 123)\n"
+        ),
+    }
+    try:
+        validate_cross_module_contracts(skill_pol, bad_arity_skills)
+        raise AssertionError("Expected transitive arity PolicyValidationError")
+    except PolicyValidationError as exc:
+        assert "search_step" in str(exc)
+
+    reg = AuthorToolRegistry(db_path=dbp)
+    reg.configure_generation(generation=16, mode="SWARM_PEER", skills=facade_skills)
+    reg.current_policy_code = skill_pol
+    reg.enforce_peer_research_gate = False
+    _out_f, st_f = reg.dry_run_policy(
+        '<skill_code module="combat">\ndef attack_or_search(state):\n    return search_step(state) if (_can_fight() and state.hp > 0) else None\n</skill_code>',
+        seed=42,
+        max_turns=20,
+    )
+    assert "PASSED" in st_f or st_f == "PASSED"
+
+
+def test_phase1_cli_args_wiki_and_prompts():
+    from scripts.run_swarm import parse_args
+
+    args_def = parse_args(["--provider", "openrouter", "--model", "z-ai/glm-5.3-flash"])
+    assert args_def.refactor_model == "z-ai/glm-5.3-flash"
+    assert args_def.reasoning_effort == "medium"
+    assert args_def.seeds == 64
+    assert args_def.race_seeds == 32
+    assert args_def.scenario_gate == "off"
+
+    args_custom = parse_args(
+        [
+            "--provider",
+            "openrouter",
+            "--model",
+            "z-ai/glm-5.3-flash",
+            "--refactor-model",
+            "anthropic/claude-opus-4.5",
+            "--routing",
+            "exacto",
+            "--race-seeds",
+            "16",
+            "--scenario-gate",
+            "strict",
+        ]
+    )
+    assert args_custom.refactor_model == "anthropic/claude-opus-4.5"
+    assert args_custom.routing == "exacto"
+    assert args_custom.race_seeds == 16
+    assert args_custom.scenario_gate == "strict"
+
+    if os.path.exists(DEFAULT_WIKI_DB):
+        eng = WikiEngine(DEFAULT_WIKI_DB)
+        hits = eng.search_wiki("Sokoban Level", top_k=3)
+        assert hits
+        art = eng.read_article("Sokoban")
+        assert len(art) > 1500
+        assert "Sokoban" in art
+
+    sys_p = build_system_prompt(is_swarm=True)
+    assert "preempt_if" in sys_p and "adjacent_closed_doors" in sys_p
+    pol_25 = (
+        "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector\n"
+        "class Policy:\n"
+        "    def __init__(self):\n"
+        "        self.tree = BehaviorTree(PrioritySelector([\n"
+        + "".join(f"            ActionLeaf(f_{i}, name='fn_{i}'),\n" for i in range(25))
+        + "        ]), blackboard=Blackboard())\n"
+    )
+    user_p = build_user_prompt(
+        mode="SWARM_PEER",
+        generation=3,
+        current_policy=pol_25,
+        skills={"nav": "def go(): return Action.N\n"},
+    )
+    assert "fn_24" in user_p  # No silent brs[:20] truncation!

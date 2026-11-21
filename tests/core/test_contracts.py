@@ -1,8 +1,4 @@
-"""
-Tests for Core Domain Contracts & Codebase Hardening.
-Verifies EpisodeRun, BatchEvaluation, CandidatePackage, assert_baseline_invariants,
-and DB logger champion baseline loading.
-"""
+"""Domain-scoped tests for LOX."""
 
 from lox.core.contracts import (
     BatchEvaluation,
