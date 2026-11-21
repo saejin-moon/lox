@@ -527,7 +527,8 @@ def incubate_candidate(
                     if guard_d_diffs:
                         g_delta = sum(guard_d_diffs) / len(guard_d_diffs)
                         metrics["guard_depth_delta"] = round(g_delta, 4)
-                    if len(paired_d_diffs) >= 4 and avg_d_delta <= -0.35:
+                    reg_thresh = -0.15 if len(paired_d_diffs) >= 6 else -0.35
+                    if len(paired_d_diffs) >= 4 and avg_d_delta <= reg_thresh:
                         candidate.sandbox_metrics = metrics
                         candidate.sandbox_passed = False
                         candidate.error = (

@@ -2773,3 +2773,122 @@ def test_gen54_stack_precision_guard_protects_clean_winner():
     )
     assert v54.promoted is True, v54.reason
     assert v54.winner_id == "peer_2"
+
+
+def test_gen60_rejection_memory_mech_and_tight_incubation_guard(tmp_path):
+    """
+    Verifies Gen 58-60 fixes:
+    1. DeficitAnalyzer surfaces failed `mech=...` from `theories` inside `recent_attempts`.
+    2. incubate_candidate rejects mild depth regressions (`<= -0.15`) when `>= 6` paired shards are evaluated.
+    """
+    from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import PeerCandidate, incubate_candidate
+    from lox.db.schema import connect_db, init_db
+
+    # 1. Rejected mechanism surfaced in recent_attempts
+    dbp = str(tmp_path / "mech_mem.duckdb")
+    init_db(dbp)
+    con = connect_db(dbp, read_only=False)
+    try:
+        con.execute(
+            "INSERT INTO batches (batch_id, generation, mode, hypothesis_passed) VALUES ('b60', 60, 'SWARM', TRUE)"
+        )
+        con.execute(
+            """
+            INSERT INTO tournament_attempts (
+                attempt_id, generation, peer_id, deficit_id, promoted, sandbox_passed,
+                avg_depth, max_depth, avg_ac, policy_exceptions, reject_reason, wins, losses
+            )
+            VALUES ('a60', 60, 'peer_1', 'slice_high_search_or_horizon_burn', FALSE, TRUE,
+                    2.72, 6, 4.1, 0, 'horizon_waste_regression', 8, 22)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO theories (doc_id, generation, agent_role, doc_type, title, content)
+            VALUES ('th60', 60, 'peer_1', 'THEORY', 'Gen 60 peer_1',
+                    'Peer peer_1\nObservation: obs\nMechanism: per-tile search cap 25 + open-floor patrol\nC/Wiki Rule: ')
+            """
+        )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=61, current_policy="class Policy: pass"
+    )
+    assert rep.recent_attempts
+    assert any(
+        "mech=per-tile search cap 25 + open-floor patrol" in ra
+        for ra in rep.recent_attempts
+    )
+
+    # 2. incubate_candidate rejects depth_delta = -0.17 across 6 paired shards (<= -0.15),
+    #    while allowing -0.25 across only 4 shards (> -0.35).
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.N\n"
+    )
+
+    class _MildRegPool:
+        benchmark = "nethack"
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"r_{s}",
+                        "seed": s,
+                        "depth": 3 if s == 1 else 4,
+                        "max_depth": 3 if s == 1 else 4,
+                        "score": 500,
+                        "turns": 400,
+                        "policy_exceptions": 0,
+                        "action_bytes": b"BB",
+                    }
+                    for s in s_list
+                ],
+            }
+
+    inc6 = {
+        s: {"seed": s, "depth": 4, "max_depth": 4, "score": 500, "action_bytes": b"AA"}
+        for s in range(1, 7)
+    }
+    c6 = incubate_candidate(
+        PeerCandidate(
+            peer_id="p_reg6",
+            claimed_deficit_id="d1",
+            claimed_label="mild_reg",
+            policy_code=base_pol,
+            skills={},
+        ),
+        deficit_report=DeficitReport(generation=61, regime="PLATEAU"),
+        claimed_deficit=DeficitCluster(cluster_id="d1", kind="k", label="l"),
+        eval_pool=_MildRegPool(),
+        incumbent_shard_runs=inc6,
+        shard_seeds=list(
+            range(1, 7)
+        ),  # 1 seed -1 depth across 6 -> avg -0.1667 <= -0.15!
+    )
+    assert c6.sandbox_passed is False
+    assert "Incubation paired depth regression" in c6.error
+
+    inc4 = {s: inc6[s] for s in range(1, 5)}
+    c4 = incubate_candidate(
+        PeerCandidate(
+            peer_id="p_ok4",
+            claimed_deficit_id="d1",
+            claimed_label="mild_4",
+            policy_code=base_pol,
+            skills={},
+        ),
+        deficit_report=DeficitReport(generation=61, regime="PLATEAU"),
+        claimed_deficit=DeficitCluster(cluster_id="d1", kind="k", label="l"),
+        eval_pool=_MildRegPool(),
+        incumbent_shard_runs=inc4,
+        shard_seeds=list(range(1, 5)),  # 1 seed -1 depth across 4 -> avg -0.25 > -0.35
+    )
+    assert c4.sandbox_passed is True

@@ -497,9 +497,9 @@ class SwarmCampaignOrchestrator:
                 assigned_clusters.append(climb_pool[(generation + i) % len(climb_pool)])
 
         _angles = (
-            "Hypothesis Angle A: Redesign loop-termination / state-budget / transition rules across the owning subsystem.",
-            "Hypothesis Angle B: Redesign preconditions / action-selection / fallback priorities so stalled or repetitive states exit cleanly.",
-            "Hypothesis Angle C: Address resource/capability/information bottlenecks upstream before terminal failure occurs.",
+            "Hypothesis Angle A (Primary Loop/Navigation): Redesign loop-termination / state-budget / transition rules in the primary loop module, avoiding any mechanisms marked CRN_REJECTED in Rejection Memory.",
+            "Hypothesis Angle B (Upstream Resource/Survival/Capability): Fix upstream resource, survival, or capability bottlenecks causing `top_ends` terminations — do NOT edit the same navigation loop as Angle A.",
+            "Hypothesis Angle C (Fallback/Precondition Redesign): Redesign preconditions, action-selection, or fallback priorities so stalled or repetitive states exit cleanly.",
         )
         cluster_seen_counts: dict[str, int] = {}
         for i in range(active_peers):

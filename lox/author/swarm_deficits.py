@@ -460,6 +460,37 @@ class DeficitAnalyzer:
         min_g = max(1, int(report.generation) - 4)
         # 1. Query exact challenger records from `tournament_attempts` (including rejected peers & tracebacks)
         try:
+            mech_by_gen_peer: dict[tuple[int, str], str] = {}
+            try:
+                th_rows = con.execute(
+                    """
+                    SELECT generation, agent_role, content
+                    FROM theories
+                    WHERE generation >= ? AND generation < ?
+                      AND agent_role != 'referee'
+                    ORDER BY created_at DESC
+                    """,
+                    [min_g, int(report.generation)],
+                ).fetchall()
+                for tg, trole, tcontent in th_rows:
+                    key = (int(tg), str(trole or ""))
+                    if key in mech_by_gen_peer:
+                        continue
+                    raw_c = str(tcontent or "")
+                    mech_snip = ""
+                    m_idx = raw_c.find("Mechanism:")
+                    if m_idx >= 0:
+                        tail = raw_c[m_idx + len("Mechanism:") :].strip()
+                        for stop_tok in ("\nC/Wiki Rule:", "\nTouched Branches:"):
+                            s_i = tail.find(stop_tok)
+                            if s_i >= 0:
+                                tail = tail[:s_i]
+                        mech_snip = " ".join(tail.split())[:140]
+                    if mech_snip:
+                        mech_by_gen_peer[key] = mech_snip
+            except Exception:
+                pass
+
             ta_rows = con.execute(
                 """
                 SELECT generation, peer_id, deficit_id, promoted, sandbox_passed,
@@ -524,6 +555,9 @@ class DeficitAnalyzer:
                     extra.append(f"tb={str(tbs[0])[:240]}")
                 elif sb_err and not sb_ok:
                     extra.append(f"err={str(sb_err)[:240]}")
+                mech_txt = mech_by_gen_peer.get((int(gen_i), str(pid or "")), "")
+                if mech_txt and not promoted:
+                    extra.append(f"mech={mech_txt}")
                 ext_s = f" | {'; '.join(extra)}" if extra else ""
                 attempts.append(
                     f"Gen {gen_i} [{tag} | {pid}@{did} | D={ad} (Max={md}), AC={aac}]{ext_s}"
