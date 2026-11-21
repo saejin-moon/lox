@@ -481,17 +481,8 @@ class SwarmCampaignOrchestrator:
             )
             focus_slots = max(2, active_peers // 2)
             primary_cl = ranked_cl[0]
-            for s_idx in range(focus_slots):
-                assigned_clusters.append(
-                    ranked_cl[0]
-                    if (
-                        s_idx < focus_slots - 1
-                        or str(getattr(ranked_cl[1], "kind", ""))
-                        not in _high_leverage_kinds
-                        and int(getattr(ranked_cl[1], "run_count", 0) or 0) < 8
-                    )
-                    else ranked_cl[1]
-                )
+            for _ in range(focus_slots):
+                assigned_clusters.append(primary_cl)
             rem_pool = [c for c in ranked_cl if c is not primary_cl] or ranked_cl
             for r_idx in range(active_peers - focus_slots):
                 assigned_clusters.append(rem_pool[(generation + r_idx) % len(rem_pool)])

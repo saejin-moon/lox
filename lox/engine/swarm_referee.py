@@ -366,9 +366,9 @@ def _selection_rank_key(
     cand_stats: dict[str, Any], pair_stats: dict[str, Any]
 ) -> tuple[int, float, float, float, int]:
     """
-    Precision-aware v2.1 selection ranker:
-      1. Credibility tier (`sign_perm_p < 0.15` and `wins > losses`) so high-precision surgical
-         winners outrank high-variance coin-flip edits.
+    Precision-aware v2.2 selection ranker:
+      1. 3-level confidence tier (`2` for `p < 0.05`, `1` for `p < 0.15`, `0` otherwise when `wins > losses`)
+         so strong `p < 0.05` winners are never outranked by noisy `p ~ 0.08-0.14` stacks.
       2. Lower-confidence-adjusted Winsorized delta (`lcb_score = winsor_delta - 0.5 * winsor_se`).
       3. Statistical confidence (`-sign_perm_p`).
       4. Point Winsorized delta (`winsor_delta`).
@@ -381,10 +381,15 @@ def _selection_rank_key(
         pair_stats.get("winsor_delta", pair_stats.get("mean_delta", 0.0)) or 0.0
     )
     lcb = float(pair_stats.get("lcb_score", winsor_d) or 0.0)
-    is_credible = 1 if (sign_p < 0.15 and wins > losses) else 0
+    if wins > losses and sign_p < 0.05:
+        cred_tier = 2
+    elif wins > losses and sign_p < 0.15:
+        cred_tier = 1
+    else:
+        cred_tier = 0
     ast_n = int(cand_stats.get("ast_nodes", 0) or 0)
     return (
-        is_credible,
+        cred_tier,
         round(lcb, 4),
         round(-sign_p, 4),
         round(winsor_d, 4),
@@ -1052,6 +1057,11 @@ class SwarmReferee:
                             break
                         top_a, _st_a, pr_a = scan_safe[idx_i]
                         top_b, _st_b, pr_b = scan_safe[idx_j]
+                        pa = float(pr_a.get("sign_perm_p", 1.0) or 1.0)
+                        pb = float(pr_b.get("sign_perm_p", 1.0) or 1.0)
+                        # Never dilute a strong p < 0.05 winner with a noisy (p >= 0.25) second parent
+                        if pa < 0.05 and pb >= 0.25:
+                            continue
                         cand_stack = self._compose_two_packages(
                             base_policy,
                             base_skills,
@@ -1114,7 +1124,12 @@ class SwarmReferee:
                         # Guard against noisy stacks diluting a cleaner individual parent
                         stk_p = float(stk_pr.get("sign_perm_p", 1.0) or 1.0)
                         parent_p = stack_parent_p.get(cand_stack.peer_id, 1.0)
-                        if stk_ok and stk_p > max(parent_p * 1.5, 0.10):
+                        p_cap = (
+                            max(parent_p * 2.0, 0.03)
+                            if parent_p < 0.05
+                            else max(parent_p * 1.5, 0.10)
+                        )
+                        if stk_ok and stk_p > p_cap:
                             stk_ok = False
                             stk_reason = "stack_precision_degraded"
                         sel_entries.append(

@@ -2658,3 +2658,118 @@ def test_micro_pilot_6_probes_net_summary_and_guard_jitter(tmp_path):
     out_zero = reg_zero._run_peer_paired_micro_pilot(base_pol, {})
     assert "PROBE diverged=0/6, regressed=0/6" in out_zero
     assert "ZERO-PROBE-DRIFT NOTE" in out_zero
+
+
+def test_gen54_stack_precision_guard_protects_clean_winner():
+    """
+    Gen 54 regression: when peer_2 achieves 7W/0L (p=0.0078) on S_select and peer_4 has
+    noisy 4W/2L (p=0.3438), SwarmReferee must NOT let a noisy stack_peer_2_peer_4 cut peer_2.
+    """
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.engine.swarm_referee import SwarmReferee
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.N\n"
+    )
+    base_skills = {
+        "survival/avoid": "def avoid(s):\n    return 1\n",
+        "combat/core": "def fight(s):\n    return 1\n",
+    }
+    select32 = [154000 + i for i in range(32)]
+    confirm64 = [10154000 + i for i in range(64)]
+
+    class _Gen54Pool:
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            if "_inc_" in batch_id:
+                return {
+                    "batch_id": batch_id,
+                    "runs": [
+                        {
+                            "run_id": f"inc_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 500,
+                            "turns": 1500,
+                            "end_reason": "killed",
+                        }
+                        for s in s_list
+                    ],
+                }
+            is_sel = "_sel_" in batch_id
+            runs = []
+            for idx, s in enumerate(s_list):
+                if "stack_peer_2_peer_4" in batch_id:
+                    # Noisy stack: high variance on S_select (10W/4L, p=0.089) + big spike, fails S_confirm
+                    if is_sel:
+                        if idx < 10:
+                            d, sc = 6, 1500
+                        elif idx < 14:
+                            d, sc = 2, 300
+                        else:
+                            d, sc = 3, 500
+                    else:
+                        d, sc = 3, 500
+                elif "peer_2" in batch_id:
+                    # Clean 7W/0L on S_select (p=0.0078) and 8W/0L on S_confirm!
+                    win_n = 7 if is_sel else 8
+                    d = 5 if idx < win_n else 3
+                    sc = 1100 if idx < win_n else 500
+                else:
+                    # peer_4: noisy 4W/2L on S_select (p=0.3438)
+                    if idx < 4:
+                        d, sc = 5, 1100
+                    elif idx < 6:
+                        d, sc = 2, 300
+                    else:
+                        d, sc = 3, 500
+                runs.append(
+                    {
+                        "run_id": f"c_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 1500,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    p2 = PeerCandidate(
+        peer_id="peer_2",
+        claimed_deficit_id="slice_frontier_failures",
+        claimed_label="avoid_ranged",
+        policy_code=base_pol,
+        skills={**base_skills, "survival/avoid": "def avoid(s):\n    return 2\n"},
+        touched_skills={"survival/avoid"},
+        touched_skill_symbols={"survival/avoid": {"avoid"}},
+        sandbox_passed=True,
+        loc_total=10,
+    )
+    p4 = PeerCandidate(
+        peer_id="peer_4",
+        claimed_deficit_id="slice_frontier_failures",
+        claimed_label="crossfire",
+        policy_code=base_pol,
+        skills={**base_skills, "combat/core": "def fight(s):\n    return 2\n"},
+        touched_skills={"combat/core"},
+        touched_skill_symbols={"combat/core": {"fight"}},
+        sandbox_passed=True,
+        loc_total=10,
+    )
+    v54 = SwarmReferee().evaluate_tournament(
+        generation=54,
+        candidates=[p2, p4],
+        base_policy=base_pol,
+        base_skills=base_skills,
+        eval_pool=_Gen54Pool(),
+        select_seeds=select32,
+        seeds=confirm64,
+    )
+    assert v54.promoted is True, v54.reason
+    assert v54.winner_id == "peer_2"
