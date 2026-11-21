@@ -1028,8 +1028,34 @@ class DeficitAnalyzer:
             dom_fns: list[str],
             notes: list[str],
         ) -> DeficitCluster:
-            avg_d = sum(float(r[3] or 1.0) for r in c_rows) / len(c_rows)
-            avg_t = sum(float(r[4] or 0.0) for r in c_rows) / len(c_rows)
+            from collections import Counter
+
+            n_c = len(c_rows)
+            depths_c = [int(r[3] or 1) for r in c_rows]
+            avg_d = sum(float(d) for d in depths_c) / n_c
+            avg_t = sum(float(r[4] or 0.0) for r in c_rows) / n_c
+            tiles_c = sorted(int(r[6] or 0) for r in c_rows)
+            med_tiles = tiles_c[n_c // 2] if tiles_c else 0
+            avg_wait = sum(float(r[7] or 0.0) for r in c_rows) / n_c
+            avg_srch = sum(float(r[8] or 0.0) for r in c_rows) / n_c
+            starved_cnt = sum(1 for r in c_rows if bool(r[9]))
+            unarmored_cnt = sum(1 for r in c_rows if bool(r[10]))
+            end_hist = Counter(
+                str(r[5] or "unknown").strip()[:36] for r in c_rows
+            ).most_common(2)
+            top_ends = ", ".join(f"`{er}` x{cnt}" for er, cnt in end_hist)
+            cluster_stats = (
+                f"cluster_stats[N={n_c}]: depth={min(depths_c)}-{max(depths_c)} (avg={avg_d:.2f}), "
+                f"avg_turns={avg_t:.0f}, med_tiles={med_tiles}, "
+                f"avg_search={avg_srch:.1f}%, avg_wait={avg_wait:.1f}%"
+            )
+            if starved_cnt:
+                cluster_stats += f", starved_with_food={starved_cnt}/{n_c}"
+            if unarmored_cnt:
+                cluster_stats += f", unworn_armor={unarmored_cnt}/{n_c}"
+            if top_ends:
+                cluster_stats += f", top_ends=[{top_ends}]"
+            rep_note = f"; ex1: {notes[0]}" if notes else ""
             fixtures: list[dict[str, Any]] = []
             for r in c_rows[:2]:
                 ab = bytes(r[15] or b"") if r[15] is not None else b""
@@ -1051,7 +1077,7 @@ class DeficitAnalyzer:
                 cluster_id=cid,
                 kind=kind,
                 label=label,
-                run_count=len(c_rows),
+                run_count=n_c,
                 avg_depth=avg_d,
                 avg_turns=avg_t,
                 sample_run_ids=[str(r[0]) for r in c_rows[:4]],
@@ -1060,7 +1086,7 @@ class DeficitAnalyzer:
                 ),
                 dominant_fns=dom_fns[:5],
                 replay_fixtures=fixtures,
-                evidence="; ".join(notes[:2]),
+                evidence=f"{cluster_stats}{rep_note}",
             )
 
         built: list[DeficitCluster] = []
@@ -1200,7 +1226,7 @@ class DeficitAnalyzer:
                         FROM ticks
                         WHERE run_id = ?
                         ORDER BY step_idx DESC
-                        LIMIT 5
+                        LIMIT 3
                         """,
                         [rid],
                     ).fetchall()
@@ -1215,7 +1241,7 @@ class DeficitAnalyzer:
                             )
                             for tr in rev
                         )
-                        extras.append(f"pre_mortem=[{seq_str}]")
+                        extras.append(f"sample1_pre_mortem=[{seq_str}]")
                         if wiki_engine is not None:
                             last_msg = next(
                                 (

@@ -447,10 +447,73 @@ class SwarmCampaignOrchestrator:
             and bool(current_policy.strip())
         )
         crossover_slots = 1 if use_crossover else 0
-        for i in range(active_peers):
-            cl = _copy.copy(
-                orthogonal_clusters[(generation + i) % len(orthogonal_clusters)]
+
+        # In PLATEAU regime, concentrate >= 50% of peers on the highest-leverage systemic
+        # bottleneck(s) with distinct hypothesis angles rather than round-robining onto tiny
+        # symptom slices. In CLIMBING regime, preserve uniform round-robin coverage.
+        _high_leverage_kinds = {
+            "search_or_horizon_loop",
+            "confinement_horizon",
+            "stalled_trajectory",
+        }
+        assigned_clusters: list[Any] = []
+        if (
+            str(deficit_report.regime or "").upper() == "PLATEAU"
+            and len(orthogonal_clusters) >= 2
+            and active_peers >= 2
+        ):
+            ranked_cl = sorted(
+                orthogonal_clusters,
+                key=lambda c: (
+                    (
+                        2.0
+                        if str(getattr(c, "kind", "")) in _high_leverage_kinds
+                        else (1.2 if int(getattr(c, "run_count", 0) or 0) >= 8 else 1.0)
+                    )
+                    * max(1, int(getattr(c, "run_count", 0) or 1))
+                ),
+                reverse=True,
             )
+            focus_slots = max(2, active_peers // 2)
+            primary_cl = ranked_cl[0]
+            for s_idx in range(focus_slots):
+                assigned_clusters.append(
+                    ranked_cl[0]
+                    if (
+                        s_idx < focus_slots - 1
+                        or str(getattr(ranked_cl[1], "kind", ""))
+                        not in _high_leverage_kinds
+                        and int(getattr(ranked_cl[1], "run_count", 0) or 0) < 8
+                    )
+                    else ranked_cl[1]
+                )
+            rem_pool = [c for c in ranked_cl if c is not primary_cl] or ranked_cl
+            for r_idx in range(active_peers - focus_slots):
+                assigned_clusters.append(rem_pool[(generation + r_idx) % len(rem_pool)])
+        else:
+            for i in range(active_peers):
+                assigned_clusters.append(
+                    orthogonal_clusters[(generation + i) % len(orthogonal_clusters)]
+                )
+
+        _angles = (
+            "Hypothesis Angle A: Redesign loop-termination / state-budget / transition rules across the owning subsystem.",
+            "Hypothesis Angle B: Redesign preconditions / action-selection / fallback priorities so stalled or repetitive states exit cleanly.",
+            "Hypothesis Angle C: Address resource/capability/information bottlenecks upstream before terminal failure occurs.",
+        )
+        cluster_seen_counts: dict[str, int] = {}
+        for i in range(active_peers):
+            cl = _copy.copy(assigned_clusters[i])
+            cid_key = str(getattr(cl, "cluster_id", "") or "")
+            occ_idx = cluster_seen_counts.get(cid_key, 0)
+            cluster_seen_counts[cid_key] = occ_idx + 1
+            if str(deficit_report.regime or "").upper() == "PLATEAU" and (
+                assigned_clusters.count(assigned_clusters[i]) > 1 or occ_idx > 0
+            ):
+                angle_note = _angles[occ_idx % len(_angles)]
+                cl.evidence = (
+                    f"{cl.evidence} | {angle_note}" if cl.evidence else angle_note
+                )
             if i < crossover_slots:
                 nm = self._near_misses[i % len(self._near_misses)]
                 diff_snip = str(nm.get("diff_preview", "") or "").strip()
@@ -655,6 +718,7 @@ class SwarmCampaignOrchestrator:
                 lost = list(att.get("seeds_lost") or [])
                 if (
                     gained
+                    and (att_w >= 3 or (att_w + att_l >= 5 and att_w > att_l))
                     and att_w > att_l
                     and (att_win > 0.0 or att_iqm > 0.0)
                     and att_d >= verdict.incumbent_avg_depth

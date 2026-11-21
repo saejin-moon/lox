@@ -515,16 +515,26 @@ def incubate_candidate(
 
                     metrics["probe_diverged"] = probe_diverged
                     if paired_d_diffs:
-                        metrics["depth_delta"] = round(
-                            sum(paired_d_diffs) / len(paired_d_diffs), 4
-                        )
+                        avg_d_delta = sum(paired_d_diffs) / len(paired_d_diffs)
+                        metrics["depth_delta"] = round(avg_d_delta, 4)
+                    else:
+                        avg_d_delta = 0.0
                     if paired_s_diffs:
-                        metrics["score_delta"] = round(
-                            sum(paired_s_diffs) / len(paired_s_diffs), 2
-                        )
+                        avg_s_delta = sum(paired_s_diffs) / len(paired_s_diffs)
+                        metrics["score_delta"] = round(avg_s_delta, 2)
+                    else:
+                        avg_s_delta = 0.0
                     if guard_d_diffs:
                         g_delta = sum(guard_d_diffs) / len(guard_d_diffs)
                         metrics["guard_depth_delta"] = round(g_delta, 4)
+                    if len(paired_d_diffs) >= 4 and avg_d_delta <= -0.35:
+                        candidate.sandbox_metrics = metrics
+                        candidate.sandbox_passed = False
+                        candidate.error = (
+                            f"Incubation paired depth regression across {len(paired_d_diffs)} shards "
+                            f"(depth_delta={avg_d_delta:+.2f}, score_delta={avg_s_delta:+.1f})"
+                        )
+                        return candidate
         except Exception as exc:
             candidate.sandbox_passed = False
             candidate.error = f"Incubation shard failed: {type(exc).__name__}: {exc}"

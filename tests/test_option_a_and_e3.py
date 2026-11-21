@@ -2424,3 +2424,102 @@ def test_plateau_fixes_gate_telemetry_and_probes(tmp_path):
     assert "TARGET seed=20: ✅ RESCUED/IMPROVED" in mp_out
     assert "PROBE seed=5000010: UNCHANGED" in mp_out
     assert "DEAD-PATCH WARNING" not in mp_out
+
+
+def test_cluster_stats_plateau_focus_and_incubation_guard(tmp_path):
+    """
+    Verifies Gen 49-51 fixes:
+    1. DeficitAnalyzer includes cluster_stats[N=...] aggregate telemetry in evidence.
+    2. incubate_candidate rejects depth_delta <= -0.35 across >= 4 paired shards.
+    """
+    from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import PeerCandidate, incubate_candidate
+    from lox.db.schema import connect_db, init_db
+
+    # 1. cluster_stats aggregate telemetry in DeficitAnalyzer
+    dbp = str(tmp_path / "cs_test.duckdb")
+    init_db(dbp)
+    con = connect_db(dbp, read_only=False)
+    try:
+        con.execute(
+            "INSERT INTO batches (batch_id, generation, mode, hypothesis_passed) VALUES ('b1', 10, 'SWARM', TRUE)"
+        )
+        for i in range(6):
+            con.execute(
+                """
+                INSERT INTO runs (
+                    run_id, batch_id, generation, seed, depth, max_depth, turns,
+                    score, end_reason, unique_tiles, pct_wait, pct_search,
+                    starved_with_food, died_unarmored, is_shard
+                )
+                VALUES (?, 'b1', 10, ?, 2, 2, 2200, 300, 'max_steps', 90, 5.0, 50.0, FALSE, TRUE, FALSE)
+                """,
+                [f"r_{i}", 100 + i],
+            )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=11, current_policy="class Policy: pass"
+    )
+    assert rep.fail_clusters
+    assert "cluster_stats[N=6]:" in rep.fail_clusters[0].evidence
+    assert "avg_search=50.0%" in rep.fail_clusters[0].evidence
+
+    # 2. incubate_candidate rejects paired depth_delta <= -0.35 across >= 4 shards
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.N\n"
+    )
+
+    class _RegPool:
+        benchmark = "nethack"
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"inc_{s}",
+                        "seed": s,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 200,
+                        "turns": 500,
+                        "policy_exceptions": 0,
+                        "action_bytes": b"BB",
+                    }
+                    for s in s_list
+                ],
+            }
+
+    inc_runs = {
+        s: {
+            "seed": s,
+            "depth": 4,
+            "max_depth": 4,
+            "score": 600,
+            "action_bytes": b"AA",
+        }
+        for s in (1, 2, 3, 4)
+    }
+    bad_cand = PeerCandidate(
+        peer_id="p_reg",
+        claimed_deficit_id="d1",
+        claimed_label="reg",
+        policy_code=base_pol,
+        skills={},
+    )
+    res_cand = incubate_candidate(
+        bad_cand,
+        deficit_report=DeficitReport(generation=51, regime="PLATEAU"),
+        claimed_deficit=DeficitCluster(cluster_id="d1", kind="k", label="l"),
+        eval_pool=_RegPool(),
+        incumbent_shard_runs=inc_runs,
+        shard_seeds=[1, 2, 3, 4],
+    )
+    assert res_cand.sandbox_passed is False
+    assert "Incubation paired depth regression" in res_cand.error
