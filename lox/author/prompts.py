@@ -130,9 +130,9 @@ Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, comb
    - **Surgical Failure Fix (`CLIMBING` / isolated failure class)**: NetHack RNG is chaotic; altering unrelated early turns can create noisy churn. Gate new interrupts, prompts, or fallbacks **cleanly on the general deficit precondition** (e.g., `consecutive_stalls >= N`, exact status condition/encumbrance flag, or unhandled prompt) so you fix the **entire failure class** without disrupting healthy early play.
    - **Systemic Efficiency / Bottleneck Redesign (`PLATEAU` or high action-burn / floor-residence gap in telemetry)**: When `DeficitReport` shows excessive per-floor residence or a dominant repetitive action share, redesigning the core loop, termination condition, or budget logic of the owning subsystem is **encouraged and expected**. Do NOT wrap systemic inefficiency loops in narrow single-seed micro-guards — those produce `0W/0L` dead patches.
    - Inspect the **Paired Micro-Pilot Diff** returned by `dry_run_policy`:
-     - If a `GUARD` seed shows **`⚠️ REGRESSION`**, tighten or fix the regressing logic and re-verify before submitting.
-     - If a `GUARD` seed shows **`OK (non-regressing drift)`**, **do NOT over-tighten** — neutral/improving drift on guards is healthy and expected for general fixes.
-     - Inspect **`PROBE`** seeds (unseen games) to check whether your change generalizes beyond historical `TARGET` seeds.
+     - If a `GUARD` seed shows **`⚠️ REGRESSION`** (depth/exception/stall regression), fix the regressing logic and re-verify before submitting.
+     - If a `GUARD` seed shows **`OK (non-regressing drift)`**, **do NOT over-tighten** — NEVER add artificial `depth <= X` or `xp_level <= Y` caps solely to silence benign `GUARD` byte-drift.
+     - Inspect the **6 unseen `PROBE` seeds** and **Micro-Pilot Net Summary** (`W/L`, `avg_Δdepth`). If `GENERALIZATION REGRESSION WARNING` fires, your change broke unseen runs (e.g., overly aggressive cap or unguarded flee loop) — broaden or soften the mechanism before submitting. If `ZERO-PROBE-DRIFT NOTE` fires, your precondition is likely over-narrow.
      - If **`TARGET` seeds are `UNCHANGED` (`DEAD-PATCH WARNING`)**, your precondition is too narrow or unreachable — broaden it to the general root cause and re-test before submitting.
 
 2. **Schema-Safe `ws.domain(...)` State (Zero `KeyError`s)**:

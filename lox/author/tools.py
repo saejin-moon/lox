@@ -3251,7 +3251,7 @@ class AuthorToolRegistry:
         ]
         probe_seeds = [
             int(s)
-            for s in dict.fromkeys(int(x) for x in self.peer_probe_seeds[:2])
+            for s in dict.fromkeys(int(x) for x in self.peer_probe_seeds[:6])
             if int(s) not in guard_seeds and int(s) not in target_seeds
         ]
         all_seeds = guard_seeds + target_seeds + probe_seeds
@@ -3327,9 +3327,26 @@ class AuthorToolRegistry:
         guard_regressions: list[str] = []
         target_evaluated = 0
         target_unchanged = 0
+        probe_evaluated = 0
+        probe_diverged = 0
+        probe_improved = 0
+        probe_regressed = 0
+        net_wins = 0
+        net_losses = 0
+        net_ties = 0
+        depth_deltas_all: list[float] = []
 
         def _fmt_row(role: str, sd: int) -> None:
-            nonlocal target_evaluated, target_unchanged
+            nonlocal \
+                target_evaluated, \
+                target_unchanged, \
+                probe_evaluated, \
+                probe_diverged, \
+                probe_improved, \
+                probe_regressed, \
+                net_wins, \
+                net_losses, \
+                net_ties
             cr = cand_by_seed.get(sd)
             if cr is None:
                 return
@@ -3371,6 +3388,16 @@ class AuthorToolRegistry:
                 )
 
             exc_note = f", exc={b_exc}->{c_exc}" if (b_exc or c_exc) else ""
+            d_diff = float(c_d - b_d)
+            depth_deltas_all.append(d_diff)
+            if c_d > b_d or (c_d == b_d and c_sc >= b_sc + 50 and c_exc <= b_exc):
+                net_wins += 1
+            elif c_d < b_d or c_exc > b_exc:
+                net_losses += 1
+            else:
+                net_ties += 1
+
+            stall_ends = {"stalled_zero_turn", "max_steps", "crash"}
             if role == "GUARD":
                 if div_byte is None:
                     lines.append(
@@ -3380,7 +3407,7 @@ class AuthorToolRegistry:
                     regressed = (
                         c_d < b_d
                         or c_exc > b_exc
-                        or (c_d == b_d and c_sc <= b_sc - 100)
+                        or (c_end in stall_ends and b_end not in stall_ends)
                     )
                     if regressed:
                         guard_regressions.append(
@@ -3394,15 +3421,26 @@ class AuthorToolRegistry:
                             f"  * GUARD seed={sd}: OK (non-regressing drift @ byte {div_byte} -> Dlvl {b_d}->{c_d}, S={b_sc}->{c_sc}, end={b_end}->{c_end}{exc_note}; do NOT over-tighten)"
                         )
             elif role == "PROBE":
+                probe_evaluated += 1
+                if div_byte is not None:
+                    probe_diverged += 1
                 div_txt = (
                     "UNCHANGED (0-byte drift)"
                     if div_byte is None
                     else f"GENERALIZED (drift @ byte {div_byte})"
                 )
-                regressed = c_d < b_d or c_exc > b_exc
+                regressed = (
+                    c_d < b_d
+                    or c_exc > b_exc
+                    or (c_end in stall_ends and b_end not in stall_ends)
+                )
                 improved = c_d > b_d or (
                     c_d == b_d and c_sc >= b_sc + 50 and c_exc <= b_exc
                 )
+                if improved:
+                    probe_improved += 1
+                elif regressed:
+                    probe_regressed += 1
                 status_tag = (
                     "✅ IMPROVED"
                     if improved
@@ -3415,7 +3453,6 @@ class AuthorToolRegistry:
                 target_evaluated += 1
                 if div_byte is None:
                     target_unchanged += 1
-                stall_ends = {"stalled_zero_turn", "max_steps", "crash"}
                 improved = (
                     c_d > b_d
                     or (
@@ -3453,11 +3490,43 @@ class AuthorToolRegistry:
         for sd in probe_seeds:
             _fmt_row("PROBE", sd)
 
+        if depth_deltas_all:
+            avg_dd = sum(depth_deltas_all) / len(depth_deltas_all)
+            probe_part = (
+                f", PROBE diverged={probe_diverged}/{probe_evaluated}, regressed={probe_regressed}/{probe_evaluated}"
+                if probe_evaluated > 0
+                else ""
+            )
+            lines.append(
+                f"- Micro-Pilot Net Summary: W/L/T={net_wins}/{net_losses}/{net_ties} across {len(depth_deltas_all)} seeds (avg_Δdepth={avg_dd:+.2f}{probe_part})"
+            )
+
         if guard_regressions:
             lines.append(
                 "- ⚠️ GUARD DRIFT WARNING: Guard seed(s) regressed: "
                 + "; ".join(guard_regressions)
-                + ". Tighten your guard precondition to prevent regression without overfitting to a single target seed, then re-test with `dry_run_policy`."
+                + ". Fix the regressing logic cleanly (do NOT add artificial depth<=X / xp_level<=Y caps), then re-test with `dry_run_policy`."
+            )
+        if probe_evaluated > 0 and (
+            probe_regressed >= 2
+            or (
+                probe_regressed > probe_improved
+                and depth_deltas_all
+                and (sum(depth_deltas_all) / len(depth_deltas_all)) <= -0.25
+            )
+        ):
+            lines.append(
+                f"- ⚠️ GENERALIZATION REGRESSION WARNING: {probe_regressed}/{probe_evaluated} unseen PROBE seed(s) regressed. "
+                "Your change hurts normal unseen runs (e.g., overly aggressive cap or unguarded flee loop) — soften/fix the mechanism before submitting."
+            )
+        if (
+            probe_evaluated >= 4
+            and probe_diverged == 0
+            and not (target_evaluated > 0 and target_unchanged == target_evaluated)
+        ):
+            lines.append(
+                f"- ℹ️ ZERO-PROBE-DRIFT NOTE: Fired on 0/{probe_evaluated} unseen PROBE seeds. "
+                "Verify your precondition is not over-tightened to `depth<=X`/`xl<=Y` or a 1-seed edge case."
             )
         if target_evaluated > 0 and target_unchanged == target_evaluated:
             bonus_note = ""

@@ -2523,3 +2523,138 @@ def test_cluster_stats_plateau_focus_and_incubation_guard(tmp_path):
     )
     assert res_cand.sandbox_passed is False
     assert "Incubation paired depth regression" in res_cand.error
+
+
+def test_micro_pilot_6_probes_net_summary_and_guard_jitter(tmp_path):
+    """
+    Verifies Gen 52-53 candidate-quality fixes in _run_peer_paired_micro_pilot:
+    1. Evaluates up to 6 PROBE seeds and emits Micro-Pilot Net Summary.
+    2. Emits GENERALIZATION REGRESSION WARNING when >= 2 PROBE seeds regress.
+    3. Emits ZERO-PROBE-DRIFT NOTE when 0/4+ PROBE seeds diverge.
+    4. Does NOT falsely flag minor GUARD score jitter at equal depth as REGRESSION.
+    """
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import init_db
+
+    dbp = str(tmp_path / "mp6.duckdb")
+    init_db(dbp)
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.N\n"
+    )
+    probes = [5000001 + i for i in range(6)]
+
+    class _ProbeTestPool:
+        max_steps = 1000
+
+        def __init__(self, mode: str):
+            self.mode = mode
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            runs = []
+            for s in s_list:
+                if s == 10:  # GUARD: equal depth, -120 score jitter (must stay OK!)
+                    runs.append(
+                        {
+                            "run_id": f"mp_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 380,
+                            "turns": 500,
+                            "pct_search": 10.0,
+                            "end_reason": "killed",
+                            "action_bytes": b"AB",
+                        }
+                    )
+                elif s == 20:  # TARGET: rescued
+                    runs.append(
+                        {
+                            "run_id": f"mp_{s}",
+                            "seed": s,
+                            "depth": 4,
+                            "max_depth": 4,
+                            "score": 800,
+                            "turns": 500,
+                            "pct_search": 10.0,
+                            "end_reason": "killed",
+                            "action_bytes": b"XY",
+                        }
+                    )
+                elif self.mode == "regress" and s in probes[:3]:
+                    runs.append(
+                        {
+                            "run_id": f"mp_{s}",
+                            "seed": s,
+                            "depth": 1,
+                            "max_depth": 1,
+                            "score": 100,
+                            "turns": 500,
+                            "pct_search": 10.0,
+                            "end_reason": "killed",
+                            "action_bytes": b"ZZ",
+                        }
+                    )
+                else:
+                    runs.append(
+                        {
+                            "run_id": f"mp_{s}",
+                            "seed": s,
+                            "depth": 3,
+                            "max_depth": 3,
+                            "score": 500,
+                            "turns": 500,
+                            "pct_search": 10.0,
+                            "end_reason": "killed",
+                            "action_bytes": b"AA",
+                        }
+                    )
+            return {"batch_id": batch_id, "runs": runs}
+
+    base_runs = [
+        {
+            "seed": s,
+            "depth": 2 if s == 20 else 3,
+            "max_depth": 2 if s == 20 else 3,
+            "score": 500,
+            "turns": 500,
+            "pct_search": 10.0,
+            "end_reason": "killed",
+            "action_bytes": b"AA",
+        }
+        for s in [10, 20] + probes
+    ]
+
+    reg_warn = AuthorToolRegistry(db_path=dbp)
+    reg_warn.current_policy_code = base_pol
+    reg_warn.configure_generation(
+        pool=_ProbeTestPool("regress"),
+        baseline_runs=base_runs,
+        peer_guard_seeds=[10],
+        peer_target_seeds=[20],
+        peer_probe_seeds=probes,
+        max_peer_micro_pilots=2,
+    )
+    out_reg = reg_warn._run_peer_paired_micro_pilot(base_pol, {})
+    assert "GUARD seed=10: OK" in out_reg
+    assert "GUARD DRIFT WARNING" not in out_reg
+    assert "Micro-Pilot Net Summary:" in out_reg
+    assert "PROBE diverged=3/6, regressed=3/6" in out_reg
+    assert "GENERALIZATION REGRESSION WARNING" in out_reg
+
+    reg_zero = AuthorToolRegistry(db_path=dbp)
+    reg_zero.current_policy_code = base_pol
+    reg_zero.configure_generation(
+        pool=_ProbeTestPool("zero"),
+        baseline_runs=base_runs,
+        peer_guard_seeds=[10],
+        peer_target_seeds=[20],
+        peer_probe_seeds=probes,
+        max_peer_micro_pilots=2,
+    )
+    out_zero = reg_zero._run_peer_paired_micro_pilot(base_pol, {})
+    assert "PROBE diverged=0/6, regressed=0/6" in out_zero
+    assert "ZERO-PROBE-DRIFT NOTE" in out_zero

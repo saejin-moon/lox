@@ -402,9 +402,14 @@ class SwarmCampaignOrchestrator:
         )
         used_eval_seeds = set(seeds) | set(select_seeds or [])
         probe_seeds: list[int] = []
-        if int(self.seeds_per_batch) >= 6:
+        target_probes = (
+            6
+            if int(self.seeds_per_batch) >= 12
+            else (2 if int(self.seeds_per_batch) >= 6 else 0)
+        )
+        if target_probes > 0:
             p_cand = 5_000_000 + int(generation) * 10_000
-            while len(probe_seeds) < 2:
+            while len(probe_seeds) < target_probes:
                 if p_cand not in used_eval_seeds:
                     probe_seeds.append(p_cand)
                     used_eval_seeds.add(p_cand)
@@ -417,8 +422,8 @@ class SwarmCampaignOrchestrator:
         )
         if not raw_shard_seeds:
             raw_shard_seeds = [1, 2]
-        max_shard = min(12, max(2, int(self.seeds_per_batch)))
-        hist_cap = max(2, max_shard - len(probe_seeds))
+        max_shard = min(16, max(2, int(self.seeds_per_batch)))
+        hist_cap = min(10, max(2, max_shard - len(probe_seeds)))
         shard_seeds = list(dict.fromkeys(raw_shard_seeds[:hist_cap] + probe_seeds))[
             :max_shard
         ]
@@ -491,10 +496,14 @@ class SwarmCampaignOrchestrator:
             for r_idx in range(active_peers - focus_slots):
                 assigned_clusters.append(rem_pool[(generation + r_idx) % len(rem_pool)])
         else:
+            substantial = [
+                c
+                for c in orthogonal_clusters
+                if int(getattr(c, "run_count", 0) or 0) >= 5
+            ]
+            climb_pool = substantial if len(substantial) >= 2 else orthogonal_clusters
             for i in range(active_peers):
-                assigned_clusters.append(
-                    orthogonal_clusters[(generation + i) % len(orthogonal_clusters)]
-                )
+                assigned_clusters.append(climb_pool[(generation + i) % len(climb_pool)])
 
         _angles = (
             "Hypothesis Angle A: Redesign loop-termination / state-budget / transition rules across the owning subsystem.",

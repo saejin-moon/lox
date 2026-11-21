@@ -667,7 +667,7 @@ class SwarmPeerAgent:
             scenario_gate=getattr(self, "scenario_gate", "off"),
             peer_guard_seeds=list(deficit_report.d_succ_seeds[:2]),
             peer_target_seeds=list(claimed_deficit.sample_seeds[:2]),
-            peer_probe_seeds=list((probe_seeds or [])[:2]),
+            peer_probe_seeds=list((probe_seeds or [])[:6]),
             max_peer_micro_pilots=3,
         )
         self.author.tools.enforce_peer_research_gate = self.provider != "mock"
@@ -721,7 +721,7 @@ class SwarmPeerAgent:
             f"- Evidence: {claimed_deficit.evidence}\n"
             f"- Target Sample Seeds: {claimed_deficit.sample_seeds}\n"
             f"- Guard Seeds (preserve non-regression; do NOT over-tighten on neutral drift): {list(deficit_report.d_succ_seeds[:2])}\n"
-            f"- Unseen Probe Seeds (informational generalization check in `dry_run_policy`): {list((probe_seeds or [])[:2])}\n"
+            f"- Unseen Probe Seeds (generalization check in `dry_run_policy`): {list((probe_seeds or [])[:6])}\n"
             f"- Diagnosis Note: Inspect `champion_ticks` / `ticks` and workspace `skills/` directly to locate the true root cause across module boundaries."
             f"{frontier_block}\n"
         )
