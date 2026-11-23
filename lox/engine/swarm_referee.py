@@ -56,6 +56,120 @@ class TournamentVerdict:
     holdout_rejected: bool = False
     best_pair: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
+    select_batches: dict[str, BatchEvaluation] = field(default_factory=dict)
+    confirm_challenger_eval: tuple[str, BatchEvaluation] | None = None
+    qualifying_stepping_stone: dict[str, Any] | None = None
+
+
+_FIXABLE_GUARD_REASONS = frozenset(
+    {
+        "guard_failed",
+        "cvar25_tail_regression",
+        "auto_esc_regression",
+        "horizon_waste_regression",
+    }
+)
+
+
+def _binomial_sign_p(wins: int, losses: int) -> float:
+    """Exact one-sided binomial sign-test p-value P(Bin(W+L, 0.5) >= W)."""
+    import math as _math
+
+    w = max(0, int(wins))
+    los = max(0, int(losses))
+    n = w + los
+    if n <= 0:
+        return 1.0
+    if w <= 0:
+        return 1.0
+    return float(sum(_math.comb(n, k) for k in range(w, n + 1)) * (0.5**n))
+
+
+def select_qualifying_stepping_stone(
+    generation: int,
+    entries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """
+    Empirically calibrated Hybrid Stepping-Stone selector (calibrated on G1–G66 `forest/lox.duckdb`):
+    - Hard prerequisites: `policy_exceptions == 0`, `wins >= 3`, `wins > losses`,
+      and `max(winsor_delta, iqm_delta) > 0.0`.
+    - Signal gate (A or B):
+      A. Statistical signal: `min(wilcoxon_p, binomial_sign_p(wins, losses)) < 0.20`
+         (scale-invariant across both `S_select` and `S_confirm`, rejecting 50/50 coin-flip noise).
+      B. Fixable guard-blocked upside: `reject_reason` in `_FIXABLE_GUARD_REASONS`,
+         `wins - losses >= 2`, and `max(winsor_delta, iqm_delta) >= 0.05`.
+    Ranks qualifying candidates by lowest `min_p`, then highest `max(winsor_delta, iqm_delta)`,
+    then highest `wins - losses`.
+    """
+    qualified: list[tuple[tuple[float, float, int], dict[str, Any]]] = []
+    for item in entries:
+        cand: PeerCandidate | None = item.get("candidate")
+        if cand is None or not str(cand.policy_code or "").strip():
+            continue
+        exc = int(item.get("policy_exceptions", 0) or 0)
+        if exc > 0:
+            continue
+        wins = int(item.get("wins", 0) or 0)
+        losses = int(item.get("losses", 0) or 0)
+        if wins < 3 or wins <= losses:
+            continue
+        iqm_d = float(item.get("iqm_delta", 0.0) or 0.0)
+        win_d = float(item.get("winsor_delta", iqm_d) or 0.0)
+        best_d = max(win_d, iqm_d)
+        if best_d <= 0.0:
+            continue
+        wp = float(
+            item.get("wilcoxon_p", 1.0) if item.get("wilcoxon_p") is not None else 1.0
+        )
+        sp = _binomial_sign_p(wins, losses)
+        min_p = min(wp, sp)
+        rej = str(item.get("reject_reason", "") or "").strip()
+
+        stat_ok = min_p < 0.20
+        guard_upside_ok = (
+            rej in _FIXABLE_GUARD_REASONS and (wins - losses) >= 2 and best_d >= 0.05
+        )
+        if not (stat_ok or guard_upside_ok):
+            continue
+
+        mech = str(
+            (cand.hypothesis_yaml or {}).get("mechanism", "")
+            or cand.claimed_label
+            or ""
+        )[:1000]
+        tfs = (
+            sorted(cand.touched_branches)
+            or sorted(cand.touched_skills)
+            or [cand.claimed_deficit_id]
+        )
+        stone = {
+            "stone_id": f"stone_g{int(generation)}_{cand.peer_id}",
+            "generation": int(generation),
+            "source_peer_id": str(cand.peer_id),
+            "source_run_kind": str(item.get("source_run_kind", "select") or "select"),
+            "source_batch_id": str(item.get("source_batch_id", "") or ""),
+            "revision_count": 0,
+            "status": "active",
+            "policy_code": str(cand.policy_code),
+            "skills": dict(cand.skills or {}),
+            "mechanism": mech,
+            "target_functions": tfs,
+            "wins": wins,
+            "losses": losses,
+            "iqm_delta": iqm_d,
+            "winsor_delta": win_d,
+            "wilcoxon_p": wp,
+            "sign_p": sp,
+            "reject_reason": rej,
+            "seeds_gained": list(item.get("seeds_gained") or []),
+            "seeds_lost": list(item.get("seeds_lost") or []),
+        }
+        rank_key = (min_p, -best_d, -(wins - losses))
+        qualified.append((rank_key, stone))
+    if not qualified:
+        return None
+    qualified.sort(key=lambda pair: pair[0])
+    return qualified[0][1]
 
 
 def _package_fingerprint(policy_code: str, skills: dict[str, str]) -> str:
@@ -963,10 +1077,10 @@ class SwarmReferee:
                 self._incumbent_cache.get(sel_inc_key) if has_base else None
             )
             if has_base and cached_sel_inc is None:
-                sel_pkgs.append(("inc", base_policy, base_skills, None, False))
+                sel_pkgs.append(("inc", base_policy, base_skills, None, True))
             for cand in finalists:
                 sel_pkgs.append(
-                    (cand.peer_id, cand.policy_code, cand.skills, cand, False)
+                    (cand.peer_id, cand.policy_code, cand.skills, cand, True)
                 )
             sel_batches = _run_batch_slice(sel_pkgs, s_select, "sel_")
 
@@ -1099,12 +1213,13 @@ class SwarmReferee:
                 if stack_cands:
                     stk_batches = _run_batch_slice(
                         [
-                            (sc.peer_id, sc.policy_code, sc.skills, sc, False)
+                            (sc.peer_id, sc.policy_code, sc.skills, sc, True)
                             for sc in stack_cands
                         ],
                         s_select,
                         "sel_stk_",
                     )
+                    sel_batches.update(stk_batches)
                     for cand_stack in stack_cands:
                         stk_be = stk_batches.get(cand_stack.peer_id)
                         if stk_be is None:
@@ -1206,6 +1321,32 @@ class SwarmReferee:
                 ]
                 if inc_batch_eval is not None:
                     retained_eval = _clone_incumbent_eval(inc_batch_eval, generation)
+                    stone_pool_no_sel = [
+                        {
+                            "candidate": c,
+                            "policy_exceptions": int(
+                                st.get("policy_exceptions", 0) or 0
+                            ),
+                            "wins": int(pr.get("wins", 0) or 0),
+                            "losses": int(pr.get("losses", 0) or 0),
+                            "iqm_delta": float(pr.get("iqm_delta", 0.0) or 0.0),
+                            "winsor_delta": float(pr.get("winsor_delta", 0.0) or 0.0),
+                            "wilcoxon_p": pr.get(
+                                "wilcoxon_p", pr.get("sign_perm_p", 1.0)
+                            ),
+                            "reject_reason": s_reason
+                            if not s_ok
+                            else "failed_select_stage",
+                            "seeds_gained": list(pr.get("seeds_gained") or []),
+                            "seeds_lost": list(pr.get("seeds_lost") or []),
+                            "source_run_kind": "select",
+                            "source_batch_id": str(be.get("batch_id", "")),
+                        }
+                        for c, be, st, pr, s_ok, s_reason in sel_entries
+                    ]
+                    sel_batches_out = dict(sel_batches)
+                    if sel_inc_eval is not None and "inc" not in sel_batches_out:
+                        sel_batches_out["inc"] = sel_inc_eval
                     ui.warn(
                         f"Gen {generation}: Zero finalists beat incumbent safely on S_select (N={len(s_select)}). Retaining Incumbent."
                     )
@@ -1224,6 +1365,10 @@ class SwarmReferee:
                         incumbent_batch_eval=inc_batch_eval,
                         attempts_summary=attempts_summary,
                         reason=f"Zero candidates beat incumbent safely on S_select (N={len(s_select)}); retained incumbent.",
+                        select_batches=sel_batches_out,
+                        qualifying_stepping_stone=select_qualifying_stepping_stone(
+                            generation, stone_pool_no_sel
+                        ),
                     )
                 raise RuntimeError(
                     f"Gen {generation}: Zero safe bootstrap candidates on S_select."
@@ -1336,13 +1481,13 @@ class SwarmReferee:
                     )
                     obf_batches = _run_batch_slice(
                         [
-                            ("inc", base_policy, base_skills, None, False),
+                            ("inc", base_policy, base_skills, None, True),
                             (
                                 best_cand.peer_id,
                                 best_cand.policy_code,
                                 best_cand.skills,
                                 best_cand,
-                                False,
+                                True,
                             ),
                         ],
                         s_obf,
@@ -1360,6 +1505,7 @@ class SwarmReferee:
                     pooled_cand_eval = _assemble_batch_eval(
                         f"obf_pool_{best_cand.peer_id}_g{generation}", pooled_cand_runs
                     )
+                    best_eval = pooled_cand_eval
                     pooled_inc_stats = _extract_stats(
                         pooled_inc_eval, base_policy, base_skills, loc_override=base_loc
                     )
@@ -1480,11 +1626,69 @@ class SwarmReferee:
                 f"Inc D={inc_stats['avg_depth']:.2f} | {scoreboard_str}"
             )
 
+            sel_batches_out = dict(sel_batches)
+            if sel_inc_eval is not None and "inc" not in sel_batches_out:
+                sel_batches_out["inc"] = sel_inc_eval
+
             if not beats_incumbent and inc_batch_eval is not None:
                 if inc_fp:
                     rej_set = self._rejected_fingerprints.setdefault(inc_fp, set())
                     for c, _be, _st, _pr, _s_ok, _sr in sel_entries:
                         rej_set.add(_package_fingerprint(c.policy_code, c.skills))
+                stone_pool_rej: list[dict[str, Any]] = []
+                for c, be, st, pr, s_ok, s_reason in sel_entries:
+                    if c.peer_id == best_cand.peer_id:
+                        stone_pool_rej.append(
+                            {
+                                "candidate": c,
+                                "policy_exceptions": int(
+                                    best_stats.get("policy_exceptions", 0) or 0
+                                ),
+                                "wins": int(best_pair.get("wins", 0) or 0),
+                                "losses": int(best_pair.get("losses", 0) or 0),
+                                "iqm_delta": float(
+                                    best_pair.get("iqm_delta", 0.0) or 0.0
+                                ),
+                                "winsor_delta": float(
+                                    best_pair.get("winsor_delta", 0.0) or 0.0
+                                ),
+                                "wilcoxon_p": best_pair.get(
+                                    "wilcoxon_p", best_pair.get("sign_perm_p", 1.0)
+                                ),
+                                "reject_reason": best_rej_reason,
+                                "seeds_gained": list(
+                                    best_pair.get("seeds_gained") or []
+                                ),
+                                "seeds_lost": list(best_pair.get("seeds_lost") or []),
+                                "source_run_kind": "confirm_challenger",
+                                "source_batch_id": str(best_eval.get("batch_id", "")),
+                            }
+                        )
+                    else:
+                        stone_pool_rej.append(
+                            {
+                                "candidate": c,
+                                "policy_exceptions": int(
+                                    st.get("policy_exceptions", 0) or 0
+                                ),
+                                "wins": int(pr.get("wins", 0) or 0),
+                                "losses": int(pr.get("losses", 0) or 0),
+                                "iqm_delta": float(pr.get("iqm_delta", 0.0) or 0.0),
+                                "winsor_delta": float(
+                                    pr.get("winsor_delta", 0.0) or 0.0
+                                ),
+                                "wilcoxon_p": pr.get(
+                                    "wilcoxon_p", pr.get("sign_perm_p", 1.0)
+                                ),
+                                "reject_reason": s_reason
+                                if not s_ok
+                                else f"cut_in_select_stage_by_{best_cand.peer_id}",
+                                "seeds_gained": list(pr.get("seeds_gained") or []),
+                                "seeds_lost": list(pr.get("seeds_lost") or []),
+                                "source_run_kind": "select",
+                                "source_batch_id": str(be.get("batch_id", "")),
+                            }
+                        )
                 reject_note = (
                     f"{best_rej_reason} on S_confirm "
                     f"(W/L={best_pair.get('wins', 0)}/{best_pair.get('losses', 0)}, "
@@ -1516,6 +1720,11 @@ class SwarmReferee:
                     holdout_rejected=holdout_rejected,
                     best_pair=dict(best_pair),
                     reason=f"Rejected `{best_cand.peer_id}` ({reject_note}); kept incumbent.",
+                    select_batches=sel_batches_out,
+                    confirm_challenger_eval=(best_cand.peer_id, best_eval),
+                    qualifying_stepping_stone=select_qualifying_stepping_stone(
+                        generation, stone_pool_rej
+                    ),
                 )
 
             self.cache_incumbent(
@@ -1554,6 +1763,7 @@ class SwarmReferee:
                     f"winsorΔ={best_pair.get('winsor_delta', 0.0):+.3f}, "
                     f"p={best_pair.get('sign_perm_p', 1.0):.4f})."
                 ),
+                select_batches=sel_batches_out,
             )
 
         # =====================================================================
@@ -1813,6 +2023,30 @@ class SwarmReferee:
                 rej_set = self._rejected_fingerprints.setdefault(inc_fp, set())
                 for c, _be, _st, _pr, _cb, _cs, _cr in eval_rows_b:
                     rej_set.add(_package_fingerprint(c.policy_code, c.skills))
+            stone_pool_b = [
+                {
+                    "candidate": c,
+                    "policy_exceptions": int(st.get("policy_exceptions", 0) or 0),
+                    "wins": int(pr.get("wins", 0) or 0),
+                    "losses": int(pr.get("losses", 0) or 0),
+                    "iqm_delta": float(pr.get("iqm_delta", 0.0) or 0.0),
+                    "winsor_delta": float(pr.get("winsor_delta", 0.0) or 0.0),
+                    "wilcoxon_p": pr.get("wilcoxon_p", pr.get("sign_perm_p", 1.0)),
+                    "reject_reason": best_rej_reason
+                    if c.peer_id == best_cand.peer_id
+                    else c_rej,
+                    "seeds_gained": list(pr.get("seeds_gained") or []),
+                    "seeds_lost": list(pr.get("seeds_lost") or []),
+                    "source_run_kind": "confirm_challenger",
+                    "source_batch_id": str(be.get("batch_id", "")),
+                }
+                for c, be, st, pr, _cb, _cs, c_rej in eval_rows_b
+            ]
+            b_sel_out = {
+                c.peer_id: be
+                for c, be, _st, _pr, _cb, _cs, _cr in eval_rows_b
+                if c.peer_id != best_cand.peer_id
+            }
             reject_note = (
                 f"{best_rej_reason} "
                 f"(Δdepth={d_delta:+.2f}, winsorΔ={best_pair.get('winsor_delta', 0.0):+.3f}, "
@@ -1843,6 +2077,11 @@ class SwarmReferee:
                 holdout_rejected=holdout_rejected,
                 best_pair=dict(best_pair),
                 reason=f"Rejected `{best_cand.peer_id}` ({reject_note}); kept incumbent.",
+                select_batches=b_sel_out,
+                confirm_challenger_eval=(best_cand.peer_id, best_eval),
+                qualifying_stepping_stone=select_qualifying_stepping_stone(
+                    generation, stone_pool_b
+                ),
             )
 
         self.cache_incumbent(

@@ -24,6 +24,8 @@ _LOG = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/lox.duckdb"
 _DB_CONN_LOCK = threading.RLock()
+_DB_INIT_LOCK = threading.Lock()
+_INITIALIZED_DBS: set[str] = set()
 
 # Canonical SQL predicate filtering out micro-shard evaluations from full-episode aggregations
 NON_SHARD_RUNS_SQL = (
@@ -38,20 +40,25 @@ def connect_db(
 ) -> duckdb.DuckDBPyConnection:
     """
     Connects to DuckDB with exponential backoff while honoring `read_only=True`.
-    If `read_only=True` collides with an active in-process read-write handle
-    ("different configuration"), falls back to `read_only=False` for that handle only.
+    When this process already initialized `db_path` in read-write mode (i.e. inside
+    an active campaign writer process with concurrent peer query/write threads),
+    opens a read-write MVCC connection so concurrent `query_db` reads and
+    `save_runs_and_ticks` writes never collide on DuckDB's per-process config rule.
     """
+    abs_path = os.path.abspath(db_path)
     if not read_only:
-        os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
     elif not os.path.exists(db_path):
         raise FileNotFoundError(f"DuckDB database does not exist: {db_path}")
+
+    effective_ro = bool(read_only) and (abs_path not in _INITIALIZED_DBS)
 
     delay = 0.05
     last_err: Exception | None = None
     for attempt in range(retries):
         with _DB_CONN_LOCK:
             try:
-                if read_only:
+                if effective_ro:
                     try:
                         return duckdb.connect(db_path, read_only=True)
                     except Exception as ro_exc:
@@ -137,6 +144,9 @@ CREATE TABLE IF NOT EXISTS runs (
     achievements INTEGER DEFAULT 0,
     is_shard BOOLEAN DEFAULT FALSE,
     shard_id VARCHAR DEFAULT '',
+    run_kind VARCHAR DEFAULT 'champion',
+    peer_id VARCHAR DEFAULT '',
+    attempt_num INTEGER DEFAULT 0,
     created_at TIMESTAMP
 );
 
@@ -371,15 +381,52 @@ CREATE TABLE IF NOT EXISTS tournament_attempts (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS stepping_stones (
+    stone_id VARCHAR PRIMARY KEY,
+    generation INTEGER,
+    parent_policy_id VARCHAR,
+    source_peer_id VARCHAR,
+    source_run_kind VARCHAR,
+    source_batch_id VARCHAR,
+    revision_count INTEGER DEFAULT 0,
+    status VARCHAR DEFAULT 'active',
+    policy_code TEXT,
+    skills_json TEXT DEFAULT '{}',
+    mechanism TEXT,
+    target_functions VARCHAR,
+    wins INTEGER DEFAULT 0,
+    losses INTEGER DEFAULT 0,
+    iqm_delta DOUBLE DEFAULT 0.0,
+    winsor_delta DOUBLE DEFAULT 0.0,
+    wilcoxon_p DOUBLE DEFAULT 1.0,
+    sign_p DOUBLE DEFAULT 1.0,
+    reject_reason TEXT DEFAULT '',
+    seeds_gained_json TEXT DEFAULT '[]',
+    seeds_lost_json TEXT DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE OR REPLACE VIEW champion_runs AS
 SELECT * FROM runs
 WHERE batch_id = (
     SELECT batch_id FROM batches
     WHERE hypothesis_passed = TRUE
-      AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
+      AND mode NOT IN (
+          'PILOT',
+          'BASELINE_BACKFILL',
+          'MACRO_WRITE',
+          'MICRO_PILOT',
+          'MICRO_PILOT_BASELINE',
+          'INCUBATE',
+          'INCUBATE_BASELINE',
+          'SELECT',
+          'SELECT_INCUMBENT',
+          'CONFIRM_CHALLENGER'
+      )
     ORDER BY generation DESC, created_at DESC
     LIMIT 1
 )
+AND COALESCE(run_kind, 'champion') = 'champion'
 AND COALESCE(is_shard, FALSE) = FALSE
 AND run_id NOT LIKE 'shard_%';
 
@@ -388,7 +435,18 @@ SELECT * FROM function_stats
 WHERE batch_id = (
     SELECT batch_id FROM batches
     WHERE hypothesis_passed = TRUE
-      AND mode NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')
+      AND mode NOT IN (
+          'PILOT',
+          'BASELINE_BACKFILL',
+          'MACRO_WRITE',
+          'MICRO_PILOT',
+          'MICRO_PILOT_BASELINE',
+          'INCUBATE',
+          'INCUBATE_BASELINE',
+          'SELECT',
+          'SELECT_INCUMBENT',
+          'CONFIRM_CHALLENGER'
+      )
     ORDER BY generation DESC, created_at DESC
     LIMIT 1
 );
@@ -411,6 +469,35 @@ AND COALESCE(run_id, '') NOT LIKE 'shard_%';
 CREATE OR REPLACE VIEW latest_pilot_ticks AS
 SELECT * FROM ticks
 WHERE run_id IN (SELECT run_id FROM latest_pilot_runs);
+
+CREATE OR REPLACE VIEW peer_runs AS
+SELECT * FROM runs
+WHERE COALESCE(run_kind, 'champion') != 'champion';
+
+CREATE OR REPLACE VIEW peer_ticks AS
+SELECT
+    t.*,
+    r.generation,
+    r.peer_id,
+    r.run_kind,
+    r.attempt_num,
+    r.seed,
+    r.batch_id
+FROM ticks t
+JOIN runs r ON t.run_id = r.run_id
+WHERE COALESCE(r.run_kind, 'champion') != 'champion';
+
+CREATE OR REPLACE VIEW all_ticks AS
+SELECT
+    t.*,
+    r.generation,
+    r.peer_id,
+    r.run_kind,
+    r.attempt_num,
+    r.seed,
+    r.batch_id
+FROM ticks t
+JOIN runs r ON t.run_id = r.run_id;
 """
 
 
@@ -456,10 +543,6 @@ def compute_llm_cost(
     return float(p_cost + c_cost + r_cost)
 
 
-_DB_INIT_LOCK = threading.Lock()
-_INITIALIZED_DBS: set[str] = set()
-
-
 def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
     """Initializes all DuckDB tables for LOX and automatically migrates outdated schemas."""
     abs_path = os.path.abspath(db_path)
@@ -502,6 +585,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                     ("worn_oprop_count", "INTEGER DEFAULT 0"),
                     ("dungeons_visited", "INTEGER DEFAULT 1"),
                     ("achievements", "INTEGER DEFAULT 0"),
+                    ("run_kind", "VARCHAR DEFAULT 'champion'"),
+                    ("peer_id", "VARCHAR DEFAULT ''"),
+                    ("attempt_num", "INTEGER DEFAULT 0"),
                     ("created_at", "TIMESTAMP"),
                 ]:
                     if c_name not in cols_runs:
@@ -717,14 +803,15 @@ def get_schema_markdown(
         return "\n".join(
             [
                 "### DuckDB Schema (`query_db(sql)`)",
-                "- Views: `champion_runs` / `champion_function_stats` / `champion_ticks` (latest promoted batch), `latest_pilot_runs`, `latest_pilot_ticks`.",
-                f"- `runs`: {_fmt_cols('runs', {'action_bytes'})}. *(Notes: `hunger_state` on `ticks`; `seed` on `runs`; `pct_wait`/`pct_search` in 0..100; filter shards via `NOT is_shard`.)*",
-                f"- `ticks`: {_fmt_cols('ticks')}.",
+                "- Views: `champion_runs` / `champion_function_stats` / `champion_ticks` (latest promoted batch), `peer_runs` / `peer_ticks` (all non-champion peer micro-pilot/incubate/select/confirm_challenger runs+ticks with `generation`, `peer_id`, `run_kind`, `attempt_num`, `seed`), `all_ticks` (unified ticks across ALL runs joined with run metadata).",
+                f"- `runs`: {_fmt_cols('runs', {'action_bytes'})}. *(Notes: `run_kind` distinguishes `'champion'`, `'micro_pilot'`, `'micro_pilot_baseline'`, `'incubate'`, `'select'`, `'confirm_challenger'`; `hunger_state` on `ticks`; `seed` on `runs`; `pct_wait`/`pct_search` in 0..100; filter shards via `NOT is_shard`.)*",
+                f"- `ticks`: {_fmt_cols('ticks')}. *(Unified lossless ticks across 100% of runs, joined via `run_id`.)*",
                 f"- `batches`: {_fmt_cols('batches')}.",
                 f"- `policies`: {_fmt_cols('policies')}.",
                 f"- `function_stats`: {_fmt_cols('function_stats')}.",
                 f"- `theories`: {_fmt_cols('theories')}.",
                 f"- `tournament_attempts`: {_fmt_cols('tournament_attempts')}.",
+                f"- `stepping_stones`: {_fmt_cols('stepping_stones', {'policy_code', 'skills_json'})}.",
                 f"- `expert_runs`: {_fmt_cols('expert_runs')}.",
                 f"- `expert_ticks`: {_fmt_cols('expert_ticks')}.",
             ]

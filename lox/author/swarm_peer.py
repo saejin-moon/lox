@@ -267,6 +267,7 @@ def incubate_candidate(
     shard_seeds: list[int] | None = None,
     frontier_checkpoints: list[Any] | None = None,
     probe_seeds: list[int] | None = None,
+    db_path: str = "",
 ) -> PeerCandidate:
     """
     Isolated Sandbox Incubation (`tau_iso`):
@@ -394,17 +395,32 @@ def incubate_candidate(
     if eval_pool is not None and (shard_seeds or organic_shards):
         try:
             target_ep_cnt = len(shard_seeds or []) + len(organic_shards)
+            inc_batch_id = f"incubate_{candidate.peer_id}_g{deficit_report.generation}_{int(time.time())}"
             cand_eval = eval_pool.evaluate_batch(
-                batch_id=f"incubate_{candidate.peer_id}_g{deficit_report.generation}_{int(time.time())}",
+                batch_id=inc_batch_id,
                 policy_code=code,
                 macros_code="",
                 skills=skills,
                 target_episodes=max(1, target_ep_cnt),
                 priority_seeds=list(shard_seeds) if shard_seeds else None,
                 shards=organic_shards if organic_shards else None,
-                record_ticks=False,
+                record_ticks=True,
             )
             c_runs = cand_eval.get("runs", [])
+            if db_path and c_runs:
+                try:
+                    from lox.db.logger import BatchDatabaseLogger
+
+                    BatchDatabaseLogger(db_path).save_runs_and_ticks(
+                        batch_id=inc_batch_id,
+                        generation=int(deficit_report.generation),
+                        run_kind="incubate",
+                        peer_id=str(candidate.peer_id),
+                        runs=c_runs,
+                        run_id_prefix=f"g{deficit_report.generation}_{candidate.peer_id}_inc",
+                    )
+                except Exception:
+                    pass
             # Hard exception gate across incubation episodes & organic scenarios
             exc_total = sum(int(r.get("policy_exceptions", 0) or 0) for r in c_runs)
             if exc_total > 0:
@@ -593,8 +609,16 @@ class SwarmPeerAgent:
         shard_seeds: list[int] | None = None,
         frontier: Any = None,
         probe_seeds: list[int] | None = None,
+        directive: dict[str, Any] | None = None,
+        stepping_stone: dict[str, Any] | None = None,
+        incumbent_policy: str = "",
+        incumbent_skills: dict[str, str] | None = None,
     ) -> PeerCandidate:
         skills_copy = dict(current_skills or {})
+        base_inc_policy = str(incumbent_policy or current_policy or "")
+        base_inc_skills = dict(
+            incumbent_skills if incumbent_skills is not None else skills_copy
+        )
         sampled_frontier: list[Any] = []
         if frontier is not None and getattr(frontier, "checkpoints", None):
             min_f_d = max(2, int(deficit_report.incumbent_max_depth or 2) - 1)
@@ -651,6 +675,7 @@ class SwarmPeerAgent:
                 shard_seeds=shard_seeds,
                 frontier_checkpoints=sampled_frontier,
                 probe_seeds=probe_seeds,
+                db_path=self.db_path,
             )
             self._record_peer_theory(generation, claimed_deficit, cand)
             return cand
@@ -670,9 +695,14 @@ class SwarmPeerAgent:
             peer_target_seeds=list(claimed_deficit.sample_seeds[:2]),
             peer_probe_seeds=list((probe_seeds or [])[:6]),
             max_peer_micro_pilots=4,
+            peer_id=self.peer_id,
         )
         self.author.tools.enforce_peer_research_gate = self.provider != "mock"
         self.author.tools.current_policy_code = str(current_policy or "")
+        self.author.tools.baseline_policy_code = str(
+            base_inc_policy or current_policy or ""
+        )
+        self.author.tools.baseline_skills = dict(base_inc_skills)
 
         arch_block = ""
         try:
@@ -714,8 +744,42 @@ class SwarmPeerAgent:
                 "- Non-regressing drift (`OK`) on `GUARD` seeds is expected and healthy for systemic improvements.\n"
             )
 
+        directive_block = ""
+        if isinstance(directive, dict) and directive:
+            focus_sub = str(directive.get("focus_subsystem") or "").strip()
+            inv_q = str(directive.get("investigative_question") or "").strip()
+            excl = str(directive.get("exclude_overlap") or "").strip()
+            directive_block = (
+                f"\n### Orthogonal Peer Directive (`{self.peer_id}`):\n"
+                + (f"- Focus Subsystem: `{focus_sub}`\n" if focus_sub else "")
+                + (f"- Investigative Question: {inv_q}\n" if inv_q else "")
+                + (f"- Non-Overlap Boundary: {excl}\n" if excl else "")
+            )
+
+        revision_block = ""
+        if isinstance(stepping_stone, dict) and stepping_stone:
+            st_gen = int(stepping_stone.get("generation", 0) or 0)
+            st_pid = str(stepping_stone.get("source_peer_id", "") or "")
+            st_kind = str(stepping_stone.get("source_run_kind", "select") or "select")
+            st_gained = list(stepping_stone.get("seeds_gained") or [])
+            st_lost = list(stepping_stone.get("seeds_lost") or [])
+            st_rej = str(stepping_stone.get("reject_reason", "") or "")
+            st_rev = int(stepping_stone.get("revision_count", 0) or 0) + 1
+            revision_block = (
+                f"\n### Track A — Revision Track (`{self.peer_id}`, Revision Attempt #{st_rev}):\n"
+                f"- Starting Codebase: You are starting DIRECTLY from high-signal unpromoted stepping stone "
+                f"`{st_pid}` (Gen {st_gen}, `run_kind='{st_kind}'`, W/L={stepping_stone.get('wins', 0)}/{stepping_stone.get('losses', 0)}, "
+                f"winsorΔ={float(stepping_stone.get('winsor_delta', 0.0)):+.3f}, iqmΔ={float(stepping_stone.get('iqm_delta', 0.0)):+.3f}, "
+                f"reject_reason=`{st_rej}`).\n"
+                f"- Seeds Gained vs Incumbent: {st_gained[:10]}\n"
+                f"- Seeds Lost vs Incumbent: {st_lost[:10]}\n"
+                f"- Unbiased Diagnosis Query: Compare the stepping stone's ticks vs incumbent ticks directly in `all_ticks` / `peer_ticks` via `query_db` "
+                f"(`WHERE generation = {st_gen} AND peer_id = '{st_pid}' AND run_kind = '{st_kind}' AND seed IN (...)`) to discover why `seeds_lost` "
+                f"(or `{st_rej}`) regressed, then refine the stepping stone while preserving `seeds_gained`.\n"
+            )
+
         extra_context = (
-            f"{deficit_report.format_brief()}{arch_block}{plateau_directive}\n\n"
+            f"{deficit_report.format_brief()}{arch_block}{plateau_directive}{directive_block}{revision_block}\n\n"
             f"### Your Claimed Target Deficit (`{self.peer_id}`):\n"
             f"- Cluster ID: `{claimed_deficit.cluster_id}` ({claimed_deficit.kind})\n"
             f"- Description: {claimed_deficit.label}\n"
@@ -723,7 +787,7 @@ class SwarmPeerAgent:
             f"- Target Sample Seeds: {claimed_deficit.sample_seeds}\n"
             f"- Guard Seeds (preserve non-regression; do NOT over-tighten on neutral drift): {list(deficit_report.d_succ_seeds[:2])}\n"
             f"- Unseen Probe Seeds (generalization check in `dry_run_policy`): {list((probe_seeds or [])[:6])}\n"
-            f"- Diagnosis Note: Inspect `champion_ticks` / `ticks` and workspace `skills/` directly to locate the true root cause across module boundaries."
+            f"- Diagnosis Note: Inspect `champion_ticks`, `peer_ticks`, `all_ticks`, and workspace `skills/` directly via `query_db` to locate the true root cause across module boundaries."
             f"{frontier_block}\n"
         )
 
@@ -800,8 +864,8 @@ class SwarmPeerAgent:
         touched_skills, touched_branches, clobbers = compute_candidate_footprint(
             pol_code,
             kept_skills,
-            current_policy,
-            skills_copy,
+            base_inc_policy,
+            base_inc_skills,
             protected_branches=deficit_report.protected_branches,
         )
 
@@ -816,7 +880,7 @@ class SwarmPeerAgent:
             touched_skills=touched_skills,
             touched_branches=touched_branches,
             touched_skill_symbols=compute_candidate_skill_symbols(
-                kept_skills, skills_copy
+                kept_skills, base_inc_skills
             ),
             clobbers_protected=clobbers,
         )
@@ -830,6 +894,7 @@ class SwarmPeerAgent:
             shard_seeds=shard_seeds,
             frontier_checkpoints=sampled_frontier,
             probe_seeds=probe_seeds,
+            db_path=self.db_path,
         )
 
         status_lbl = (

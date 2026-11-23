@@ -429,25 +429,137 @@ class SwarmCampaignOrchestrator:
         ]
         incumbent_shard_runs: dict[int, dict[str, Any]] = {}
         if current_policy.strip() and shard_seeds:
+            inc_shard_bid = f"incubate_inc_g{generation}_{int(time.time())}"
             inc_shard = self.eval_pool.evaluate_batch(
-                batch_id=f"incubate_inc_g{generation}_{int(time.time())}",
+                batch_id=inc_shard_bid,
                 policy_code=current_policy,
                 macros_code="",
                 skills=initial_skills,
                 target_episodes=len(shard_seeds),
                 priority_seeds=shard_seeds,
                 max_steps=active_max_steps,
-                record_ticks=False,
+                record_ticks=True,
             )
-            for r in inc_shard.get("runs", []) or []:
-                incumbent_shard_runs[int(r.get("seed", 0))] = dict(r)
+            inc_shard_list = [dict(r) for r in (inc_shard.get("runs", []) or [])]
+            for r in inc_shard_list:
+                incumbent_shard_runs[int(r.get("seed", 0))] = r
+            if inc_shard_list:
+                try:
+                    self.db_logger.save_runs_and_ticks(
+                        batch_id=inc_shard_bid,
+                        generation=generation,
+                        run_kind="incubate_baseline",
+                        peer_id="incumbent",
+                        runs=inc_shard_list,
+                        run_id_prefix=f"g{generation}_inc_base",
+                    )
+                except Exception:
+                    pass
 
-        # 3. Concurrent Symmetric Peer Agents + E3 Semantic Crossover / Architect Slots (always synced with current incumbent!)
+        # 3. Merged Dual-Track Peers: 1 Revision Track (`peer_rev`, when active stepping stone exists)
+        #    + 4 Fresh Exploration Track (`peer_1`..`peer_4`), coordinated by lightweight Meta-Agent Directive Planner.
         import copy as _copy
 
-        peer_assignments: list[tuple[str, Any, str, dict[str, str], str | None]] = []
+        active_stone: dict[str, Any] | None = None
+        if current_policy.strip():
+            active_stone = self.db_logger.load_active_stepping_stone(
+                parent_policy_id=cur_fp, max_revisions=2
+            )
+
+        fresh_peer_ids = [f"peer_{i + 1}" for i in range(active_peers)]
+        arch_summary = ""
+        try:
+            from lox.author.tools import AuthorToolRegistry
+
+            _tmp_tools = AuthorToolRegistry(db_path=self.db_path)
+            _tmp_tools.current_policy_code = current_policy
+            _tmp_tools.skills = dict(initial_skills)
+            arch_summary, _ = _tmp_tools.architecture_map()
+        except Exception:
+            arch_summary = ""
+
+        planned_directives: dict[str, dict[str, Any]] = {}
+        try:
+            planner = SwarmMetaAgent(
+                provider=self.provider,
+                model=self.model,
+                db_path=self.db_path,
+                theories_path=self.db_path,
+                frontier_dir=str(self.frontier_dir),
+            )
+            dir_list = planner.plan_peer_directives(
+                generation=generation,
+                fresh_peer_ids=fresh_peer_ids,
+                deficit_report=deficit_report,
+                architecture_map=arch_summary,
+                active_stepping_stone=active_stone,
+            )
+            planned_directives = {
+                str(d["peer_id"]): d
+                for d in dir_list
+                if isinstance(d, dict) and d.get("peer_id")
+            }
+            if planned_directives and self.provider != "mock":
+                dir_summary = " | ".join(
+                    f"{pid}->{d.get('focus_subsystem', d.get('target_cluster_id', '?'))}"
+                    for pid, d in planned_directives.items()
+                )
+                ui.info(f"Gen {generation} Meta-Directives (--model): {dir_summary}")
+        except Exception as exc:
+            ui.warn(f"Gen {generation}: Directive planner skipped ({exc})")
+
+        peer_assignments: list[
+            tuple[
+                str,
+                Any,
+                str,
+                dict[str, str],
+                dict[str, Any] | None,
+                dict[str, Any] | None,
+            ]
+        ] = []
+        cluster_by_id = {str(getattr(c, "cluster_id", "") or ""): c for c in clusters}
+
+        # Track A: 1 Revision slot (`peer_rev`) added alongside the 4 Fresh slots (0 Fresh slots lost!)
+        if (
+            active_stone is not None
+            and str(active_stone.get("policy_code", "") or "").strip()
+        ):
+            rev_cl = _copy.copy(clusters[0])
+            rev_lost = [int(s) for s in (active_stone.get("seeds_lost") or [])[:4]]
+            if rev_lost:
+                rev_cl.sample_seeds = rev_lost
+            rev_cl.cluster_id = f"revision_{active_stone['source_peer_id']}"
+            rev_cl.label = (
+                f"[Revision Track] Refine Gen {active_stone['generation']} "
+                f"`{active_stone['source_peer_id']}` (W/L={active_stone['wins']}/{active_stone['losses']}, "
+                f"reject={active_stone['reject_reason']})"
+            )
+            rev_cl.evidence = (
+                f"Active stepping stone `{active_stone['stone_id']}` "
+                f"(rev {int(active_stone.get('revision_count', 0)) + 1}/2, "
+                f"winsorΔ={float(active_stone.get('winsor_delta', 0.0)):+.3f}, "
+                f"iqmΔ={float(active_stone.get('iqm_delta', 0.0)):+.3f})."
+            )
+            peer_assignments.append(
+                (
+                    "peer_rev",
+                    rev_cl,
+                    str(active_stone["policy_code"]),
+                    dict(active_stone.get("skills") or {}),
+                    None,
+                    active_stone,
+                )
+            )
+            ui.info(
+                f"Gen {generation}: Activated 1 Revision + {active_peers} Fresh slots "
+                f"(`peer_rev` refining Gen {active_stone['generation']} `{active_stone['source_peer_id']}` "
+                f"W/L={active_stone['wins']}/{active_stone['losses']}, rev {int(active_stone.get('revision_count', 0)) + 1}/2)."
+            )
+
         use_crossover = (
-            self._plateau_streak >= 4
+            active_stone is None
+            and self._plateau_streak >= 4
             and bool(self._near_misses)
             and bool(current_policy.strip())
         )
@@ -503,12 +615,18 @@ class SwarmCampaignOrchestrator:
         )
         cluster_seen_counts: dict[str, int] = {}
         for i in range(active_peers):
-            cl = _copy.copy(assigned_clusters[i])
+            pid = f"peer_{i + 1}"
+            p_dir = planned_directives.get(pid)
+            dir_cid = str((p_dir or {}).get("target_cluster_id") or "")
+            base_cl = cluster_by_id.get(dir_cid, assigned_clusters[i])
+            cl = _copy.copy(base_cl)
             cid_key = str(getattr(cl, "cluster_id", "") or "")
             occ_idx = cluster_seen_counts.get(cid_key, 0)
             cluster_seen_counts[cid_key] = occ_idx + 1
-            if str(deficit_report.regime or "").upper() == "PLATEAU" and (
-                assigned_clusters.count(assigned_clusters[i]) > 1 or occ_idx > 0
+            if (
+                not p_dir
+                and str(deficit_report.regime or "").upper() == "PLATEAU"
+                and (assigned_clusters.count(assigned_clusters[i]) > 1 or occ_idx > 0)
             ):
                 angle_note = _angles[occ_idx % len(_angles)]
                 cl.evidence = (
@@ -534,7 +652,7 @@ class SwarmCampaignOrchestrator:
                 cl.evidence = f"{cl.evidence} | {nm_note}" if cl.evidence else nm_note
                 cl.label = f"[Semantic Crossover] {cl.label}"
             peer_assignments.append(
-                (f"peer_{i + 1}", cl, current_policy, initial_skills, None)
+                (pid, cl, current_policy, initial_skills, p_dir, None)
             )
         sampled_elite_ids: list[str] = []
 
@@ -559,6 +677,8 @@ class SwarmCampaignOrchestrator:
             cluster: Any,
             p_policy: str,
             p_skills: dict[str, str],
+            p_directive: dict[str, Any] | None,
+            p_stone: dict[str, Any] | None,
         ) -> PeerCandidate:
             peer_model = (
                 self.refactor_model
@@ -587,6 +707,10 @@ class SwarmCampaignOrchestrator:
                 shard_seeds=shard_seeds,
                 frontier=self.frontier,
                 probe_seeds=probe_seeds,
+                directive=p_directive,
+                stepping_stone=p_stone,
+                incumbent_policy=current_policy,
+                incumbent_skills=initial_skills,
             )
 
         peer_errors: list[tuple[str, BaseException]] = []
@@ -596,8 +720,8 @@ class SwarmCampaignOrchestrator:
         )
         try:
             fut_map = {
-                executor.submit(_run_peer, pid, cl, sp, ss): pid
-                for pid, cl, sp, ss, _ecid in peer_assignments
+                executor.submit(_run_peer, pid, cl, sp, ss, pdir, pstone): pid
+                for pid, cl, sp, ss, pdir, pstone in peer_assignments
             }
             for fut in concurrent.futures.as_completed(fut_map):
                 pid = fut_map[fut]
@@ -847,6 +971,103 @@ class SwarmCampaignOrchestrator:
         except Exception:
             pass
 
+        # Persist 100% of S_select and rejected S_confirm challenger runs+ticks into unified `runs` + `ticks`
+        try:
+            for sel_pid, sel_be in (verdict.select_batches or {}).items():
+                sel_runs = list((sel_be or {}).get("runs", []) or [])
+                if not sel_runs:
+                    continue
+                is_inc_sel = sel_pid == "inc"
+                self.db_logger.save_runs_and_ticks(
+                    batch_id=str(
+                        sel_be.get(
+                            "batch_id",
+                            f"sel_{sel_pid}_g{generation}_{int(time.time() * 1000)}",
+                        )
+                    ),
+                    generation=generation,
+                    run_kind="select_incumbent" if is_inc_sel else "select",
+                    peer_id="incumbent" if is_inc_sel else str(sel_pid),
+                    runs=sel_runs,
+                    run_id_prefix=f"g{generation}_{'inc' if is_inc_sel else sel_pid}_sel",
+                )
+            if verdict.confirm_challenger_eval is not None:
+                c_pid, c_be = verdict.confirm_challenger_eval
+                c_runs = list((c_be or {}).get("runs", []) or [])
+                if c_runs:
+                    self.db_logger.save_runs_and_ticks(
+                        batch_id=str(
+                            c_be.get(
+                                "batch_id",
+                                f"conf_{c_pid}_g{generation}_{int(time.time() * 1000)}",
+                            )
+                        ),
+                        generation=generation,
+                        run_kind="confirm_challenger",
+                        peer_id=str(c_pid),
+                        runs=c_runs,
+                        run_id_prefix=f"g{generation}_{c_pid}_conf",
+                    )
+        except Exception:
+            pass
+
+        # Update `stepping_stones` lifecycle for Dual-Track Revision
+        try:
+            if verdict.promoted:
+                if active_stone is not None and "peer_rev" in str(verdict.winner_id):
+                    self.db_logger.update_stepping_stone_status(
+                        active_stone["stone_id"], "promoted"
+                    )
+                self.db_logger.retire_stepping_stones_for_parent(
+                    cur_fp, new_status="superseded"
+                )
+            else:
+                if active_stone is not None:
+                    self.db_logger.increment_stepping_stone_revision(
+                        active_stone["stone_id"], max_revisions=2
+                    )
+                q_stone = verdict.qualifying_stepping_stone
+                if isinstance(q_stone, dict) and q_stone.get("policy_code"):
+                    q_stone = dict(q_stone)
+                    q_stone["parent_policy_id"] = cur_fp
+                    still_active = self.db_logger.load_active_stepping_stone(
+                        parent_policy_id=cur_fp, max_revisions=2
+                    )
+                    should_save = still_active is None
+                    if still_active is not None:
+                        new_p = min(
+                            float(q_stone.get("wilcoxon_p", 1.0)),
+                            float(q_stone.get("sign_p", 1.0)),
+                        )
+                        old_p = min(
+                            float(still_active.get("wilcoxon_p", 1.0)),
+                            float(still_active.get("sign_p", 1.0)),
+                        )
+                        new_d = max(
+                            float(q_stone.get("winsor_delta", 0.0)),
+                            float(q_stone.get("iqm_delta", 0.0)),
+                        )
+                        old_d = max(
+                            float(still_active.get("winsor_delta", 0.0)),
+                            float(still_active.get("iqm_delta", 0.0)),
+                        )
+                        if (new_p < old_p) or (new_p == old_p and new_d > old_d):
+                            self.db_logger.update_stepping_stone_status(
+                                still_active["stone_id"], "superseded"
+                            )
+                            should_save = True
+                    if should_save:
+                        self.db_logger.save_stepping_stone(q_stone)
+                        ui.info(
+                            f"Gen {generation}: Saved stepping stone `{q_stone['stone_id']}` "
+                            f"(W/L={q_stone['wins']}/{q_stone['losses']}, "
+                            f"winsorΔ={float(q_stone.get('winsor_delta', 0.0)):+.3f}, "
+                            f"min_p={min(float(q_stone.get('wilcoxon_p', 1.0)), float(q_stone.get('sign_p', 1.0))):.4f}) "
+                            f"for next-gen `peer_rev`."
+                        )
+        except Exception:
+            pass
+
         # Persist generation outcome into `experiments` and promotions into `discoveries`
         try:
             bp = dict(getattr(verdict, "best_pair", {}) or {})
@@ -990,7 +1211,7 @@ class SwarmCampaignOrchestrator:
         except Exception:
             pass
 
-        if generation % 5 == 0:
+        if self.db_logger.prune_ticks and generation % 5 == 0:
             try:
                 self.db_logger.prune_old_telemetry(
                     current_generation=generation, keep_generations=20
@@ -1465,7 +1686,7 @@ class SwarmCampaignOrchestrator:
                     pass
         self._sync_batch_cost(batch_id, generation)
 
-        if generation % 5 == 0:
+        if self.db_logger.prune_ticks and generation % 5 == 0:
             try:
                 self.db_logger.prune_old_telemetry(
                     current_generation=generation, keep_generations=20

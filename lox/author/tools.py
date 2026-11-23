@@ -306,6 +306,9 @@ class AuthorToolRegistry:
         self.peer_probe_seeds: list[int] = []
         self.peer_micro_pilots_used: int = 0
         self.max_peer_micro_pilots: int = 3
+        self.peer_id: str = ""
+        self.baseline_policy_code: str = ""
+        self.baseline_skills: dict[str, str] | None = None
         self._dead_patch_bonus_granted: bool = False
 
     def _get_harness(self, max_steps: int, benchmark: str | None = None) -> Any:
@@ -416,6 +419,7 @@ class AuthorToolRegistry:
         peer_target_seeds: list[int] | None = None,
         peer_probe_seeds: list[int] | None = None,
         max_peer_micro_pilots: int = 3,
+        peer_id: str = "",
     ) -> None:
         """Sets worker pool and baseline runs context for pilot evaluations."""
         self.pool = pool
@@ -451,6 +455,7 @@ class AuthorToolRegistry:
         self.peer_probe_seeds = [int(s) for s in (peer_probe_seeds or [])]
         self.peer_micro_pilots_used = 0
         self.max_peer_micro_pilots = max(0, int(max_peer_micro_pilots))
+        self.peer_id = str(peer_id or self.peer_id or "")
         self._dead_patch_bonus_granted = False
         if skills is not None:
             self.skills = dict(skills)
@@ -2122,9 +2127,17 @@ class AuthorToolRegistry:
             else:
                 state = harness.reset(seed=int(seed))
 
-            for _ in range(max(10, min(2000, int(max_turns)))):
+            smoke_cap = max(10, min(2000, int(max_turns)))
+            last_live_state = (
+                state if int(getattr(state, "depth", 0) or 0) > 0 else None
+            )
+            smoke_ended = False
+            smoke_end_reason = ""
+            for _ in range(smoke_cap):
                 raw_act, active_fn = runner.next_action(state)
                 state, done, info = harness.step(raw_act)
+                if not done and int(getattr(state, "depth", 0) or 0) > 0:
+                    last_live_state = state
                 msg_l = (state.message or "").lower()
                 is_prompt = getattr(state, "in_yn_prompt", False) or getattr(
                     state, "in_text_prompt", False
@@ -2162,6 +2175,21 @@ class AuthorToolRegistry:
                 raw_act_names.append(act_name)
                 actions_taken.append(f"{active_fn}:{act_name}")
                 if done:
+                    hit_smoke_cap = (
+                        harness.step_count >= smoke_cap
+                        and int(getattr(state, "depth", 0) or 0) > 0
+                        and int(getattr(state, "hp", 0) or 0) > 0
+                    )
+                    if not hit_smoke_cap:
+                        smoke_ended = True
+                        smoke_end_reason = (
+                            str(getattr(state, "end_reason", "") or "")
+                            or str(info.get("end_reason", "") or "")
+                            or str(getattr(state, "message", "") or "").split(".")[0][
+                                :80
+                            ]
+                            or "ended"
+                        )
                     break
 
             fn_summary = ", ".join(
@@ -3180,9 +3208,23 @@ class AuthorToolRegistry:
                 skill_name=str(skill_name or ""),
                 skill_code=str(skill_code or ""),
             )
+            disp_state = (
+                last_live_state
+                if (
+                    smoke_ended
+                    and int(getattr(state, "depth", 0) or 0) == 0
+                    and last_live_state is not None
+                )
+                else state
+            )
+            status_suffix = (
+                f", Status=ENDED({smoke_end_reason})"
+                if smoke_ended
+                else ", Status=ALIVE"
+            )
             return (
                 f"Dry-Run PASSED ({harness.step_count} steps on seed {seed}).\n"
-                f"- Final State: Dlvl={state.depth}, Pos=({state.y},{state.x}), UniqueTiles={len(unique_positions)}, HP={state.hp}/{state.max_hp}, Turn={state.turn}\n"
+                f"- Final State: Dlvl={disp_state.depth}, Pos=({disp_state.y},{disp_state.x}), UniqueTiles={len(unique_positions)}, HP={disp_state.hp}/{disp_state.max_hp}, Turn={disp_state.turn}{status_suffix}\n"
                 f"- Functions Called: {{{fn_summary}}}\n"
                 f"- Action Breakdown: {{{act_counts}}}\n"
                 f"- Registered Params: {{{params_summary}}}\n"
@@ -3273,18 +3315,31 @@ class AuthorToolRegistry:
         )
         micro_max_steps = max(200, min(pool_cap, 6500 if long_horizon_target else 4000))
         missing_base = [s for s in all_seeds if s not in base_by_seed]
+        attempt_idx = self.peer_micro_pilots_used + 1
+        peer_tag = str(self.peer_id or "peer")
+        base_batch_id = f"peer_mp_inc_g{self.generation}_{peer_tag}_a{attempt_idx}_{int(time.time() * 1000)}"
+        cand_batch_id = f"peer_mp_cand_g{self.generation}_{peer_tag}_a{attempt_idx}_{int(time.time() * 1000)}"
+        new_base_runs: list[dict[str, Any]] = []
         try:
+            base_pol_eval = str(
+                self.baseline_policy_code or self.current_policy_code or ""
+            )
+            base_skills_eval = (
+                self.baseline_skills
+                if self.baseline_skills is not None
+                else self.skills
+            )
             with _PEER_MICRO_PILOT_LOCK:
-                if missing_base and str(self.current_policy_code or "").strip():
+                if missing_base and base_pol_eval.strip():
                     base_res = self.pool.evaluate_batch(
-                        batch_id=f"peer_mp_inc_g{self.generation}_{int(time.time() * 1000)}",
-                        policy_code=self.current_policy_code,
+                        batch_id=base_batch_id,
+                        policy_code=base_pol_eval,
                         macros_code=macros_code,
-                        skills=self.skills,
+                        skills=base_skills_eval,
                         target_episodes=len(missing_base),
                         priority_seeds=missing_base,
                         max_steps=micro_max_steps,
-                        record_ticks=False,
+                        record_ticks=True,
                         show_progress=False,
                     )
                     for br in base_res.get("runs", []) or []:
@@ -3292,33 +3347,76 @@ class AuthorToolRegistry:
                             sd_i = int(br["seed"])
                             base_by_seed[sd_i] = dict(br)
                             self.baseline_runs.append(dict(br))
+                            new_base_runs.append(dict(br))
 
                 cand_res = self.pool.evaluate_batch(
-                    batch_id=f"peer_mp_cand_g{self.generation}_{int(time.time() * 1000)}_{self.peer_micro_pilots_used}",
+                    batch_id=cand_batch_id,
                     policy_code=policy_code,
                     macros_code=macros_code,
                     skills=cand_skills,
                     target_episodes=len(all_seeds),
                     priority_seeds=all_seeds,
                     max_steps=micro_max_steps,
-                    record_ticks=False,
+                    record_ticks=True,
                     show_progress=False,
                 )
         except Exception as exc:
             return f"\n- Paired Micro-Pilot: unavailable ({type(exc).__name__}: {exc})"
 
         self.peer_micro_pilots_used += 1
-        cand_by_seed = {
-            int(r["seed"]): r
+        cand_runs_list = [
+            r
             for r in (cand_res.get("runs", []) or [])
             if isinstance(r, dict) and "seed" in r
-        }
+        ]
+        cand_by_seed = {int(r["seed"]): r for r in cand_runs_list}
         if not cand_by_seed:
             return ""
+
+        # Persist 100% of candidate and baseline micro-pilot runs+ticks into unified `runs` + `ticks`
+        mp_ticks_logged = 0
+        if self.db_path:
+            try:
+                from lox.db.logger import BatchDatabaseLogger
+
+                db_log = BatchDatabaseLogger(self.db_path)
+                mp_ticks_logged += db_log.save_runs_and_ticks(
+                    batch_id=cand_batch_id,
+                    generation=int(self.generation),
+                    run_kind="micro_pilot",
+                    peer_id=peer_tag,
+                    runs=cand_runs_list,
+                    attempt_num=attempt_idx,
+                    run_id_prefix=f"g{self.generation}_{peer_tag}_mp{attempt_idx}",
+                )
+                # Always log paired baseline runs for this attempt so candidate vs baseline ticks can be joined on (generation, peer_id, attempt_num, seed)
+                paired_base_runs = (
+                    new_base_runs
+                    if len(new_base_runs) == len(all_seeds)
+                    else [base_by_seed[sd] for sd in all_seeds if sd in base_by_seed]
+                )
+                if paired_base_runs:
+                    mp_ticks_logged += db_log.save_runs_and_ticks(
+                        batch_id=base_batch_id,
+                        generation=int(self.generation),
+                        run_kind="micro_pilot_baseline",
+                        peer_id=peer_tag,
+                        runs=paired_base_runs,
+                        attempt_num=attempt_idx,
+                        run_id_prefix=f"g{self.generation}_{peer_tag}_mp{attempt_idx}_base",
+                    )
+            except Exception:
+                pass
 
         lines: list[str] = [
             f"\n### Paired Micro-Pilot Diff vs Incumbent ({self.peer_micro_pilots_used}/{self.max_peer_micro_pilots}, cap={micro_max_steps} steps)"
         ]
+        if mp_ticks_logged > 0:
+            lines.append(
+                f"- Queryable Ticks Logged ({mp_ticks_logged:,} ticks in `peer_ticks` / `ticks`): "
+                f"filter `WHERE generation = {self.generation} AND peer_id = '{peer_tag}' AND attempt_num = {attempt_idx} AND seed = <seed>` "
+                f"(`run_kind IN ('micro_pilot', 'micro_pilot_baseline')`) via `query_db` to diagnose any flat or regressed seed directly."
+            )
         guard_regressions: list[str] = []
         target_evaluated = 0
         target_unchanged = 0

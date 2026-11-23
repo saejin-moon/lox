@@ -655,3 +655,191 @@ def test_synthesis_logs_persistence(tmp_path):
     )
     assert row["reasoning_tokens"] == 25
     assert row["wall_ms"] == 120.5
+
+
+def test_unified_runs_ticks_concurrency_and_stepping_stones(tmp_path):
+    """
+    Verifies unified runs+ticks storage:
+    1. `save_runs_and_ticks` logs 100% of ticks tagged with `(run_kind, peer_id, attempt_num)`
+       without polluting `batches` or `champion_runs`.
+    2. `peer_ticks` and `all_ticks` expose unified ticks alongside `champion_ticks`.
+    3. Default `prune_ticks=False` preserves 100% of ticks even when `prune_old_telemetry` is called.
+    4. Concurrent multi-threaded `query_db` reads + `save_runs_and_ticks` writes succeed cleanly.
+    5. `stepping_stones` CRUD + revision_count retirement at `max_revisions=2`.
+    """
+    import concurrent.futures
+
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+
+    db_p = str(tmp_path / "unified.duckdb")
+    init_db(db_p).close()
+    logger = BatchDatabaseLogger(db_path=db_p)
+    assert logger.prune_ticks is False
+
+    # Seed 1 champion batch
+    logger.save_policy(
+        "pol_g1", 1, "SWARM", "class Policy: pass", "", {}, 2.0, 2, is_promoted=True
+    )
+    logger.save_batch(
+        batch_id="batch_champ_g1",
+        generation=1,
+        mode="SWARM",
+        parent_policy_id="none",
+        candidate_policy_id="pol_g1",
+        target_functions=["step"],
+        runs=[
+            {
+                "run_id": "champ_r1",
+                "seed": 100,
+                "depth": 2,
+                "max_depth": 2,
+                "score": 120,
+                "turns": 10,
+                "ticks": [
+                    {
+                        "turn": 1,
+                        "step_idx": 1,
+                        "depth": 1,
+                        "hp": 16,
+                        "max_hp": 16,
+                        "action_name": "E",
+                        "active_function": "explore",
+                        "message": "champ tick",
+                    }
+                ],
+            }
+        ],
+        episodes_discarded=0,
+        batch_metrics={"avg_depth": 2.0, "max_depth": 2, "avg_score": 120.0},
+        verdict={"passed": True, "reason": "ok"},
+    )
+
+    # Log micro-pilot + select runs/ticks into unified runs+ticks
+    n_ticks = logger.save_runs_and_ticks(
+        batch_id="mp_b1",
+        generation=2,
+        run_kind="micro_pilot",
+        peer_id="peer_2",
+        attempt_num=1,
+        runs=[
+            {
+                "seed": 100,
+                "depth": 3,
+                "max_depth": 3,
+                "score": 250,
+                "turns": 20,
+                "ticks": [
+                    {
+                        "turn": t,
+                        "step_idx": t,
+                        "depth": 2,
+                        "hp": 15,
+                        "max_hp": 16,
+                        "action_name": "DOWN",
+                        "active_function": "descend",
+                        "message": f"mp_tick_{t}",
+                    }
+                    for t in range(1, 6)
+                ],
+            }
+        ],
+    )
+    assert n_ticks == 5
+
+    # Default prune_old_telemetry is a no-op (zero tick deletion)
+    prune_res = logger.prune_old_telemetry(current_generation=100, keep_generations=1)
+    assert prune_res == {"ticks_pruned": 0, "runs_pruned": 0}
+
+    con = connect_db(db_p, read_only=True)
+    try:
+        # batches table remains pure (only the 1 champion batch)
+        assert con.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM champion_runs").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM peer_runs").fetchone()[0] == 1
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM peer_ticks WHERE generation = 2 AND peer_id = 'peer_2' AND attempt_num = 1 AND seed = 100"
+            ).fetchone()[0]
+            == 5
+        )
+        assert con.execute("SELECT COUNT(*) FROM all_ticks").fetchone()[0] == 6
+    finally:
+        con.close()
+
+    # Concurrent multi-threaded query_db reads + save_runs_and_ticks writes
+    reg = AuthorToolRegistry(db_path=db_p)
+
+    def _writer(idx: int) -> int:
+        return logger.save_runs_and_ticks(
+            batch_id=f"conc_b_{idx}",
+            generation=2,
+            run_kind="micro_pilot",
+            peer_id=f"peer_{idx}",
+            attempt_num=1,
+            runs=[
+                {
+                    "seed": 500 + idx,
+                    "depth": 2,
+                    "max_depth": 2,
+                    "turns": 5,
+                    "ticks": [
+                        {
+                            "turn": 1,
+                            "step_idx": 1,
+                            "depth": 2,
+                            "hp": 16,
+                            "max_hp": 16,
+                            "action_name": "E",
+                            "active_function": "nav",
+                        }
+                    ],
+                }
+            ],
+        )
+
+    def _reader(_idx: int) -> str:
+        txt, status = reg.query_db(
+            "SELECT run_kind, COUNT(*) AS n FROM all_ticks GROUP BY run_kind"
+        )
+        assert "error" not in status.lower(), txt
+        return status
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        w_futs = [ex.submit(_writer, i) for i in range(1, 5)]
+        r_futs = [ex.submit(_reader, i) for i in range(8)]
+        assert all(f.result() == 1 for f in w_futs)
+        assert all("rows" in f.result() for f in r_futs)
+
+    # Stepping-stone lifecycle + retirement after 2 revisions
+    logger.save_stepping_stone(
+        {
+            "stone_id": "stone_g2_peer_2",
+            "generation": 2,
+            "parent_policy_id": "fp_abc",
+            "source_peer_id": "peer_2",
+            "source_run_kind": "select",
+            "source_batch_id": "sel_b2",
+            "policy_code": "class Policy:\n    pass\n",
+            "skills": {"nav": "def go(): return None\n"},
+            "mechanism": "fix stairs",
+            "target_functions": ["nav"],
+            "wins": 7,
+            "losses": 0,
+            "iqm_delta": 0.21,
+            "winsor_delta": 0.21,
+            "wilcoxon_p": 0.0078,
+            "sign_p": 0.0078,
+            "reject_reason": "cut_in_select_stage_by_stack",
+            "seeds_gained": [1, 2, 3],
+            "seeds_lost": [4],
+        }
+    )
+    loaded = logger.load_active_stepping_stone("fp_abc", max_revisions=2)
+    assert loaded is not None and loaded["stone_id"] == "stone_g2_peer_2"
+    logger.increment_stepping_stone_revision("stone_g2_peer_2", max_revisions=2)
+    loaded2 = logger.load_active_stepping_stone("fp_abc", max_revisions=2)
+    assert loaded2 is not None and loaded2["revision_count"] == 1
+    logger.increment_stepping_stone_revision("stone_g2_peer_2", max_revisions=2)
+    assert logger.load_active_stepping_stone("fp_abc", max_revisions=2) is None

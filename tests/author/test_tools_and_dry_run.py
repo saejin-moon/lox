@@ -939,3 +939,98 @@ def test_dry_run_replay_runs_micro_pilot_and_flags_auto_esc_spike(tmp_path):
     assert "Paired Micro-Pilot Diff vs Incumbent" in out_txt
     assert "PROBE seed=5000001: ⚠️ REGRESSED" in out_txt
     assert "auto_esc=0->4" in out_txt
+
+
+def test_micro_pilot_logs_queryable_ticks_and_live_terminal_state(tmp_path):
+    """
+    Verifies:
+    1. `_run_peer_paired_micro_pilot` calls `evaluate_batch` with `record_ticks=True`
+       and persists both `micro_pilot` and `micro_pilot_baseline` ticks into unified
+       `runs` + `ticks`, immediately queryable via `query_db` on `peer_ticks`.
+    2. Smoke replay preserves the last live state (`Dlvl > 0, HP > 0`) instead of
+       printing `Dlvl=0, Pos=(0,0), HP=0/0, Turn=0` when the terminal frame zeroes blstats.
+    """
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import init_db
+
+    dbp = str(tmp_path / "mp_ticks.duckdb")
+    init_db(dbp).close()
+
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.SEARCH\n"
+    )
+    seen_record_ticks: list[bool] = []
+
+    class _TickPool:
+        max_steps = 500
+
+        def evaluate_batch(
+            self, batch_id, priority_seeds=None, record_ticks=False, **kwargs
+        ):
+            seen_record_ticks.append(bool(record_ticks))
+            s_list = list(priority_seeds or [])
+            is_inc = "_inc_" in str(batch_id)
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"r_{s}",
+                        "seed": s,
+                        "depth": 2 if is_inc else 3,
+                        "max_depth": 2 if is_inc else 3,
+                        "score": 100 if is_inc else 250,
+                        "turns": 50,
+                        "pct_search": 5.0,
+                        "end_reason": "killed",
+                        "action_bytes": b"AA" if is_inc else b"AB",
+                        "ticks": [
+                            {
+                                "turn": t,
+                                "step_idx": t,
+                                "depth": 1 if is_inc else 2,
+                                "hp": 14,
+                                "max_hp": 16,
+                                "action_name": "SEARCH" if is_inc else "DOWN",
+                                "active_function": "step",
+                                "message": "base_msg" if is_inc else "cand_msg",
+                            }
+                            for t in (1, 2, 3)
+                        ],
+                    }
+                    for s in s_list
+                ],
+            }
+
+    reg = AuthorToolRegistry(db_path=dbp)
+    reg.current_policy_code = base_pol
+    reg.configure_generation(
+        pool=_TickPool(),
+        generation=67,
+        mode="SWARM_PEER",
+        baseline_runs=[],
+        peer_guard_seeds=[10],
+        peer_target_seeds=[20],
+        peer_probe_seeds=[30],
+        max_peer_micro_pilots=4,
+        peer_id="peer_2",
+    )
+    cand_pol = base_pol.replace("Action.SEARCH", "Action.WAIT")
+    out_txt, status = reg.dry_run_policy(code=cand_pol, seed=42, max_turns=10)
+    assert "PASSED" in status
+    assert seen_record_ticks and all(seen_record_ticks)
+    assert "Queryable Ticks Logged" in out_txt
+    assert "peer_id = 'peer_2'" in out_txt
+    assert "Status=ALIVE" in out_txt
+
+    # Peer can immediately query its own micro-pilot & baseline ticks via raw SQL
+    sql_out, sql_st = reg.query_db(
+        "SELECT run_kind, seed, COUNT(*) AS n_ticks FROM peer_ticks "
+        "WHERE generation = 67 AND peer_id = 'peer_2' AND attempt_num = 1 "
+        "GROUP BY run_kind, seed ORDER BY run_kind, seed"
+    )
+    assert "6 rows" in sql_st, (sql_out, sql_st)
+    assert "micro_pilot" in sql_out
+    assert "micro_pilot_baseline" in sql_out

@@ -1130,3 +1130,173 @@ def test_swarm_referee_promotes_explorer_over_wait_zombie_incumbent_and_preserve
     assert "class Policy:" in p_text
     s_text, _ = reg.read_skill("exploration", policy_id="cell_v2_d0_v1_t0")
     assert "def go():" in s_text
+
+
+def test_stepping_stone_hybrid_metric_and_select_record_ticks():
+    """
+    Verifies:
+    1. Empirically calibrated Hybrid Stepping-Stone selector accepts real G54/G42/G35-class
+       candidates (small-sample high-precision wins & guard-blocked high-upside breakthroughs)
+       and rejects 50/50 coin-flip noise and policy_exception regressions.
+    2. Split-Sample `S_select` runs with `record_ticks=True` and exposes `select_batches`,
+       `confirm_challenger_eval`, and `qualifying_stepping_stone` on `TournamentVerdict`.
+    """
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.engine.swarm_referee import (
+        SwarmReferee,
+        select_qualifying_stepping_stone,
+    )
+
+    def _cand(pid: str, code: str = "class Policy:\n    pass\n") -> PeerCandidate:
+        return PeerCandidate(
+            peer_id=pid,
+            claimed_deficit_id="d1",
+            claimed_label="lbl",
+            policy_code=code,
+            skills={},
+            sandbox_passed=True,
+            loc_total=2,
+        )
+
+    # 1. Coin-flip noise (32W/30L, p=0.45) & exception candidates are rejected
+    noise = [
+        {
+            "candidate": _cand("peer_noise"),
+            "policy_exceptions": 0,
+            "wins": 32,
+            "losses": 30,
+            "iqm_delta": 0.02,
+            "winsor_delta": 0.02,
+            "wilcoxon_p": 0.447,
+            "reject_reason": "below_sign_perm_alpha",
+            "seeds_gained": [1, 2],
+            "seeds_lost": [3, 4],
+        },
+        {
+            "candidate": _cand("peer_exc"),
+            "policy_exceptions": 1,
+            "wins": 10,
+            "losses": 0,
+            "iqm_delta": 0.5,
+            "winsor_delta": 0.5,
+            "wilcoxon_p": 0.001,
+            "reject_reason": "policy_exceptions_regression",
+        },
+    ]
+    assert select_qualifying_stepping_stone(66, noise) is None
+
+    # 2. Guard-blocked high-upside candidate (G42 peer_4: 14W/12L, iqm=+0.681, cvar25_tail_regression) qualifies
+    guard_rescue = select_qualifying_stepping_stone(
+        42,
+        [
+            {
+                "candidate": _cand("peer_4"),
+                "policy_exceptions": 0,
+                "wins": 14,
+                "losses": 12,
+                "iqm_delta": 0.681,
+                "winsor_delta": 0.681,
+                "wilcoxon_p": 0.35,
+                "reject_reason": "cvar25_tail_regression",
+                "seeds_gained": [1, 2],
+                "seeds_lost": [9],
+            }
+        ],
+    )
+    assert guard_rescue is not None
+    assert guard_rescue["source_peer_id"] == "peer_4"
+
+    # 3. Ranks lowest min_p first (G54 peer_2 7W/0L beats G35 peer_1 8W/3L)
+    best = select_qualifying_stepping_stone(
+        54,
+        [
+            {
+                "candidate": _cand("peer_1"),
+                "policy_exceptions": 0,
+                "wins": 8,
+                "losses": 3,
+                "iqm_delta": 0.038,
+                "winsor_delta": 0.038,
+                "wilcoxon_p": 0.0841,
+                "reject_reason": "below_sig_or_pareto_gate",
+            },
+            {
+                "candidate": _cand("peer_2"),
+                "policy_exceptions": 0,
+                "wins": 7,
+                "losses": 0,
+                "iqm_delta": 0.205,
+                "winsor_delta": 0.205,
+                "wilcoxon_p": 0.0078,
+                "reject_reason": "cut_in_select_stage_by_stack",
+            },
+        ],
+    )
+    assert best is not None
+    assert best["source_peer_id"] == "peer_2"
+
+    # 4. Split-sample S_select runs with record_ticks=True and preserves select_batches & confirm_challenger_eval
+    base_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, s):\n"
+        "        return Action.WAIT\n"
+    )
+    cand_pol = base_pol.replace("Action.WAIT", "Action.SEARCH")
+    sel_flags: list[tuple[str, bool]] = []
+
+    class _SplitPool:
+        benchmark = "nethack"
+
+        def evaluate_batch(
+            self, batch_id, priority_seeds=None, record_ticks=False, **kwargs
+        ):
+            sel_flags.append((str(batch_id), bool(record_ticks)))
+            s_list = list(priority_seeds or [])
+            is_cand = "peer_cand" in str(batch_id)
+            is_sel = "sel_" in str(batch_id)
+            runs = []
+            for idx, s in enumerate(s_list):
+                # Wins 6/8 on S_select, ties on S_confirm -> rejected C* with qualifying S_select stone
+                if is_cand and is_sel:
+                    d = 4 if idx < 6 else 2
+                elif is_cand:
+                    d = 2
+                else:
+                    d = 2
+                runs.append(
+                    {
+                        "run_id": f"{batch_id}_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": d * 100,
+                        "turns": 100,
+                        "end_reason": "killed",
+                        "ticks": [
+                            {
+                                "turn": 1,
+                                "step_idx": 1,
+                                "depth": d,
+                                "hp": 10,
+                                "max_hp": 10,
+                            }
+                        ],
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    verdict = SwarmReferee().evaluate_tournament(
+        generation=67,
+        candidates=[_cand("peer_cand", cand_pol)],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=_SplitPool(),
+        seeds=list(range(100, 116)),
+        select_seeds=list(range(100, 108)),
+    )
+    assert verdict.promoted is False
+    assert sel_flags and all(flag for _, flag in sel_flags)
+    assert "peer_cand" in verdict.select_batches
+    assert verdict.confirm_challenger_eval is not None
+    assert verdict.confirm_challenger_eval[0] == "peer_cand"

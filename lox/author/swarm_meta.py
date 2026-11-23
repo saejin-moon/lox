@@ -822,3 +822,151 @@ After finishing your tool calls, return ONLY a valid JSON array of {n_categories
             f"Meta-Agent: Applied Post-Critic revision for Generation {generation} (Repairs: {repair_turns})."
         )
         return candidate_code, cand_skills, True
+
+    def plan_peer_directives(
+        self,
+        generation: int,
+        fresh_peer_ids: list[str],
+        deficit_report: Any,
+        architecture_map: str = "",
+        active_stepping_stone: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Lightweight 1-shot Directive Planner running on `self.model` (`--model`).
+        Assigns mutually exclusive investigative questions & subsystem scopes to the Fresh
+        Exploration peers so parallel peers never collide on the exact same mechanism
+        (or duplicate `peer_rev`'s active stepping-stone refinement).
+        Strictly honors 'Hard Code Nothing': assigns neutral investigative scopes only,
+        never prescribed code or hardcoded game heuristics.
+        """
+        peer_ids = [str(p) for p in fresh_peer_ids if str(p).strip()]
+        if not peer_ids:
+            return []
+
+        clusters = list(
+            getattr(deficit_report, "fail_clusters", None)
+            or getattr(deficit_report, "clusters", None)
+            or []
+        )
+        cluster_ids = [str(getattr(c, "cluster_id", "") or "") for c in clusters]
+
+        def _fallback_directives() -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            stone_sub = ""
+            if active_stepping_stone:
+                tfs = active_stepping_stone.get("target_functions") or []
+                stone_sub = ", ".join(str(x) for x in tfs[:3])
+            for idx, pid in enumerate(peer_ids):
+                cl = clusters[idx % len(clusters)] if clusters else None
+                cid = str(getattr(cl, "cluster_id", "general")) if cl else "general"
+                lbl = (
+                    str(getattr(cl, "label", "systemic progression"))
+                    if cl
+                    else "systemic progression"
+                )
+                excl = (
+                    f"Do NOT duplicate `peer_rev`'s active stepping-stone work on ({stone_sub}); "
+                    if stone_sub
+                    else ""
+                ) + "focus on a distinct subsystem from other peers."
+                out.append(
+                    {
+                        "peer_id": pid,
+                        "track": "fresh",
+                        "target_cluster_id": cid,
+                        "focus_subsystem": cid,
+                        "investigative_question": f"Investigate root causes of `{cid}` ({lbl}) directly in `champion_ticks` and `skills/`.",
+                        "exclude_overlap": excl,
+                    }
+                )
+            return out
+
+        if self.provider == "mock":
+            return _fallback_directives()
+
+        brief_txt = (
+            deficit_report.format_brief()
+            if hasattr(deficit_report, "format_brief")
+            else str(deficit_report or "")
+        )[:3200]
+        arch_txt = str(architecture_map or "")[:2000]
+        stone_txt = "None (no active Revision Track peer this generation)."
+        if active_stepping_stone:
+            stone_txt = (
+                f"Active `peer_rev` is refining Gen {active_stepping_stone.get('generation')} "
+                f"`{active_stepping_stone.get('source_peer_id')}` "
+                f"(targets={active_stepping_stone.get('target_functions')}, "
+                f"W/L={active_stepping_stone.get('wins')}/{active_stepping_stone.get('losses')}, "
+                f"reject_reason={active_stepping_stone.get('reject_reason')}, "
+                f"mechanism={str(active_stepping_stone.get('mechanism', ''))[:200]}). "
+                "Assign Fresh peers to ORTHOGONAL subsystems/questions so they do not duplicate `peer_rev`."
+            )
+
+        prompt = f"""Assign {len(peer_ids)} ORTHOGONAL investigative directives for Generation {generation} Fresh Exploration peers: {peer_ids}.
+
+### Active Revision Track (`peer_rev`):
+{stone_txt}
+
+### Empirical Deficit Report:
+{brief_txt}
+
+### Current Codebase Architecture Map:
+{arch_txt}
+
+### Strict Rules ("Hard Code Nothing"):
+1. Assign each peer in {peer_ids} a **distinct `focus_subsystem` and neutral `investigative_question`** so NO two peers investigate or patch the same mechanism/subsystem (and none duplicate `peer_rev` or recently rejected mechanisms in Rejection Memory).
+2. Do NOT prescribe code changes, thresholds, or hardcoded game tactics — only specify WHICH empirical failure mode / subsystem to investigate in `champion_ticks` & `skills/` and WHAT other peers are covering (`exclude_overlap`).
+3. Prefer valid `target_cluster_id` values from {cluster_ids or ["general"]}.
+
+Return ONLY a valid JSON array of {len(peer_ids)} objects, each with keys:
+- "peer_id": one of {peer_ids}
+- "target_cluster_id": cluster_id string
+- "focus_subsystem": short module/subsystem scope (e.g. "skills/goals/explore.py" or "skills/survival/...")
+- "investigative_question": 1-2 sentence neutral empirical question for the peer to answer via `query_db` on `champion_ticks`
+- "exclude_overlap": explicit 1-sentence boundary naming what other peers + `peer_rev` are covering so this peer does not collide with them
+"""
+        try:
+            raw_txt = self.author.run_tool_session(
+                system_prompt=(
+                    "You are the LOX Swarm Directive Planner. Your ONLY job is to partition "
+                    "parallel peer agents onto non-overlapping empirical questions and subsystems "
+                    "without prescribing hardcoded strategies. Output strict JSON only."
+                ),
+                user_prompt=prompt,
+                max_tool_turns=0,
+                generation=generation,
+                session_mode="META_DIRECTIVES",
+                agent_role_override="meta_directive_planner",
+                require_json=True,
+                expected_json_type="array",
+            )
+            parsed = self._parse_categories_json(raw_txt)
+            if not parsed:
+                return _fallback_directives()
+            by_pid: dict[str, dict[str, Any]] = {}
+            for idx, item in enumerate(parsed):
+                pid = str(item.get("peer_id") or "").strip()
+                if pid not in peer_ids and idx < len(peer_ids):
+                    pid = peer_ids[idx]
+                if pid not in peer_ids or pid in by_pid:
+                    continue
+                cid = str(item.get("target_cluster_id") or "").strip()
+                if cluster_ids and cid not in cluster_ids:
+                    cid = cluster_ids[idx % len(cluster_ids)]
+                by_pid[pid] = {
+                    "peer_id": pid,
+                    "track": "fresh",
+                    "target_cluster_id": cid or "general",
+                    "focus_subsystem": str(
+                        item.get("focus_subsystem") or cid or "general"
+                    )[:120],
+                    "investigative_question": str(
+                        item.get("investigative_question") or ""
+                    )[:400],
+                    "exclude_overlap": str(item.get("exclude_overlap") or "")[:300],
+                }
+            fallback = {d["peer_id"]: d for d in _fallback_directives()}
+            return [by_pid.get(pid, fallback[pid]) for pid in peer_ids]
+        except Exception as exc:
+            ui.warn(f"Meta-Agent directive planner fallback ({exc})")
+            return _fallback_directives()

@@ -48,9 +48,15 @@ def test_swarm_campaign_orchestrator_end_to_end(tmp_path):
 
         con = duckdb.connect(db_path, read_only=True)
         batches_cnt = con.execute("SELECT count(*) FROM batches").fetchone()[0]
-        runs_cnt = con.execute("SELECT count(*) FROM runs").fetchone()[0]
+        champ_runs_cnt = con.execute(
+            "SELECT count(*) FROM runs WHERE run_kind = 'champion'"
+        ).fetchone()[0]
+        peer_runs_cnt = con.execute("SELECT count(*) FROM peer_runs").fetchone()[0]
+        all_ticks_cnt = con.execute("SELECT count(*) FROM all_ticks").fetchone()[0]
         assert batches_cnt == 1
-        assert runs_cnt == 2
+        assert champ_runs_cnt == 2
+        assert peer_runs_cnt >= 2
+        assert all_ticks_cnt > 0
         con.close()
     finally:
         orchestrator.close()
@@ -646,3 +652,193 @@ def test_phase1_cli_args_wiki_and_prompts():
         skills={"nav": "def go(): return Action.N\n"},
     )
     assert "fn_24" in user_p  # No silent brs[:20] truncation!
+
+
+def test_dual_track_1_revision_plus_4_fresh_and_directive_planner(
+    tmp_path, monkeypatch
+):
+    """
+    Verifies:
+    1. `SwarmMetaAgent.plan_peer_directives` returns orthogonal directives for all Fresh peers
+       (and falls back cleanly in mock mode).
+    2. When an active stepping stone exists for the current incumbent, `SwarmCampaignOrchestrator`
+       spawns 1 Revision (`peer_rev`, starting from stepping stone code) + 4 Fresh (`peer_1..4`)
+       = 5 concurrent peers, and retires the stone after 2 revision attempts.
+    """
+    from unittest.mock import patch
+
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.author.swarm_meta import SwarmMetaAgent
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import init_db
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+    from lox.engine.swarm_referee import _package_fingerprint
+
+    db_p = str(tmp_path / "dual_track.duckdb")
+    ws_p = tmp_path / "ws"
+    ws_p.mkdir()
+    fr_p = str(tmp_path / "frontier")
+    init_db(db_p).close()
+
+    inc_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.WAIT\n"
+    )
+    stone_pol = (
+        "from lox.env.actions import Action\n"
+        "class Policy:\n"
+        "    def step(self, state):\n"
+        "        return Action.SEARCH\n"
+    )
+    (ws_p / "policy.py").write_text(inc_pol, encoding="utf-8")
+    inc_fp = _package_fingerprint(inc_pol, {})
+
+    logger = BatchDatabaseLogger(db_path=db_p)
+    logger.save_stepping_stone(
+        {
+            "stone_id": "stone_g66_peer_2",
+            "generation": 66,
+            "parent_policy_id": inc_fp,
+            "source_peer_id": "peer_2",
+            "source_run_kind": "select",
+            "source_batch_id": "sel_g66_peer_2",
+            "policy_code": stone_pol,
+            "skills": {},
+            "mechanism": "shop escape",
+            "target_functions": ["explore"],
+            "wins": 7,
+            "losses": 0,
+            "iqm_delta": 0.20,
+            "winsor_delta": 0.20,
+            "wilcoxon_p": 0.008,
+            "sign_p": 0.008,
+            "reject_reason": "cut_in_select_stage_by_stack",
+            "seeds_gained": [101, 102],
+            "seeds_lost": [103],
+        }
+    )
+
+    # 1. Verify Meta-Agent Directive Planner mock fallback
+    meta = SwarmMetaAgent(provider="mock", model="test-model", db_path=db_p)
+    dummy_rep = DeficitReport(
+        generation=67,
+        incumbent_avg_depth=3.5,
+        incumbent_max_depth=6,
+        regime="PLATEAU",
+        fail_clusters=[
+            DeficitCluster("c1", "death", "Starvation", 10, [101], "ev1"),
+            DeficitCluster("c2", "loop", "Search loop", 12, [102], "ev2"),
+        ],
+    )
+    dirs = meta.plan_peer_directives(
+        generation=67,
+        fresh_peer_ids=["peer_1", "peer_2", "peer_3", "peer_4"],
+        deficit_report=dummy_rep,
+        active_stepping_stone=logger.load_active_stepping_stone(inc_fp),
+    )
+    assert [d["peer_id"] for d in dirs] == ["peer_1", "peer_2", "peer_3", "peer_4"]
+    assert all("peer_rev" in d["exclude_overlap"] for d in dirs)
+
+    # 2. Verify SwarmOrchestrator launches 1 Revision (peer_rev with stone_pol) + 4 Fresh (peer_1..4 with inc_pol)
+    class _StubPool:
+        benchmark = "nethack"
+
+        def evaluate_batch(self, batch_id="", priority_seeds=None, **kwargs):
+            return {
+                "batch_id": batch_id,
+                "runs": [
+                    {
+                        "run_id": f"{batch_id}_{s}",
+                        "seed": s,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 50,
+                        "turns": 50,
+                        "end_reason": "killed",
+                        "ticks": [
+                            {
+                                "turn": 1,
+                                "step_idx": 1,
+                                "depth": 2,
+                                "hp": 10,
+                                "max_hp": 10,
+                            }
+                        ],
+                    }
+                    for s in (priority_seeds or [1, 2])
+                ],
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "lox.engine.swarm_orchestrator.PersistentEvalPool",
+        lambda *a, **k: _StubPool(),
+    )
+    orch = SwarmCampaignOrchestrator(
+        db_path=db_p,
+        workspace_dir=str(ws_p),
+        frontier_dir=fr_p,
+        provider="mock",
+        model="mock-model",
+        num_workers=4,
+        seeds_per_batch=4,
+    )
+    seen_starts: dict[str, tuple[str, bool]] = {}
+
+    def _fake_peer_cycle(
+        self_peer,
+        generation,
+        deficit_report,
+        claimed_deficit,
+        current_policy,
+        current_skills,
+        **kwargs,
+    ):
+        seen_starts[self_peer.peer_id] = (
+            current_policy,
+            kwargs.get("stepping_stone") is not None,
+        )
+        return PeerCandidate(
+            peer_id=self_peer.peer_id,
+            claimed_deficit_id=claimed_deficit.cluster_id,
+            claimed_label=claimed_deficit.label,
+            policy_code=inc_pol,
+            skills={},
+            sandbox_passed=False,
+            error="noop_test",
+        )
+
+    try:
+        with (
+            patch(
+                "lox.author.swarm_deficits.DeficitAnalyzer.analyze",
+                lambda *a, **k: dummy_rep,
+            ),
+            patch(
+                "lox.author.swarm_peer.SwarmPeerAgent.run_cycle",
+                _fake_peer_cycle,
+            ),
+        ):
+            orch.run_generation(67)
+    finally:
+        orch.close()
+
+    assert set(seen_starts.keys()) == {
+        "peer_rev",
+        "peer_1",
+        "peer_2",
+        "peer_3",
+        "peer_4",
+    }
+    assert seen_starts["peer_rev"] == (stone_pol, True)
+    for fp_id in ("peer_1", "peer_2", "peer_3", "peer_4"):
+        assert seen_starts[fp_id] == (inc_pol, False)
+
+    # After 1 revision attempt, revision_count incremented to 1 (still active for 1 more try)
+    st_after = logger.load_active_stepping_stone(inc_fp, max_revisions=2)
+    assert st_after is not None and st_after["revision_count"] == 1

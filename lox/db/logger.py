@@ -44,7 +44,8 @@ class BatchDatabaseLogger:
     def __init__(
         self,
         db_path: str = DEFAULT_DB_PATH,
-        max_tick_runs_per_batch: int = 1000,
+        max_tick_runs_per_batch: int = 100_000,
+        prune_ticks: bool = False,
     ):
         import os
 
@@ -52,6 +53,7 @@ class BatchDatabaseLogger:
 
         self.db_path = db_path
         self.max_tick_runs_per_batch = max_tick_runs_per_batch
+        self.prune_ticks = bool(prune_ticks)
         if os.path.abspath(db_path) not in _INITIALIZED_DBS:
             con = init_db(self.db_path)
             con.close()
@@ -244,6 +246,9 @@ class BatchDatabaseLogger:
                     "achievements": [int(r.get("achievements", 0) or 0) for r in runs],
                     "is_shard": [bool(r.get("is_shard", False)) for r in runs],
                     "shard_id": [str(r.get("shard_id", "")) for r in runs],
+                    "run_kind": [str(r.get("run_kind") or "champion") for r in runs],
+                    "peer_id": [str(r.get("peer_id") or "") for r in runs],
+                    "attempt_num": [int(r.get("attempt_num", 0) or 0) for r in runs],
                     "created_at": [datetime.datetime.now()] * len(runs),
                 }
                 run_tbl = pa.Table.from_pydict(run_cols)
@@ -347,9 +352,9 @@ class BatchDatabaseLogger:
                     )
                     con.unregister("_temp_ticks")
 
-                    # Prune ticks from old superseded batches every 5 generations so per-batch commits stay fast
-                    # while preserving 100% full ticks for champion, recent, pilot, and outlier runs.
-                    if int(generation) % 5 == 0:
+                    # Only prune ticks when explicitly opted in (`prune_ticks=True`).
+                    # Default preserves 100% of ticks across all runs for holistic querying.
+                    if self.prune_ticks and int(generation) % 5 == 0:
                         con.execute(
                             """
                             DELETE FROM ticks
@@ -1005,7 +1010,10 @@ class BatchDatabaseLogger:
         current_generation: int,
         keep_generations: int = 20,
         keep_recent_generations: int | None = None,
+        force: bool = False,
     ) -> dict[str, int]:
+        if not self.prune_ticks and not force:
+            return {"ticks_pruned": 0, "runs_pruned": 0}
         keep = (
             keep_recent_generations
             if keep_recent_generations is not None
@@ -1180,5 +1188,393 @@ class BatchDatabaseLogger:
                 con.execute("ROLLBACK")
             except Exception:
                 pass
+        finally:
+            con.close()
+
+    @_db_write_locked
+    def save_runs_and_ticks(
+        self,
+        batch_id: str,
+        generation: int,
+        run_kind: str,
+        peer_id: str,
+        runs: list[dict[str, Any]],
+        attempt_num: int = 0,
+        run_id_prefix: str | None = None,
+        parent_policy_id: str = "",
+        candidate_policy_id: str = "",
+    ) -> int:
+        """
+        Persists 100% of episode runs and 100% of their tick trajectories into the single
+        unified `runs` + `ticks` tables, tagged by `(run_kind, peer_id, attempt_num)`.
+        Used for peer `micro_pilot`, `micro_pilot_baseline`, `incubate`, `incubate_baseline`,
+        `select`, `select_incumbent`, and `confirm_challenger` evaluations so agents can
+        query any run holistically via `runs`, `ticks`, `peer_ticks`, or `all_ticks`.
+        Returns the number of tick rows written.
+        """
+        if not runs:
+            return 0
+        norm_runs: list[EpisodeRun] = [normalize_episode_run(r) for r in runs]
+        now = datetime.datetime.now()
+        kind_clean = str(run_kind or "peer").strip().lower()
+        peer_clean = str(peer_id or "").strip()
+        prefix = (
+            str(run_id_prefix)
+            if run_id_prefix
+            else f"g{int(generation)}_{peer_clean or 'peer'}_{kind_clean}"
+            + (f"_a{int(attempt_num)}" if int(attempt_num) > 0 else "")
+        )
+
+        assigned_rids: list[str] = []
+        seen_rids: dict[str, int] = {}
+        for idx, r in enumerate(norm_runs):
+            sd = int(r.get("seed", idx) or 0)
+            sh_id = str(r.get("shard_id", "") or "").strip()
+            base_rid = f"{prefix}_sh{sh_id}_s{sd}" if sh_id else f"{prefix}_s{sd}"
+            dup_n = seen_rids.get(base_rid, 0)
+            seen_rids[base_rid] = dup_n + 1
+            rid = base_rid if dup_n == 0 else f"{base_rid}_d{dup_n}"
+            assigned_rids.append(rid)
+
+        con = connect_db(self.db_path, read_only=False)
+        ticks_written = 0
+        try:
+            con.execute("BEGIN TRANSACTION")
+
+            run_cols = {
+                "run_id": assigned_rids,
+                "batch_id": [str(batch_id)] * len(norm_runs),
+                "generation": [int(generation)] * len(norm_runs),
+                "seed": [int(r.get("seed", 0) or 0) for r in norm_runs],
+                "role": [str(r.get("role", "val-hum-law-fem")) for r in norm_runs],
+                "depth": [int(r.get("depth", 1) or 1) for r in norm_runs],
+                "max_depth": [int(r.get("max_depth", 1) or 1) for r in norm_runs],
+                "score": [int(r.get("score", 0) or 0) for r in norm_runs],
+                "turns": [int(r.get("turns", 0) or 0) for r in norm_runs],
+                "steps": [int(r.get("steps", 0) or 0) for r in norm_runs],
+                "xp_level": [int(r.get("xp_level", 1) or 1) for r in norm_runs],
+                "final_hp": [int(r.get("final_hp", 0) or 0) for r in norm_runs],
+                "max_hp": [int(r.get("max_hp", 0) or 0) for r in norm_runs],
+                "final_ac": [int(r.get("final_ac", 10) or 10) for r in norm_runs],
+                "gold": [int(r.get("gold", 0) or 0) for r in norm_runs],
+                "end_reason": [str(r.get("end_reason", "ended")) for r in norm_runs],
+                "death_message": [str(r.get("death_message", "")) for r in norm_runs],
+                "is_outlier_good": [
+                    bool(r.get("is_outlier_good", False)) for r in norm_runs
+                ],
+                "outlier_z_score": [
+                    float(r.get("outlier_z_score", 0.0) or 0.0) for r in norm_runs
+                ],
+                "batch_percentile": [
+                    float(r.get("batch_percentile", 0.0) or 0.0) for r in norm_runs
+                ],
+                "summary_digest": [str(r.get("summary_digest", "")) for r in norm_runs],
+                "game_log": [str(r.get("game_log", "")) for r in norm_runs],
+                "milestones_json": [
+                    (
+                        r.get("milestones_json")
+                        if isinstance(r.get("milestones_json"), str)
+                        and not r.get("milestones")
+                        else json.dumps(
+                            r.get("milestones") or {},
+                            default=lambda o: (
+                                sorted(o) if isinstance(o, set) else str(o)
+                            ),
+                        )
+                    )
+                    for r in norm_runs
+                ],
+                "triggered_functions": [
+                    (
+                        r.get("triggered_functions")
+                        if isinstance(r.get("triggered_functions"), str)
+                        else json.dumps(
+                            r.get("triggered_functions")
+                            if r.get("triggered_functions") is not None
+                            else (r.get("functions_triggered") or {})
+                        )
+                    )
+                    for r in norm_runs
+                ],
+                "last_active_function": [
+                    str(r.get("last_active_function") or "root") for r in norm_runs
+                ],
+                "action_bytes": [
+                    bytes(r.get("action_bytes") or b"") for r in norm_runs
+                ],
+                "wall_ms": [float(r.get("wall_ms") or 0.0) for r in norm_runs],
+                "auto_esc_count": [
+                    int(r.get("auto_esc_count") or 0) for r in norm_runs
+                ],
+                "subgen_preemptions": [
+                    int(r.get("subgen_preemptions") or 0) for r in norm_runs
+                ],
+                "policy_exceptions": [
+                    int(r.get("policy_exceptions") or 0) for r in norm_runs
+                ],
+                "unique_tiles": [int(r.get("unique_tiles") or 0) for r in norm_runs],
+                "pct_wait": [float(r.get("pct_wait") or 0.0) for r in norm_runs],
+                "pct_search": [float(r.get("pct_search") or 0.0) for r in norm_runs],
+                "starved_with_food": [
+                    bool(r.get("starved_with_food", False)) for r in norm_runs
+                ],
+                "died_unarmored": [
+                    bool(r.get("died_unarmored", False)) for r in norm_runs
+                ],
+                "worn_oprop_count": [
+                    int(r.get("worn_oprop_count", 0) or 0) for r in norm_runs
+                ],
+                "dungeons_visited": [
+                    max(1, int(r.get("dungeons_visited", 1) or 1)) for r in norm_runs
+                ],
+                "achievements": [int(r.get("achievements", 0) or 0) for r in norm_runs],
+                "is_shard": [bool(r.get("is_shard", False)) for r in norm_runs],
+                "shard_id": [str(r.get("shard_id", "")) for r in norm_runs],
+                "run_kind": [kind_clean] * len(norm_runs),
+                "peer_id": [peer_clean] * len(norm_runs),
+                "attempt_num": [int(attempt_num)] * len(norm_runs),
+                "created_at": [now] * len(norm_runs),
+            }
+            run_tbl = pa.Table.from_pydict(run_cols)
+            run_cols_str = ", ".join(run_cols.keys())
+            con.register("_temp_peer_runs", run_tbl)
+            con.execute(
+                f"INSERT OR REPLACE INTO runs ({run_cols_str}) SELECT {run_cols_str} FROM _temp_peer_runs"
+            )
+            con.unregister("_temp_peer_runs")
+
+            tick_cols: dict[str, list[Any]] = {
+                "run_id": [],
+                "turn": [],
+                "step_idx": [],
+                "depth": [],
+                "dungeon_num": [],
+                "hp": [],
+                "max_hp": [],
+                "energy": [],
+                "ac": [],
+                "xp_level": [],
+                "hunger_state": [],
+                "condition_mask": [],
+                "y": [],
+                "x": [],
+                "action_name": [],
+                "raw_key": [],
+                "active_function": [],
+                "byte_offset": [],
+                "message": [],
+                "visible_monsters": [],
+                "inventory_summary": [],
+            }
+            for rid, r in zip(assigned_rids, norm_runs):
+                for t in r.get("ticks", []) or []:
+                    if not isinstance(t, dict):
+                        continue
+                    tick_cols["run_id"].append(rid)
+                    tick_cols["turn"].append(int(t.get("turn", 0) or 0))
+                    tick_cols["step_idx"].append(int(t.get("step_idx", 0) or 0))
+                    tick_cols["depth"].append(int(t.get("depth", 1) or 1))
+                    tick_cols["dungeon_num"].append(int(t.get("dungeon_num", 0) or 0))
+                    tick_cols["hp"].append(int(t.get("hp", 0) or 0))
+                    tick_cols["max_hp"].append(int(t.get("max_hp", 0) or 0))
+                    tick_cols["energy"].append(int(t.get("energy", 0) or 0))
+                    tick_cols["ac"].append(int(t.get("ac", 10) or 10))
+                    tick_cols["xp_level"].append(int(t.get("xp_level", 1) or 1))
+                    tick_cols["hunger_state"].append(int(t.get("hunger_state", 1) or 1))
+                    tick_cols["condition_mask"].append(
+                        int(t.get("condition_mask", 0) or 0)
+                    )
+                    tick_cols["y"].append(int(t.get("y", 0) or 0))
+                    tick_cols["x"].append(int(t.get("x", 0) or 0))
+                    tick_cols["action_name"].append(str(t.get("action_name", "")))
+                    tick_cols["raw_key"].append(int(t.get("raw_key", 0) or 0))
+                    tick_cols["active_function"].append(
+                        str(t.get("active_function", "root"))
+                    )
+                    tick_cols["byte_offset"].append(int(t.get("byte_offset", 0) or 0))
+                    tick_cols["message"].append(str(t.get("message", "")))
+                    tick_cols["visible_monsters"].append(
+                        str(t.get("visible_monsters", ""))
+                    )
+                    tick_cols["inventory_summary"].append(
+                        str(t.get("inventory_summary", ""))
+                    )
+
+            ticks_written = len(tick_cols["run_id"])
+            if ticks_written > 0:
+                tick_tbl = pa.Table.from_pydict(tick_cols)
+                tick_cols_str = ", ".join(tick_cols.keys())
+                placeholders = ", ".join("?" for _ in assigned_rids)
+                con.execute(
+                    f"DELETE FROM ticks WHERE run_id IN ({placeholders})",
+                    assigned_rids,
+                )
+                con.register("_temp_peer_ticks", tick_tbl)
+                con.execute(
+                    f"INSERT INTO ticks ({tick_cols_str}) SELECT {tick_cols_str} FROM _temp_peer_ticks"
+                )
+                con.unregister("_temp_peer_ticks")
+
+            con.execute("COMMIT")
+            return ticks_written
+        except Exception as exc:
+            _LOG.warning(
+                "Failed saving runs/ticks (%s, %s, n=%d): %s",
+                kind_clean,
+                peer_clean,
+                len(norm_runs),
+                exc,
+            )
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            return 0
+        finally:
+            con.close()
+
+    @_db_write_locked
+    def save_stepping_stone(self, stone: dict[str, Any]) -> None:
+        """Persists a high-signal unpromoted stepping stone into `stepping_stones`."""
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                """
+                INSERT OR REPLACE INTO stepping_stones (
+                    stone_id, generation, parent_policy_id, source_peer_id,
+                    source_run_kind, source_batch_id, revision_count, status,
+                    policy_code, skills_json, mechanism, target_functions,
+                    wins, losses, iqm_delta, winsor_delta, wilcoxon_p, sign_p,
+                    reject_reason, seeds_gained_json, seeds_lost_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(stone["stone_id"]),
+                    int(stone.get("generation", 0) or 0),
+                    str(stone.get("parent_policy_id", "") or ""),
+                    str(stone.get("source_peer_id", "") or ""),
+                    str(stone.get("source_run_kind", "select") or "select"),
+                    str(stone.get("source_batch_id", "") or ""),
+                    int(stone.get("revision_count", 0) or 0),
+                    str(stone.get("status", "active") or "active"),
+                    str(stone.get("policy_code", "") or ""),
+                    json.dumps(stone.get("skills") or {}),
+                    str(stone.get("mechanism", "") or "")[:1000],
+                    json.dumps(stone.get("target_functions") or []),
+                    int(stone.get("wins", 0) or 0),
+                    int(stone.get("losses", 0) or 0),
+                    float(stone.get("iqm_delta", 0.0) or 0.0),
+                    float(stone.get("winsor_delta", 0.0) or 0.0),
+                    float(stone.get("wilcoxon_p", 1.0) or 1.0),
+                    float(stone.get("sign_p", 1.0) or 1.0),
+                    str(stone.get("reject_reason", "") or "")[:300],
+                    json.dumps(list(stone.get("seeds_gained") or [])),
+                    json.dumps(list(stone.get("seeds_lost") or [])),
+                    datetime.datetime.now(),
+                ],
+            )
+        finally:
+            con.close()
+
+    def load_active_stepping_stone(
+        self,
+        parent_policy_id: str,
+        max_revisions: int = 2,
+    ) -> dict[str, Any] | None:
+        """Loads the strongest active unpromoted stepping stone for `parent_policy_id`."""
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            row = con.execute(
+                """
+                SELECT
+                    stone_id, generation, parent_policy_id, source_peer_id,
+                    source_run_kind, source_batch_id, revision_count, status,
+                    policy_code, skills_json, mechanism, target_functions,
+                    wins, losses, iqm_delta, winsor_delta, wilcoxon_p, sign_p,
+                    reject_reason, seeds_gained_json, seeds_lost_json
+                FROM stepping_stones
+                WHERE status = 'active'
+                  AND parent_policy_id = ?
+                  AND revision_count < ?
+                ORDER BY LEAST(COALESCE(wilcoxon_p, 1.0), COALESCE(sign_p, 1.0)) ASC,
+                         GREATEST(COALESCE(winsor_delta, 0.0), COALESCE(iqm_delta, 0.0)) DESC,
+                         generation DESC
+                LIMIT 1
+                """,
+                [str(parent_policy_id or ""), int(max_revisions)],
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "stone_id": str(row[0]),
+                "generation": int(row[1] or 0),
+                "parent_policy_id": str(row[2] or ""),
+                "source_peer_id": str(row[3] or ""),
+                "source_run_kind": str(row[4] or "select"),
+                "source_batch_id": str(row[5] or ""),
+                "revision_count": int(row[6] or 0),
+                "status": str(row[7] or "active"),
+                "policy_code": str(row[8] or ""),
+                "skills": json.loads(row[9] or "{}"),
+                "mechanism": str(row[10] or ""),
+                "target_functions": json.loads(row[11] or "[]"),
+                "wins": int(row[12] or 0),
+                "losses": int(row[13] or 0),
+                "iqm_delta": float(row[14] or 0.0),
+                "winsor_delta": float(row[15] or 0.0),
+                "wilcoxon_p": float(row[16] if row[16] is not None else 1.0),
+                "sign_p": float(row[17] if row[17] is not None else 1.0),
+                "reject_reason": str(row[18] or ""),
+                "seeds_gained": json.loads(row[19] or "[]"),
+                "seeds_lost": json.loads(row[20] or "[]"),
+            }
+        except Exception:
+            return None
+        finally:
+            con.close()
+
+    @_db_write_locked
+    def increment_stepping_stone_revision(
+        self, stone_id: str, max_revisions: int = 2
+    ) -> None:
+        """Increments `revision_count` on `stone_id` and retires it once `max_revisions` is reached."""
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                """
+                UPDATE stepping_stones
+                SET revision_count = revision_count + 1,
+                    status = CASE
+                        WHEN revision_count + 1 >= ? THEN 'retired'
+                        ELSE status
+                    END
+                WHERE stone_id = ?
+                """,
+                [int(max_revisions), str(stone_id)],
+            )
+        finally:
+            con.close()
+
+    @_db_write_locked
+    def update_stepping_stone_status(self, stone_id: str, status: str) -> None:
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                "UPDATE stepping_stones SET status = ? WHERE stone_id = ?",
+                [str(status), str(stone_id)],
+            )
+        finally:
+            con.close()
+
+    @_db_write_locked
+    def retire_stepping_stones_for_parent(
+        self, parent_policy_id: str, new_status: str = "superseded"
+    ) -> None:
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                "UPDATE stepping_stones SET status = ? WHERE parent_policy_id = ? AND status = 'active'",
+                [str(new_status), str(parent_policy_id or "")],
+            )
         finally:
             con.close()

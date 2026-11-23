@@ -164,13 +164,16 @@ Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, comb
 {schema_md}
 
 ### SQL Templates (`query_db`)
-1. `SELECT generation, candidate_policy_id, avg_depth, p90_depth, max_depth, avg_score, avg_turns, hypothesis_passed FROM batches ORDER BY generation DESC LIMIT 10;`
+1. `SELECT generation, candidate_policy_id, avg_depth, p90_depth, max_depth, avg_score, avg_turns, hypothesis_passed FROM batches WHERE mode = 'SWARM' ORDER BY generation DESC LIMIT 10;`
 2. `SELECT function_name, episodes_triggered, total_calls, total_turns_active, stagnation_share, livelock_score, liblit_failure_score, ochiai_good_run_score FROM champion_function_stats ORDER BY total_turns_active DESC LIMIT 20;`
 3. `SELECT run_id, seed, depth, max_depth, final_ac, xp_level, turns, unique_tiles, policy_exceptions, last_active_function, end_reason, summary_digest FROM champion_runs ORDER BY max_depth ASC, turns DESC LIMIT 8;`
-4. `SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth FROM expert_runs;`
+4. `SELECT run_kind, seed, turn, depth, hp, max_hp, active_function, action_name, message FROM peer_ticks WHERE generation = <G> AND peer_id = '<your_peer_id>' AND attempt_num = <N> AND seed = <S> ORDER BY run_kind, turn LIMIT 30;`
+5. `SELECT COUNT(*) AS n, ROUND(AVG(final_ac),2) AS ac, ROUND(AVG(xp_level),2) AS xl, ROUND(AVG(max_depth),1) AS depth FROM expert_runs;`
 
 ### Swarm Peer Rules & Investigation Protocol
-- **Never Guess**: Check C rules via `query_wiki` / `read_wiki_article` / `query_monster` / `query_item` and inspect code/data via `query_db` / `query_theories` / `diff_policies` / `read_skill(name, start_line, end_line)` / `read_symbol` / `find_references` / `grep_skills` / `architecture_map` / `benchmark_expert_parity`.
+- **Batch Parallel Tool Calls**: Whenever you need multiple independent reads or queries (e.g. `query_db` + `read_skill` + `query_wiki`/`query_theories`), emit ALL of them in the **same turn** instead of 1 small tool call per turn. Reserve your turn budget for iterative hypothesis testing and post-`dry_run_policy` diagnosis.
+- **Never Guess — Query Raw Ticks**: Check C rules via `query_wiki` / `read_wiki_article` / `query_monster` / `query_item` and inspect code/data via `query_db` (`champion_runs`, `champion_ticks`, `peer_runs`, `peer_ticks`, `all_ticks`) / `query_theories` / `diff_policies` / `read_skill(name, start_line, end_line)` / `read_symbol` / `find_references` / `grep_skills` / `architecture_map` / `benchmark_expert_parity`.
+- **Self-Diagnose `dry_run_policy` via SQL**: Every `dry_run_policy` micro-pilot logs 100% of candidate (`run_kind='micro_pilot'`) and paired baseline (`run_kind='micro_pilot_baseline'`) trajectories into unified `runs` + `ticks` (`peer_ticks` / `all_ticks`). Whenever a `TARGET` seed stays unchanged or a `GUARD`/`PROBE` seed regresses, **query `peer_ticks` directly with `query_db`** for that exact `(generation, peer_id, attempt_num, seed)` to compare candidate vs baseline actions, messages, and active functions before revising—never guess blindly or re-run identical code.
 - **Anti-Recycling & Grounding**: Before first `dry_run_policy`, check `query_theories` + `query_wiki` (never tweak `REJECTED` mechanisms; protect high-Ochiai `D_succ` goals/functions).
 - **Option-A Goal & Domain Architecture**:
   - `Policy.step(state)` observes `self.ws = WorldState()`, checks prompts/survival/combat interrupts, and ticks/preempts committed goals in `GoalRunner` (`skills/goals/core.py`). Never fall through silently to `Action.WAIT`.
@@ -563,8 +566,8 @@ Follow these stages inside THIS conversation (your context, DB queries, and expe
         return f"""### Gen {generation} — Mode: `SWARM_PEER`
 {digest_block}{existing_policy_block}{skills_block}
 ### Task (`SWARM_PEER`)
-- Batch empirical research in Turns 1–2 (at least 1 empirical call: `query_db` on `champion_ticks`, `query_wiki`/`query_monster`/`query_item`, or `query_theories`); use the pre-injected `Architecture Map (Option A)` to read only the 1–2 target symbols/files (`read_symbol`, ranged `read_skill`). Never repeat rejected ideas from `Recent Experiment & Rejection Memory`.
-- Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions). Inspect the **Paired Micro-Pilot Diff**: tighten only if a `GUARD` seed shows `⚠️ REGRESSION` (never over-tighten on `OK (non-regressing drift)`), and broaden if `TARGET` seeds are `UNCHANGED` so your patch actually fires on fresh tournament seeds.
+- **Batch independent tool calls in parallel** during Turns 1–2 (e.g. combine `query_db`, `read_skill`/`read_symbol`, `query_wiki`/`query_theories` in the same turn rather than 1 tool call per turn). Never repeat rejected ideas from `Recent Experiment & Rejection Memory`, and honor any `exclude_overlap` scope assigned to you.
+- Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions). After `dry_run_policy`, **query `peer_ticks` / `all_ticks` via `query_db`** on any regressed `GUARD`/`PROBE` seed or unchanged `TARGET` seed to observe the exact divergence turn, actions, and messages before iterating.
 - Output brief ```yaml``` hypothesis (plus optional `skills_to_prune: [...]`) and final `<skill_code module="...">` / `<policy_code>` XML blocks.
 """
 
