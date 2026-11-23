@@ -27,9 +27,11 @@ _DB_CONN_LOCK = threading.RLock()
 _DB_INIT_LOCK = threading.Lock()
 _INITIALIZED_DBS: set[str] = set()
 
-# Canonical SQL predicate filtering out micro-shard evaluations from full-episode aggregations
+# Canonical SQL predicate filtering out micro-shard & non-champion peer/pilot runs from champion aggregations
 NON_SHARD_RUNS_SQL = (
-    "COALESCE(is_shard, FALSE) = FALSE AND COALESCE(run_id, '') NOT LIKE 'shard_%'"
+    "COALESCE(is_shard, FALSE) = FALSE "
+    "AND COALESCE(run_id, '') NOT LIKE 'shard_%' "
+    "AND COALESCE(run_kind, 'champion') = 'champion'"
 )
 
 

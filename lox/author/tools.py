@@ -2907,6 +2907,7 @@ class AuthorToolRegistry:
                             WHERE octet_length(r.action_bytes) > 20
                               AND COALESCE(r.is_shard, FALSE) = FALSE
                               AND COALESCE(r.run_id, '') NOT LIKE 'shard_%'
+                              AND COALESCE(r.run_kind, 'champion') = 'champion'
                               AND r.end_reason NOT IN ('ascended', 'max_steps')
                               AND (
                                   NOT EXISTS (SELECT 1 FROM batches WHERE hypothesis_passed = TRUE OR batch_id LIKE '%_inc_%')

@@ -770,3 +770,90 @@ def test_gen62_single_mechanism_prompt_phrase_grouping_and_zero_loss_stack(tmp_p
     assert any("stack_" in b for b in zpool.seen_batches)
     assert v62.promoted is True, v62.reason
     assert v62.winner_id == "stack_peer_a_peer_b"
+
+
+def test_deficit_analyzer_excludes_non_champion_peer_and_pilot_runs(tmp_path):
+    """
+    Regression test for G68-G71 leak: `micro_pilot_baseline` (`peer_mp_inc_*`),
+    `incubate_baseline` (`incubate_inc_*`), `select`, and `confirm_challenger`
+    rows stored in the unified `runs` table must NEVER pollute `DeficitAnalyzer`
+    (even though their batch_ids contain `_inc_`).
+    """
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import init_db
+
+    dbp = str(tmp_path / "no_leak.duckdb")
+    init_db(dbp).close()
+    logger = BatchDatabaseLogger(db_path=dbp)
+
+    # 1. Seed 16 clean champion runs at Dlvl 2-3 (starved / max_steps)
+    logger.save_policy(
+        "pol_g71", 71, "SWARM", "class Policy: pass", "", {}, 2.5, 3, is_promoted=True
+    )
+    champ_runs = [
+        {
+            "run_id": f"champ_71_{i}",
+            "seed": 1000 + i,
+            "depth": 2,
+            "max_depth": 2 if i < 12 else 3,
+            "score": 200,
+            "turns": 1500,
+            "end_reason": "starved",
+            "pct_search": 40.0,
+            "unique_tiles": 200,
+            "game_log": "T1500: You faint from lack of food.",
+            "run_kind": "champion",
+        }
+        for i in range(16)
+    ]
+    logger.save_batch(
+        batch_id="batch_swarm_g71_champ",
+        generation=71,
+        mode="SWARM",
+        parent_policy_id="none",
+        candidate_policy_id="pol_g71",
+        target_functions=["step"],
+        runs=champ_runs,
+        episodes_discarded=0,
+        batch_metrics={"avg_depth": 2.25, "max_depth": 3, "avg_score": 200.0},
+        verdict={"passed": True, "reason": "ok"},
+    )
+
+    # 2. Flood unified `runs` with 12 duplicate Dlvl-11 guard copies whose batch_ids match `*_inc_*`
+    phantom_runs = [
+        {
+            "seed": 99999,
+            "depth": 11,
+            "max_depth": 11,
+            "score": 5000,
+            "turns": 3750,
+            "end_reason": "It bites!  It bites! | You die",
+            "game_log": "[T3750 D11 N] It bites!  It bites! | You die",
+        }
+        for _ in range(12)
+    ]
+    logger.save_runs_and_ticks(
+        batch_id="peer_mp_inc_g71_peer_1_a1_12345",
+        generation=71,
+        run_kind="micro_pilot_baseline",
+        peer_id="peer_1",
+        attempt_num=1,
+        runs=phantom_runs,
+    )
+    logger.save_runs_and_ticks(
+        batch_id="incubate_inc_g71_12345",
+        generation=71,
+        run_kind="incubate_baseline",
+        peer_id="incumbent",
+        runs=phantom_runs[:4],
+    )
+
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=72, current_policy="class Policy: pass"
+    )
+    assert "N=16" in rep.vital_summary, rep.vital_summary
+    assert 99999 not in rep.d_succ_seeds
+    assert all("It bites!" not in c.label for c in rep.fail_clusters), [
+        c.label for c in rep.fail_clusters
+    ]

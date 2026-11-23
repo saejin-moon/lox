@@ -272,7 +272,9 @@ class DeficitAnalyzer:
             t_row = con.execute(
                 "SELECT COALESCE(MIN(r.generation), 0) "
                 "FROM ticks t JOIN runs r ON t.run_id = r.run_id "
-                "WHERE COALESCE(r.is_shard, FALSE) = FALSE AND COALESCE(r.run_id, '') NOT LIKE 'shard_%'"
+                "WHERE COALESCE(r.is_shard, FALSE) = FALSE "
+                "AND COALESCE(r.run_id, '') NOT LIKE 'shard_%' "
+                "AND COALESCE(r.run_kind, 'champion') = 'champion'"
             ).fetchone()
             if t_row and t_row[0] is not None:
                 report.ticks_min_gen = int(t_row[0])

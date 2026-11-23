@@ -441,6 +441,7 @@ def mine_organic_scenarios(
                       AND OCTET_LENGTH(action_bytes) > 12
                       AND COALESCE(is_shard, FALSE) = FALSE
                       AND COALESCE(run_id, '') NOT LIKE 'shard_%'
+                      AND COALESCE(run_kind, 'champion') = 'champion'
                       AND ({where_sql})
                     ORDER BY {order_sql}
                     LIMIT 6
