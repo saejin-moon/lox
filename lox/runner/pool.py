@@ -33,6 +33,7 @@ from lox.env.base import EnvHarness
 from lox.env.harness import policy_handles_menus
 from lox.lang.compiler import CompiledPolicy, compile_policy_package
 from lox.lang.instrument import PolicyLoopError
+from lox.lang.validator import PolicyValidationError
 from lox.ui.console import ui
 
 # Process-local persistent state inside worker processes
@@ -164,19 +165,21 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         harness.max_steps = max_steps
         if harness.done:
             msg = getattr(state, "message", "") or ""
+            wall_ms = (time.perf_counter() - t0) * 1000.0
             return EpisodeRun(
                 {
                     "triggered": True,
                     "is_shard": True,
-                    "shard_id": task.get("shard_id") or "",
+                    "shard_id": str(task.get("shard_id") or ""),
                     "run_id": run_id,
                     "seed": seed,
+                    "role": role,
                     "steps": 0,
                     "turns": int(getattr(state, "turn", 0) or 0),
                     "score": int(getattr(state, "score", 0) or 0),
                     "gold": int(getattr(state, "gold", 0) or 0),
-                    "max_depth": int(getattr(state, "depth", 1) or 1),
-                    "depth": int(getattr(state, "depth", 1) or 1),
+                    "max_depth": max(1, int(getattr(state, "depth", 1) or 1)),
+                    "depth": max(1, int(getattr(state, "depth", 1) or 1)),
                     "final_hp": int(getattr(state, "hp", 0) or 0),
                     "max_hp": int(getattr(state, "max_hp", 0) or 0),
                     "final_ac": int(
@@ -184,10 +187,21 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                         if getattr(state, "ac", None) is not None
                         else 10
                     ),
-                    "xp_level": int(getattr(state, "xp_level", 1) or 1),
-                    "end_reason": msg.split(".")[0][:60] if msg else "died",
+                    "xp_level": max(1, int(getattr(state, "xp_level", 1) or 1)),
+                    "achievements": 0,
+                    "end_reason": msg.split(".")[0][:60]
+                    if msg
+                    else "shard_already_done",
                     "death_message": msg[:160],
+                    "summary_digest": f"Overview: Shard already terminated before replay end ({msg[:80] or 'done'})",
+                    "game_log": msg[:160],
+                    "milestones": {"shard_already_done": True},
                     "action_bytes": bytes(harness.action_bytes),
+                    "step_byte_offsets": list(
+                        getattr(harness, "step_byte_offsets", ())
+                    ),
+                    "last_active_function": "root",
+                    "wall_ms": round(wall_ms, 2),
                     "auto_esc_count": 0,
                     "subgen_preemptions": 0,
                     "policy_exceptions": 0,
@@ -253,16 +267,18 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     last_inv_items: list[Any] = []
     last_inv_summary: str = ""
 
-    def _summarize_inv(st_obj: Any) -> tuple[list[Any], str]:
+    def _summarize_inv(st_obj: Any) -> tuple[bool, list[Any], str]:
         if not hasattr(st_obj, "inventory"):
-            return [], ""
+            return False, [], ""
         try:
             raw_inv = (
                 st_obj.inventory() if callable(st_obj.inventory) else st_obj.inventory
             )
             if not raw_inv:
-                return [], ""
-            items_list = list(raw_inv)
+                return True, [], ""
+            items_list = (
+                list(raw_inv) if isinstance(raw_inv, (list, tuple, set)) else []
+            )
             parts: list[str] = []
             for it in items_list:
                 ltr = getattr(it, "letter", "?")
@@ -278,11 +294,11 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
                     tags.append("cursed")
                 tag_s = f"({','.join(tags)})" if tags else ""
                 parts.append(f"{ltr}:{nm}{tag_s}")
-            return items_list, "; ".join(parts)
+            return True, items_list, "; ".join(parts)
         except Exception:
-            return [], ""
+            return False, [], ""
 
-    last_inv_items, last_inv_summary = _summarize_inv(state)
+    _inv_ok0, last_inv_items, last_inv_summary = _summarize_inv(state)
     last_depth = max(1, int(getattr(state, "depth", 1) or 1))
     exception_tracebacks: list[str] = []
     info: dict[str, Any] = {}
@@ -410,12 +426,12 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             last_turn = next_turn
 
         if not done and (step_idx == 1 or next_d != prev_d or step_idx % 20 == 0):
-            cur_items, cur_sum = _summarize_inv(next_state)
-            if cur_items:
+            inv_ok, cur_items, cur_sum = _summarize_inv(next_state)
+            if inv_ok:
                 last_inv_items, last_inv_summary = cur_items, cur_sum
         elif done:
-            cur_items, cur_sum = _summarize_inv(state)
-            if cur_items:
+            inv_ok, cur_items, cur_sum = _summarize_inv(state)
+            if inv_ok:
                 last_inv_items, last_inv_summary = cur_items, cur_sum
 
         if record_ticks:
@@ -562,8 +578,9 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
     died_unarmored = False
 
     if not last_inv_items and hasattr(state, "inventory"):
-        last_inv_items, last_inv_summary = _summarize_inv(state)
+        _inv_ok_end, last_inv_items, last_inv_summary = _summarize_inv(state)
 
+    unworn_armor = False
     if last_inv_items:
         try:
             has_food = any(
@@ -589,23 +606,14 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             unworn_armor = False
 
-    from lox.lang.bt import extract_runner_leaf_errors
-
-    leaf_errors = extract_runner_leaf_errors(runner)
-    dedup_leaf_errs = list(dict.fromkeys(f"{n}: {e}" for n, e in leaf_errors))[:10]
     if isinstance(milestones, dict):
         milestones["final_inventory"] = last_inv_summary
         milestones["final_ac_true"] = last_ac
-        milestones["unworn_armor_in_pack"] = bool(locals().get("unworn_armor", False))
-        if dedup_leaf_errs:
-            milestones["leaf_errors"] = dedup_leaf_errs
-        all_tbs = list(dict.fromkeys([*exception_tracebacks, *dedup_leaf_errs]))[:8]
-        if all_tbs:
-            milestones["exception_tracebacks"] = all_tbs
-    if dedup_leaf_errs and "LeafErrors:" not in summary_digest:
-        summary_digest = (
-            f"{summary_digest}\nLeafErrors: {'; '.join(dedup_leaf_errs[:4])}"
-        )
+        milestones["unworn_armor_in_pack"] = bool(unworn_armor)
+        if exception_tracebacks:
+            milestones["exception_tracebacks"] = list(
+                dict.fromkeys(exception_tracebacks)
+            )[:8]
 
     total_steps = max(1, harness.step_count)
     pct_wait = round((wait_count / total_steps) * 100.0, 2)
@@ -627,9 +635,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             ),
             "max_depth": max_depth,
             "score": last_score,
-            "achievements": len(getattr(state, "achievements", ()))
-            if hasattr(state, "achievements")
-            else 0,
+            "achievements": 0,
             "turns": last_turn,
             "steps": harness.step_count,
             "xp_level": last_xl,
@@ -647,7 +653,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             "auto_esc_count": runner.auto_esc_count
             + int(getattr(harness, "prompt_aborts", 0)),
             "subgen_preemptions": runner.subgen_preemptions,
-            "policy_exceptions": runner.policy_exceptions + len(leaf_errors),
+            "policy_exceptions": runner.policy_exceptions,
             "unique_tiles": len(visited_positions),
             "pct_wait": pct_wait,
             "pct_search": pct_search,
@@ -700,11 +706,11 @@ class PersistentEvalPool:
         self.role = role
         self.max_steps = max_steps
         self.benchmark = benchmark
-        self._pool: mp.pool.Pool | None = None
+        self._pool: Any = None
         self._pool_lock = threading.RLock()
         self._cancel_epoch = mp.get_context("spawn").Value("i", 0)
 
-    def _ensure_pool(self) -> mp.pool.Pool | None:
+    def _ensure_pool(self) -> Any:
         if self.workers <= 1:
             return None
         with self._pool_lock:
@@ -740,7 +746,7 @@ class PersistentEvalPool:
         unreachable_abort_after: int = 500,
         shards: list[Any] | None = None,
         skills: dict[str, str] | None = None,
-        benchmark: str = "nethack",
+        benchmark: str | None = None,
         max_steps: int | None = None,
     ) -> dict[str, Any]:
         """Thread-safe entrypoint serializing concurrent pool access across peer threads."""
@@ -784,7 +790,7 @@ class PersistentEvalPool:
         unreachable_abort_after: int = 500,
         shards: list[Any] | None = None,
         skills: dict[str, str] | None = None,
-        benchmark: str = "nethack",
+        benchmark: str | None = None,
         max_steps: int | None = None,
     ) -> dict[str, Any]:
         """
@@ -837,22 +843,22 @@ class PersistentEvalPool:
                 return sh.get(attr, default)
             return default
 
-        shard_seeds = {int(_shard_val(x, "seed", 0)) for x in shard_queue}
-
-        # Build seed queue: priority_seeds first (excluding seeds already executed as shards), then sequential fresh seeds
-        used_seeds: set[int] = set(shard_seeds)
+        # Track full-episode seeds independently of shard seeds so paired full seeds
+        # are never dropped merely because a mid-game shard originated from the same seed.
+        used_full_seeds: set[int] = set()
         seed_queue: list[int] = []
         if priority_seeds:
             for s in priority_seeds:
                 si = int(s)
-                if si not in used_seeds:
-                    used_seeds.add(si)
+                if si not in used_full_seeds:
+                    used_full_seeds.add(si)
                     seed_queue.append(si)
 
         next_seed_cursor = int(seed_start)
         triggered_runs: list[dict[str, Any]] = []
         discarded_count = 0
         raw_done = 0
+        fresh_raw_done = 0
         total_steps = 0
         target_fns_called_count = 0
         registered_params: dict[str, Any] = {}
@@ -870,10 +876,16 @@ class PersistentEvalPool:
                 ):
                     needed = target_episodes - len(triggered_runs)
                     guaranteed_ready = len(shard_queue) + len(seed_queue)
-                    if guaranteed_ready > 0 or not target_fns:
+                    if not target_fns:
                         batch_capacity = min(
                             needed,
-                            guaranteed_ready if guaranteed_ready > 0 else needed,
+                            max_raw_episodes - raw_done,
+                        )
+                    elif guaranteed_ready > 0:
+                        # Fill at least `workers` (up to `needed`) so small priority/shard queues never starve the pool.
+                        batch_capacity = min(
+                            max(guaranteed_ready, min(needed, self.workers)),
+                            needed,
                             max_raw_episodes - raw_done,
                         )
                     else:
@@ -920,10 +932,10 @@ class PersistentEvalPool:
                             if seed_queue:
                                 s = seed_queue.pop(0)
                             else:
-                                while next_seed_cursor in used_seeds:
+                                while next_seed_cursor in used_full_seeds:
                                     next_seed_cursor += 1
                                 s = next_seed_cursor
-                                used_seeds.add(s)
+                                used_full_seeds.add(s)
                                 next_seed_cursor += 1
 
                             is_pri = s in unconditional_seeds_set
@@ -964,8 +976,15 @@ class PersistentEvalPool:
                         if res.get("cancelled"):
                             continue
                         raw_done += 1
+                        res_seed = int(res.get("seed", -1))
+                        is_fresh_trigger_ep = (
+                            not bool(res.get("is_shard", False))
+                            and res_seed not in unconditional_seeds_set
+                        )
+                        if is_fresh_trigger_ep:
+                            fresh_raw_done += 1
                         total_steps += int(res.get("steps", 0))
-                        if res.get("registered_params") and not registered_params:
+                        if res.get("registered_params"):
                             registered_params.update(res["registered_params"])
 
                         if target_fns:
@@ -1025,10 +1044,10 @@ class PersistentEvalPool:
                         if len(triggered_runs) >= target_episodes:
                             break
 
-                        # Unreachable function circuit breaker: if >= unreachable_abort_after raw episodes ran and 0 target calls
+                        # Unreachable function circuit breaker: count only fresh trigger-enforced seeds
                         if (
                             target_fns
-                            and raw_done
+                            and fresh_raw_done
                             >= min(unreachable_abort_after, max_raw_episodes)
                             and target_fns_called_count == 0
                         ):
@@ -1051,6 +1070,9 @@ class PersistentEvalPool:
                                 pass
                         break
                 break
+            except (PolicyValidationError, SyntaxError):
+                # Deterministic policy compilation/validation failures will not heal by respawning workers
+                raise
             except Exception as pool_exc:
                 if attempt == 0 and self.workers > 1:
                     ui.warn(
@@ -1063,16 +1085,18 @@ class PersistentEvalPool:
                     triggered_runs.clear()
                     discarded_count = 0
                     raw_done = 0
+                    fresh_raw_done = 0
                     total_steps = 0
                     target_fns_called_count = 0
                     shard_queue = list(shards) if shards else []
                     seed_queue = []
+                    used_full_seeds = set()
                     if priority_seeds:
                         for s in priority_seeds:
                             si = int(s)
-                            if si not in shard_seeds:
+                            if si not in used_full_seeds:
+                                used_full_seeds.add(si)
                                 seed_queue.append(si)
-                    used_seeds = set(shard_seeds) | set(seed_queue)
                     next_seed_cursor = int(seed_start)
                     continue
                 raise
@@ -1096,17 +1120,9 @@ class PersistentEvalPool:
                 "raw_episodes_run": raw_done,
                 "avg_depth": float(np.mean(depths)) if depths else 0.0,
                 "p90_depth": float(np.percentile(depths, 90)) if depths else 0.0,
-                "max_depth": (
-                    int(np.max([r["max_depth"] for r in triggered_runs]))
-                    if triggered_runs
-                    else 0
-                ),
+                "max_depth": int(np.max(depths)) if depths else 0,
                 "avg_score": float(np.mean(scores)) if scores else 0.0,
-                "max_score": (
-                    int(np.max([r["score"] for r in triggered_runs]))
-                    if triggered_runs
-                    else 0
-                ),
+                "max_score": int(np.max(scores)) if scores else 0,
                 "avg_turns": float(np.mean(turns)) if turns else 0.0,
                 "steps_per_sec": round(sps, 1),
                 "wall_sec": round(wall_sec, 2),
@@ -1123,7 +1139,7 @@ class PersistentEvalPool:
     ) -> list[dict[str, Any]]:
         """
         Executes an explicit list of tasks concurrently across persistent workers.
-        Useful for paired SPSA evaluations and multi-candidate tournaments.
+        Useful for multi-candidate tournaments and targeted seed replays.
         """
         if not tasks:
             return []
@@ -1136,6 +1152,8 @@ class PersistentEvalPool:
                             pool.imap_unordered(run_single_episode, tasks, chunksize=1)
                         )
                     return [run_single_episode(tk) for tk in tasks]
+                except (PolicyValidationError, SyntaxError):
+                    raise
                 except Exception as pool_exc:
                     if attempt == 0 and self.workers > 1:
                         ui.warn(
@@ -1149,6 +1167,7 @@ class PersistentEvalPool:
         return []
 
     def close(self) -> None:
+        global _WORKER_HARNESS
         with self._pool_lock:
             if self._pool is not None:
                 try:
@@ -1157,3 +1176,9 @@ class PersistentEvalPool:
                 except Exception:
                     pass
                 self._pool = None
+            elif self.workers <= 1 and _WORKER_HARNESS is not None:
+                try:
+                    _WORKER_HARNESS.close()
+                except Exception:
+                    pass
+                _WORKER_HARNESS = None

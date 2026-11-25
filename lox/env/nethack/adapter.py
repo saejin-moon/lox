@@ -65,9 +65,8 @@ class NetHackAdapter(BenchmarkAdapter):
         )
         branch_bonus = max(0, int(run.get("dungeons_visited") or 1) - 1) * 0.15
         sc = math.log1p(max(0.0, float(run.get("score") or 0))) * 0.12
-        ms_dict = (
-            run.get("milestones") if isinstance(run.get("milestones"), dict) else {}
-        )
+        raw_ms = run.get("milestones")
+        ms_dict: dict[str, Any] = raw_ms if isinstance(raw_ms, dict) else {}
 
         # Dlvl-1 bootstrap exploration tiebreak only (avoids 98% saturation on Dlvl 2+)
         d1_bootstrap = 0.0

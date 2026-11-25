@@ -1,6 +1,5 @@
-from lox.lang.compiler import CompiledPolicy, PolicyRunner, compile_policy_and_macros
+from lox.lang.compiler import CompiledPolicy, PolicyRunner, compile_policy_package
 from lox.lang.instrument import ExecutionTracer, PolicyLoopError, TunableParam
-from lox.lang.macros import MacroLibrary
 from lox.lang.validator import (
     PolicyValidationError,
     smart_dedent,
@@ -11,12 +10,11 @@ from lox.lang.validator import (
 __all__ = [
     "CompiledPolicy",
     "ExecutionTracer",
-    "MacroLibrary",
     "PolicyLoopError",
     "PolicyRunner",
     "PolicyValidationError",
     "TunableParam",
-    "compile_policy_and_macros",
+    "compile_policy_package",
     "smart_dedent",
     "splice_functions_into_policy",
     "validate_python_code",

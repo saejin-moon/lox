@@ -156,13 +156,28 @@ from lox.env.actions import DIR_DELTAS
 
 
 def step_toward(state, ws, target, allow_diagonal=True):
-    """Computes one pure A* step toward `target` honoring NLE doorway `no_diag` geometry."""
+    """Computes one pure A* step toward `target` honoring NLE doorway `no_diag` geometry and runtime blacklists."""
     mask = ws.safe_passable_mask if ws.safe_passable_mask is not None else ws.passable_mask
     if mask is None or target is None:
         return None
+    ty, tx = int(target[0]), int(target[1])
+    fc = ws.floor(state)
+    if fc.blocked_until:
+        turn_now = int(getattr(ws, "turn", 0) or 0)
+        blocked_coords = [
+            pos
+            for pos in list(fc.blocked_until.keys())
+            if pos != (ty, tx) and fc.is_blocked(pos, turn_now)
+        ]
+        if blocked_coords:
+            mask = mask.copy()
+            h, w = mask.shape
+            for by, bx in blocked_coords:
+                if 0 <= by < h and 0 <= bx < w:
+                    mask[by, bx] = False
     dy, dx = state.path_step(
         mask,
-        (int(target[0]), int(target[1])),
+        (ty, tx),
         allow_diagonal=bool(allow_diagonal),
         no_diag=ws.no_diag_mask,
     )

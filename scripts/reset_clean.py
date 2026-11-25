@@ -80,6 +80,11 @@ def reset_clean(
             os.remove(theory_p)
             print(f"Removed {theory_p}")
 
+    if frontier_dir is None and Path(policy_path).parent.as_posix().endswith(
+        "data/workspace"
+    ):
+        frontier_dir = "data/frontier"
+
     if frontier_dir:
         f_path = Path(frontier_dir)
         if f_path.exists():
@@ -102,6 +107,8 @@ def reset_clean(
                 "theories",
                 "tournament_attempts",
                 "archive_policies",
+                "stepping_stones",
+                "proactive_branches",
             ]:
                 try:
                     con.execute(f"DELETE FROM {table}")

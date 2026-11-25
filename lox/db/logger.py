@@ -29,6 +29,16 @@ _LOG = logging.getLogger(__name__)
 _DB_WRITE_LOCK = threading.RLock()
 
 
+def _opt_int(d: dict[str, Any], key: str, default: int = 0) -> int:
+    val = d.get(key)
+    return int(default) if val is None else int(val)
+
+
+def _opt_float(d: dict[str, Any], key: str, default: float = 0.0) -> float:
+    val = d.get(key)
+    return float(default) if val is None else float(val)
+
+
 def _db_write_locked(fn):
     @functools.wraps(fn)
     def _wrapper(*args, **kwargs):
@@ -47,14 +57,12 @@ class BatchDatabaseLogger:
         max_tick_runs_per_batch: int = 100_000,
         prune_ticks: bool = False,
     ):
-        import os
-
-        from lox.db.schema import _INITIALIZED_DBS
+        from lox.db.schema import is_db_initialized
 
         self.db_path = db_path
         self.max_tick_runs_per_batch = max_tick_runs_per_batch
         self.prune_ticks = bool(prune_ticks)
-        if os.path.abspath(db_path) not in _INITIALIZED_DBS:
+        if not is_db_initialized(self.db_path):
             con = init_db(self.db_path)
             con.close()
 
@@ -79,15 +87,15 @@ class BatchDatabaseLogger:
         """
         norm_runs: list[EpisodeRun] = [normalize_episode_run(r) for r in runs]
         full_runs, _ = split_full_and_shard_runs(norm_runs)
-        stat_runs = full_runs if full_runs else norm_runs
+        stat_runs: list[dict[str, Any]] = list(full_runs if full_runs else norm_runs)
         mark_outlier_good_runs(stat_runs)
         for r, er in zip(runs, norm_runs):
             if r is not er and isinstance(r, dict):
                 r["is_outlier_good"] = er.get("is_outlier_good", False)
                 r["outlier_z_score"] = er.get("outlier_z_score", 0.0)
                 r["batch_percentile"] = er.get("batch_percentile", 0.0)
-        runs = norm_runs
-        fn_stats = compute_function_stats(batch_id, generation, runs)
+        runs = list(norm_runs)
+        fn_stats = compute_function_stats(batch_id, generation, stat_runs)
         outlier_count = sum(1 for r in stat_runs if r.get("is_outlier_good"))
         batch_metrics["outlier_count"] = outlier_count
 
@@ -97,24 +105,20 @@ class BatchDatabaseLogger:
         total_cost_usd = 0.0
         total_tokens = 0
         try:
-            if str(mode).upper() == "SWARM":
-                row_c = con.execute(
-                    "SELECT SUM(cost_usd), SUM(prompt_tokens + completion_tokens) FROM synthesis_logs WHERE generation = ? OR batch_id = ?",
-                    [generation, batch_id],
-                ).fetchone()
-            else:
-                row_c = con.execute(
-                    "SELECT SUM(cost_usd), SUM(prompt_tokens + completion_tokens) FROM synthesis_logs WHERE batch_id = ?",
-                    [batch_id],
-                ).fetchone()
+            row_c = con.execute(
+                "SELECT SUM(cost_usd), SUM(prompt_tokens + completion_tokens) FROM synthesis_logs WHERE generation = ? OR batch_id = ?",
+                [generation, batch_id],
+            ).fetchone()
             if row_c:
                 total_cost_usd = float(row_c[0] or 0.0)
                 total_tokens = int(row_c[1] or 0)
         except Exception as exc:
             _LOG.warning("Cost aggregation query warning: %s", exc)
 
+        in_tx = False
         try:
             con.execute("BEGIN TRANSACTION")
+            in_tx = True
             con.execute(
                 """
                 INSERT OR REPLACE INTO batches (
@@ -137,22 +141,22 @@ class BatchDatabaseLogger:
                     json.dumps(target_functions),
                     len(runs),
                     int(episodes_discarded),
-                    float(batch_metrics.get("avg_depth", 0.0)),
-                    float(batch_metrics.get("p90_depth", 0.0)),
-                    int(batch_metrics.get("max_depth", 0)),
-                    float(batch_metrics.get("avg_score", 0.0)),
-                    int(batch_metrics.get("max_score", 0)),
-                    float(batch_metrics.get("avg_turns", 0.0)),
+                    _opt_float(batch_metrics, "avg_depth", 0.0),
+                    _opt_float(batch_metrics, "p90_depth", 0.0),
+                    _opt_int(batch_metrics, "max_depth", 0),
+                    _opt_float(batch_metrics, "avg_score", 0.0),
+                    _opt_int(batch_metrics, "max_score", 0),
+                    _opt_float(batch_metrics, "avg_turns", 0.0),
                     int(outlier_count),
                     bool(verdict.get("passed", False))
                     if isinstance(verdict, dict) and verdict
                     else (verdict is None),
-                    float(verdict.get("wilcoxon_p", 1.0)) if verdict else 1.0,
-                    float(verdict.get("ci_lower", 0.0)) if verdict else 0.0,
-                    float(verdict.get("ci_upper", 0.0)) if verdict else 0.0,
-                    int(batch_metrics.get("seeds_evaluated", len(runs))),
+                    _opt_float(verdict, "wilcoxon_p", 1.0) if verdict else 1.0,
+                    _opt_float(verdict, "ci_lower", 0.0) if verdict else 0.0,
+                    _opt_float(verdict, "ci_upper", 0.0) if verdict else 0.0,
+                    _opt_int(batch_metrics, "seeds_evaluated", len(runs)),
                     bool(batch_metrics.get("is_early_stopped", False)),
-                    float(batch_metrics.get("pilot_best_delta", 0.0)),
+                    _opt_float(batch_metrics, "pilot_best_delta", 0.0),
                     float(total_cost_usd),
                     int(total_tokens),
                     now,
@@ -165,18 +169,18 @@ class BatchDatabaseLogger:
                     "run_id": [str(r["run_id"]) for r in runs],
                     "batch_id": [str(batch_id)] * len(runs),
                     "generation": [int(generation)] * len(runs),
-                    "seed": [int(r["seed"]) for r in runs],
-                    "role": [str(r.get("role", "val-hum-law-fem")) for r in runs],
-                    "depth": [int(r.get("depth", 1)) for r in runs],
-                    "max_depth": [int(r.get("max_depth", 1)) for r in runs],
-                    "score": [int(r.get("score", 0)) for r in runs],
-                    "turns": [int(r.get("turns", 0)) for r in runs],
-                    "steps": [int(r.get("steps", 0)) for r in runs],
-                    "xp_level": [int(r.get("xp_level", 1)) for r in runs],
-                    "final_hp": [int(r.get("final_hp", 0)) for r in runs],
-                    "max_hp": [int(r.get("max_hp", 0)) for r in runs],
-                    "final_ac": [int(r.get("final_ac", 10)) for r in runs],
-                    "gold": [int(r.get("gold", 0)) for r in runs],
+                    "seed": [_opt_int(r, "seed", 0) for r in runs],
+                    "role": [str(r.get("role") or "val-hum-law-fem") for r in runs],
+                    "depth": [_opt_int(r, "depth", 1) for r in runs],
+                    "max_depth": [_opt_int(r, "max_depth", 1) for r in runs],
+                    "score": [_opt_int(r, "score", 0) for r in runs],
+                    "turns": [_opt_int(r, "turns", 0) for r in runs],
+                    "steps": [_opt_int(r, "steps", 0) for r in runs],
+                    "xp_level": [_opt_int(r, "xp_level", 1) for r in runs],
+                    "final_hp": [_opt_int(r, "final_hp", 0) for r in runs],
+                    "max_hp": [_opt_int(r, "max_hp", 0) for r in runs],
+                    "final_ac": [_opt_int(r, "final_ac", 10) for r in runs],
+                    "gold": [_opt_int(r, "gold", 0) for r in runs],
                     "end_reason": [str(r.get("end_reason", "ended")) for r in runs],
                     "death_message": [str(r.get("death_message", "")) for r in runs],
                     "is_outlier_good": [
@@ -307,34 +311,38 @@ class BatchDatabaseLogger:
                 for r in selected_for_ticks:
                     rid = str(r["run_id"])
                     for t in r.get("ticks", []):
+                        raw_ac = t.get("ac")
+                        raw_hs = t.get("hunger_state")
                         tick_cols["run_id"].append(rid)
-                        tick_cols["turn"].append(int(t.get("turn", 0)))
-                        tick_cols["step_idx"].append(int(t.get("step_idx", 0)))
-                        tick_cols["depth"].append(int(t.get("depth", 1)))
-                        tick_cols["dungeon_num"].append(int(t.get("dungeon_num", 0)))
-                        tick_cols["hp"].append(int(t.get("hp", 0)))
-                        tick_cols["max_hp"].append(int(t.get("max_hp", 0)))
-                        tick_cols["energy"].append(int(t.get("energy", 0)))
-                        tick_cols["ac"].append(int(t.get("ac", 10)))
-                        tick_cols["xp_level"].append(int(t.get("xp_level", 1)))
-                        tick_cols["hunger_state"].append(int(t.get("hunger_state", 1)))
+                        tick_cols["turn"].append(int(t.get("turn") or 0))
+                        tick_cols["step_idx"].append(int(t.get("step_idx") or 0))
+                        tick_cols["depth"].append(int(t.get("depth") or 1))
+                        tick_cols["dungeon_num"].append(int(t.get("dungeon_num") or 0))
+                        tick_cols["hp"].append(int(t.get("hp") or 0))
+                        tick_cols["max_hp"].append(int(t.get("max_hp") or 0))
+                        tick_cols["energy"].append(int(t.get("energy") or 0))
+                        tick_cols["ac"].append(10 if raw_ac is None else int(raw_ac))
+                        tick_cols["xp_level"].append(int(t.get("xp_level") or 1))
+                        tick_cols["hunger_state"].append(
+                            1 if raw_hs is None else int(raw_hs)
+                        )
                         tick_cols["condition_mask"].append(
-                            int(t.get("condition_mask", 0))
+                            int(t.get("condition_mask") or 0)
                         )
-                        tick_cols["y"].append(int(t.get("y", 0)))
-                        tick_cols["x"].append(int(t.get("x", 0)))
-                        tick_cols["action_name"].append(str(t.get("action_name", "")))
-                        tick_cols["raw_key"].append(int(t.get("raw_key", 0)))
+                        tick_cols["y"].append(int(t.get("y") or 0))
+                        tick_cols["x"].append(int(t.get("x") or 0))
+                        tick_cols["action_name"].append(str(t.get("action_name") or ""))
+                        tick_cols["raw_key"].append(int(t.get("raw_key") or 0))
                         tick_cols["active_function"].append(
-                            str(t.get("active_function", "root"))
+                            str(t.get("active_function") or "root")
                         )
-                        tick_cols["byte_offset"].append(int(t.get("byte_offset", 0)))
-                        tick_cols["message"].append(str(t.get("message", "")))
+                        tick_cols["byte_offset"].append(int(t.get("byte_offset") or 0))
+                        tick_cols["message"].append(str(t.get("message") or ""))
                         tick_cols["visible_monsters"].append(
-                            str(t.get("visible_monsters", ""))
+                            str(t.get("visible_monsters") or "")
                         )
                         tick_cols["inventory_summary"].append(
-                            str(t.get("inventory_summary", ""))
+                            str(t.get("inventory_summary") or "")
                         )
 
                 if tick_cols["run_id"]:
@@ -418,8 +426,13 @@ class BatchDatabaseLogger:
                 con.unregister("_temp_fn_stats")
 
             con.execute("COMMIT")
+            in_tx = False
         except Exception:
-            con.execute("ROLLBACK")
+            if in_tx:
+                try:
+                    con.execute("ROLLBACK")
+                except Exception:
+                    pass
             raise
         finally:
             con.close()
@@ -706,15 +719,18 @@ class BatchDatabaseLogger:
         total_cost_usd = 0.0
         try:
             row_c = con.execute(
-                "SELECT SUM(cost_usd) FROM synthesis_logs WHERE batch_id = ?",
-                [batch_id],
+                "SELECT SUM(cost_usd) FROM synthesis_logs WHERE generation = ? OR batch_id = ?",
+                [generation, batch_id],
             ).fetchone()
             if row_c and row_c[0] is not None:
                 total_cost_usd = float(row_c[0])
-        except Exception:
-            pass
+        except Exception as cost_exc:
+            _LOG.warning("Experiment cost lookup warning (%s): %s", batch_id, cost_exc)
 
+        in_tx = False
         try:
+            con.execute("BEGIN TRANSACTION")
+            in_tx = True
             con.execute(
                 """
                 INSERT OR REPLACE INTO experiments (
@@ -743,18 +759,20 @@ class BatchDatabaseLogger:
                     ),
                     str(hypothesis.get("mechanism") or ""),
                     bool(verdict.get("passed", False)),
-                    float(verdict.get("mean_delta", 0.0)),
-                    float(verdict.get("ci_lower", 0.0)),
-                    float(verdict.get("ci_upper", 0.0)),
-                    float(verdict.get("wilcoxon_p", 1.0)),
-                    int(verdict.get("wins", 0)),
-                    int(verdict.get("losses", 0)),
-                    int(verdict.get("ties", 0)),
-                    int(verdict.get("seeds_evaluated", 0)),
+                    float(verdict.get("mean_delta") or 0.0),
+                    float(verdict.get("ci_lower") or 0.0),
+                    float(verdict.get("ci_upper") or 0.0),
+                    float(
+                        1.0 if (raw_wp := verdict.get("wilcoxon_p")) is None else raw_wp
+                    ),
+                    int(verdict.get("wins") or 0),
+                    int(verdict.get("losses") or 0),
+                    int(verdict.get("ties") or 0),
+                    int(verdict.get("seeds_evaluated") or 0),
                     bool(verdict.get("is_early_stopped", False)),
-                    float(verdict.get("pilot_best_delta", 0.0)),
+                    float(verdict.get("pilot_best_delta") or 0.0),
                     float(total_cost_usd),
-                    str(verdict.get("reason", "")),
+                    str(verdict.get("reason") or ""),
                     datetime.datetime.now(),
                 ],
             )
@@ -780,13 +798,22 @@ class BatchDatabaseLogger:
                         str(hypothesis.get("binding_constraint") or ""),
                         str(hypothesis.get("verified_c_rule") or ""),
                         str(hypothesis.get("mechanism") or ""),
-                        float(verdict.get("mean_delta", 0.0)),
-                        float(verdict.get("avg_depth", 1.0)),
-                        float(verdict.get("p90_depth", 1.0)),
-                        int(verdict.get("max_depth", 1)),
+                        float(verdict.get("mean_delta") or 0.0),
+                        float(verdict.get("avg_depth") or 1.0),
+                        float(verdict.get("p90_depth") or 1.0),
+                        int(verdict.get("max_depth") or 1),
                         datetime.datetime.now(),
                     ],
                 )
+            con.execute("COMMIT")
+            in_tx = False
+        except Exception:
+            if in_tx:
+                try:
+                    con.execute("ROLLBACK")
+                except Exception:
+                    pass
+            raise
         finally:
             con.close()
 
@@ -1022,8 +1049,12 @@ class BatchDatabaseLogger:
         cutoff_gen = current_generation - keep
         pilot_cutoff_gen = current_generation - 5
         con = connect_db(self.db_path, read_only=False)
+        in_tx = False
         try:
-            t_before = con.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+            con.execute("BEGIN TRANSACTION")
+            in_tx = True
+            t_before_row = con.execute("SELECT COUNT(*) FROM ticks").fetchone()
+            t_before = int(t_before_row[0]) if t_before_row else 0
             con.execute(
                 """
                 DELETE FROM ticks
@@ -1037,10 +1068,12 @@ class BatchDatabaseLogger:
                 """,
                 (cutoff_gen,),
             )
-            t_after = con.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+            t_after_row = con.execute("SELECT COUNT(*) FROM ticks").fetchone()
+            t_after = int(t_after_row[0]) if t_after_row else 0
             ticks_deleted = t_before - t_after
 
-            r_before = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            r_before_row = con.execute("SELECT COUNT(*) FROM runs").fetchone()
+            r_before = int(r_before_row[0]) if r_before_row else 0
             con.execute(
                 """
                 DELETE FROM ticks
@@ -1060,12 +1093,21 @@ class BatchDatabaseLogger:
                 """,
                 (pilot_cutoff_gen,),
             )
-            r_after = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            r_after_row = con.execute("SELECT COUNT(*) FROM runs").fetchone()
+            r_after = int(r_after_row[0]) if r_after_row else 0
             runs_deleted = r_before - r_after
 
+            con.execute("COMMIT")
+            in_tx = False
             con.execute("CHECKPOINT")
             return {"ticks_pruned": ticks_deleted, "runs_pruned": runs_deleted}
-        except Exception:
+        except Exception as prune_exc:
+            _LOG.warning("prune_old_telemetry failed: %s", prune_exc)
+            if in_tx:
+                try:
+                    con.execute("ROLLBACK")
+                except Exception:
+                    pass
             return {"ticks_pruned": 0, "runs_pruned": 0}
         finally:
             con.close()
@@ -1099,7 +1141,7 @@ class BatchDatabaseLogger:
                     "avg_score": [
                         float(a.get("avg_score", 0.0) or 0.0) for a in attempts
                     ],
-                    "avg_ac": [float(a.get("avg_ac", 10.0) or 10.0) for a in attempts],
+                    "avg_ac": [_opt_float(a, "avg_ac", 10.0) for a in attempts],
                     "avg_xp_level": [
                         float(a.get("avg_xp_level", 1.0) or 1.0) for a in attempts
                     ],
@@ -1145,10 +1187,28 @@ class BatchDatabaseLogger:
                         ],
                         type=pa.float64(),
                     ),
+                    "winsor_delta": pa.array(
+                        [
+                            float(a["winsor_delta"])
+                            if a.get("winsor_delta") is not None
+                            else None
+                            for a in attempts
+                        ],
+                        type=pa.float64(),
+                    ),
                     "wilcoxon_p": pa.array(
                         [
                             float(a["wilcoxon_p"])
                             if a.get("wilcoxon_p") is not None
+                            else None
+                            for a in attempts
+                        ],
+                        type=pa.float64(),
+                    ),
+                    "sign_perm_p": pa.array(
+                        [
+                            float(a["sign_perm_p"])
+                            if a.get("sign_perm_p") is not None
                             else None
                             for a in attempts
                         ],
@@ -1228,7 +1288,7 @@ class BatchDatabaseLogger:
         assigned_rids: list[str] = []
         seen_rids: dict[str, int] = {}
         for idx, r in enumerate(norm_runs):
-            sd = int(r.get("seed", idx) or 0)
+            sd = _opt_int(r, "seed", idx)
             sh_id = str(r.get("shard_id", "") or "").strip()
             base_rid = f"{prefix}_sh{sh_id}_s{sd}" if sh_id else f"{prefix}_s{sd}"
             dup_n = seen_rids.get(base_rid, 0)
@@ -1255,7 +1315,7 @@ class BatchDatabaseLogger:
                 "xp_level": [int(r.get("xp_level", 1) or 1) for r in norm_runs],
                 "final_hp": [int(r.get("final_hp", 0) or 0) for r in norm_runs],
                 "max_hp": [int(r.get("max_hp", 0) or 0) for r in norm_runs],
-                "final_ac": [int(r.get("final_ac", 10) or 10) for r in norm_runs],
+                "final_ac": [_opt_int(r, "final_ac", 10) for r in norm_runs],
                 "gold": [int(r.get("gold", 0) or 0) for r in norm_runs],
                 "end_reason": [str(r.get("end_reason", "ended")) for r in norm_runs],
                 "death_message": [str(r.get("death_message", "")) for r in norm_runs],
@@ -1378,9 +1438,9 @@ class BatchDatabaseLogger:
                     tick_cols["hp"].append(int(t.get("hp", 0) or 0))
                     tick_cols["max_hp"].append(int(t.get("max_hp", 0) or 0))
                     tick_cols["energy"].append(int(t.get("energy", 0) or 0))
-                    tick_cols["ac"].append(int(t.get("ac", 10) or 10))
+                    tick_cols["ac"].append(_opt_int(t, "ac", 10))
                     tick_cols["xp_level"].append(int(t.get("xp_level", 1) or 1))
-                    tick_cols["hunger_state"].append(int(t.get("hunger_state", 1) or 1))
+                    tick_cols["hunger_state"].append(_opt_int(t, "hunger_state", 1))
                     tick_cols["condition_mask"].append(
                         int(t.get("condition_mask", 0) or 0)
                     )
@@ -1465,8 +1525,8 @@ class BatchDatabaseLogger:
                     int(stone.get("losses", 0) or 0),
                     float(stone.get("iqm_delta", 0.0) or 0.0),
                     float(stone.get("winsor_delta", 0.0) or 0.0),
-                    float(stone.get("wilcoxon_p", 1.0) or 1.0),
-                    float(stone.get("sign_p", 1.0) or 1.0),
+                    _opt_float(stone, "wilcoxon_p", 1.0),
+                    _opt_float(stone, "sign_p", 1.0),
                     str(stone.get("reject_reason", "") or "")[:300],
                     json.dumps(list(stone.get("seeds_gained") or [])),
                     json.dumps(list(stone.get("seeds_lost") or [])),
@@ -1528,7 +1588,8 @@ class BatchDatabaseLogger:
                 "seeds_gained": json.loads(row[19] or "[]"),
                 "seeds_lost": json.loads(row[20] or "[]"),
             }
-        except Exception:
+        except Exception as exc:
+            _LOG.warning("Failed loading active stepping stone: %s", exc)
             return None
         finally:
             con.close()
@@ -1575,6 +1636,110 @@ class BatchDatabaseLogger:
             con.execute(
                 "UPDATE stepping_stones SET status = ? WHERE parent_policy_id = ? AND status = 'active'",
                 [str(new_status), str(parent_policy_id or "")],
+            )
+        finally:
+            con.close()
+
+    @_db_write_locked
+    def save_proactive_branch(self, branch: dict[str, Any]) -> None:
+        """Persists or advances a sheltered multi-generation proactive branch (`proactive_2`)."""
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                """
+                INSERT OR REPLACE INTO proactive_branches (
+                    branch_id, base_champion_fp, generation_started, last_generation,
+                    steps_taken, max_steps, status, policy_code, skills_json,
+                    goal_summary, capabilities_added_json, last_avg_depth,
+                    last_winsor_delta, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(branch["branch_id"]),
+                    str(branch.get("base_champion_fp", "") or ""),
+                    int(branch.get("generation_started", 0) or 0),
+                    int(branch.get("last_generation", 0) or 0),
+                    int(branch.get("steps_taken", 0) or 0),
+                    int(branch.get("max_steps", 4) or 4),
+                    str(branch.get("status", "active") or "active"),
+                    str(branch.get("policy_code", "") or ""),
+                    json.dumps(branch.get("skills") or {}),
+                    str(branch.get("goal_summary", "") or "")[:1000],
+                    json.dumps(list(branch.get("capabilities_added") or [])),
+                    float(branch.get("last_avg_depth", 0.0) or 0.0),
+                    float(branch.get("last_winsor_delta", 0.0) or 0.0),
+                    datetime.datetime.now(),
+                ],
+            )
+        finally:
+            con.close()
+
+    def load_active_proactive_branch(
+        self,
+        base_champion_fp: str,
+    ) -> dict[str, Any] | None:
+        """Loads the active sheltered proactive branch for `base_champion_fp`, if any."""
+        con = connect_db(self.db_path, read_only=True)
+        try:
+            row = con.execute(
+                """
+                SELECT
+                    branch_id, base_champion_fp, generation_started, last_generation,
+                    steps_taken, max_steps, status, policy_code, skills_json,
+                    goal_summary, capabilities_added_json, last_avg_depth,
+                    last_winsor_delta
+                FROM proactive_branches
+                WHERE status = 'active'
+                  AND base_champion_fp = ?
+                  AND steps_taken < COALESCE(max_steps, 4)
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                [str(base_champion_fp or "")],
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "branch_id": str(row[0]),
+                "base_champion_fp": str(row[1] or ""),
+                "generation_started": int(row[2] or 0),
+                "last_generation": int(row[3] or 0),
+                "steps_taken": int(row[4] or 0),
+                "max_steps": int(row[5] or 4),
+                "status": str(row[6] or "active"),
+                "policy_code": str(row[7] or ""),
+                "skills": json.loads(row[8] or "{}"),
+                "goal_summary": str(row[9] or ""),
+                "capabilities_added": json.loads(row[10] or "[]"),
+                "last_avg_depth": float(row[11] or 0.0),
+                "last_winsor_delta": float(row[12] or 0.0),
+            }
+        except Exception as exc:
+            _LOG.warning("Failed loading active stepping stone: %s", exc)
+            return None
+        finally:
+            con.close()
+
+    @_db_write_locked
+    def update_proactive_branch_status(self, branch_id: str, status: str) -> None:
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                "UPDATE proactive_branches SET status = ?, updated_at = ? WHERE branch_id = ?",
+                [str(status), datetime.datetime.now(), str(branch_id)],
+            )
+        finally:
+            con.close()
+
+    @_db_write_locked
+    def retire_proactive_branches_for_champion(
+        self, base_champion_fp: str, new_status: str = "superseded"
+    ) -> None:
+        con = connect_db(self.db_path, read_only=False)
+        try:
+            con.execute(
+                "UPDATE proactive_branches SET status = ?, updated_at = ? WHERE base_champion_fp = ? AND status = 'active'",
+                [str(new_status), datetime.datetime.now(), str(base_champion_fp or "")],
             )
         finally:
             con.close()

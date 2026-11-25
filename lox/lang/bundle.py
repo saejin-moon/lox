@@ -78,7 +78,7 @@ def strip_code_fences(src: str) -> str:
 
 
 def extract_fenced_inner(src: str) -> str:
-    """Extracts fenced Python inside XML blocks if present, otherwise returns text stripped of full outer fences."""
+    """Extracts fenced Python inside XML blocks if present, even if prose precedes the fence."""
     text = str(src or "").strip()
     exact = strip_code_fences(text)
     if exact != text:
@@ -88,7 +88,7 @@ def extract_fenced_inner(src: str) -> str:
         text,
         flags=re.DOTALL | re.IGNORECASE,
     )
-    if inner and text.lstrip().startswith("```"):
+    if inner:
         return inner.group(1).strip()
     return text
 
@@ -108,7 +108,13 @@ def extract_json_payload(raw_text: str) -> Any | None:
             return json.loads(cand)
         except Exception:
             pass
-    for pat in (r"\{.*\}", r"\[.*\]"):
+    idx_obj = txt.find("{")
+    idx_arr = txt.find("[")
+    if idx_arr != -1 and (idx_obj == -1 or idx_arr < idx_obj):
+        patterns = (r"\[.*\]", r"\{.*\}")
+    else:
+        patterns = (r"\{.*\}", r"\[.*\]")
+    for pat in patterns:
         m = re.search(pat, txt, flags=re.DOTALL)
         if m:
             try:
@@ -252,12 +258,9 @@ def extract_policy_fallback_from_markdown(text: str) -> str:
                 for tok in (
                     "def ",
                     "class ",
-                    "ActionLeaf",
-                    "ConditionLeaf",
-                    "PrioritySelector",
-                    "Sequence",
-                    "BehaviorTree",
-                    "subtree",
+                    "register_goal",
+                    "GoalRunner",
+                    "WorldState",
                 )
             )
         ]
@@ -381,18 +384,26 @@ def extract_skill_imports(
             if k.startswith(f"{pkg}/"):
                 info.referenced_keys.add(k)
 
+    bare_skills_aliases: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             mod = str(node.module or "")
             if mod == "skills":
                 for al in node.names:
+                    if al.name == "*":
+                        for k in known_keys:
+                            info.referenced_keys.add(k)
+                        continue
                     cand = _normalize_bundle_skill_key(al.name)
                     if cand in known_keys:
                         info.referenced_keys.add(cand)
                         info.module_aliases[al.asname or al.name] = cand
                     elif cand in pkgs:
                         _expand_pkg(cand)
-                    elif known_keys:
+                    elif not known_keys:
+                        info.referenced_keys.add(cand)
+                        info.module_aliases[al.asname or al.name] = cand
+                    else:
                         info.missing_refs.append(f"skills.{al.name}")
             elif mod.startswith("skills."):
                 tail = mod[len("skills.") :]
@@ -420,7 +431,9 @@ def extract_skill_imports(
                     info.missing_refs.append(mod)
         elif isinstance(node, ast.Import):
             for al in node.names:
-                if al.name.startswith("skills."):
+                if al.name == "skills":
+                    bare_skills_aliases.add(al.asname or "skills")
+                elif al.name.startswith("skills."):
                     tail = al.name[len("skills.") :]
                     if tail in pkgs and tail not in known_keys:
                         _expand_pkg(tail)
@@ -432,4 +445,27 @@ def extract_skill_imports(
                             info.module_aliases[al.asname] = s_mod
                     else:
                         info.missing_refs.append(al.name)
+
+    # Scan `<skills_alias>.<pkg>.<mod>` and `<skills_alias>.<mod>` attribute accesses after bare `import skills`
+    if bare_skills_aliases:
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id in bare_skills_aliases
+            ):
+                two = f"{node.value.attr}/{node.attr}"
+                if two in known_keys:
+                    info.referenced_keys.add(two)
+            elif (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in bare_skills_aliases
+            ):
+                one = node.attr
+                if one in known_keys:
+                    info.referenced_keys.add(one)
+                elif one in pkgs:
+                    _expand_pkg(one)
     return info

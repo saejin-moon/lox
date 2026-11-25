@@ -25,7 +25,29 @@ _LOG = logging.getLogger(__name__)
 DEFAULT_DB_PATH = "data/lox.duckdb"
 _DB_CONN_LOCK = threading.RLock()
 _DB_INIT_LOCK = threading.Lock()
-_INITIALIZED_DBS: set[str] = set()
+_INITIALIZED_DBS: dict[str, tuple[int, int]] = {}
+
+
+def _db_file_sig(abs_path: str) -> tuple[int, int] | None:
+    try:
+        st = os.stat(abs_path)
+        return (int(st.st_ino), int(st.st_mtime_ns))
+    except OSError:
+        return None
+
+
+def is_db_initialized(db_path: str) -> bool:
+    """True only if `abs_path` exists on disk and matches the (inode, mtime_ns) initialized in this process."""
+    abs_path = os.path.abspath(db_path)
+    recorded = _INITIALIZED_DBS.get(abs_path)
+    if recorded is None:
+        return False
+    cur = _db_file_sig(abs_path)
+    if cur is None or cur != recorded:
+        _INITIALIZED_DBS.pop(abs_path, None)
+        return False
+    return True
+
 
 # Canonical SQL predicate filtering out micro-shard & non-champion peer/pilot runs from champion aggregations
 NON_SHARD_RUNS_SQL = (
@@ -53,7 +75,7 @@ def connect_db(
     elif not os.path.exists(db_path):
         raise FileNotFoundError(f"DuckDB database does not exist: {db_path}")
 
-    effective_ro = bool(read_only) and (abs_path not in _INITIALIZED_DBS)
+    effective_ro = bool(read_only) and (not is_db_initialized(abs_path))
 
     delay = 0.05
     last_err: Exception | None = None
@@ -376,7 +398,9 @@ CREATE TABLE IF NOT EXISTS tournament_attempts (
     holdout_iqm_delta DOUBLE,
     holdout_rejected BOOLEAN DEFAULT FALSE,
     iqm_delta DOUBLE,
+    winsor_delta DOUBLE,
     wilcoxon_p DOUBLE,
+    sign_perm_p DOUBLE,
     wins INTEGER,
     losses INTEGER,
     reject_reason TEXT,
@@ -406,6 +430,23 @@ CREATE TABLE IF NOT EXISTS stepping_stones (
     seeds_gained_json TEXT DEFAULT '[]',
     seeds_lost_json TEXT DEFAULT '[]',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS proactive_branches (
+    branch_id VARCHAR PRIMARY KEY,
+    base_champion_fp VARCHAR,
+    generation_started INTEGER,
+    last_generation INTEGER,
+    steps_taken INTEGER DEFAULT 0,
+    max_steps INTEGER DEFAULT 4,
+    status VARCHAR DEFAULT 'active',
+    policy_code TEXT,
+    skills_json TEXT DEFAULT '{}',
+    goal_summary TEXT DEFAULT '',
+    capabilities_added_json TEXT DEFAULT '[]',
+    last_avg_depth DOUBLE DEFAULT 0.0,
+    last_winsor_delta DOUBLE DEFAULT 0.0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE OR REPLACE VIEW champion_runs AS
@@ -525,23 +566,38 @@ DEFAULT_LLM_COST_RATES: dict[str, dict[str, float]] = {
 
 def compute_llm_cost(
     model: str,
-    prompt_tokens: int,
-    completion_tokens: int,
-    reasoning_tokens: int = 0,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    reasoning_tokens: int | None = 0,
 ) -> float:
     """Computes exact USD cost of an LLM call from per-million token pricing rates."""
+    p_tok = int(prompt_tokens or 0)
+    c_tok = int(completion_tokens or 0)
+    r_tok = int(reasoning_tokens or 0)
     m_low = (model or "").lower().strip()
-    rates = DEFAULT_LLM_COST_RATES.get(m_low)
-    if not rates:
-        for k, v in DEFAULT_LLM_COST_RATES.items():
-            if k in m_low or m_low in k:
-                rates = v
-                break
+    rates: dict[str, float] | None = None
+    if m_low:
+        rates = DEFAULT_LLM_COST_RATES.get(m_low)
+        if not rates:
+            # Strip provider prefix if absent on input (e.g. "gpt-4o" -> match "openai/gpt-4o" exact suffix first)
+            for k, v in DEFAULT_LLM_COST_RATES.items():
+                if k.split("/", 1)[-1] == m_low:
+                    rates = v
+                    break
+        if not rates:
+            # Longest-key substring match (`k in m_low` or suffix in `m_low`, never `m_low in k`)
+            for k, v in sorted(
+                DEFAULT_LLM_COST_RATES.items(), key=lambda kv: len(kv[0]), reverse=True
+            ):
+                k_short = k.split("/", 1)[-1]
+                if k in m_low or k_short in m_low:
+                    rates = v
+                    break
     if not rates:
         rates = {"prompt": 0.15, "completion": 0.60, "reasoning": 0.60}
-    p_cost = (prompt_tokens / 1_000_000.0) * rates["prompt"]
-    c_cost = (completion_tokens / 1_000_000.0) * rates["completion"]
-    r_cost = (reasoning_tokens / 1_000_000.0) * rates["reasoning"]
+    p_cost = (p_tok / 1_000_000.0) * rates["prompt"]
+    c_cost = (c_tok / 1_000_000.0) * rates["completion"]
+    r_cost = (r_tok / 1_000_000.0) * rates["reasoning"]
     return float(p_cost + c_cost + r_cost)
 
 
@@ -549,10 +605,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
     """Initializes all DuckDB tables for LOX and automatically migrates outdated schemas."""
     abs_path = os.path.abspath(db_path)
     with _DB_INIT_LOCK:
-        if not os.path.exists(abs_path):
-            _INITIALIZED_DBS.discard(abs_path)
+        already_ok = is_db_initialized(abs_path)
         con = connect_db(db_path, read_only=False)
-        if abs_path in _INITIALIZED_DBS:
+        if already_ok:
             return con
         try:
             tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
@@ -713,7 +768,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                     ("holdout_iqm_delta", "DOUBLE"),
                     ("holdout_rejected", "BOOLEAN DEFAULT FALSE"),
                     ("iqm_delta", "DOUBLE"),
+                    ("winsor_delta", "DOUBLE"),
                     ("wilcoxon_p", "DOUBLE"),
+                    ("sign_perm_p", "DOUBLE"),
                     ("wins", "INTEGER"),
                     ("losses", "INTEGER"),
                     ("reject_reason", "TEXT"),
@@ -739,7 +796,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
                 )
         except Exception as rate_exc:
             _LOG.warning("Failed seeding llm_cost_rates: %s", rate_exc)
-        _INITIALIZED_DBS.add(abs_path)
+        sig = _db_file_sig(abs_path)
+        if sig is not None:
+            _INITIALIZED_DBS[abs_path] = sig
         return con
 
 
@@ -814,6 +873,7 @@ def get_schema_markdown(
                 f"- `theories`: {_fmt_cols('theories')}.",
                 f"- `tournament_attempts`: {_fmt_cols('tournament_attempts')}.",
                 f"- `stepping_stones`: {_fmt_cols('stepping_stones', {'policy_code', 'skills_json'})}.",
+                f"- `proactive_branches`: {_fmt_cols('proactive_branches', {'policy_code', 'skills_json'})}.",
                 f"- `expert_runs`: {_fmt_cols('expert_runs')}.",
                 f"- `expert_ticks`: {_fmt_cols('expert_ticks')}.",
             ]

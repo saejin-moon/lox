@@ -11,13 +11,10 @@ import pytest
 from lox.author.prompts import build_system_prompt, build_user_prompt
 from lox.author.swarm_deficits import DeficitAnalyzer, DeficitCluster
 from lox.author.swarm_peer import PeerCandidate
-from lox.author.swarm_worker import SwarmWorker
 from lox.author.tools import AuthorToolRegistry
 from lox.datasets.wiki import DEFAULT_WIKI_DB, WikiEngine
 from lox.db.schema import connect_db, init_db
 from lox.db.theories import TheoryDocumentStore
-from lox.env.actions import Action
-from lox.env.harness import NetHackHarness
 from lox.lang.validator import (
     PolicyValidationError,
     validate_cross_module_contracts,
@@ -157,56 +154,6 @@ def test_run_swarm_clean_resets_campaign_while_preserving_experts(tmp_path):
         assert fresh_policies == 1
     finally:
         con.close()
-
-
-def test_swarm_gen2_with_frontier_checkpoint_brief_and_replay(tmp_path):
-    from lox.engine.frontier import FrontierArchive
-
-    theories_path = str(tmp_path / "theories.lance")
-    frontier_dir = str(tmp_path / "frontier")
-    db_path = str(tmp_path / "test_cp_gen2.duckdb")
-    con = init_db(db_path)
-    con.close()
-
-    # Build a real action trace and save as FrontierCheckpoint (mimics Gen 1 extraction)
-    h = NetHackHarness(max_steps=40)
-    try:
-        st = h.reset(seed=42)
-        for _ in range(10):
-            st, done, _ = h.step(Action.SEARCH)
-            if done:
-                break
-        act_bytes = bytes(h.action_bytes)
-        archive = FrontierArchive(frontier_dir=frontier_dir)
-        cp = archive.add_checkpoint(
-            seed=42,
-            depth=2,
-            milestone="dlvl_2",
-            turns=int(st.turn),
-            action_bytes=act_bytes,
-            game_log="Explored room.",
-            checkpoint_id="fc_dlvl_2_seed42_g1",
-        )
-    finally:
-        h.close()
-
-    worker = SwarmWorker(
-        role="threat",
-        provider="mock",
-        db_path=db_path,
-        theories_path=theories_path,
-        frontier_dir=frontier_dir,
-        max_turns=1,
-    )
-    brief = worker._build_worker_brief(
-        generation=2,
-        checkpoint=cp,
-    )
-    assert "fc_dlvl_2_seed42_g1" in brief
-    assert "Dlvl 2" in brief
-
-    res = worker.run_cycle(generation=2, checkpoint=cp)
-    assert res["role"] == "threat"
 
 
 def test_climbing_regime_does_not_throttle_peers_to_two(tmp_path, monkeypatch):
@@ -423,35 +370,10 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
 
     from lox.author.tools import merge_skill_module_update
     from lox.db.schema import init_db
-    from lox.engine.scheduler import ModeScheduler
     from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
     from lox.lang.modularize import maybe_auto_modularize
 
-    # 1. ModeScheduler enters REFACTOR on bloated skills even when policy.py is small
-    sched = ModeScheduler()
-    sched.gens_since_refactor = 3
-    assert (
-        sched.select_mode(
-            generation=4,
-            has_policy=True,
-            policy_line_count=34,
-            max_skill_lines=320,
-            total_lines=354,
-        )
-        == "REFACTOR"
-    )
-    assert (
-        sched.select_mode(
-            generation=5,
-            has_policy=True,
-            policy_line_count=34,
-            max_skill_lines=320,
-            total_lines=354,
-        )
-        == "WRITE"
-    )
-
-    # 2. DeficitAnalyzer flags skill bloat at >=250 / >=300 LOC
+    # 1. DeficitAnalyzer flags skill bloat at >=250 / >=300 LOC
     dbp = str(tmp_path / "refactor_thresh.duckdb")
     init_db(dbp)
     thin_pol = (
@@ -527,7 +449,6 @@ def test_skill_aware_refactor_thresholds_split_merge_and_swarm_refactor_slot(tmp
         num_workers=2,
         eval_workers=2,
         seeds_per_batch=2,
-        swarm_architecture="peer",
     )
     try:
         res = orch.run_generation(16)
@@ -636,14 +557,16 @@ def test_phase1_cli_args_wiki_and_prompts():
         assert "Sokoban" in art
 
     sys_p = build_system_prompt(is_swarm=True)
-    assert "preempt_if" in sys_p and "adjacent_closed_doors" in sys_p
+    assert "adjacent_closed_doors" in sys_p
+    assert "register_goal" in sys_p
     pol_25 = (
-        "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector\n"
-        "class Policy:\n"
-        "    def __init__(self):\n"
-        "        self.tree = BehaviorTree(PrioritySelector([\n"
-        + "".join(f"            ActionLeaf(f_{i}, name='fn_{i}'),\n" for i in range(25))
-        + "        ]), blackboard=Blackboard())\n"
+        "import skills.goals.core as goals\n"
+        "from lox.env.actions import Action\n"
+        + "".join(
+            f"goals.register_goal('fn_{i}', priority={i}, trigger=lambda s, w: False, step=lambda s, w: Action.WAIT)\n"
+            for i in range(25)
+        )
+        + "class Policy:\n    def step(self, state): return Action.WAIT\n"
     )
     user_p = build_user_prompt(
         mode="SWARM_PEER",
@@ -667,8 +590,8 @@ def test_dual_track_1_revision_plus_4_fresh_and_directive_planner(
     """
     from unittest.mock import patch
 
+    from lox.author.directives import SwarmDirectivePlanner
     from lox.author.swarm_deficits import DeficitCluster, DeficitReport
-    from lox.author.swarm_meta import SwarmMetaAgent
     from lox.author.swarm_peer import PeerCandidate
     from lox.db.logger import BatchDatabaseLogger
     from lox.db.schema import init_db
@@ -721,8 +644,8 @@ def test_dual_track_1_revision_plus_4_fresh_and_directive_planner(
         }
     )
 
-    # 1. Verify Meta-Agent Directive Planner mock fallback
-    meta = SwarmMetaAgent(provider="mock", model="test-model", db_path=db_p)
+    # 1. Verify Directive Planner mock fallback for Layout A (2R + 2P)
+    meta = SwarmDirectivePlanner(provider="mock", model="test-model", db_path=db_p)
     dummy_rep = DeficitReport(
         generation=67,
         incumbent_avg_depth=3.5,
@@ -735,14 +658,28 @@ def test_dual_track_1_revision_plus_4_fresh_and_directive_planner(
     )
     dirs = meta.plan_peer_directives(
         generation=67,
-        fresh_peer_ids=["peer_1", "peer_2", "peer_3", "peer_4"],
+        fresh_peer_ids=["reactive_1", "reactive_2", "proactive_1", "proactive_2"],
         deficit_report=dummy_rep,
         active_stepping_stone=logger.load_active_stepping_stone(inc_fp),
+        peer_roles={
+            "reactive_1": "revision",
+            "reactive_2": "reactive",
+            "proactive_1": "proactive_capability",
+            "proactive_2": "proactive_branch",
+        },
     )
-    assert [d["peer_id"] for d in dirs] == ["peer_1", "peer_2", "peer_3", "peer_4"]
-    assert all("peer_rev" in d["exclude_overlap"] for d in dirs)
+    assert [d["peer_id"] for d in dirs] == [
+        "reactive_1",
+        "reactive_2",
+        "proactive_1",
+        "proactive_2",
+    ]
+    assert dirs[1]["exclude_overlap"] and "stepping-stone" in dirs[1]["exclude_overlap"]
+    assert dirs[2]["track"] == "proactive_capability"
+    assert dirs[3]["track"] == "proactive_branch"
 
-    # 2. Verify SwarmOrchestrator launches 1 Revision (peer_rev with stone_pol) + 4 Fresh (peer_1..4 with inc_pol)
+    # 2. Verify SwarmOrchestrator launches Layout A: 2 Reactive + 2 Proactive
+    #    where `reactive_1` picks up the active stepping stone (`stone_pol`)!
     class _StubPool:
         benchmark = "nethack"
 
@@ -788,7 +725,7 @@ def test_dual_track_1_revision_plus_4_fresh_and_directive_planner(
         num_workers=4,
         seeds_per_batch=4,
     )
-    seen_starts: dict[str, tuple[str, bool]] = {}
+    seen_starts: dict[str, tuple[str, bool, str]] = {}
 
     def _fake_peer_cycle(
         self_peer,
@@ -802,6 +739,7 @@ def test_dual_track_1_revision_plus_4_fresh_and_directive_planner(
         seen_starts[self_peer.peer_id] = (
             current_policy,
             kwargs.get("stepping_stone") is not None,
+            str(kwargs.get("track", "")),
         )
         return PeerCandidate(
             peer_id=self_peer.peer_id,
@@ -811,6 +749,7 @@ def test_dual_track_1_revision_plus_4_fresh_and_directive_planner(
             skills={},
             sandbox_passed=False,
             error="noop_test",
+            track=str(kwargs.get("track", "reactive")),
         )
 
     try:
@@ -829,16 +768,199 @@ def test_dual_track_1_revision_plus_4_fresh_and_directive_planner(
         orch.close()
 
     assert set(seen_starts.keys()) == {
-        "peer_rev",
-        "peer_1",
-        "peer_2",
-        "peer_3",
-        "peer_4",
+        "reactive_1",
+        "reactive_2",
+        "proactive_1",
+        "proactive_2",
     }
-    assert seen_starts["peer_rev"] == (stone_pol, True)
-    for fp_id in ("peer_1", "peer_2", "peer_3", "peer_4"):
-        assert seen_starts[fp_id] == (inc_pol, False)
+    assert seen_starts["reactive_1"] == (stone_pol, True, "revision")
+    assert seen_starts["reactive_2"] == (inc_pol, False, "reactive")
+    assert seen_starts["proactive_1"] == (inc_pol, False, "proactive_capability")
+    assert seen_starts["proactive_2"] == (inc_pol, False, "proactive_branch")
 
     # After 1 revision attempt, revision_count incremented to 1 (still active for 1 more try)
     st_after = logger.load_active_stepping_stone(inc_fp, max_revisions=2)
     assert st_after is not None and st_after["revision_count"] == 1
+
+
+def test_v3_proactive_branch_advancement_4gen_reset_and_graduation(
+    tmp_path, monkeypatch
+):
+    """
+    Verifies Component 3:
+    1. `proactive_2` advances its sheltered branch on non-catastrophic S_select without polluting Champion.
+    2. On Gen 2..3, `proactive_2` continues from the saved `proactive_head` code.
+    3. At step 4 without graduating, branch resets cleanly to Champion.
+    4. When `proactive_2` wins strict tournament promotion, branch status becomes 'graduated' and workspace updates.
+    """
+    from unittest.mock import patch
+
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.db.logger import BatchDatabaseLogger
+    from lox.db.schema import connect_db, init_db
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+    from lox.engine.swarm_referee import _package_fingerprint
+
+    db_p = str(tmp_path / "pbranch.duckdb")
+    ws_p = tmp_path / "ws"
+    ws_p.mkdir()
+    init_db(db_p).close()
+
+    inc_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, state):\n        return Action.WAIT\n"
+
+    def br_step_pol(k: int) -> str:
+        return (
+            f"from lox.env.actions import Action\n"
+            f"class Policy:\n"
+            f"    def step(self, state):\n"
+            f"        _v = {k}\n"
+            f"        return Action.SEARCH\n"
+        )
+
+    (ws_p / "policy.py").write_text(inc_pol, encoding="utf-8")
+    inc_fp = _package_fingerprint(inc_pol, {})
+
+    dummy_rep = DeficitReport(
+        generation=1,
+        incumbent_avg_depth=3.0,
+        incumbent_max_depth=5,
+        regime="PLATEAU",
+        fail_clusters=[DeficitCluster("c1", "loop", "Loop", 10, [101], "ev")],
+    )
+
+    promote_p2_mode = {"win": False}
+
+    class _BranchPool:
+        benchmark = "nethack"
+
+        def evaluate_batch(self, batch_id="", priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [1, 2, 3, 4])
+            is_p2 = "proactive_2" in str(batch_id)
+            runs = []
+            for idx, s in enumerate(s_list):
+                if is_p2 and promote_p2_mode["win"]:
+                    d, sc = 5, 1200
+                elif is_p2:
+                    # Non-catastrophic S_select: 2W/2L around champion depth=3.0 (winsor_delta~0.0, avg_depth=3.0)
+                    d = 4 if idx % 2 == 0 else 2
+                    sc = 700 if idx % 2 == 0 else 400
+                else:
+                    d, sc = 3, 500
+                runs.append(
+                    {
+                        "run_id": f"{batch_id}_{s}",
+                        "seed": s,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 500,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "lox.engine.swarm_orchestrator.PersistentEvalPool",
+        lambda *a, **k: _BranchPool(),
+    )
+    orch = SwarmCampaignOrchestrator(
+        db_path=db_p,
+        workspace_dir=str(ws_p),
+        frontier_dir=str(tmp_path / "fr"),
+        provider="mock",
+        model="mock-model",
+        num_workers=4,
+        seeds_per_batch=8,
+    )
+    assert orch.referee.max_tournament_peers >= 4
+
+    p2_seen_starts: list[str] = []
+
+    def _fake_peer_cycle(
+        self_peer,
+        generation,
+        deficit_report,
+        claimed_deficit,
+        current_policy,
+        current_skills,
+        **kwargs,
+    ):
+        if self_peer.peer_id == "proactive_2":
+            p2_seen_starts.append(current_policy)
+            return PeerCandidate(
+                peer_id="proactive_2",
+                claimed_deficit_id=claimed_deficit.cluster_id,
+                claimed_label=claimed_deficit.label,
+                hypothesis_yaml={"mechanism": f"branch_step_g{generation}"},
+                policy_code=br_step_pol(generation),
+                skills={},
+                sandbox_passed=True,
+                sandbox_metrics={"avg_depth": 3.0},
+                track="proactive_branch",
+            )
+        return PeerCandidate(
+            peer_id=self_peer.peer_id,
+            claimed_deficit_id=claimed_deficit.cluster_id,
+            claimed_label=claimed_deficit.label,
+            policy_code=inc_pol,
+            skills={},
+            sandbox_passed=False,
+            error="skip_other",
+            track=str(kwargs.get("track", "reactive")),
+        )
+
+    logger = BatchDatabaseLogger(db_path=db_p)
+    try:
+        with (
+            patch(
+                "lox.author.swarm_deficits.DeficitAnalyzer.analyze",
+                lambda *a, **k: dummy_rep,
+            ),
+            patch(
+                "lox.author.swarm_peer.SwarmPeerAgent.run_cycle",
+                _fake_peer_cycle,
+            ),
+        ):
+            # Gens 1..3 advance sheltered branch without modifying workspace Champion
+            for g in (1, 2, 3):
+                r = orch.run_generation(g)
+                assert r["promoted"] is False
+                assert (ws_p / "policy.py").read_text(encoding="utf-8") == inc_pol
+                br = logger.load_active_proactive_branch(inc_fp)
+                assert br is not None and br["steps_taken"] == g
+            # Gen 2 started from Gen 1's branch head, not champion
+            assert "_v = 1" in p2_seen_starts[1]
+            assert "_v = 2" in p2_seen_starts[2]
+
+            # Gen 4 hits max_steps=4 -> resets cleanly to Champion (no active branch left)
+            r4 = orch.run_generation(4)
+            assert r4["promoted"] is False
+            assert logger.load_active_proactive_branch(inc_fp) is None
+
+            # Gen 5 starts fresh from Champion, then Gen 6 graduates proactive_2 to Champion!
+            r5 = orch.run_generation(5)
+            assert r5["promoted"] is False
+            assert p2_seen_starts[4] == inc_pol
+            br5 = logger.load_active_proactive_branch(inc_fp)
+            assert br5 is not None and br5["steps_taken"] == 1
+
+            promote_p2_mode["win"] = True
+            r6 = orch.run_generation(6)
+            assert r6["promoted"] is True
+            assert r6["winner_id"] == "proactive_2"
+            assert "_v = 6" in (ws_p / "policy.py").read_text(encoding="utf-8")
+            con = connect_db(db_p, read_only=True)
+            try:
+                st_row = con.execute(
+                    "SELECT status FROM proactive_branches WHERE branch_id = ?",
+                    [br5["branch_id"]],
+                ).fetchone()
+                assert st_row is not None and st_row[0] == "graduated"
+            finally:
+                con.close()
+    finally:
+        orch.close()

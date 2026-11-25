@@ -90,17 +90,17 @@ def test_phase3_unified_duckdb_prefix_cache_tier1_and_multiseed_smoke(tmp_path):
     finally:
         con.close()
 
-    # 2. Tier-1 manifest & non-duplicated BT docs in SWARM_PEER prompt
+    # 2. Tier-1 manifest in SWARM_PEER prompt
     long_policy = "\n".join(
         [
-            "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector",
+            "from lox.env.actions import Action",
             "class Policy:",
         ]
         + [f"    def helper_{i}(self, s): return None" for i in range(70)]
     )
     large_skills = {
-        "combat": "\n".join([f"def fight_{i}(s, bb): return None" for i in range(40)]),
-        "equip": "\n".join([f"def wear_{i}(s, bb): return None" for i in range(40)]),
+        "combat": "\n".join([f"def fight_{i}(s): return None" for i in range(40)]),
+        "equip": "\n".join([f"def wear_{i}(s): return None" for i in range(40)]),
     }
     peer_prompt = build_user_prompt(
         mode="SWARM_PEER",
@@ -122,21 +122,15 @@ def test_phase3_unified_duckdb_prefix_cache_tier1_and_multiseed_smoke(tmp_path):
     )
     cand_seed1000_bug = """
 from lox.env.actions import Action
-from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
 
-def conditional_bug(st, bb):
-    # Triggers ONLY after several turns when seed != 42 (using seeded randomness on st.step_count == 5)
+def conditional_bug(st):
     if st.step_count == 5 and st.y != 11:
-        # Force deterministic failure on non-seed-42 coordinates if reached or always raise when x > 0 on step 5 except mock check
         return 1 / 0
     return Action.SEARCH
 
 class Policy:
-    def __init__(self):
-        self.blackboard = Blackboard()
-        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(conditional_bug, name='bug')]), blackboard=self.blackboard)
     def step(self, st):
-        return self.tree.tick(st) or Action.WAIT
+        return conditional_bug(st) or Action.WAIT
 """
     diag, status = reg.dry_run_policy(
         code=cand_seed1000_bug, seed=42, max_turns=60, smoke_only=True
@@ -232,7 +226,6 @@ def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
     5. ModeScheduler triggers REFACTOR based on policy line count and cadence.
     """
     from lox.datasets.download_experts import ingest_expert_runs_into_duckdb
-    from lox.engine.scheduler import ModeScheduler
     from lox.env.grid_utils import astar_next_step
     from lox.env.state import _IS_OPEN_DOOR_GLYPH_LUT, WorldMemory
 
@@ -328,20 +321,6 @@ def test_pass4_codebase_bottleneck_fixes(tmp_path: Path) -> None:
     )
     assert step in ((1, 0), (0, 1)), f"Expected orthogonal entry, got {step}"
 
-    # 4. ModeScheduler REFACTOR Gating on Line Count and Cadence
-    sched = ModeScheduler()
-    m1 = sched.select_mode(generation=1, has_policy=True, policy_line_count=200)
-    assert m1 == "WRITE"
-
-    # Generation 2 with small policy should remain WRITE
-    m2 = sched.select_mode(generation=2, has_policy=True, policy_line_count=300)
-    assert m2 == "WRITE"
-
-    # Generation 4 with policy_line_count >= 450 triggers REFACTOR
-    sched.gens_since_refactor = 4
-    m4 = sched.select_mode(generation=4, has_policy=True, policy_line_count=460)
-    assert m4 == "REFACTOR"
-
 
 def test_pass5_deep_audit_fixes(tmp_path: Path) -> None:
     """
@@ -436,7 +415,6 @@ class Policy:
 """
     out, status = tools.dry_run_policy(smoke_code, smoke_only=True)
     assert status == "PASSED (smoke check)"
-    assert tools.pilot_runs_used == 0
 
     tools.last_passed_code = "code_v1"
     tools.last_pilot_improved = True
@@ -477,22 +455,23 @@ class Policy:
 
 def test_pass6_overnight_audit_fixes(tmp_path: Path) -> None:
     """Pass 6: Overnight Campaign & Runtime Audit Overhaul Verification."""
-    from lox.engine.scheduler import ModeScheduler
     from lox.lang.validator import splice_functions_into_policy
 
     # 1. ExecutionTracer attributes turns to handle_combat (not leaf helper get_passable_mask)
-    #    and counts boolean macro calls returning False
-    macro_src = """
-def macro_is_low_hp(state):
+    #    and counts boolean skill helper calls returning False
+    helper_skill = """
+def helper_is_low_hp(state):
     return False
 """
     pol_src = """
+from skills.helpers import helper_is_low_hp
+
 class Policy:
     def get_passable_mask(self, state):
         return state.mem.passable_mask
 
     def handle_combat(self, state):
-        if macro_is_low_hp(state):
+        if helper_is_low_hp(state):
             return Action.WAIT
         mask = self.get_passable_mask(state)
         return Action.E
@@ -502,7 +481,7 @@ class Policy:
             act = self.handle_combat(state)
             state = yield act
 """
-    compiled = compile_policy_and_macros(pol_src, macros_code=macro_src)
+    compiled = compile_policy_package(pol_src, skills={"helpers": helper_skill})
     h = NetHackHarness(max_steps=10)
     try:
         st = h.reset(seed=42)
@@ -512,7 +491,7 @@ class Policy:
         assert active_fn == "handle_combat"
         assert runner.tracer.fn_turns.get("handle_combat", 0) == 1
         assert runner.tracer.fn_turns.get("get_passable_mask", 0) == 0
-        assert runner.tracer.fn_calls.get("macro_is_low_hp", 0) >= 1
+        assert runner.tracer.fn_calls.get("helper_is_low_hp", 0) >= 1
     finally:
         h.close()
 
@@ -556,7 +535,7 @@ class Policy:
     finally:
         pool.close()
 
-    # 3. splice_functions_into_policy preserves existing self.<attr> in __init__
+    # 3. splice_functions_into_policy preserves existing referenced self.<attr> in __init__
     base_code = """
 class Policy:
     def __init__(self):
@@ -565,6 +544,7 @@ class Policy:
         self.overwrite_me = "old"
 
     def run(self, state):
+        _ = (self.old_attr1, self.old_attr2)
         return Action.WAIT
 """
     patch_code = """
@@ -581,17 +561,6 @@ class Policy:
         "self.overwrite_me = 'new'" in spliced or 'self.overwrite_me = "new"' in spliced
     )
     assert "self.new_attr = 30" in spliced
-
-    # 4. ModeScheduler triggers REFACTOR when policy_line_count >= 450 and gens_since_refactor >= 4
-    sched = ModeScheduler()
-    mode_at_3 = sched.select_mode(
-        generation=3, has_policy=True, consecutive_failures=3, policy_line_count=500
-    )
-    assert mode_at_3 == "REFACTOR"
-    mode_at_4 = sched.select_mode(
-        generation=4, has_policy=True, consecutive_failures=4, policy_line_count=500
-    )
-    assert mode_at_4 != "REFACTOR"
 
     # 5. AuthorToolRegistry.query_policy_docs("policy") returns current_policy_code
     db_p = str(tmp_path / "pass6_tools.duckdb")
@@ -652,7 +621,6 @@ class Policy:
 
 def test_pass7_final_preflight_audit_fixes(tmp_path: Path) -> None:
     """Pass 7: Final Pre-Flight Deep Sweep Verification."""
-    from lox.lang.macros import MacroHarvester, MacroLibrary
     from lox.runner.pool import run_single_episode
 
     # 1. Standing on a downstairs tile '>' where chars[y, x] == ord('@')
@@ -745,33 +713,11 @@ class Policy:
     )
     assert shard_res["steps"] <= 20
 
-    # 4. MacroHarvester does not harvest methods calling unharvested self.<method>,
-    # while harvesting methods accessing self.passable_mask
-    m_lib = MacroLibrary(path=str(tmp_path / "test_macros.py"))
-    candidate_pol = """
-class Policy:
-    def helper_valid(self, state):
-        return self.passable_mask[state.y, state.x]
-
-    def unharvested_stateful(self):
-        return self.custom_state
-
-    def helper_invalid(self, state):
-        return self.unharvested_stateful()
-
-    def run(self, state):
-        while True:
-            yield Action.WAIT
-"""
-    harvested = MacroHarvester.harvest_from_policy(candidate_pol, m_lib)
-    assert "helper_valid" in harvested
-    assert "helper_invalid" not in harvested
-
 
 def test_pass8_long_horizon_and_unattended_ops(tmp_path: Path) -> None:
     """Pass 8: Multi-Week Unattended Ascension & Deep-Horizon Scaling Architecture."""
     from lox.db.shards import extract_shards_from_runs
-    from lox.engine.orchestrator import (
+    from lox.engine.reporting import (
         compute_adaptive_max_steps,
         write_status_report,
     )
@@ -1254,17 +1200,13 @@ class Policy:
     assert any("missing_mod" in e or "not_a_real_field" in e for e in py_errs)
 
     good_pol = """from lox.env.actions import Action
-from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
 
-def step_wait(st, bb):
+def step_wait(st):
     return Action.WAIT
 
 class Policy:
-    def __init__(self):
-        self.blackboard = Blackboard()
-        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(step_wait, name='w')]), blackboard=self.blackboard)
     def step(self, state):
-        return self.tree.tick(state) or Action.WAIT
+        return step_wait(state) or Action.WAIT
 """
     assert run_pyright_on_package(good_pol, skills={}) == []
 
@@ -1281,7 +1223,7 @@ class Policy:
     reg = AuthorToolRegistry(db_path=db_path)
     reg.current_policy_code = good_pol
     reg.skills = {
-        "nav": "def move_dir(st, bb):\n    bb.nav_target = (1, 2)\n    return bb.nav_target\n"
+        "nav": "def move_dir(st, ws):\n    ws.nav_target = (1, 2)\n    return ws.nav_target\n"
     }
     reg.configure_generation(
         pool=None, skills=reg.skills, generation=1, mode="SWARM_PEER"
@@ -1290,8 +1232,6 @@ class Policy:
     assert "policy.py" in ref_out
     grep_out, _ = reg.grep_skills("nav_target")
     assert "skills/nav.py" in grep_out
-    bb_out, _ = reg.blackboard_map()
-    assert "nav_target" in bb_out
     parity_out, _ = reg.benchmark_expert_parity(top_n=5)
     assert "Parity" in parity_out
 
@@ -1299,7 +1239,7 @@ class Policy:
     peer_tool_names = {s["function"]["name"] for s in peer_specs}
     assert "query_policy_docs" not in peer_tool_names
     assert "read_wiki_article" in peer_tool_names
-    assert "blackboard_map" in peer_tool_names
+    assert "architecture_map" in peer_tool_names
     dry_props = next(
         s["function"]["parameters"]["properties"]
         for s in peer_specs
@@ -1647,18 +1587,14 @@ def test_phase4_and_5_organic_scenarios_referee_composition_holdout_and_scoped_o
     # 3. Hard exception rejection during incubate_candidate
     base_pol = """
 from lox.env.actions import Action
-from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector
 from skills.sub import h_base
 
 class Policy:
-    def __init__(self):
-        self.blackboard = Blackboard()
-        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(h_base, name='base')]), blackboard=self.blackboard)
     def step(self, state):
-        return self.tree.tick(state) or Action.WAIT
+        return h_base(state) or Action.WAIT
 """
     base_skills = {
-        "sub": "from lox.env.actions import Action\ndef h_base(s, bb):\n    return Action.SEARCH\n"
+        "sub": "from lox.env.actions import Action\ndef h_base(s):\n    return Action.SEARCH\n"
     }
     cand_exc = PeerCandidate(
         peer_id="p_exc",
@@ -1700,19 +1636,19 @@ class Policy:
     assert "exception" in inc_out.error.lower()
 
     # 4. Top-K 3-way AST composition inside the SAME skill module + Hidden Holdout audit cancellation
-    sk_a = base_skills["sub"] + "\ndef h_alpha(s, bb):\n    return Action.EAST\n"
-    sk_b = base_skills["sub"] + "\ndef h_beta(s, bb):\n    return Action.WEST\n"
+    sk_a = base_skills["sub"] + "\ndef h_alpha(s):\n    return Action.EAST\n"
+    sk_b = base_skills["sub"] + "\ndef h_beta(s):\n    return Action.WEST\n"
     pol_a = base_pol.replace(
         "from skills.sub import h_base", "from skills.sub import h_alpha, h_base"
     ).replace(
-        "ActionLeaf(h_base, name='base')",
-        "ActionLeaf(h_alpha, name='alpha'), ActionLeaf(h_base, name='base')",
+        "class Policy:",
+        "def run_alpha(s):\n    return h_alpha(s)\n\nclass Policy:",
     )
     pol_b = base_pol.replace(
         "from skills.sub import h_base", "from skills.sub import h_base, h_beta"
     ).replace(
-        "ActionLeaf(h_base, name='base')",
-        "ActionLeaf(h_base, name='base'), ActionLeaf(h_beta, name='beta')",
+        "class Policy:",
+        "def run_beta(s):\n    return h_beta(s)\n\nclass Policy:",
     )
     ca = PeerCandidate(
         peer_id="pA",

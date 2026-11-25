@@ -11,11 +11,14 @@ Total Niches: 5 * 4 * 4 = 80 cells (`cell_v2_d{d}_v{v}_t{t}`).
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -60,7 +63,12 @@ class MAPElitesArchive:
         self.depth_thresholds = tuple(depth_thresholds)
         self.caution_thresholds = tuple(caution_thresholds)
         self.density_thresholds = tuple(density_thresholds)
-        self.fitness_weights = tuple(fitness_weights)
+        self.fitness_weights: tuple[float, float, float, float] = (
+            float(fitness_weights[0]),
+            float(fitness_weights[1]),
+            float(fitness_weights[2]),
+            float(fitness_weights[3]),
+        )
 
     @staticmethod
     def _bin_value(val: float, thresholds: tuple[float, ...]) -> int:
@@ -89,9 +97,12 @@ class MAPElitesArchive:
         )
 
         # 2. Vitals Progression Dimension (0 to 3): rewards armor upgrades (low AC), XL, branches
-        avg_ac = float(metrics.get("avg_ac", 10.0) or 10.0)
-        avg_xl = float(metrics.get("avg_xp_level", metrics.get("avg_xl", 1.0)) or 1.0)
-        avg_branches = float(metrics.get("avg_branches", 1.0) or 1.0)
+        raw_ac = metrics.get("avg_ac")
+        avg_ac = 10.0 if raw_ac is None else float(raw_ac)
+        raw_xl = metrics.get("avg_xp_level", metrics.get("avg_xl"))
+        avg_xl = 1.0 if raw_xl is None else float(raw_xl)
+        raw_br = metrics.get("avg_branches")
+        avg_branches = 1.0 if raw_br is None else float(raw_br)
         vitals_val = (
             max(0.0, 10.0 - avg_ac)
             + 1.5 * max(0.0, avg_xl - 1.0)
@@ -126,8 +137,9 @@ class MAPElitesArchive:
         cell_id = f"cell_v2_d{d_bin}_v{v_bin}_t{t_bin}"
         return cell_id, d_bin, v_bin, t_bin
 
-    @staticmethod
+    @classmethod
     def compute_fitness(
+        cls,
         metrics: dict[str, Any],
         *,
         fitness_weights: tuple[float, float, float, float] | None = None,
@@ -139,15 +151,18 @@ class MAPElitesArchive:
         w_depth, w_max, w_score, w_turns = (
             fitness_weights
             if fitness_weights is not None
-            else (1000.0, 150.0, 0.1, 0.05)
+            else cls.DEFAULT_FITNESS_WEIGHTS
         )
         avg_depth = float(metrics.get("avg_depth", metrics.get("mean_depth", 1.0)))
         max_depth = float(metrics.get("max_depth", 1.0))
         avg_score = float(metrics.get("avg_score", metrics.get("mean_score", 0.0)))
         avg_turns = float(metrics.get("avg_turns", metrics.get("mean_turns", 0.0)))
-        avg_ac = float(metrics.get("avg_ac", 10.0) or 10.0)
-        avg_xl = float(metrics.get("avg_xp_level", metrics.get("avg_xl", 1.0)) or 1.0)
-        avg_branches = float(metrics.get("avg_branches", 1.0) or 1.0)
+        raw_ac = metrics.get("avg_ac")
+        avg_ac = 10.0 if raw_ac is None else float(raw_ac)
+        raw_xl = metrics.get("avg_xp_level", metrics.get("avg_xl"))
+        avg_xl = 1.0 if raw_xl is None else float(raw_xl)
+        raw_br = metrics.get("avg_branches")
+        avg_branches = 1.0 if raw_br is None else float(raw_br)
         vitals_bonus = (
             max(0.0, 10.0 - avg_ac) * 120.0
             + max(0.0, avg_xl - 1.0) * 150.0
@@ -247,8 +262,10 @@ class MAPElitesArchive:
                     int(elite.promotions),
                 ],
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning(
+                "MAPElitesArchive persist warning (%s): %s", elite.cell_id, exc
+            )
 
     def sample_elite(self, strategy: str = "ucb_curiosity") -> Elite | None:
         """
@@ -323,8 +340,8 @@ class MAPElitesArchive:
                 con.execute(
                     "DELETE FROM archive_policies WHERE cell_id NOT LIKE 'cell_v2_%'"
                 )
-            except Exception:
-                pass
+            except Exception as purge_exc:
+                _LOG.warning("MAPElitesArchive v1 purge skipped: %s", purge_exc)
             rows = con.execute(
                 """
                 SELECT cell_id, depth_bin, caution_bin, resource_bin, fitness,
@@ -355,5 +372,6 @@ class MAPElitesArchive:
                 )
                 loaded += 1
             return loaded
-        except Exception:
+        except Exception as load_exc:
+            _LOG.warning("MAPElitesArchive load warning: %s", load_exc)
             return 0

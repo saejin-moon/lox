@@ -16,6 +16,10 @@ _KEY_ALIASES: dict[str, str] = {
     "xp_level": "final_xp_level",
     "final_max_hp": "max_hp",
     "max_hp": "final_max_hp",
+    "final_hp": "hp",
+    "hp": "final_hp",
+    "final_ac": "ac",
+    "ac": "final_ac",
     "functions_triggered": "triggered_functions",
     "triggered_functions": "functions_triggered",
     "function_turns": "fn_turns",
@@ -140,12 +144,24 @@ class EpisodeRun(dict):
         shard_id_str = str(super().get("shard_id", "") or "")
         if run_id_str.startswith("shard_") or shard_id_str:
             super().__setitem__("is_shard", True)
-        elif "is_shard" not in self:
+        elif super().get("is_shard") is None:
             super().__setitem__("is_shard", False)
+        else:
+            super().__setitem__("is_shard", bool(super().get("is_shard")))
+
+        # Coalesce explicit None for depth / max_depth BEFORE stairs_down_found check
+        raw_d = super().get("depth")
+        raw_md = super().get("max_depth")
+        eff_d = int(raw_d) if raw_d is not None else 1
+        eff_md = int(raw_md) if raw_md is not None else eff_d
+        if raw_d is None:
+            super().__setitem__("depth", eff_d)
+        if raw_md is None:
+            super().__setitem__("max_depth", eff_md)
 
         # Ensure `stairs_down_found` is consistent with `max_depth > 1` or `summary_digest`
         if "stairs_down_found" not in self or not super().get("stairs_down_found"):
-            max_d = int(super().get("max_depth", super().get("depth", 1)) or 1)
+            max_d = max(eff_d, eff_md)
             digest = str(super().get("summary_digest", "") or "")
             ms_dict = super().get("milestones")
             has_st = bool(

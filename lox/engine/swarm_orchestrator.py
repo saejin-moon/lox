@@ -1,19 +1,12 @@
 """
-LOX Swarm Campaign Orchestrator ("Hard Code Nothing").
-Coordinates the Hierarchical Multi-Agent Swarm with a Two-Pass Advisory Critic
-and ZERO hardcoded rollbacks:
-1. Critic Pass 1 (`guide_before_generation`): Runs as the very first agent every
-   generation to audit DuckDB telemetry, branch turn shares, and game mechanics,
-   providing a high-level strategic guide to the Meta-Agent.
-2. Meta-Agent Dynamic Macro-Category Discovery (`discover_macro_categories`).
-3. Concurrent Category Workers (`SwarmWorker.run_cycle`) exploring hypotheses on
-   frontier checkpoints and failure fixtures.
-4. Meta-Agent Initial Policy Assembly (`assemble_policy`) + Paired Seed Evaluation.
-5. Critic Pass 2 (`review_after_assembly`): Compares the Meta-Agent's evaluated draft
-   and actions against previous generations and informs the Meta-Agent.
-6. Meta-Agent Post-Critic Revision (`revise_policy_with_critic`): The Meta-Agent
-   decides for itself whether to keep its draft or revise/restore capabilities.
-7. Frontier Checkpoint extraction and MAP-Elites diversity archive maintenance.
+LOX Democratized Peer Swarm Campaign Orchestrator ("Hard Code Nothing").
+Coordinates the Layout A (`2R + 2P`) Option-A Peer Swarm:
+1. Pre-generation Side Cohesion Refactor when any module >= 500 LOC.
+2. Deterministic `DeficitAnalyzer` + organic scenario mining (`D_fail` + `D_succ`).
+3. 1-shot `SwarmDirectivePlanner` partitioning orthogonal scopes across parallel peers.
+4. Concurrent `SwarmPeerAgent` execution (`reactive_1`, `reactive_2`, `proactive_1`, `proactive_2`).
+5. Split-Sample CRN Tournament (`SwarmReferee`) + O'Brien-Fleming / Triggered Stage-3b Confirmation.
+6. Lifecycle persistence (`stepping_stones`, `proactive_branches`, `FrontierArchive`, `MAPElitesArchive`).
 """
 
 from __future__ import annotations
@@ -28,23 +21,31 @@ from typing import Any
 
 import numpy as np
 
-from lox.author.swarm_critic import SwarmCriticAgent
+from lox.author.directives import SwarmDirectivePlanner, prune_unused_skills
 from lox.author.swarm_deficits import DeficitAnalyzer
-from lox.author.swarm_meta import SwarmMetaAgent
 from lox.author.swarm_peer import PeerCandidate, SwarmPeerAgent
-from lox.author.swarm_worker import SwarmWorker
 from lox.core.contracts import BatchEvaluation
 from lox.db.logger import BatchDatabaseLogger
 from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db
 from lox.db.shards import mine_organic_scenarios
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.frontier import FrontierArchive
-from lox.engine.map_elites import MAPElitesArchive
-from lox.engine.orchestrator import compute_adaptive_max_steps, write_status_report
-from lox.engine.swarm_referee import (
-    SwarmReferee,
-    _package_fingerprint,
+from lox.engine.lifecycle import (
+    build_layout_a_assignments,
+    update_near_misses,
+    update_proactive_branch_lifecycle,
+    update_stepping_stone_lifecycle,
 )
+from lox.engine.map_elites import MAPElitesArchive
+from lox.engine.referee_gates import (
+    _assemble_batch_eval,
+    _package_fingerprint,
+    opt_float,
+    opt_int,
+)
+from lox.engine.reporting import compute_adaptive_max_steps, write_status_report
+from lox.engine.swarm_referee import SwarmReferee
+from lox.lang.bundle import load_skills_dir, write_skills_dir
 from lox.lang.modularize import run_side_cohesion_refactor
 from lox.lang.starter import build_clean_option_a_starter
 from lox.runner.pool import PersistentEvalPool
@@ -55,7 +56,7 @@ DEFAULT_FRONTIER_DIR = "data/frontier"
 
 
 class SwarmCampaignOrchestrator:
-    """End-to-End Orchestrator for the LOX Multi-Agent Swarm."""
+    """End-to-End Orchestrator for the LOX Layout A Peer Swarm."""
 
     def __init__(
         self,
@@ -67,11 +68,9 @@ class SwarmCampaignOrchestrator:
         num_workers: int = 4,
         turns_per_worker: int = 3,
         seeds_per_batch: int = 8,
-        benchmark: str = "nethack",
         role: str = "val-hum-law-fem",
         max_steps: int = 5000,
         frontier_min_depth: int = 2,
-        swarm_architecture: str = "peer",
         eval_workers: int | None = None,
         reasoning_effort: str = "medium",
         routing: str = "nitro",
@@ -100,7 +99,6 @@ class SwarmCampaignOrchestrator:
         self.num_workers = num_workers
         self.turns_per_worker = turns_per_worker
         self.seeds_per_batch = seeds_per_batch
-        self.benchmark = benchmark
         self.role = role
         self.max_steps = int(max_steps)
         self.frontier_min_depth = int(frontier_min_depth)
@@ -111,22 +109,20 @@ class SwarmCampaignOrchestrator:
             self.eval_workers = max(
                 self.num_workers, min(int(self.seeds_per_batch), cpu_cap)
             )
-        self.swarm_architecture = (
-            str(swarm_architecture or "peer").strip().lower()
-            if str(swarm_architecture or "peer").strip().lower() in ("peer", "legacy")
-            else "peer"
-        )
 
-        # Initialize DuckDB tables and logger
-        init_db(self.db_path)
+        # Initialize DuckDB tables and close the init handle cleanly (Fix L-3)
+        _init_con = init_db(self.db_path)
+        try:
+            _init_con.close()
+        except Exception as exc:
+            ui.warn(f"Initial DB close warning: {exc}")
         self.db_logger = BatchDatabaseLogger(db_path=self.db_path)
 
         # Initialize Unified DuckDB Theory Store & Frontier Archive
-        theories_path = self.db_path
-        self.theories = TheoryDocumentStore(db_path=theories_path)
+        self.theories = TheoryDocumentStore(db_path=self.db_path)
         self.frontier = FrontierArchive(frontier_dir=self.frontier_dir)
 
-        # Initialize MAP-Elites Diversity Archive and hydrate persisted elites/plateau state
+        # Initialize MAP-Elites Diversity Archive
         self.map_elites = MAPElitesArchive()
         try:
             _con_init = connect_db(self.db_path, read_only=True)
@@ -134,69 +130,41 @@ class SwarmCampaignOrchestrator:
                 self.map_elites.load_from_db(_con_init)
             finally:
                 _con_init.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            ui.warn(f"Initial MAP-Elites load warning: {exc}")
 
-        # Initialize Deficit Analyzer & Deterministic Referee (for peer mode)
+        # Initialize Deficit Analyzer, Directive Planner, & Deterministic Referee
         self.deficit_analyzer = DeficitAnalyzer(db_path=self.db_path)
-        self.referee = SwarmReferee(
-            max_tournament_peers=max(2, min(4, self.num_workers))
+        self.referee = SwarmReferee(max_tournament_peers=max(4, int(self.num_workers)))
+        self.directive_planner = SwarmDirectivePlanner(
+            provider=self.provider,
+            model=self.model,
+            db_path=self.db_path,
+            theories_store=self.theories,
+            reasoning_effort=self.reasoning_effort,
+            routing=self.routing,
         )
         self.campaign_start_time = time.time()
         self._plateau_streak: int = self._compute_depth_plateau_streak()
         self._attempted_ast_modular_fps: set[str] = set()
         self._near_misses: list[dict[str, Any]] = []
 
-        # Legacy Meta-Agent & Two-Pass Advisory Critic (only used when swarm_architecture='legacy')
-        self.meta_agent = SwarmMetaAgent(
-            provider=self.provider,
-            model=self.model,
-            db_path=self.db_path,
-            theories_path=theories_path,
-            frontier_dir=self.frontier_dir,
-        )
-        self.meta_agent.frontier = self.frontier
-        self.meta_agent.author.tools.theories_store = self.meta_agent.theories
-        self.critic = SwarmCriticAgent(
-            provider=self.provider,
-            model=self.model,
-            db_path=self.db_path,
-            theories_store=self.theories,
-        )
-
         # Initialize Multi-Core Persistent Eval Pool
         self.eval_pool = PersistentEvalPool(
             workers=max(1, self.eval_workers),
             role=self.role,
             max_steps=self.max_steps,
-            benchmark=self.benchmark,
         )
 
     def close(self) -> None:
-        """Shuts down worker pool and logs completion."""
+        """Shuts down worker pool cleanly."""
         try:
             self.eval_pool.close()
-        except Exception:
-            pass
-
-    def _delete_batch_artifacts(self, batch_id: str) -> None:
-        """Removes draft run/tick/function_stats rows when replacing a batch after Meta-Agent revision."""
-        try:
-            con = connect_db(self.db_path, read_only=False)
-            try:
-                con.execute(
-                    "DELETE FROM ticks WHERE run_id IN (SELECT run_id FROM runs WHERE batch_id = ?)",
-                    [batch_id],
-                )
-                con.execute("DELETE FROM runs WHERE batch_id = ?", [batch_id])
-                con.execute("DELETE FROM function_stats WHERE batch_id = ?", [batch_id])
-            finally:
-                con.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            ui.warn(f"Eval pool close warning: {exc}")
 
     def _sync_batch_cost(self, batch_id: str, generation: int) -> None:
-        """Updates `batches.total_cost_usd` and `total_llm_tokens` after Pass 2 and Meta-Agent revision."""
+        """Updates `batches.total_cost_usd` and `total_llm_tokens` from `synthesis_logs`."""
         try:
             con = connect_db(self.db_path, read_only=False)
             try:
@@ -212,18 +180,18 @@ class SwarmCampaignOrchestrator:
                     )
             finally:
                 con.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            ui.warn(f"Gen {generation}: batch cost sync warning ({exc})")
 
     def _get_start_generation(self) -> int:
-        """Returns `MAX(generation) + 1` from DuckDB `batches` so restarted overnight runs resume cleanly."""
+        """Returns `MAX(generation) + 1` from DuckDB `batches` so restarted runs resume cleanly."""
         try:
             con = connect_db(self.db_path, read_only=True)
             try:
                 row = con.execute(
                     "SELECT COALESCE(MAX(generation), 0) FROM batches"
                 ).fetchone()
-                return int(row[0] or 0) + 1
+                return (int(row[0] or 0) + 1) if row else 1
             finally:
                 con.close()
         except Exception:
@@ -246,16 +214,7 @@ class SwarmCampaignOrchestrator:
             "total_cost_usd": 0.0,
         }
 
-    def run_generation(self, generation: int) -> dict[str, Any]:
-        """Dispatches generation execution to the selected swarm architecture (`peer` or `legacy`)."""
-        if self.swarm_architecture == "peer":
-            return self._run_generation_peer(generation)
-        return self._run_generation_legacy(generation)
-
     def _load_workspace_skills(self, skills_dir: Path) -> dict[str, str]:
-        """Recursively loads `skills/*.py` and `skills/<domain>/*.py` into normalized skill keys."""
-        from lox.lang.bundle import load_skills_dir
-
         return load_skills_dir(skills_dir)
 
     def _write_workspace_package(
@@ -265,25 +224,14 @@ class SwarmCampaignOrchestrator:
         policy_code: str,
         skills: dict[str, str],
     ) -> None:
-        """Writes `policy.py` and `skills/**/*.py` (with `__init__.py` for subpackages) and prunes orphans."""
-        from lox.lang.bundle import write_skills_dir
-
         policy_path.write_text(policy_code, encoding="utf-8")
         write_skills_dir(
             skills_dir, skills or {}, sync=False, ensure_trailing_newline=False
         )
-        SwarmMetaAgent.prune_unused_skills(policy_code, skills, skills_dir=skills_dir)
+        prune_unused_skills(policy_code, skills, skills_dir=skills_dir)
 
-    def _run_generation_peer(self, generation: int) -> dict[str, Any]:
-        """
-        Democratized Peer Swarm loop (E3 Hybrid + Option-A Architecture):
-        0. Mandatory ungated pre-gen Side Cohesion Refactor if any module >= 500 LOC.
-        1. Stratified `DeficitAnalyzer` + purely organic shards (`D_fail` + `D_succ`).
-        2. Concurrent Scoped Peers (+ Semantic Crossover/Architect slots on plateau >= 2)
-           incubated on paired micro-shards + organic FrontierArchive checkpoints.
-        3. Hardened CRN Tournament + fresh holdout + organic Tier-2 Frontier check.
-        4. Updates `workspace/`, DuckDB telemetry, `FrontierArchive`, and Near-Miss Buffer.
-        """
+    def run_generation(self, generation: int) -> dict[str, Any]:
+        """Runs a single generation of the Layout A (`2R+2P`) Democratized Peer Swarm."""
         t0 = time.time()
         ui.header(f"LOX Democratized Peer Swarm - Generation {generation}")
 
@@ -294,14 +242,13 @@ class SwarmCampaignOrchestrator:
         )
         initial_skills = self._load_workspace_skills(skills_dir)
 
-        # Clean Gen-0 Option-A starter bootstrap (zero hardcoded NetHack strategy)
         if not current_policy.strip():
             current_policy, initial_skills = build_clean_option_a_starter()
             self._write_workspace_package(
                 policy_path, skills_dir, current_policy, initial_skills
             )
 
-        # 0. Mandatory Pre-Gen Side Cohesion Refactor (outside progression/promotion gating!)
+        # 0. Mandatory Pre-Gen Side Cohesion Refactor (outside promotion gating)
         cur_fp = _package_fingerprint(current_policy, initial_skills)
         pol_loc_now = len(current_policy.splitlines())
         needs_side_refactor = (
@@ -325,9 +272,9 @@ class SwarmCampaignOrchestrator:
                 self._write_workspace_package(
                     policy_path, skills_dir, current_policy, initial_skills
                 )
-                self._attempted_ast_modular_fps.add(
-                    _package_fingerprint(current_policy, initial_skills)
-                )
+                # Fix H-12: Recompute `cur_fp` immediately after pre-gen side cohesion refactor!
+                cur_fp = _package_fingerprint(current_policy, initial_skills)
+                self._attempted_ast_modular_fps.add(cur_fp)
 
         # 1. Deterministic Deficit Discovery + Organic Scenario Bank + Adaptive Horizon
         active_max_steps = self._compute_active_max_steps()
@@ -355,7 +302,7 @@ class SwarmCampaignOrchestrator:
                 f"gained={len(nm['seeds_gained'])}, lost={len(nm['seeds_lost'])}, touched={sorted(nm['touched_skills'])[:3]})"
                 for nm in self._near_misses[:3]
             ]
-        # Select orthogonal failure clusters by distinct objective outcome cohorts (cluster_id)
+
         clusters = deficit_report.fail_clusters
         orthogonal_clusters: list[Any] = []
         seen_cids: set[str] = set()
@@ -368,11 +315,8 @@ class SwarmCampaignOrchestrator:
         if not orthogonal_clusters:
             orthogonal_clusters = list(clusters)
 
-        # Keep enough peers for orthogonal slices + best-of-N/crossover diversity even while CLIMBING
         target_peers = max(min(4, int(self.num_workers)), len(orthogonal_clusters))
         active_peers = max(1, min(int(self.num_workers), target_peers))
-
-        # Keep eval_pool step horizon synchronized with active_max_steps so incubation and tournament agree
         self.eval_pool.max_steps = int(active_max_steps)
 
         ui.info(
@@ -381,10 +325,7 @@ class SwarmCampaignOrchestrator:
             f"Clusters={len(clusters)} (ortho={len(orthogonal_clusters)}) | Peers={active_peers} | MaxSteps={active_max_steps}"
         )
 
-        # 2. Strictly Disjoint Paired CRN Seed Partitions (stride 10,000 -> zero cross-gen collision!)
-        # - D_dev (`shard_seeds`): historical D_succ + D_fail seeds ONLY (zero leakage from S_select/S_confirm)
-        # - S_select (`select_seeds`): N_select fresh in-sample selection seeds
-        # - S_confirm (`seeds`): N_confirm completely unseen out-of-sample confirmation seeds
+        # 2. Strictly Disjoint Paired CRN Seed Partitions (stride 10,000 -> zero cross-gen collision)
         seeds = [
             10_000_000 + int(generation) * 10_000 + i
             for i in range(self.seeds_per_batch)
@@ -414,14 +355,13 @@ class SwarmCampaignOrchestrator:
                     probe_seeds.append(p_cand)
                     used_eval_seeds.add(p_cand)
                 p_cand += 1
+
         raw_shard_seeds = list(
             dict.fromkeys(
                 deficit_report.d_succ_seeds[:2]
                 + [sd for cl in clusters for sd in cl.sample_seeds[:2]]
             )
-        )
-        if not raw_shard_seeds:
-            raw_shard_seeds = [1, 2]
+        ) or [1, 2]
         max_shard = min(16, max(2, int(self.seeds_per_batch)))
         hist_cap = min(10, max(2, max_shard - len(probe_seeds)))
         shard_seeds = list(dict.fromkeys(raw_shard_seeds[:hist_cap] + probe_seeds))[
@@ -453,20 +393,50 @@ class SwarmCampaignOrchestrator:
                         runs=inc_shard_list,
                         run_id_prefix=f"g{generation}_inc_base",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    ui.warn(
+                        f"Gen {generation}: incubate_baseline persistence failed ({exc})"
+                    )
 
-        # 3. Merged Dual-Track Peers: 1 Revision Track (`peer_rev`, when active stepping stone exists)
-        #    + 4 Fresh Exploration Track (`peer_1`..`peer_4`), coordinated by lightweight Meta-Agent Directive Planner.
-        import copy as _copy
-
+        # 3. Layout A — Fixed 4-Peer Balanced Team (`2 Reactive + 2 Proactive`)
         active_stone: dict[str, Any] | None = None
+        active_branch: dict[str, Any] | None = None
         if current_policy.strip():
             active_stone = self.db_logger.load_active_stepping_stone(
                 parent_policy_id=cur_fp, max_revisions=2
             )
+            active_branch = self.db_logger.load_active_proactive_branch(
+                base_champion_fp=cur_fp
+            )
 
-        fresh_peer_ids = [f"peer_{i + 1}" for i in range(active_peers)]
+        if active_peers >= 4:
+            roster_specs: list[tuple[str, str]] = [
+                ("reactive_1", "revision" if active_stone else "reactive"),
+                ("reactive_2", "reactive"),
+                ("proactive_1", "proactive_capability"),
+                ("proactive_2", "proactive_branch"),
+            ]
+            for extra_i in range(4, active_peers):
+                roster_specs.append((f"reactive_{extra_i - 1}", "reactive"))
+        elif active_peers == 3:
+            roster_specs = [
+                ("reactive_1", "revision" if active_stone else "reactive"),
+                ("reactive_2", "reactive"),
+                ("proactive_1", "proactive_capability"),
+            ]
+        elif active_peers == 2:
+            roster_specs = [
+                ("reactive_1", "revision" if active_stone else "reactive"),
+                ("proactive_1", "proactive_capability"),
+            ]
+        else:
+            roster_specs = [
+                ("reactive_1", "revision" if active_stone else "reactive"),
+            ]
+
+        roster_peer_ids = [pid for pid, _ in roster_specs]
+        roster_roles = {pid: rtrack for pid, rtrack in roster_specs}
+
         arch_summary = ""
         try:
             from lox.author.tools import AuthorToolRegistry
@@ -480,19 +450,14 @@ class SwarmCampaignOrchestrator:
 
         planned_directives: dict[str, dict[str, Any]] = {}
         try:
-            planner = SwarmMetaAgent(
-                provider=self.provider,
-                model=self.model,
-                db_path=self.db_path,
-                theories_path=self.db_path,
-                frontier_dir=str(self.frontier_dir),
-            )
-            dir_list = planner.plan_peer_directives(
+            dir_list = self.directive_planner.plan_peer_directives(
                 generation=generation,
-                fresh_peer_ids=fresh_peer_ids,
+                fresh_peer_ids=roster_peer_ids,
                 deficit_report=deficit_report,
                 architecture_map=arch_summary,
                 active_stepping_stone=active_stone,
+                peer_roles=roster_roles,
+                active_proactive_branch=active_branch,
             )
             planned_directives = {
                 str(d["peer_id"]): d
@@ -508,158 +473,25 @@ class SwarmCampaignOrchestrator:
         except Exception as exc:
             ui.warn(f"Gen {generation}: Directive planner skipped ({exc})")
 
-        peer_assignments: list[
-            tuple[
-                str,
-                Any,
-                str,
-                dict[str, str],
-                dict[str, Any] | None,
-                dict[str, Any] | None,
-            ]
-        ] = []
-        cluster_by_id = {str(getattr(c, "cluster_id", "") or ""): c for c in clusters}
-
-        # Track A: 1 Revision slot (`peer_rev`) added alongside the 4 Fresh slots (0 Fresh slots lost!)
-        if (
-            active_stone is not None
-            and str(active_stone.get("policy_code", "") or "").strip()
-        ):
-            rev_cl = _copy.copy(clusters[0])
-            rev_lost = [int(s) for s in (active_stone.get("seeds_lost") or [])[:4]]
-            if rev_lost:
-                rev_cl.sample_seeds = rev_lost
-            rev_cl.cluster_id = f"revision_{active_stone['source_peer_id']}"
-            rev_cl.label = (
-                f"[Revision Track] Refine Gen {active_stone['generation']} "
-                f"`{active_stone['source_peer_id']}` (W/L={active_stone['wins']}/{active_stone['losses']}, "
-                f"reject={active_stone['reject_reason']})"
-            )
-            rev_cl.evidence = (
-                f"Active stepping stone `{active_stone['stone_id']}` "
-                f"(rev {int(active_stone.get('revision_count', 0)) + 1}/2, "
-                f"winsorΔ={float(active_stone.get('winsor_delta', 0.0)):+.3f}, "
-                f"iqmΔ={float(active_stone.get('iqm_delta', 0.0)):+.3f})."
-            )
-            peer_assignments.append(
-                (
-                    "peer_rev",
-                    rev_cl,
-                    str(active_stone["policy_code"]),
-                    dict(active_stone.get("skills") or {}),
-                    None,
-                    active_stone,
-                )
-            )
-            ui.info(
-                f"Gen {generation}: Activated 1 Revision + {active_peers} Fresh slots "
-                f"(`peer_rev` refining Gen {active_stone['generation']} `{active_stone['source_peer_id']}` "
-                f"W/L={active_stone['wins']}/{active_stone['losses']}, rev {int(active_stone.get('revision_count', 0)) + 1}/2)."
-            )
-
-        use_crossover = (
-            active_stone is None
-            and self._plateau_streak >= 4
-            and bool(self._near_misses)
-            and bool(current_policy.strip())
+        peer_assignments = build_layout_a_assignments(
+            generation=generation,
+            roster_specs=roster_specs,
+            clusters=clusters,
+            orthogonal_clusters=orthogonal_clusters,
+            deficit_report=deficit_report,
+            current_policy=current_policy,
+            initial_skills=initial_skills,
+            probe_seeds=probe_seeds,
+            planned_directives=planned_directives,
+            active_stone=active_stone,
+            active_branch=active_branch,
+            plateau_streak=self._plateau_streak,
+            near_misses=self._near_misses,
         )
-        crossover_slots = 1 if use_crossover else 0
 
-        # In PLATEAU regime, concentrate >= 50% of peers on the highest-leverage systemic
-        # bottleneck(s) with distinct hypothesis angles rather than round-robining onto tiny
-        # symptom slices. In CLIMBING regime, preserve uniform round-robin coverage.
-        _high_leverage_kinds = {
-            "search_or_horizon_loop",
-            "confinement_horizon",
-            "stalled_trajectory",
-        }
-        assigned_clusters: list[Any] = []
-        if (
-            str(deficit_report.regime or "").upper() == "PLATEAU"
-            and len(orthogonal_clusters) >= 2
-            and active_peers >= 2
-        ):
-            ranked_cl = sorted(
-                orthogonal_clusters,
-                key=lambda c: (
-                    (
-                        2.0
-                        if str(getattr(c, "kind", "")) in _high_leverage_kinds
-                        else (1.2 if int(getattr(c, "run_count", 0) or 0) >= 8 else 1.0)
-                    )
-                    * max(1, int(getattr(c, "run_count", 0) or 1))
-                ),
-                reverse=True,
-            )
-            focus_slots = max(2, active_peers // 2)
-            primary_cl = ranked_cl[0]
-            for _ in range(focus_slots):
-                assigned_clusters.append(primary_cl)
-            rem_pool = [c for c in ranked_cl if c is not primary_cl] or ranked_cl
-            for r_idx in range(active_peers - focus_slots):
-                assigned_clusters.append(rem_pool[(generation + r_idx) % len(rem_pool)])
-        else:
-            substantial = [
-                c
-                for c in orthogonal_clusters
-                if int(getattr(c, "run_count", 0) or 0) >= 5
-            ]
-            climb_pool = substantial if len(substantial) >= 2 else orthogonal_clusters
-            for i in range(active_peers):
-                assigned_clusters.append(climb_pool[(generation + i) % len(climb_pool)])
-
-        _angles = (
-            "Hypothesis Angle A (Primary Loop/Navigation): Redesign loop-termination / state-budget / transition rules in the primary loop module, avoiding any mechanisms marked CRN_REJECTED in Rejection Memory.",
-            "Hypothesis Angle B (Upstream Resource/Survival/Capability): Fix upstream resource, survival, or capability bottlenecks causing `top_ends` terminations — do NOT edit the same navigation loop as Angle A.",
-            "Hypothesis Angle C (Fallback/Precondition Redesign): Redesign preconditions, action-selection, or fallback priorities so stalled or repetitive states exit cleanly.",
-        )
-        cluster_seen_counts: dict[str, int] = {}
-        for i in range(active_peers):
-            pid = f"peer_{i + 1}"
-            p_dir = planned_directives.get(pid)
-            dir_cid = str((p_dir or {}).get("target_cluster_id") or "")
-            base_cl = cluster_by_id.get(dir_cid, assigned_clusters[i])
-            cl = _copy.copy(base_cl)
-            cid_key = str(getattr(cl, "cluster_id", "") or "")
-            occ_idx = cluster_seen_counts.get(cid_key, 0)
-            cluster_seen_counts[cid_key] = occ_idx + 1
-            if (
-                not p_dir
-                and str(deficit_report.regime or "").upper() == "PLATEAU"
-                and (assigned_clusters.count(assigned_clusters[i]) > 1 or occ_idx > 0)
-            ):
-                angle_note = _angles[occ_idx % len(_angles)]
-                cl.evidence = (
-                    f"{cl.evidence} | {angle_note}" if cl.evidence else angle_note
-                )
-            if i < crossover_slots:
-                nm = self._near_misses[i % len(self._near_misses)]
-                diff_snip = str(nm.get("diff_preview", "") or "").strip()
-                diff_part = (
-                    f"\nNear-Miss Unified Diff Preview:\n```diff\n{diff_snip}\n```"
-                    if diff_snip
-                    else ""
-                )
-                nm_note = (
-                    f"SEMANTIC CROSSOVER / ARCHITECT PASS: Combine current incumbent's stability "
-                    f"with positive near-miss `{nm['peer_id']}` from Gen {nm['generation']} "
-                    f"(D={nm['avg_depth']:.2f}, maxD={nm['max_depth']}, S={nm['avg_score']:.0f}, "
-                    f"W/L={nm.get('wins', 0)}/{nm.get('losses', 0)}, ΔIQM={nm.get('iqm_delta', 0.0):+.4f}, "
-                    f"gained={nm['seeds_gained'][:5]}, lost={nm['seeds_lost'][:5]}, "
-                    f"touched={sorted(nm['touched_skills'])[:4]}, mechanism=`{nm['mechanism'][:140]}`). "
-                    f"Preserve incumbent guard stability while capturing gained seeds.{diff_part}"
-                )
-                cl.evidence = f"{cl.evidence} | {nm_note}" if cl.evidence else nm_note
-                cl.label = f"[Semantic Crossover] {cl.label}"
-            peer_assignments.append(
-                (pid, cl, current_policy, initial_skills, p_dir, None)
-            )
-        sampled_elite_ids: list[str] = []
-
-        peer_tool_turns = max(16, int(self.turns_per_worker) * 5)
+        peer_tool_turns = max(22, int(self.turns_per_worker) * 6)
         peer_candidates: list[PeerCandidate] = []
-
-        use_refactor_model_for_p1 = bool(
+        use_refactor_model_for_p2 = bool(
             self.refactor_model != self.model
             and (
                 self._plateau_streak >= 3
@@ -667,9 +499,9 @@ class SwarmCampaignOrchestrator:
                 or bool(deficit_report.skill_bloat_notes)
             )
         )
-        if use_refactor_model_for_p1:
+        if use_refactor_model_for_p2:
             ui.info(
-                f"Gen {generation}: Routing refactor/plateau slot `peer_1` to `--refactor-model` `{self.refactor_model}`."
+                f"Gen {generation}: Routing refactor/plateau slot `proactive_2` to `--refactor-model` `{self.refactor_model}`."
             )
 
         def _run_peer(
@@ -679,10 +511,12 @@ class SwarmCampaignOrchestrator:
             p_skills: dict[str, str],
             p_directive: dict[str, Any] | None,
             p_stone: dict[str, Any] | None,
+            p_track: str,
+            p_branch: dict[str, Any] | None,
         ) -> PeerCandidate:
             peer_model = (
                 self.refactor_model
-                if (use_refactor_model_for_p1 and peer_id == "peer_1")
+                if (use_refactor_model_for_p2 and peer_id == "proactive_2")
                 else self.model
             )
             peer = SwarmPeerAgent(
@@ -711,6 +545,8 @@ class SwarmCampaignOrchestrator:
                 stepping_stone=p_stone,
                 incumbent_policy=current_policy,
                 incumbent_skills=initial_skills,
+                track=p_track,
+                proactive_branch=p_branch,
             )
 
         peer_errors: list[tuple[str, BaseException]] = []
@@ -720,8 +556,10 @@ class SwarmCampaignOrchestrator:
         )
         try:
             fut_map = {
-                executor.submit(_run_peer, pid, cl, sp, ss, pdir, pstone): pid
-                for pid, cl, sp, ss, pdir, pstone in peer_assignments
+                executor.submit(
+                    _run_peer, pid, cl, sp, ss, pdir, pstone, ptrk, pbr
+                ): pid
+                for pid, cl, sp, ss, pdir, pstone, ptrk, pbr in peer_assignments
             }
             for fut in concurrent.futures.as_completed(fut_map):
                 pid = fut_map[fut]
@@ -767,7 +605,7 @@ class SwarmCampaignOrchestrator:
                 "aborting generation to avoid zombie incumbent rollouts."
             )
 
-        # 4. Strict Split-Sample Paired CRN Tournament (Select on S_select -> Confirm single winner on S_confirm)
+        # 4. Strict Split-Sample Paired CRN Tournament
         verdict = self.referee.evaluate_tournament(
             generation=generation,
             candidates=peer_candidates,
@@ -781,7 +619,7 @@ class SwarmCampaignOrchestrator:
             scenario_gate=self.scenario_gate,
         )
 
-        # 4b. Side Cohesion Refactor (post-promotion side maintenance ONLY — never forces promoted=True)
+        # 4b. Post-Promotion Side Cohesion Refactor (Fix M-13: filter OBF runs to `set(seeds)` before caching!)
         win_pol_loc = len(str(verdict.winner_policy_code or "").splitlines())
         win_skills_dict = dict(verdict.winner_skills or {})
         needs_post_refactor = (
@@ -803,116 +641,40 @@ class SwarmCampaignOrchestrator:
                 verdict.winner_skills = ref_skills
                 verdict.reason = f"{verdict.reason} | {ref_msg}"
                 if verdict.winner_batch_eval is not None:
-                    self.referee.cache_incumbent(
-                        eval_pool=self.eval_pool,
-                        policy_code=ref_pol,
-                        skills=ref_skills,
-                        seeds=seeds,
-                        max_steps=active_max_steps,
-                        batch_eval=verdict.winner_batch_eval,
-                    )
-
-        # Record ONLY positive, net-winning, guard-passing near-misses (with inline diff) for E3 Semantic Crossover
-        if not verdict.promoted:
-            import difflib as _difflib
-
-            cand_by_id = {c.peer_id: c for c in peer_candidates}
-            for att in verdict.attempts_summary or []:
-                pid = str(att.get("peer_id", ""))
-                c_obj = cand_by_id.get(pid)
-                if c_obj is None or int(att.get("policy_exceptions", 0) or 0) > 0:
-                    continue
-                rej_r = str(att.get("reject_reason", "") or "")
-                if rej_r in (
-                    "guard_failed",
-                    "policy_exceptions_regression",
-                    "auto_esc_regression",
-                    "horizon_waste_regression",
-                    "cvar25_tail_regression",
-                ):
-                    continue
-                att_d = float(att.get("avg_depth", 1.0) or 1.0)
-                att_md = int(att.get("max_depth", 1) or 1)
-                att_s = float(att.get("avg_score", 0.0) or 0.0)
-                att_w = int(att.get("wins", 0) or 0)
-                att_l = int(att.get("losses", 0) or 0)
-                att_iqm = float(att.get("iqm_delta", 0.0) or 0.0)
-                att_win = float(att.get("winsor_delta", att_iqm) or 0.0)
-                gained = list(att.get("seeds_gained") or [])
-                lost = list(att.get("seeds_lost") or [])
-                if (
-                    gained
-                    and (att_w >= 3 or (att_w + att_l >= 5 and att_w > att_l))
-                    and att_w > att_l
-                    and (att_win > 0.0 or att_iqm > 0.0)
-                    and att_d >= verdict.incumbent_avg_depth
-                ):
-                    diff_chunks: list[str] = []
-                    cand_sks = dict(c_obj.skills or {})
-                    for sk_k in sorted(set(initial_skills) | set(cand_sks)):
-                        old_s = str(initial_skills.get(sk_k, "") or "")
-                        new_s = str(cand_sks.get(sk_k, "") or "")
-                        if old_s != new_s:
-                            u_diff = list(
-                                _difflib.unified_diff(
-                                    old_s.splitlines(),
-                                    new_s.splitlines(),
-                                    fromfile=f"inc/{sk_k}.py",
-                                    tofile=f"{pid}/{sk_k}.py",
-                                    lineterm="",
-                                    n=1,
-                                )
-                            )
-                            if u_diff:
-                                diff_chunks.append("\n".join(u_diff[:30]))
-                    if not diff_chunks and c_obj.policy_code != current_policy:
-                        u_pol = list(
-                            _difflib.unified_diff(
-                                current_policy.splitlines(),
-                                c_obj.policy_code.splitlines(),
-                                fromfile="inc/policy.py",
-                                tofile=f"{pid}/policy.py",
-                                lineterm="",
-                                n=1,
-                            )
+                    seed_set = {int(s) for s in seeds}
+                    all_w_runs = list(verdict.winner_batch_eval.get("runs", []) or [])
+                    filtered_runs = [
+                        r for r in all_w_runs if int(r.get("seed", -1)) in seed_set
+                    ]
+                    cache_be = (
+                        _assemble_batch_eval(
+                            str(verdict.winner_batch_eval.get("batch_id", "")),
+                            filtered_runs,
                         )
-                        if u_pol:
-                            diff_chunks.append("\n".join(u_pol[:30]))
-                    diff_preview = "\n".join(diff_chunks)[:1200]
-                    hyp = getattr(c_obj, "hypothesis_yaml", {}) or {}
-                    self._near_misses.append(
-                        {
-                            "peer_id": pid,
-                            "generation": generation,
-                            "avg_depth": att_d,
-                            "max_depth": att_md,
-                            "avg_score": att_s,
-                            "avg_ac": float(att.get("avg_ac", 10.0) or 10.0),
-                            "wins": att_w,
-                            "losses": att_l,
-                            "iqm_delta": att_iqm,
-                            "seeds_gained": gained,
-                            "seeds_lost": lost,
-                            "touched_skills": set(
-                                getattr(c_obj, "touched_skills", set()) or set()
-                            ),
-                            "mechanism": str(
-                                hyp.get("mechanism", "") or c_obj.claimed_label
-                            ),
-                            "diff_preview": diff_preview,
-                            "policy_code": c_obj.policy_code,
-                            "skills": cand_sks,
-                        }
+                        if len(filtered_runs) == len(seeds)
+                        else verdict.winner_batch_eval
                     )
-            self._near_misses.sort(
-                key=lambda nm: (
-                    float(nm.get("iqm_delta", 0.0)),
-                    nm["avg_depth"],
-                    nm["avg_score"],
-                ),
-                reverse=True,
-            )
-            self._near_misses = self._near_misses[:4]
+                    if len(filtered_runs) == len(seeds) or len(all_w_runs) == len(
+                        seeds
+                    ):
+                        self.referee.cache_incumbent(
+                            eval_pool=self.eval_pool,
+                            policy_code=ref_pol,
+                            skills=ref_skills,
+                            seeds=seeds,
+                            max_steps=active_max_steps,
+                            batch_eval=cache_be,
+                        )
+
+        # Update Near-Miss Crossover buffer (Fix M-9: cleared immediately on promotion)
+        update_near_misses(
+            self._near_misses,
+            generation=generation,
+            verdict=verdict,
+            peer_candidates=peer_candidates,
+            current_policy=current_policy,
+            initial_skills=initial_skills,
+        )
 
         # Sync workspace only if promoted
         if verdict.promoted:
@@ -959,19 +721,17 @@ class SwarmCampaignOrchestrator:
                 "passed": verdict.promoted,
                 "reason": verdict.reason,
                 "scoreboard": verdict.scoreboard,
-                "wilcoxon_p": float(bp_stats.get("wilcoxon_p", 1.0)),
-                "ci_lower": float(bp_stats.get("ci_lower", 0.0)),
-                "ci_upper": float(bp_stats.get("ci_upper", 0.0)),
+                "wilcoxon_p": opt_float(bp_stats, "wilcoxon_p", 1.0),
+                "ci_lower": opt_float(bp_stats, "ci_lower", 0.0),
+                "ci_upper": opt_float(bp_stats, "ci_upper", 0.0),
             },
         )
 
-        # Persist challenger tournament attempts (including rejected peers + tracebacks)
         try:
             self.db_logger.save_tournament_attempts(verdict.attempts_summary)
-        except Exception:
-            pass
+        except Exception as exc:
+            ui.warn(f"Gen {generation}: save_tournament_attempts failed ({exc})")
 
-        # Persist 100% of S_select and rejected S_confirm challenger runs+ticks into unified `runs` + `ticks`
         try:
             for sel_pid, sel_be in (verdict.select_batches or {}).items():
                 sel_runs = list((sel_be or {}).get("runs", []) or [])
@@ -1008,86 +768,54 @@ class SwarmCampaignOrchestrator:
                         runs=c_runs,
                         run_id_prefix=f"g{generation}_{c_pid}_conf",
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            ui.warn(f"Gen {generation}: select/confirm tick persistence failed ({exc})")
 
-        # Update `stepping_stones` lifecycle for Dual-Track Revision
+        # Update `stepping_stones` & `proactive_branches` lifecycles (Fix M-8)
         try:
-            if verdict.promoted:
-                if active_stone is not None and "peer_rev" in str(verdict.winner_id):
-                    self.db_logger.update_stepping_stone_status(
-                        active_stone["stone_id"], "promoted"
-                    )
-                self.db_logger.retire_stepping_stones_for_parent(
-                    cur_fp, new_status="superseded"
-                )
-            else:
-                if active_stone is not None:
-                    self.db_logger.increment_stepping_stone_revision(
-                        active_stone["stone_id"], max_revisions=2
-                    )
-                q_stone = verdict.qualifying_stepping_stone
-                if isinstance(q_stone, dict) and q_stone.get("policy_code"):
-                    q_stone = dict(q_stone)
-                    q_stone["parent_policy_id"] = cur_fp
-                    still_active = self.db_logger.load_active_stepping_stone(
-                        parent_policy_id=cur_fp, max_revisions=2
-                    )
-                    should_save = still_active is None
-                    if still_active is not None:
-                        new_p = min(
-                            float(q_stone.get("wilcoxon_p", 1.0)),
-                            float(q_stone.get("sign_p", 1.0)),
-                        )
-                        old_p = min(
-                            float(still_active.get("wilcoxon_p", 1.0)),
-                            float(still_active.get("sign_p", 1.0)),
-                        )
-                        new_d = max(
-                            float(q_stone.get("winsor_delta", 0.0)),
-                            float(q_stone.get("iqm_delta", 0.0)),
-                        )
-                        old_d = max(
-                            float(still_active.get("winsor_delta", 0.0)),
-                            float(still_active.get("iqm_delta", 0.0)),
-                        )
-                        if (new_p < old_p) or (new_p == old_p and new_d > old_d):
-                            self.db_logger.update_stepping_stone_status(
-                                still_active["stone_id"], "superseded"
-                            )
-                            should_save = True
-                    if should_save:
-                        self.db_logger.save_stepping_stone(q_stone)
-                        ui.info(
-                            f"Gen {generation}: Saved stepping stone `{q_stone['stone_id']}` "
-                            f"(W/L={q_stone['wins']}/{q_stone['losses']}, "
-                            f"winsorΔ={float(q_stone.get('winsor_delta', 0.0)):+.3f}, "
-                            f"min_p={min(float(q_stone.get('wilcoxon_p', 1.0)), float(q_stone.get('sign_p', 1.0))):.4f}) "
-                            f"for next-gen `peer_rev`."
-                        )
-        except Exception:
-            pass
+            update_stepping_stone_lifecycle(
+                db_logger=self.db_logger,
+                generation=generation,
+                cur_fp=cur_fp,
+                active_stone=active_stone,
+                verdict=verdict,
+                max_revisions=2,
+            )
+        except Exception as exc:
+            ui.warn(f"Gen {generation}: stepping_stone lifecycle update failed ({exc})")
+
+        try:
+            update_proactive_branch_lifecycle(
+                db_logger=self.db_logger,
+                generation=generation,
+                cur_fp=cur_fp,
+                active_branch=active_branch,
+                verdict=verdict,
+                peer_candidates=peer_candidates,
+            )
+        except Exception as exc:
+            ui.warn(
+                f"Gen {generation}: proactive_branch lifecycle update failed ({exc})"
+            )
 
         # Persist generation outcome into `experiments` and promotions into `discoveries`
         try:
-            bp = dict(getattr(verdict, "best_pair", {}) or {})
             exp_verdict = {
                 "passed": bool(verdict.promoted),
-                "mean_delta": float(
-                    bp.get(
-                        "mean_delta",
-                        verdict.winner_avg_depth - verdict.incumbent_avg_depth,
-                    )
+                "mean_delta": opt_float(
+                    bp_stats,
+                    "mean_delta",
+                    verdict.winner_avg_depth - verdict.incumbent_avg_depth,
                 ),
-                "ci_lower": float(bp.get("ci_lower", 0.0)),
-                "ci_upper": float(bp.get("ci_upper", 0.0)),
-                "wilcoxon_p": float(bp.get("wilcoxon_p", 1.0)),
-                "wins": int(bp.get("wins", 0)),
-                "losses": int(bp.get("losses", 0)),
-                "ties": int(bp.get("ties", 0)),
-                "seeds_evaluated": int(bp.get("paired_count", len(runs))),
+                "ci_lower": opt_float(bp_stats, "ci_lower", 0.0),
+                "ci_upper": opt_float(bp_stats, "ci_upper", 0.0),
+                "wilcoxon_p": opt_float(bp_stats, "wilcoxon_p", 1.0),
+                "wins": int(bp_stats.get("wins", 0) or 0),
+                "losses": int(bp_stats.get("losses", 0) or 0),
+                "ties": int(bp_stats.get("ties", 0) or 0),
+                "seeds_evaluated": int(bp_stats.get("paired_count", len(runs)) or 0),
                 "is_early_stopped": False,
-                "pilot_best_delta": float(bp.get("iqm_delta", 0.0)),
+                "pilot_best_delta": opt_float(bp_stats, "iqm_delta", 0.0),
                 "reason": str(verdict.reason or ""),
             }
             exp_hyp = {
@@ -1117,23 +845,24 @@ class SwarmCampaignOrchestrator:
                     verified_c_rule=(
                         f"{verdict.winner_id} CRN Δdepth="
                         f"{verdict.winner_avg_depth - verdict.incumbent_avg_depth:+.2f}, "
-                        f"IQMΔ={float(bp.get('iqm_delta', 0.0)):+.3f}"
+                        f"IQMΔ={opt_float(bp_stats, 'iqm_delta', 0.0):+.3f}"
                     ),
                     mechanism=str(verdict.reason or ""),
-                    mean_delta=float(
-                        bp.get(
-                            "iqm_delta",
-                            verdict.winner_avg_depth - verdict.incumbent_avg_depth,
-                        )
+                    mean_delta=opt_float(
+                        bp_stats,
+                        "iqm_delta",
+                        verdict.winner_avg_depth - verdict.incumbent_avg_depth,
                     ),
                     avg_depth=float(batch_metrics["avg_depth"]),
                     p90_depth=float(batch_metrics["p90_depth"]),
                     max_depth=int(batch_metrics["max_depth"]),
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            ui.warn(
+                f"Gen {generation}: experiment/discovery persistence failed ({exc})"
+            )
 
-        # 5. Extract Frontier Checkpoints (all deep/valid runs) & Ingest into MAP-Elites v2 Archive
+        # 5. Extract Frontier Checkpoints & Ingest into MAP-Elites v2 Archive
         new_cps = self._ingest_frontier_and_map_elites(
             generation=generation,
             runs=runs,
@@ -1144,25 +873,13 @@ class SwarmCampaignOrchestrator:
             runner_ups=verdict.all_runner_up_batches,
             allow_frontier=bool(verdict.promoted or generation <= 2 or runs),
         )
-        if sampled_elite_ids:
-            try:
-                _con_u = connect_db(self.db_path, read_only=False)
-                try:
-                    for ecid in sampled_elite_ids:
-                        self.map_elites.record_outcome(
-                            ecid, bool(verdict.promoted), con=_con_u
-                        )
-                finally:
-                    _con_u.close()
-            except Exception:
-                pass
         self._sync_batch_cost(batch_id, generation)
         self._plateau_streak = self._compute_depth_plateau_streak()
 
         if self.theories is not None and hasattr(self.theories, "save_document"):
             try:
                 sb_lines = [
-                    f"{row.get('peer_id')} ({row.get('deficit')}): D={row.get('avg_depth')}, maxD={row.get('max_depth')}, S={row.get('avg_score')}, stalls={row.get('stalls')}"
+                    f"{row.get('peer_id')} ({row.get('deficit')}): D={row.get('avg_depth')}, maxD={row.get('max_depth')}, S={row.get('avg_score')}"
                     for row in (verdict.scoreboard or [])
                 ]
                 status_word = "PROMOTED" if verdict.promoted else "KEPT_INCUMBENT"
@@ -1192,8 +909,8 @@ class SwarmCampaignOrchestrator:
                         "winner_avg_score": float(verdict.winner_avg_score),
                     },
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                ui.warn(f"Gen {generation}: outcome theory persistence warning ({exc})")
 
         try:
             write_status_report(
@@ -1204,20 +921,19 @@ class SwarmCampaignOrchestrator:
                 baseline_runs=runs,
                 active_max_steps=active_max_steps,
                 current_policy=verdict.winner_policy_code,
-                macro_code="",
                 skills_count=len(verdict.winner_skills),
                 niches=sorted(getattr(self.map_elites, "cells", {}).keys()) or ["peer"],
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            ui.warn(f"Gen {generation}: status report write failed ({exc})")
 
         if self.db_logger.prune_ticks and generation % 5 == 0:
             try:
                 self.db_logger.prune_old_telemetry(
                     current_generation=generation, keep_generations=20
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                ui.warn(f"Gen {generation}: telemetry prune warning ({exc})")
 
         avg_depth = float(batch_eval.get("avg_depth", 1.0))
         max_d = int(batch_eval.get("max_depth", 1))
@@ -1244,10 +960,7 @@ class SwarmCampaignOrchestrator:
         }
 
     def _compute_depth_plateau_streak(self) -> int:
-        """
-        Counts consecutive recent SWARM generations without a promoted breakthrough or
-        paired progression gain (immune to across-generation random seed difficulty variance).
-        """
+        """Counts consecutive recent SWARM generations without a promoted breakthrough."""
         try:
             con = connect_db(self.db_path, read_only=True)
             try:
@@ -1265,7 +978,7 @@ class SwarmCampaignOrchestrator:
             if len(rows) < 2:
                 return 0
             streak = 0
-            for gen_i, _ad, _md, passed in rows:
+            for _gen_i, _ad, _md, passed in rows:
                 if bool(passed):
                     break
                 streak += 1
@@ -1274,7 +987,7 @@ class SwarmCampaignOrchestrator:
             return 0
 
     def _compute_active_max_steps(self) -> int:
-        """Uses `compute_adaptive_max_steps` from recent promoted batches to lift the 5k horizon on deep runs."""
+        """Uses `compute_adaptive_max_steps` from recent promoted batches."""
         try:
             con = connect_db(self.db_path, read_only=True)
             try:
@@ -1294,8 +1007,8 @@ class SwarmCampaignOrchestrator:
                     )
             finally:
                 con.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            ui.warn(f"Adaptive max_steps lookup warning: {exc}")
         return self.max_steps
 
     def _ingest_frontier_and_map_elites(
@@ -1319,16 +1032,18 @@ class SwarmCampaignOrchestrator:
             for ep in runs:
                 ep_dict = dict(ep) if isinstance(ep, dict) else ep.__dict__
                 depth = max(
-                    int(ep_dict.get("depth", 1)), int(ep_dict.get("max_depth", 1))
+                    1 if ep_dict.get("depth") is None else int(ep_dict["depth"]),
+                    1
+                    if ep_dict.get("max_depth") is None
+                    else int(ep_dict["max_depth"]),
                 )
                 act_bytes = bytes(ep_dict.get("action_bytes") or b"")
-                # Cap checkpoints per depth tier so deep mid-game states aren't diluted by Dlvl 2-3 noise
                 if (
                     depth >= self.frontier_min_depth
                     and len(act_bytes) > 0
                     and depth_tier_counts.get(depth, 0) < 12
                 ):
-                    seed = int(ep_dict.get("seed", 0))
+                    seed = 0 if ep_dict.get("seed") is None else int(ep_dict["seed"])
                     cp_id = f"fc_dlvl_{depth}_seed{seed}_g{generation}"
                     if cp_id not in self.frontier.checkpoints:
                         prefix_bytes = (
@@ -1340,18 +1055,20 @@ class SwarmCampaignOrchestrator:
                             seed=seed,
                             depth=depth,
                             milestone=f"dlvl_{depth}",
-                            turns=int(ep_dict.get("turns", 0)),
+                            turns=0
+                            if ep_dict.get("turns") is None
+                            else int(ep_dict["turns"]),
                             action_bytes=prefix_bytes,
-                            game_log=str(ep_dict.get("game_log", "")),
+                            game_log=str(ep_dict.get("game_log") or ""),
                             checkpoint_id=cp_id,
                         )
                         depth_tier_counts[depth] = depth_tier_counts.get(depth, 0) + 1
                         new_cps += 1
 
         metrics = {
-            "avg_depth": float(batch_eval.get("avg_depth", 1.0)),
-            "max_depth": int(batch_eval.get("max_depth", 1)),
-            "avg_score": float(batch_eval.get("avg_score", 0.0)),
+            "avg_depth": opt_float(batch_eval, "avg_depth", 1.0),
+            "max_depth": opt_int(batch_eval, "max_depth", 1),
+            "avg_score": opt_float(batch_eval, "avg_score", 0.0),
             "avg_ac": float(
                 np.mean(
                     [
@@ -1412,305 +1129,11 @@ class SwarmCampaignOrchestrator:
             if con is not None:
                 try:
                     con.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    ui.warn(
+                        f"Gen {generation}: incubate_baseline persistence failed ({exc})"
+                    )
         return new_cps
-
-    def _run_generation_legacy(self, generation: int) -> dict[str, Any]:
-        """
-        Executes a single generation of the Legacy Hierarchical Swarm loop
-        (`SwarmCriticAgent` + `SwarmMetaAgent` + thematic `SwarmWorker`s).
-        """
-        t0 = time.time()
-        ui.header(f"LOX Swarm Campaign - Generation {generation}")
-
-        policy_path = self.workspace_dir / "policy.py"
-        skills_dir = self.workspace_dir / "skills"
-        current_policy = (
-            policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
-        )
-        initial_skills = self._load_workspace_skills(skills_dir)
-
-        # 1. Critic Pass 1: Pre-Generation High-Level Guide (very first agent called)
-        pre_gen_guide = self.critic.guide_before_generation(
-            generation=generation,
-            current_policy=current_policy,
-            skills=initial_skills,
-        )
-
-        # 2. Dynamic Macro-Category Discovery (informed by Critic Pass 1)
-        categories = self.meta_agent.discover_macro_categories(
-            generation=generation,
-            n_categories=max(1, int(self.num_workers)),
-            current_policy=current_policy,
-            skills=initial_skills,
-            pre_gen_guide=pre_gen_guide,
-        )
-        cat_names = [c["category_id"] for c in categories]
-        ui.info(f"Gen {generation}: Active Categories: {cat_names}")
-
-        # 3. Concurrent Worker Exploration
-        worker_reports: dict[str, dict[str, Any]] = {}
-        theories_path = self.db_path
-
-        def _run_worker(cat: dict[str, Any]) -> dict[str, Any]:
-            worker = SwarmWorker(
-                role=cat["category_id"],
-                description=cat.get("description", ""),
-                target_metrics=cat.get("target_metrics", []),
-                provider=self.provider,
-                model=self.model,
-                db_path=self.db_path,
-                theories_path=theories_path,
-                frontier_dir=self.frontier_dir,
-                max_turns=self.turns_per_worker,
-            )
-            target_depth = cat.get("target_depth_tier", (1, 2))[0]
-            cp = self.frontier.sample_checkpoint(min_depth=target_depth)
-            return worker.run_cycle(
-                generation=generation,
-                checkpoint=cp,
-                scaffold_code=current_policy,
-                skills=initial_skills,
-            )
-
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(categories)
-        ) as executor:
-            future_to_cat = {
-                executor.submit(_run_worker, cat): cat["category_id"]
-                for cat in categories
-            }
-            for fut in concurrent.futures.as_completed(future_to_cat):
-                c_id = future_to_cat[fut]
-                try:
-                    res = fut.result()
-                    worker_reports[c_id] = res
-                except Exception as e:
-                    ui.warn(f"Worker [{c_id}] failed: {e}")
-
-        # 4. Meta-Agent Initial Policy Assembly
-        master_policy_code = self.meta_agent.assemble_policy(
-            generation=generation,
-            worker_reports=worker_reports,
-            current_policy=current_policy,
-            skills_dir=skills_dir,
-            pre_gen_guide=pre_gen_guide,
-        )
-        policy_path.write_text(master_policy_code, encoding="utf-8")
-        skills_dict = self._load_workspace_skills(skills_dir)
-        skills_dict = self.meta_agent.prune_unused_skills(
-            master_policy_code, skills_dict, skills_dir=skills_dir
-        )
-        ui.info(
-            f"Gen {generation}: Draft master policy saved to `{policy_path}` ({len(skills_dict)} active skill module(s) in `{skills_dir}`)."
-        )
-
-        # 5. Evaluate Draft Policy on Paired Seeds & Persist to DuckDB
-        ui.info(
-            f"Gen {generation}: Evaluating master policy on {self.seeds_per_batch} paired seeds..."
-        )
-        seeds = [1000 + i for i in range(self.seeds_per_batch)]
-        batch_id = f"batch_swarm_g{generation}_{int(time.time())}"
-        batch_eval: BatchEvaluation = self.eval_pool.evaluate_batch(
-            batch_id=batch_id,
-            policy_code=master_policy_code,
-            macros_code="",
-            skills=skills_dict,
-            target_episodes=self.seeds_per_batch,
-            priority_seeds=seeds,
-            record_ticks=True,
-        )
-
-        runs = batch_eval.get("runs", [])
-        batch_id = str(batch_eval.get("batch_id", batch_id))
-        batch_metrics = self._extract_batch_metrics(batch_eval, runs)
-        policy_id = f"policy_swarm_g{generation}"
-        parent_id = f"policy_swarm_g{max(0, generation - 1)}"
-
-        self.db_logger.save_policy(
-            policy_id=policy_id,
-            generation=generation,
-            mode="SWARM",
-            policy_code=master_policy_code,
-            macros_code="",
-            params={},
-            avg_depth=float(batch_metrics["avg_depth"]),
-            max_depth=int(batch_metrics["max_depth"]),
-            is_promoted=True,
-            skills=skills_dict,
-        )
-        log_res = self.db_logger.save_batch(
-            batch_id=batch_id,
-            generation=generation,
-            mode="SWARM",
-            parent_policy_id=parent_id,
-            candidate_policy_id=policy_id,
-            target_functions=[],
-            runs=runs,
-            episodes_discarded=int(batch_eval.get("episodes_discarded", 0)),
-            batch_metrics=batch_metrics,
-            verdict={"passed": True, "reason": "Swarm Generation Evaluation"},
-        )
-
-        # 6. Critic Pass 2: Post-Assembly Comparative Review
-        post_critique = self.critic.review_after_assembly(
-            generation=generation,
-            batch_id=batch_id,
-            candidate_policy_id=policy_id,
-            current_policy=master_policy_code,
-            skills=skills_dict,
-        )
-
-        # 7. Meta-Agent Post-Critic Revision (Meta-Agent decides; zero hardcoded rollbacks)
-        revised_code, revised_skills, was_revised = (
-            self.meta_agent.revise_policy_with_critic(
-                generation=generation,
-                draft_policy=master_policy_code,
-                skills_dir=skills_dir,
-                skills=skills_dict,
-                post_critique=post_critique,
-                pre_gen_guide=pre_gen_guide,
-            )
-        )
-        if was_revised:
-            master_policy_code = revised_code
-            skills_dict = self.meta_agent.prune_unused_skills(
-                master_policy_code, revised_skills, skills_dir=skills_dir
-            )
-            policy_path.write_text(master_policy_code, encoding="utf-8")
-            ui.info(
-                f"Gen {generation}: Re-evaluating Post-Critic revised policy on {self.seeds_per_batch} paired seeds..."
-            )
-            batch_eval = self.eval_pool.evaluate_batch(
-                batch_id=batch_id,
-                policy_code=master_policy_code,
-                macros_code="",
-                skills=skills_dict,
-                target_episodes=self.seeds_per_batch,
-                priority_seeds=seeds,
-                record_ticks=True,
-            )
-            runs = batch_eval.get("runs", [])
-            batch_metrics = self._extract_batch_metrics(batch_eval, runs)
-            self._delete_batch_artifacts(batch_id)
-            self.db_logger.save_policy(
-                policy_id=policy_id,
-                generation=generation,
-                mode="SWARM",
-                policy_code=master_policy_code,
-                macros_code="",
-                params={},
-                avg_depth=float(batch_metrics["avg_depth"]),
-                max_depth=int(batch_metrics["max_depth"]),
-                is_promoted=True,
-                skills=skills_dict,
-            )
-            log_res = self.db_logger.save_batch(
-                batch_id=batch_id,
-                generation=generation,
-                mode="SWARM",
-                parent_policy_id=parent_id,
-                candidate_policy_id=policy_id,
-                target_functions=[],
-                runs=runs,
-                episodes_discarded=int(batch_eval.get("episodes_discarded", 0)),
-                batch_metrics=batch_metrics,
-                verdict={
-                    "passed": True,
-                    "reason": "Swarm Post-Critic Revised Evaluation",
-                },
-            )
-
-        # 8. Extract New Frontier Checkpoints from High-Performing Runs
-        new_cps = 0
-        for ep in runs:
-            ep_dict = dict(ep) if isinstance(ep, dict) else ep.__dict__
-            depth = max(int(ep_dict.get("depth", 1)), int(ep_dict.get("max_depth", 1)))
-            act_bytes = bytes(ep_dict.get("action_bytes") or b"")
-            if depth >= self.frontier_min_depth and len(act_bytes) > 0:
-                seed = int(ep_dict.get("seed", 0))
-                cp_id = f"fc_dlvl_{depth}_seed{seed}_g{generation}"
-                if cp_id not in self.frontier.checkpoints:
-                    prefix_bytes = (
-                        act_bytes[:-25]
-                        if len(act_bytes) > 35
-                        else (act_bytes[:-5] or act_bytes)
-                    )
-                    self.frontier.add_checkpoint(
-                        seed=seed,
-                        depth=depth,
-                        milestone=f"dlvl_{depth}",
-                        turns=int(ep_dict.get("turns", 0)),
-                        action_bytes=prefix_bytes,
-                        game_log=str(ep_dict.get("game_log", "")),
-                        checkpoint_id=cp_id,
-                    )
-                    new_cps += 1
-
-        # 9. Ingest into MAP-Elites Diversity Archive
-        avg_depth = float(batch_eval.get("avg_depth", 1.0))
-        max_d = int(batch_eval.get("max_depth", 1))
-        avg_score = float(batch_eval.get("avg_score", 0.0))
-
-        metrics = {
-            "avg_depth": avg_depth,
-            "max_depth": max_d,
-            "avg_score": avg_score,
-            "pct_wait": float(np.mean([r.get("pct_wait", 0.0) for r in runs]))
-            if runs
-            else 0.0,
-            "pct_search": float(np.mean([r.get("pct_search", 0.0) for r in runs]))
-            if runs
-            else 0.0,
-            "avg_turns": float(np.mean([r.get("turns", 0.0) for r in runs]))
-            if runs
-            else 100.0,
-        }
-        con_leg = None
-        try:
-            con_leg = connect_db(self.db_path, read_only=False)
-            self.map_elites.add_candidate(
-                policy_code=master_policy_code,
-                metrics=metrics,
-                batch_id=batch_id,
-                generation=generation,
-                con=con_leg,
-                skills=skills_dict,
-            )
-        finally:
-            if con_leg is not None:
-                try:
-                    con_leg.close()
-                except Exception:
-                    pass
-        self._sync_batch_cost(batch_id, generation)
-
-        if self.db_logger.prune_ticks and generation % 5 == 0:
-            try:
-                self.db_logger.prune_old_telemetry(
-                    current_generation=generation, keep_generations=20
-                )
-            except Exception:
-                pass
-
-        elapsed = time.time() - t0
-        ui.info(
-            f"Gen {generation} Complete in {elapsed:.1f}s: "
-            f"Avg Depth: {avg_depth:.2f} (Max: {max_d}) | Avg Score: {avg_score:.1f} | "
-            f"New Frontier CPs: {new_cps} | FunctionStats: {len(log_res)}"
-        )
-
-        return {
-            "generation": generation,
-            "avg_depth": avg_depth,
-            "max_depth": max_d,
-            "avg_score": avg_score,
-            "new_frontier_checkpoints": new_cps,
-            "elapsed_sec": elapsed,
-            "worker_reports": len(worker_reports),
-            "revised_after_critic": was_revised,
-        }
 
     def run(self, generations: int = 5) -> list[dict[str, Any]]:
         """Runs the multi-generation swarm campaign, resuming from the latest DB generation if present."""

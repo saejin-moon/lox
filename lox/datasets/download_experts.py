@@ -296,7 +296,9 @@ Reached Dlvl 25 (Castle) in 14,820 turns:
 # Status line regex for NetHack 3.6 ttyrec frames:
 # Line 22: "Player the Title   St:18/50 Dx:14 Co:18 In:10 Wi:14 Ch:10  Lawful"
 # Line 23: "Dlvl:1  $:12  HP:16(16) Pw:2(2) AC:7  Xp:1/0 T:12  Hungry"
-_DLVL_RE = re.compile(r"(?:Dlvl|Astral|Water|Air|Fire|Earth|Home\s*\d*):?\s*(\d+)?")
+_DLVL_RE = re.compile(
+    r"\b(?:Dlvl:\s*(\d+)|(?:Astral|Water|Air|Fire|Earth|Home(?:\s*\d+)?)\b)"
+)
 _HP_RE = re.compile(r"HP:(\d+)\((\d+)\)")
 _AC_RE = re.compile(r"AC:(-?\d+)")
 _XP_RE = re.compile(r"(?:Xp|Exp):(\d+)")
@@ -340,8 +342,8 @@ def parse_dumplog_to_expert_run(
     max_depth = int(meta.get("maxlvl", depth) or depth)
     score = int(meta.get("points", 0) or 0)
     turns = int(meta.get("turns", 0) or 0)
-    hp = int(meta.get("hp", 100) or 100)
-    max_hp = int(meta.get("maxhp", max(hp, 100)) or 100)
+    hp = 100 if meta.get("hp") is None else int(meta["hp"])
+    max_hp = max(hp, 100) if meta.get("maxhp") is None else int(meta["maxhp"])
     death_reason = str(meta.get("death", "ascended"))
 
     # Parse AC, XP level, Gold, Intrinsics, Inventory, and Latest Messages from dumplog_text if present
@@ -381,13 +383,12 @@ def parse_dumplog_to_expert_run(
             current_sec = "inventory"
             continue
         elif (
-            "you were" in low
-            or "you are" in low
-            or low.startswith("intrinsics")
-            or "resistant" in low
+            low.startswith("intrinsics")
+            or low.startswith("your attributes")
+            or low.startswith("latest attributes")
         ):
-            if len(s) < 90:
-                sections["intrinsics"].append(s)
+            current_sec = "intrinsics"
+            continue
         elif low.startswith("fighting skills") or low.startswith("weapon skills"):
             current_sec = "skills"
             continue
@@ -396,6 +397,13 @@ def parse_dumplog_to_expert_run(
             continue
         elif low.startswith("voluntary challenges") or low.startswith("goodbye"):
             current_sec = None
+            continue
+        elif (
+            current_sec is None
+            and ("you were" in low or "you are" in low or "resistant" in low)
+            and len(s) < 90
+        ):
+            sections["intrinsics"].append(s)
             continue
 
         if current_sec and s:
@@ -484,17 +492,25 @@ def extract_milestone_ticks_from_dumplog(
     xp_m = _XP_RE.search(status_blob)
     t_m = _TURN_RE.search(status_blob)
 
-    max_d = (
-        int(d_m.group(1))
-        if (d_m and d_m.group(1))
-        else int(meta.get("maxlvl", 45) or 45)
-    )
+    parsed_dlvl = int(d_m.group(1)) if (d_m and d_m.group(1)) else 0
+    meta_max = int(meta.get("maxlvl") or 0)
+    max_d = max(parsed_dlvl, meta_max) or 45
     final_turns = int(t_m.group(1)) if t_m else int(meta.get("turns", 35000) or 35000)
-    final_hp = int(hp_m.group(1)) if hp_m else int(meta.get("hp", 250) or 250)
-    final_max_hp = (
-        int(hp_m.group(2)) if hp_m else int(meta.get("maxhp", final_hp) or final_hp)
+    final_hp = (
+        int(hp_m.group(1))
+        if hp_m
+        else (250 if meta.get("hp") is None else int(meta["hp"]))
     )
-    final_ac = int(ac_m.group(1)) if ac_m else int(meta.get("ac", -25) or -25)
+    final_max_hp = (
+        int(hp_m.group(2))
+        if hp_m
+        else (final_hp if meta.get("maxhp") is None else int(meta["maxhp"]))
+    )
+    final_ac = (
+        int(ac_m.group(1))
+        if ac_m
+        else (-25 if meta.get("ac") is None else int(meta["ac"]))
+    )
     final_xl = int(xp_m.group(1)) if xp_m else int(meta.get("xp_level", 25) or 25)
 
     ticks: list[dict[str, Any]] = []
@@ -610,6 +626,83 @@ def extract_milestone_ticks_from_dumplog(
     return ticks
 
 
+_CSI_RE = re.compile(r"\x1b\[([0-9;?]*)([a-zA-Z])")
+
+
+class _VT100Screen:
+    """Minimal 24x80 VT100 terminal screen buffer for accurate ttyrec frame reconstruction."""
+
+    def __init__(self, rows: int = 24, cols: int = 80) -> None:
+        self.rows = rows
+        self.cols = cols
+        self.grid: list[list[str]] = [[" "] * cols for _ in range(rows)]
+        self.r = 0
+        self.c = 0
+
+    def feed(self, text: str) -> None:
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch == "\x1b" and i + 1 < n and text[i + 1] == "[":
+                m = _CSI_RE.match(text, i)
+                if m:
+                    params_str, cmd = m.group(1), m.group(2)
+                    i = m.end()
+                    clean_p = params_str.lstrip("?")
+                    nums = [int(p) for p in clean_p.split(";") if p.isdigit()]
+                    if cmd in ("H", "f"):
+                        row = (nums[0] if len(nums) >= 1 else 1) - 1
+                        col = (nums[1] if len(nums) >= 2 else 1) - 1
+                        self.r = max(0, min(self.rows - 1, row))
+                        self.c = max(0, min(self.cols - 1, col))
+                    elif cmd == "J":
+                        mode = nums[0] if nums else 0
+                        if mode == 2:
+                            for rr in range(self.rows):
+                                self.grid[rr] = [" "] * self.cols
+                        elif mode == 0:
+                            for cc in range(self.c, self.cols):
+                                self.grid[self.r][cc] = " "
+                            for rr in range(self.r + 1, self.rows):
+                                self.grid[rr] = [" "] * self.cols
+                    elif cmd == "K":
+                        mode = nums[0] if nums else 0
+                        if mode == 2:
+                            self.grid[self.r] = [" "] * self.cols
+                        elif mode == 1:
+                            for cc in range(0, self.c + 1):
+                                self.grid[self.r][cc] = " "
+                        else:
+                            for cc in range(self.c, self.cols):
+                                self.grid[self.r][cc] = " "
+                    elif cmd == "A":
+                        self.r = max(0, self.r - (nums[0] if nums else 1))
+                    elif cmd == "B":
+                        self.r = min(self.rows - 1, self.r + (nums[0] if nums else 1))
+                    elif cmd == "C":
+                        self.c = min(self.cols - 1, self.c + (nums[0] if nums else 1))
+                    elif cmd == "D":
+                        self.c = max(0, self.c - (nums[0] if nums else 1))
+                    continue
+                i += 1
+                continue
+            if ch == "\r":
+                self.c = 0
+            elif ch == "\n":
+                self.r = min(self.rows - 1, self.r + 1)
+            elif ch == "\b":
+                self.c = max(0, self.c - 1)
+            elif " " <= ch <= "~":
+                self.grid[self.r][self.c] = ch
+                if self.c < self.cols - 1:
+                    self.c += 1
+            i += 1
+
+    def render_lines(self) -> list[str]:
+        return ["".join(row).rstrip() for row in self.grid]
+
+
 def parse_ttyrec_to_expert_run(
     run_id: str,
     ttyrec_path: str,
@@ -618,85 +711,85 @@ def parse_ttyrec_to_expert_run(
     max_frames: int = 5000,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """
-    Streams a `.ttyrec` or `.ttyrec.bz2` file using `nle._pyconverter` (or binary ttyrec frame reader)
+    Streams a `.ttyrec` or `.ttyrec.bz2` file through a 24x80 VT100 screen buffer
     and compiles both the `expert_runs` row (with `summary_digest` and `game_log`) and `expert_ticks` rows.
     """
     meta = meta or {}
     ticks: list[dict[str, Any]] = []
 
-    try:
-        # Use NLE's C++ Ttyrec converter if a db exists or parse ttyrec frames directly
-        raise ImportError("Use direct fast frame parser for standalone file")
-    except Exception:
-        open_fn = bz2.open if ttyrec_path.endswith(".bz2") else open
-        with open_fn(ttyrec_path, "rb") as f:
-            data = f.read()
+    open_fn = bz2.open if ttyrec_path.endswith(".bz2") else open
+    with open_fn(ttyrec_path, "rb") as f:
+        data = f.read()
 
-        offset = 0
-        step_idx = 0
-        n_bytes = len(data)
-        while offset + 12 <= n_bytes and step_idx < max_frames:
-            length = int.from_bytes(data[offset + 8 : offset + 12], "little")
-            offset += 12
-            if offset + length > n_bytes:
+    screen = _VT100Screen(rows=24, cols=80)
+    offset = 0
+    step_idx = 0
+    n_bytes = len(data)
+    while offset + 12 <= n_bytes and step_idx < max_frames:
+        length = int.from_bytes(data[offset + 8 : offset + 12], "little")
+        offset += 12
+        if offset + length > n_bytes:
+            break
+        payload = data[offset : offset + length]
+        offset += length
+        text = payload.decode("latin1", errors="ignore")
+        screen.feed(text)
+        rendered = screen.render_lines()
+        non_empty = [ln.strip() for ln in rendered if ln.strip()]
+        if not non_empty:
+            continue
+
+        step_idx += 1
+        status_str = " ".join(rendered[22:24])
+        full_str = (
+            status_str
+            if ("Dlvl:" in status_str or "HP:" in status_str)
+            else " ".join(non_empty)
+        )
+        d_m = _DLVL_RE.search(full_str)
+        hp_m = _HP_RE.search(full_str)
+        ac_m = _AC_RE.search(full_str)
+        xp_m = _XP_RE.search(full_str)
+        t_m = _TURN_RE.search(full_str)
+
+        depth = (
+            int(d_m.group(1))
+            if (d_m and d_m.group(1))
+            else (ticks[-1]["depth"] if ticks else 1)
+        )
+        hp = int(hp_m.group(1)) if hp_m else (ticks[-1]["hp"] if ticks else 16)
+        max_hp = int(hp_m.group(2)) if hp_m else (ticks[-1]["max_hp"] if ticks else 16)
+        ac = int(ac_m.group(1)) if ac_m else (ticks[-1]["ac"] if ticks else 10)
+        xl = int(xp_m.group(1)) if xp_m else (ticks[-1]["xp_level"] if ticks else 1)
+        turn = int(t_m.group(1)) if t_m else step_idx
+        hunger = 1
+        for h_str, h_val in HUNGER_MAP.items():
+            if h_str in full_str:
+                hunger = h_val
                 break
-            payload = data[offset : offset + length]
-            offset += length
-            text = payload.decode("latin1", errors="ignore")
-            # Strip ANSI escape codes
-            clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", " ", text)
-            lines = [ln.strip() for ln in clean.splitlines() if ln.strip()]
-            if not lines:
-                continue
 
-            step_idx += 1
-            full_str = " ".join(lines)
-            d_m = _DLVL_RE.search(full_str)
-            hp_m = _HP_RE.search(full_str)
-            ac_m = _AC_RE.search(full_str)
-            xp_m = _XP_RE.search(full_str)
-            t_m = _TURN_RE.search(full_str)
-
-            depth = (
-                int(d_m.group(1))
-                if (d_m and d_m.group(1))
-                else (ticks[-1]["depth"] if ticks else 1)
-            )
-            hp = int(hp_m.group(1)) if hp_m else (ticks[-1]["hp"] if ticks else 16)
-            max_hp = (
-                int(hp_m.group(2)) if hp_m else (ticks[-1]["max_hp"] if ticks else 16)
-            )
-            ac = int(ac_m.group(1)) if ac_m else (ticks[-1]["ac"] if ticks else 10)
-            xl = int(xp_m.group(1)) if xp_m else (ticks[-1]["xp_level"] if ticks else 1)
-            turn = int(t_m.group(1)) if t_m else step_idx
-            hunger = 1
-            for h_str, h_val in HUNGER_MAP.items():
-                if h_str in full_str:
-                    hunger = h_val
-                    break
-
-            msg_line = lines[0][:120] if lines else ""
-            ticks.append(
-                {
-                    "run_id": run_id,
-                    "turn": turn,
-                    "step_idx": step_idx,
-                    "depth": depth,
-                    "dungeon_num": 0,
-                    "hp": hp,
-                    "max_hp": max_hp,
-                    "ac": ac,
-                    "xp_level": xl,
-                    "hunger_state": hunger,
-                    "y": 10,
-                    "x": 40,
-                    "action_name": "STEP",
-                    "raw_key": 0,
-                    "active_function": "expert",
-                    "message": msg_line,
-                    "screen_ascii": "\n".join(lines[:21]),
-                }
-            )
+        msg_line = (rendered[0].strip() or non_empty[0])[:120]
+        ticks.append(
+            {
+                "run_id": run_id,
+                "turn": turn,
+                "step_idx": step_idx,
+                "depth": depth,
+                "dungeon_num": 0,
+                "hp": hp,
+                "max_hp": max_hp,
+                "ac": ac,
+                "xp_level": xl,
+                "hunger_state": hunger,
+                "y": 10,
+                "x": 40,
+                "action_name": "STEP",
+                "raw_key": 0,
+                "active_function": "expert",
+                "message": msg_line,
+                "screen_ascii": "\n".join(rendered[1:22]),
+            }
+        )
 
     summary_digest, game_log, milestones = summarize_episode_ticks(ticks)
     last_t = ticks[-1] if ticks else {}

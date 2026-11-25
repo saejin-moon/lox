@@ -2,513 +2,64 @@
 Deterministic CRN Tournament Referee & AST-Disjoint Orthogonal Merger.
 ("Hard Code Nothing": zero hardcoded NetHack heuristics, zero LLM review pass.)
 
-Replaces hierarchical `SwarmCriticAgent` + `SwarmMetaAgent.assemble_policy`:
 1. Filters incubated `PeerCandidate`s on deterministic conflict & attribution checks.
-2. Optionally constructs 1 AST/skill-disjoint orthogonal pair from top-2 survivors
-   and verifies compilation before tournament entry.
-3. Evaluates Incumbent vs Surviving Peer Candidates head-to-head on paired CRN seeds.
-4. Promotes a candidate ONLY if it meets `delta >= 0` vs the Incumbent champion.
+2. Evaluates Incumbent vs Surviving Peer Candidates on paired CRN seeds (`S_select` -> `S_confirm`).
+3. Composes AST-disjoint stacks ONLY from individually safe positive `S_select` winners.
+4. Promotes a candidate ONLY if it passes the unified confirmation gate on strictly unseen seeds.
 """
 
 from __future__ import annotations
 
-import ast
-import hashlib
-import json
 import time
-from dataclasses import dataclass, field
 from typing import Any
 
-from lox.author.swarm_meta import SwarmMetaAgent
+from lox.author.directives import prune_unused_skills
 from lox.author.swarm_peer import PeerCandidate
-from lox.core.contracts import BatchEvaluation, split_full_and_shard_runs
-from lox.engine.hypothesis import (
-    cvar_bottom_quantile,
-    evaluate_tournament_pair,
-    interquartile_mean,
-    progression_metric,
+from lox.core.contracts import BatchEvaluation
+from lox.engine.hypothesis import evaluate_tournament_pair
+from lox.engine.referee_gates import (
+    _FIXABLE_GUARD_REASONS,
+    TournamentVerdict,
+    _assemble_batch_eval,
+    _binomial_sign_p,
+    _clone_incumbent_eval,
+    _count_ast_nodes,
+    _evaluate_confirmation,
+    _extract_eval_stats,
+    _has_positive_dominance,
+    _is_package_ast_equivalent,
+    _meets_select_admission_floor,
+    _package_fingerprint,
+    _passes_safety_invariants,
+    _selection_rank_key,
+    opt_float,
+    opt_int,
+    select_qualifying_stepping_stone,
 )
 from lox.lang.compiler import _COMPILE_EXEC_LOCK, compile_policy_package
 from lox.lang.validator import is_ast_equivalent, three_way_ast_merge
 from lox.ui.console import ui
 
-
-@dataclass
-class TournamentVerdict:
-    """Result of the head-to-head CRN evaluation among incubated peer candidates."""
-
-    promoted: bool
-    winner_id: str
-    winner_policy_code: str
-    winner_skills: dict[str, str]
-    winner_batch_eval: BatchEvaluation
-    incumbent_avg_depth: float
-    incumbent_avg_score: float
-    winner_avg_depth: float
-    winner_avg_score: float
-    target_functions: list[str] = field(default_factory=list)
-    scoreboard: list[dict[str, Any]] = field(default_factory=list)
-    all_runner_up_batches: list[dict[str, Any]] = field(default_factory=list)
-    incumbent_batch_eval: BatchEvaluation | None = None
-    attempts_summary: list[dict[str, Any]] = field(default_factory=list)
-    holdout_avg_depth: float | None = None
-    holdout_iqm_delta: float | None = None
-    holdout_rejected: bool = False
-    best_pair: dict[str, Any] = field(default_factory=dict)
-    reason: str = ""
-    select_batches: dict[str, BatchEvaluation] = field(default_factory=dict)
-    confirm_challenger_eval: tuple[str, BatchEvaluation] | None = None
-    qualifying_stepping_stone: dict[str, Any] | None = None
-
-
-_FIXABLE_GUARD_REASONS = frozenset(
-    {
-        "guard_failed",
-        "cvar25_tail_regression",
-        "auto_esc_regression",
-        "horizon_waste_regression",
-    }
-)
-
-
-def _binomial_sign_p(wins: int, losses: int) -> float:
-    """Exact one-sided binomial sign-test p-value P(Bin(W+L, 0.5) >= W)."""
-    import math as _math
-
-    w = max(0, int(wins))
-    los = max(0, int(losses))
-    n = w + los
-    if n <= 0:
-        return 1.0
-    if w <= 0:
-        return 1.0
-    return float(sum(_math.comb(n, k) for k in range(w, n + 1)) * (0.5**n))
-
-
-def select_qualifying_stepping_stone(
-    generation: int,
-    entries: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """
-    Empirically calibrated Hybrid Stepping-Stone selector (calibrated on G1–G66 `forest/lox.duckdb`):
-    - Hard prerequisites: `policy_exceptions == 0`, `wins >= 3`, `wins > losses`,
-      and `max(winsor_delta, iqm_delta) > 0.0`.
-    - Signal gate (A or B):
-      A. Statistical signal: `min(wilcoxon_p, binomial_sign_p(wins, losses)) < 0.20`
-         (scale-invariant across both `S_select` and `S_confirm`, rejecting 50/50 coin-flip noise).
-      B. Fixable guard-blocked upside: `reject_reason` in `_FIXABLE_GUARD_REASONS`,
-         `wins - losses >= 2`, and `max(winsor_delta, iqm_delta) >= 0.05`.
-    Ranks qualifying candidates by lowest `min_p`, then highest `max(winsor_delta, iqm_delta)`,
-    then highest `wins - losses`.
-    """
-    qualified: list[tuple[tuple[float, float, int], dict[str, Any]]] = []
-    for item in entries:
-        cand: PeerCandidate | None = item.get("candidate")
-        if cand is None or not str(cand.policy_code or "").strip():
-            continue
-        exc = int(item.get("policy_exceptions", 0) or 0)
-        if exc > 0:
-            continue
-        wins = int(item.get("wins", 0) or 0)
-        losses = int(item.get("losses", 0) or 0)
-        if wins < 3 or wins <= losses:
-            continue
-        iqm_d = float(item.get("iqm_delta", 0.0) or 0.0)
-        win_d = float(item.get("winsor_delta", iqm_d) or 0.0)
-        best_d = max(win_d, iqm_d)
-        if best_d <= 0.0:
-            continue
-        wp = float(
-            item.get("wilcoxon_p", 1.0) if item.get("wilcoxon_p") is not None else 1.0
-        )
-        sp = _binomial_sign_p(wins, losses)
-        min_p = min(wp, sp)
-        rej = str(item.get("reject_reason", "") or "").strip()
-
-        stat_ok = min_p < 0.20
-        guard_upside_ok = (
-            rej in _FIXABLE_GUARD_REASONS and (wins - losses) >= 2 and best_d >= 0.05
-        )
-        if not (stat_ok or guard_upside_ok):
-            continue
-
-        mech = str(
-            (cand.hypothesis_yaml or {}).get("mechanism", "")
-            or cand.claimed_label
-            or ""
-        )[:1000]
-        tfs = (
-            sorted(cand.touched_branches)
-            or sorted(cand.touched_skills)
-            or [cand.claimed_deficit_id]
-        )
-        stone = {
-            "stone_id": f"stone_g{int(generation)}_{cand.peer_id}",
-            "generation": int(generation),
-            "source_peer_id": str(cand.peer_id),
-            "source_run_kind": str(item.get("source_run_kind", "select") or "select"),
-            "source_batch_id": str(item.get("source_batch_id", "") or ""),
-            "revision_count": 0,
-            "status": "active",
-            "policy_code": str(cand.policy_code),
-            "skills": dict(cand.skills or {}),
-            "mechanism": mech,
-            "target_functions": tfs,
-            "wins": wins,
-            "losses": losses,
-            "iqm_delta": iqm_d,
-            "winsor_delta": win_d,
-            "wilcoxon_p": wp,
-            "sign_p": sp,
-            "reject_reason": rej,
-            "seeds_gained": list(item.get("seeds_gained") or []),
-            "seeds_lost": list(item.get("seeds_lost") or []),
-        }
-        rank_key = (min_p, -best_d, -(wins - losses))
-        qualified.append((rank_key, stone))
-    if not qualified:
-        return None
-    qualified.sort(key=lambda pair: pair[0])
-    return qualified[0][1]
-
-
-def _package_fingerprint(policy_code: str, skills: dict[str, str]) -> str:
-    h = hashlib.sha256()
-    h.update(policy_code.strip().encode("utf-8", errors="replace"))
-    for k in sorted(skills.keys()):
-        h.update(f"\n##{k}\n".encode("utf-8"))
-        h.update(skills[k].strip().encode("utf-8", errors="replace"))
-    return h.hexdigest()[:16]
-
-
-def _is_package_ast_equivalent(
-    pol_a: str,
-    skills_a: dict[str, str],
-    pol_b: str,
-    skills_b: dict[str, str],
-) -> bool:
-    if not pol_a.strip() or not pol_b.strip():
-        return False
-    if set(skills_a.keys()) != set(skills_b.keys()):
-        return False
-    if not is_ast_equivalent(pol_a, pol_b):
-        return False
-    return all(is_ast_equivalent(skills_a[k], skills_b[k]) for k in skills_a)
-
-
-def _clone_incumbent_eval(
-    inc_batch_eval: BatchEvaluation, generation: int
-) -> BatchEvaluation:
-    """Clones incumbent runs under a fresh generation-scoped `batch_id` so prior `batches`/`runs` rows are never overwritten."""
-    new_bid = f"batch_swarm_g{generation}_inc_retained_{int(time.time() * 1000)}"
-    cloned = dict(inc_batch_eval)
-    cloned["batch_id"] = new_bid
-    cloned_runs: list[dict[str, Any]] = []
-    for idx, r in enumerate(inc_batch_eval.get("runs", []) or []):
-        rc = dict(r)
-        new_rid = f"{new_bid}_r{idx:05d}"
-        rc["batch_id"] = new_bid
-        rc["run_id"] = new_rid
-        orig_ticks = rc.get("ticks")
-        if isinstance(orig_ticks, list) and orig_ticks:
-            rc["ticks"] = [
-                {**t, "run_id": new_rid} if isinstance(t, dict) else t
-                for t in orig_ticks
-            ]
-        cloned_runs.append(rc)
-    cloned["runs"] = cloned_runs
-    full_runs, shard_runs = split_full_and_shard_runs(cloned_runs)
-    cloned["full_runs"] = full_runs
-    cloned["shard_runs"] = shard_runs
-    return BatchEvaluation(cloned)
-
-
-def _count_ast_nodes(policy_code: str, skills: dict[str, str]) -> int:
-    """Counts total AST nodes across policy.py + skills (un-gameable complexity metric)."""
-    total = 0
-    for src in (policy_code, *(skills or {}).values()):
-        s = str(src or "")
-        if not s.strip():
-            continue
-        try:
-            total += sum(1 for _ in ast.walk(ast.parse(s)))
-        except SyntaxError:
-            total += len(s.splitlines()) * 4
-    return total
-
-
-def _assemble_batch_eval(
-    batch_id: str,
-    runs: list[dict[str, Any]],
-) -> BatchEvaluation:
-    import numpy as np
-
-    full_runs, shard_runs = split_full_and_shard_runs(runs)
-    stat_runs = full_runs if full_runs else runs
-    depths = [int(r.get("max_depth", r.get("depth", 1)) or 1) for r in stat_runs]
-    scores = [float(r.get("score", 0.0) or 0.0) for r in stat_runs]
-    turns = [float(r.get("turns", 0.0) or 0.0) for r in stat_runs]
-    return BatchEvaluation(
-        {
-            "batch_id": batch_id,
-            "runs": runs,
-            "full_runs": full_runs,
-            "shard_runs": shard_runs,
-            "episodes_recorded": len(runs),
-            "episodes_discarded": 0,
-            "raw_episodes_run": len(runs),
-            "avg_depth": float(np.mean(depths)) if depths else 0.0,
-            "p90_depth": float(np.percentile(depths, 90)) if depths else 0.0,
-            "max_depth": int(max(r.get("max_depth", 1) for r in runs)) if runs else 0,
-            "avg_score": float(np.mean(scores)) if scores else 0.0,
-            "max_score": int(max(r.get("score", 0) for r in runs)) if runs else 0,
-            "avg_turns": float(np.mean(turns)) if turns else 0.0,
-            "early_stopped": False,
-            "unreachable_abort": False,
-        }
-    )
-
-
-def _extract_eval_stats(
-    batch_eval: BatchEvaluation,
-    loc_total: int,
-    benchmark: str = "nethack",
-    ast_nodes: int = 0,
-) -> dict[str, Any]:
-    runs = batch_eval.get("runs", []) or []
-    if not runs:
-        return {
-            "avg_depth": float(batch_eval.get("avg_depth", 1.0) or 1.0),
-            "max_depth": int(batch_eval.get("max_depth", 1) or 1),
-            "avg_score": float(batch_eval.get("avg_score", 0.0) or 0.0),
-            "avg_ac": 10.0,
-            "avg_xp_level": 1.0,
-            "avg_turns": 0.0,
-            "iqm_prog": 1.0,
-            "mean_prog": 1.0,
-            "cvar25_prog": 1.0,
-            "stall_count": 0,
-            "hard_stall_count": 0,
-            "horizon_waste_count": 0,
-            "horizon_waste_rate": 0.0,
-            "stall_rate": 0.0,
-            "auto_esc_total": 0,
-            "policy_exceptions": 0,
-            "exc_runs": 0,
-            "run_count": 0,
-            "top_tracebacks": [],
-            "loc_total": loc_total,
-            "ast_nodes": ast_nodes or loc_total * 4,
-        }
-
-    from lox.env import get_adapter
-
-    adapter = get_adapter(benchmark or "nethack")
-    depths = [
-        float(max(int(r.get("depth", 1) or 1), int(r.get("max_depth", 1) or 1)))
-        for r in runs
-    ]
-    scores = [float(r.get("score", 0.0) or 0.0) for r in runs]
-    acs = [
-        float(r.get("final_ac", 10) if r.get("final_ac") is not None else 10)
-        for r in runs
-    ]
-    xls = [float(r.get("xp_level", 1) or 1) for r in runs]
-    turns = [float(r.get("turns", 0) or 0) for r in runs]
-    progs = [progression_metric(r, benchmark=benchmark) for r in runs]
-
-    confinement_stalls = sum(
-        1 for r in runs if "CONFINEMENT_STALL" in str(r.get("summary_digest", ""))
-    )
-    horizon_waste_cnt = sum(1 for r in runs if adapter.is_horizon_waste(r))
-    hard_stalls = sum(
-        1 for r in runs if "stalled" in str(r.get("end_reason", "")).lower()
-    )
-    auto_esc_total = sum(int(r.get("auto_esc_count", 0) or 0) for r in runs)
-    exc_total = sum(int(r.get("policy_exceptions", 0) or 0) for r in runs)
-    exc_runs = sum(1 for r in runs if int(r.get("policy_exceptions", 0) or 0) > 0)
-    tbs: list[str] = []
-    for r in runs:
-        if int(r.get("policy_exceptions", 0) or 0) <= 0:
-            continue
-        mj = r.get("milestones_json")
-        if isinstance(mj, str) and mj:
-            try:
-                mo = json.loads(mj)
-                tbs.extend(
-                    mo.get("exception_tracebacks") or mo.get("leaf_errors") or []
-                )
-            except Exception:
-                pass
-        elif isinstance(r.get("milestones"), dict):
-            mo = r["milestones"]
-            tbs.extend(mo.get("exception_tracebacks") or mo.get("leaf_errors") or [])
-        er = str(r.get("end_reason", ""))
-        dm = str(r.get("death_message", ""))
-        if er or dm:
-            tbs.append(f"{er}: {dm}"[:140])
-
-    n = float(len(runs))
-    return {
-        "avg_depth": sum(depths) / n,
-        "max_depth": int(max(depths)),
-        "avg_score": sum(scores) / n,
-        "avg_ac": sum(acs) / n,
-        "avg_xp_level": sum(xls) / n,
-        "avg_turns": sum(turns) / n,
-        "iqm_prog": interquartile_mean(progs),
-        "mean_prog": sum(progs) / n,
-        "cvar25_prog": cvar_bottom_quantile(progs, q=0.25),
-        "stall_count": confinement_stalls,
-        "hard_stall_count": hard_stalls,
-        "horizon_waste_count": horizon_waste_cnt,
-        "horizon_waste_rate": horizon_waste_cnt / n,
-        "stall_rate": horizon_waste_cnt / n,
-        "auto_esc_total": auto_esc_total,
-        "policy_exceptions": exc_total,
-        "exc_runs": exc_runs,
-        "run_count": len(runs),
-        "top_tracebacks": list(dict.fromkeys(tbs))[:5],
-        "loc_total": loc_total,
-        "ast_nodes": ast_nodes or loc_total * 4,
-    }
-
-
-def _passes_safety_invariants(
-    cand_stats: dict[str, Any],
-    inc_stats: dict[str, Any],
-    *,
-    has_base: bool,
-) -> tuple[bool, str]:
-    """
-    4 benchmark-agnostic safety invariants (zero hardcoded NetHack fields):
-      1. Runtime exceptions: cand_exc <= inc_exc (0 when inc_exc == 0).
-      2. Harness prompt dismissals: cand_auto_esc <= max(inc_auto_esc, 2).
-      3. All-depth horizon waste (max_steps / stalled*): cand_hw <= inc_hw + max(0.05, 1/N).
-      4. Bottom-quartile tail risk (CVaR-25%): cand_cvar25 >= inc_cvar25 - max(0.15, 0.05*|inc_cvar25|).
-    """
-    cand_exc = int(cand_stats.get("policy_exceptions", 0) or 0)
-    if not has_base:
-        if cand_exc > 0:
-            return False, "policy_exceptions_regression"
-        return True, ""
-
-    inc_exc = int(inc_stats.get("policy_exceptions", 0) or 0)
-    if cand_exc > inc_exc:
-        return False, "policy_exceptions_regression"
-
-    cand_auto_esc = int(cand_stats.get("auto_esc_total", 0) or 0)
-    inc_auto_esc = int(inc_stats.get("auto_esc_total", 0) or 0)
-    if cand_auto_esc > max(inc_auto_esc, 2):
-        return False, "auto_esc_regression"
-
-    cand_n = max(1, int(cand_stats.get("run_count", 0) or 1))
-    cand_hw = float(cand_stats.get("horizon_waste_rate", 0.0) or 0.0)
-    inc_hw = float(inc_stats.get("horizon_waste_rate", 0.0) or 0.0)
-    hw_tol = max(0.05, 1.0 / float(cand_n))
-    if cand_hw > inc_hw + hw_tol + 1e-9:
-        return False, "horizon_waste_regression"
-
-    cand_cvar = float(cand_stats.get("cvar25_prog", 0.0) or 0.0)
-    inc_cvar = float(inc_stats.get("cvar25_prog", 0.0) or 0.0)
-    cvar_tol = max(0.15, 0.05 * abs(inc_cvar))
-    if cand_cvar < inc_cvar - cvar_tol - 1e-9:
-        return False, "cvar25_tail_regression"
-
-    return True, ""
-
-
-def _has_positive_dominance(pair_stats: dict[str, Any]) -> bool:
-    """True iff candidate has net wins, positive mean delta, and non-outlier-driven winsorized delta."""
-    wins = int(pair_stats.get("wins", 0) or 0)
-    losses = int(pair_stats.get("losses", 0) or 0)
-    mean_d = float(pair_stats.get("mean_delta", 0.0) or 0.0)
-    winsor_d = float(pair_stats.get("winsor_delta", mean_d) or 0.0)
-    return (
-        wins > losses
-        and mean_d > 0.0
-        and (winsor_d > 0.0 or (losses == 0 and winsor_d >= 0.0))
-    )
-
-
-def _evaluate_confirmation(
-    cand_stats: dict[str, Any],
-    pair_stats: dict[str, Any],
-    inc_stats: dict[str, Any],
-    *,
-    has_base: bool,
-    alpha_cutoff: float = 0.05,
-) -> tuple[bool, bool, str, float]:
-    """
-    Unified v2 confirmation gate:
-      1. 4 benchmark-agnostic safety invariants.
-      2. Positive dominance: wins > losses, mean_delta > 0, winsor_delta > 0.
-      3. Exact Paired Sign-Permutation p < eff_alpha (with 0.5x alpha bar on >25% AST bloat).
-    Returns `(beats_incumbent, safety_ok, reject_reason, eff_alpha)`.
-    """
-    safety_ok, safety_reason = _passes_safety_invariants(
-        cand_stats, inc_stats, has_base=has_base
-    )
-    if not safety_ok:
-        return False, False, safety_reason, alpha_cutoff
-    if not has_base:
-        return True, True, "promoted", alpha_cutoff
-
-    cand_ast = int(cand_stats.get("ast_nodes", 0) or 0)
-    inc_ast = int(inc_stats.get("ast_nodes", 0) or 0)
-    bloated = inc_ast >= 50 and cand_ast > int(inc_ast * 1.25)
-    eff_alpha = alpha_cutoff * 0.5 if bloated else alpha_cutoff
-
-    n_paired = int(pair_stats.get("paired_count", pair_stats.get("n_paired", 0)) or 0)
-    sign_p = float(pair_stats.get("sign_perm_p", 1.0) or 1.0)
-
-    if not _has_positive_dominance(pair_stats):
-        return False, True, "non_positive_dominance", eff_alpha
-
-    # For tiny bootstrap smoke batches (N < 5), exact 2^n cannot drop below 0.05.
-    if n_paired < 5:
-        return True, True, "promoted", eff_alpha
-
-    if sign_p < eff_alpha:
-        return True, True, "promoted", eff_alpha
-    if bloated and sign_p < alpha_cutoff:
-        return False, True, "ast_bloat_below_tightened_alpha", eff_alpha
-    return False, True, "below_sign_perm_alpha", eff_alpha
-
-
-def _selection_rank_key(
-    cand_stats: dict[str, Any], pair_stats: dict[str, Any]
-) -> tuple[int, float, float, float, int]:
-    """
-    Precision-aware v2.2 selection ranker:
-      1. 3-level confidence tier (`2` for `p < 0.05`, `1` for `p < 0.15`, `0` otherwise when `wins > losses`)
-         so strong `p < 0.05` winners are never outranked by noisy `p ~ 0.08-0.14` stacks.
-      2. Lower-confidence-adjusted Winsorized delta (`lcb_score = winsor_delta - 0.5 * winsor_se`).
-      3. Statistical confidence (`-sign_perm_p`).
-      4. Point Winsorized delta (`winsor_delta`).
-      5. Simplicity tie-breaker (`-ast_nodes`).
-    """
-    wins = int(pair_stats.get("wins", 0) or 0)
-    losses = int(pair_stats.get("losses", 0) or 0)
-    sign_p = float(pair_stats.get("sign_perm_p", 1.0) or 1.0)
-    winsor_d = float(
-        pair_stats.get("winsor_delta", pair_stats.get("mean_delta", 0.0)) or 0.0
-    )
-    lcb = float(pair_stats.get("lcb_score", winsor_d) or 0.0)
-    if wins > losses and sign_p < 0.05:
-        cred_tier = 2
-    elif wins > losses and sign_p < 0.15:
-        cred_tier = 1
-    else:
-        cred_tier = 0
-    ast_n = int(cand_stats.get("ast_nodes", 0) or 0)
-    return (
-        cred_tier,
-        round(lcb, 4),
-        round(-sign_p, 4),
-        round(winsor_d, 4),
-        -ast_n,
-    )
+__all__ = [
+    "SwarmReferee",
+    "TournamentVerdict",
+    "_FIXABLE_GUARD_REASONS",
+    "_assemble_batch_eval",
+    "_binomial_sign_p",
+    "_clone_incumbent_eval",
+    "_count_ast_nodes",
+    "_evaluate_confirmation",
+    "_extract_eval_stats",
+    "_has_positive_dominance",
+    "_is_package_ast_equivalent",
+    "_meets_select_admission_floor",
+    "_package_fingerprint",
+    "_passes_safety_invariants",
+    "_selection_rank_key",
+    "opt_float",
+    "opt_int",
+    "select_qualifying_stepping_stone",
+]
 
 
 class SwarmReferee:
@@ -535,7 +86,6 @@ class SwarmReferee:
         if not survivors:
             return []
 
-        # Prefer candidates that did NOT clobber protected D_succ branches unless they proved +delta on guards
         safe_survivors = [
             c
             for c in survivors
@@ -642,7 +192,7 @@ class SwarmReferee:
                 else:
                     merged_skills.pop(sk, None)
 
-        kept_skills = SwarmMetaAgent.prune_unused_skills(chosen_pol, merged_skills)
+        kept_skills = prune_unused_skills(chosen_pol, merged_skills)
         try:
             with _COMPILE_EXEC_LOCK:
                 compiled = compile_policy_package(chosen_pol, "", skills=kept_skills)
@@ -685,11 +235,7 @@ class SwarmReferee:
         base_skills: dict[str, str],
         max_combos: int = 3,
     ) -> list[PeerCandidate]:
-        """
-        Scans pairs `(i, j)` in `finalists` and constructs up to `max_combos` verified AST-disjoint
-        compositions via 3-way AST merge (supporting both disjoint skill files, disjoint symbols
-        within the same skill module, and disjoint `policy.py` methods / `PrioritySelector` additions).
-        """
+        """Scans pairs `(i, j)` in `finalists` and constructs up to `max_combos` verified AST-disjoint compositions."""
         if len(finalists) < 2 or not base_policy.strip():
             return []
 
@@ -743,21 +289,12 @@ class SwarmReferee:
         frontier_shards: list[Any] | None = None,
     ) -> TournamentVerdict:
         """
-        Minimalist 3-Stage Split-Sample Promotion Gate (v2):
-          - Stage 1 (already run in `incubate_candidate` + `select_finalists`):
-            deterministic hygiene filter + up to 2 AST-disjoint ortho merges.
-          - Stage 2 (In-Sample Selection on `S_select`, `record_ticks=False`):
-            evaluates Incumbent + finalists + optional in-sample 2-way greedy stack;
-            ranks safe positive candidates by 5%-Winsorized paired mean delta (tie: -ast_nodes);
-            advances ONLY the single #1 winner `C*`.
-          - Stage 3 (Out-of-Sample Confirmation on `S_confirm`, `record_ticks=True`):
-            evaluates ONLY Incumbent + `C*` on strictly unseen seeds (`S_confirm`),
-            with optional O'Brien-Fleming `+64` extension (`α₁=0.030`, `α₂=0.032` -> FWER <= 0.05)
-            when `len(S_confirm) >= 32`. Zero fallback loop -> zero winner's-curse leakage.
-          - Mode B (Single-Stage Direct Fallback): when neither `select_seeds` nor `race_seeds`
-            is provided, evaluates directly on `seeds` with the identical unified v2 rule.
+        3-Stage Split-Sample Promotion Gate (v3):
+          - Mode A (Split-Sample): Stage 2 Selection on `S_select` + Stage 3 Confirmation on `S_confirm`
+            with O'Brien-Fleming & Triggered Sparse-Surgical Stage-3b (`max N=128`, FWER <= 0.05).
+          - Mode B (Single-Stage Direct Fallback): evaluates directly on `seeds` with the identical gate.
         """
-        _ = frontier_shards  # Retained in signature for backward compatibility; subsumed by S_confirm.
+        _ = frontier_shards
         bm_name = str(getattr(eval_pool, "benchmark", "nethack") or "nethack")
         has_base = bool(base_policy.strip())
 
@@ -772,19 +309,16 @@ class SwarmReferee:
             {"max_steps": int(max_steps)} if max_steps is not None else {}
         )
 
-        # Resolve Split-Sample (Mode A) vs Single-Stage Direct Fallback (Mode B)
         use_split_sample = bool(select_seeds) or (
             race_seeds is not None and 4 <= int(race_seeds) < len(seeds)
         )
-        # In Mode A (Split-Sample), NEVER pre-merge unverified parents before S_select safety
-        # checks — stacks are composed ONLY from individually safe positive S_select winners.
-        # In Mode B (single-stage direct), preserve pre-merge orthogonal compositions.
         if not use_split_sample:
             orthos = self.build_orthogonal_candidates(
                 finalists, base_policy, base_skills, max_combos=2
             )
             if orthos:
                 finalists.extend(orthos)
+
         if use_split_sample:
             if select_seeds:
                 s_select = [int(s) for s in select_seeds]
@@ -865,7 +399,6 @@ class SwarmReferee:
             eval_seeds: list[int],
             stage_tag: str,
         ) -> dict[str, BatchEvaluation]:
-            """Evaluates `[(tag, pol, sk, cand_or_None, rec_ticks), ...]` on `eval_seeds`."""
             ts_now = int(time.time())
             seed_rank = {int(s): i for i, s in enumerate(eval_seeds)}
             out_batches: dict[str, BatchEvaluation] = {}
@@ -953,24 +486,24 @@ class SwarmReferee:
                 "promoted": promoted,
                 "sandbox_passed": bool(c.sandbox_passed),
                 "sandbox_error": str(c.error or ""),
-                "avg_depth": float(st.get("avg_depth", 1.0)),
-                "max_depth": int(st.get("max_depth", 1)),
-                "avg_score": float(st.get("avg_score", 0.0)),
-                "avg_ac": float(st.get("avg_ac", 10.0)),
-                "avg_xp_level": float(st.get("avg_xp_level", 1.0)),
-                "policy_exceptions": int(st.get("policy_exceptions", 0)),
+                "avg_depth": opt_float(st, "avg_depth", 1.0),
+                "max_depth": opt_int(st, "max_depth", 1),
+                "avg_score": opt_float(st, "avg_score", 0.0),
+                "avg_ac": opt_float(st, "avg_ac", 10.0),
+                "avg_xp_level": opt_float(st, "avg_xp_level", 1.0),
+                "policy_exceptions": opt_int(st, "policy_exceptions", 0),
                 "seeds_gained": list(pr.get("seeds_gained", [])),
                 "seeds_lost": list(pr.get("seeds_lost", [])),
                 "top_tracebacks": list(st.get("top_tracebacks", [])),
                 "holdout_avg_depth": h_avg,
                 "holdout_iqm_delta": h_iqm,
                 "holdout_rejected": bool(h_rej),
-                "iqm_delta": float(pr.get("iqm_delta", 0.0)),
-                "wilcoxon_p": float(pr.get("wilcoxon_p", 1.0)),
-                "sign_perm_p": float(pr.get("sign_perm_p", 1.0)),
-                "winsor_delta": float(pr.get("winsor_delta", 0.0)),
-                "wins": int(pr.get("wins", 0) or 0),
-                "losses": int(pr.get("losses", 0) or 0),
+                "iqm_delta": opt_float(pr, "iqm_delta", 0.0),
+                "wilcoxon_p": opt_float(pr, "wilcoxon_p", 1.0),
+                "sign_perm_p": opt_float(pr, "sign_perm_p", 1.0),
+                "winsor_delta": opt_float(pr, "winsor_delta", 0.0),
+                "wins": opt_int(pr, "wins", 0),
+                "losses": opt_int(pr, "losses", 0),
                 "reject_reason": reject_reason,
             }
 
@@ -992,9 +525,9 @@ class SwarmReferee:
                         "promoted": False,
                         "sandbox_passed": bool(c.sandbox_passed),
                         "sandbox_error": str(c.error or ""),
-                        "avg_depth": float(c.sandbox_metrics.get("avg_depth", 1.0)),
-                        "max_depth": int(c.sandbox_metrics.get("max_depth", 1)),
-                        "avg_score": float(c.sandbox_metrics.get("avg_score", 0.0)),
+                        "avg_depth": opt_float(c.sandbox_metrics, "avg_depth", 1.0),
+                        "max_depth": opt_int(c.sandbox_metrics, "max_depth", 1),
+                        "avg_score": opt_float(c.sandbox_metrics, "avg_score", 0.0),
                         "avg_ac": 10.0,
                         "avg_xp_level": 1.0,
                         "policy_exceptions": 1
@@ -1033,7 +566,7 @@ class SwarmReferee:
                     return False
             return True
 
-        # Early exit: zero novel incubated survivors
+        # Early exit: zero novel incubated survivors (Fix M-12: always log untested attempts!)
         if not finalists:
             if has_base:
                 inc_batch_eval, inc_stats = _get_or_eval_incumbent(
@@ -1041,6 +574,8 @@ class SwarmReferee:
                 )
                 assert inc_batch_eval is not None
                 retained_eval = _clone_incumbent_eval(inc_batch_eval, generation)
+                untested_attempts: list[dict[str, Any]] = []
+                _append_untested_candidates(untested_attempts, set())
                 return TournamentVerdict(
                     promoted=False,
                     winner_id="incumbent",
@@ -1054,6 +589,7 @@ class SwarmReferee:
                     scoreboard=[],
                     all_runner_up_batches=[],
                     incumbent_batch_eval=inc_batch_eval,
+                    attempts_summary=untested_attempts,
                     reason="No novel non-rejected peer passed isolated sandbox incubation; retained incumbent.",
                 )
             raise RuntimeError(
@@ -1103,7 +639,6 @@ class SwarmReferee:
                 list(sel_inc_eval.get("runs", []) or []) if sel_inc_eval else []
             )
 
-            # Score every finalist on S_select
             sel_entries: list[
                 tuple[
                     PeerCandidate,
@@ -1129,9 +664,9 @@ class SwarmReferee:
                     )
                     if sel_inc_runs
                     else {
-                        "mean_delta": float(st.get("mean_prog", 1.0)),
-                        "winsor_delta": float(st.get("mean_prog", 1.0)),
-                        "iqm_delta": float(st.get("iqm_prog", 1.0)),
+                        "mean_delta": opt_float(st, "mean_prog", 1.0),
+                        "winsor_delta": opt_float(st, "mean_prog", 1.0),
+                        "iqm_delta": opt_float(st, "iqm_prog", 1.0),
                         "wins": len(s_select),
                         "losses": 0,
                         "ties": 0,
@@ -1143,11 +678,11 @@ class SwarmReferee:
                     }
                 )
                 s_ok, s_reason = _passes_safety_invariants(
-                    st, sel_inc_stats, has_base=has_base
+                    st, sel_inc_stats, has_base=has_base, pair_stats=pr, stage="select"
                 )
                 sel_entries.append((cand, cb, st, pr, s_ok, s_reason))
 
-            # Safe In-Sample 2-Way Stacks on S_select (ONLY from individually safe positive winners!)
+            # Safe In-Sample 2-Way Stacks on S_select
             safe_indiv_winners = [
                 (c, st, pr)
                 for (c, _cb, st, pr, s_ok, _sr) in sel_entries
@@ -1171,11 +706,9 @@ class SwarmReferee:
                             break
                         top_a, _st_a, pr_a = scan_safe[idx_i]
                         top_b, _st_b, pr_b = scan_safe[idx_j]
-                        pa = float(pr_a.get("sign_perm_p", 1.0) or 1.0)
-                        pb = float(pr_b.get("sign_perm_p", 1.0) or 1.0)
-                        lb = int(pr_b.get("losses", 0) or 0)
-                        # Never dilute a strong p < 0.05 winner with a noisy (p > 0.25 or lossy p >= 0.25) second parent,
-                        # while still allowing clean zero-loss 2W/0L (p == 0.25) fixes to stack.
+                        pa = opt_float(pr_a, "sign_perm_p", 1.0)
+                        pb = opt_float(pr_b, "sign_perm_p", 1.0)
+                        lb = opt_int(pr_b, "losses", 0)
                         if pa < 0.05 and (pb > 0.25 or (pb >= 0.25 and lb > 0)):
                             continue
                         cand_stack = self._compose_two_packages(
@@ -1206,10 +739,7 @@ class SwarmReferee:
                             continue
                         sel_seen_fps.add(stk_fp)
                         stack_cands.append(cand_stack)
-                        stack_parent_p[cand_stack.peer_id] = min(
-                            float(pr_a.get("sign_perm_p", 1.0) or 1.0),
-                            float(pr_b.get("sign_perm_p", 1.0) or 1.0),
-                        )
+                        stack_parent_p[cand_stack.peer_id] = min(pa, pb)
                 if stack_cands:
                     stk_batches = _run_batch_slice(
                         [
@@ -1236,10 +766,13 @@ class SwarmReferee:
                             benchmark=bm_name,
                         )
                         stk_ok, stk_reason = _passes_safety_invariants(
-                            stk_st, sel_inc_stats, has_base=True
+                            stk_st,
+                            sel_inc_stats,
+                            has_base=True,
+                            pair_stats=stk_pr,
+                            stage="select",
                         )
-                        # Guard against noisy stacks diluting a cleaner individual parent
-                        stk_p = float(stk_pr.get("sign_perm_p", 1.0) or 1.0)
+                        stk_p = opt_float(stk_pr, "sign_perm_p", 1.0)
                         parent_p = stack_parent_p.get(cand_stack.peer_id, 1.0)
                         p_cap = (
                             max(parent_p * 2.0, 0.03)
@@ -1253,17 +786,24 @@ class SwarmReferee:
                             (cand_stack, stk_be, stk_st, stk_pr, stk_ok, stk_reason)
                         )
 
-            # Choose single #1 winner C* from S_select
             eligible_sel = [
                 entry
                 for entry in sel_entries
-                if entry[4] and (not has_base or _has_positive_dominance(entry[3]))
+                if entry[4]
+                and _meets_select_admission_floor(entry[3], has_base=has_base)
             ]
             eligible_sel.sort(
                 key=lambda entry: _selection_rank_key(entry[2], entry[3]), reverse=True
             )
+            sel_pair_map = {
+                c.peer_id: dict(pr) for c, _be, _st, pr, _ok, _sr in sel_entries
+            }
+            sel_stats_map = {
+                c.peer_id: dict(st) for c, _be, st, _pr, _ok, _sr in sel_entries
+            }
+            sel_inc_avg_d = opt_float(sel_inc_stats, "avg_depth", 0.0)
+            sel_inc_esc = opt_int(sel_inc_stats, "auto_esc_total", 0)
 
-            # Build Stage-2 scoreboard rows for diagnostics
             scoreboard: list[dict[str, Any]] = []
             for c, _be, st, pr, _s_ok, _sr in sel_entries:
                 scoreboard.append(
@@ -1273,16 +813,15 @@ class SwarmReferee:
                         "stage": "select",
                         "avg_depth": round(float(st["avg_depth"]), 3),
                         "avg_score": round(float(st["avg_score"]), 1),
-                        "winsor_delta": round(float(pr.get("winsor_delta", 0.0)), 4),
-                        "iqm_delta": round(float(pr.get("iqm_delta", 0.0)), 4),
-                        "wins": int(pr.get("wins", 0) or 0),
-                        "losses": int(pr.get("losses", 0) or 0),
+                        "winsor_delta": round(opt_float(pr, "winsor_delta", 0.0), 4),
+                        "iqm_delta": round(opt_float(pr, "iqm_delta", 0.0), 4),
+                        "wins": opt_int(pr, "wins", 0),
+                        "losses": opt_int(pr, "losses", 0),
                         "loc": int(c.loc_total),
-                        "ast_nodes": int(st.get("ast_nodes", 0)),
+                        "ast_nodes": opt_int(st, "ast_nodes", 0),
                     }
                 )
 
-            # If ZERO candidates passed Stage 2 Select, evaluate ONLY Incumbent on S_confirm and retain
             if not eligible_sel:
                 inc_batch_eval, inc_stats = _get_or_eval_incumbent(
                     s_confirm, record_ticks=True, stage_tag="conf_"
@@ -1324,15 +863,16 @@ class SwarmReferee:
                     stone_pool_no_sel = [
                         {
                             "candidate": c,
-                            "policy_exceptions": int(
-                                st.get("policy_exceptions", 0) or 0
-                            ),
-                            "wins": int(pr.get("wins", 0) or 0),
-                            "losses": int(pr.get("losses", 0) or 0),
-                            "iqm_delta": float(pr.get("iqm_delta", 0.0) or 0.0),
-                            "winsor_delta": float(pr.get("winsor_delta", 0.0) or 0.0),
+                            "policy_exceptions": opt_int(st, "policy_exceptions", 0),
+                            "wins": opt_int(pr, "wins", 0),
+                            "losses": opt_int(pr, "losses", 0),
+                            "iqm_delta": opt_float(pr, "iqm_delta", 0.0),
+                            "winsor_delta": opt_float(pr, "winsor_delta", 0.0),
                             "wilcoxon_p": pr.get(
                                 "wilcoxon_p", pr.get("sign_perm_p", 1.0)
+                            ),
+                            "sign_perm_p": pr.get(
+                                "sign_perm_p", pr.get("wilcoxon_p", 1.0)
                             ),
                             "reject_reason": s_reason
                             if not s_ok
@@ -1366,6 +906,10 @@ class SwarmReferee:
                         attempts_summary=attempts_summary,
                         reason=f"Zero candidates beat incumbent safely on S_select (N={len(s_select)}); retained incumbent.",
                         select_batches=sel_batches_out,
+                        select_pair_by_peer=sel_pair_map,
+                        select_stats_by_peer=sel_stats_map,
+                        select_inc_avg_depth=sel_inc_avg_d,
+                        select_inc_auto_esc=sel_inc_esc,
                         qualifying_stepping_stone=select_qualifying_stepping_stone(
                             generation, stone_pool_no_sel
                         ),
@@ -1374,7 +918,7 @@ class SwarmReferee:
                     f"Gen {generation}: Zero safe bootstrap candidates on S_select."
                 )
 
-            # Stage 3: Pre-Committed Out-of-Sample Confirmation on S_confirm (ONLY Incumbent + C*)
+            # Stage 3: Out-of-Sample Confirmation on S_confirm (ONLY Incumbent + C*)
             best_cand = eligible_sel[0][0]
             conf_inc_key = (
                 id(eval_pool),
@@ -1434,9 +978,9 @@ class SwarmReferee:
                 )
                 if inc_runs_conf
                 else {
-                    "mean_delta": float(best_stats.get("mean_prog", 1.0)),
-                    "winsor_delta": float(best_stats.get("mean_prog", 1.0)),
-                    "iqm_delta": float(best_stats.get("iqm_prog", 1.0)),
+                    "mean_delta": opt_float(best_stats, "mean_prog", 1.0),
+                    "winsor_delta": opt_float(best_stats, "mean_prog", 1.0),
+                    "iqm_delta": opt_float(best_stats, "iqm_prog", 1.0),
                     "wins": len(s_confirm),
                     "losses": 0,
                     "ties": 0,
@@ -1448,7 +992,9 @@ class SwarmReferee:
                 }
             )
 
-            # O'Brien-Fleming 2-Look Confirmation when N_confirm >= 32 (α₁=0.030, α₂=0.032 -> FWER <= 0.05)
+            # O'Brien-Fleming 2-Look + Triggered Divergent-Seed Confirmation (max N=128)
+            base_conf_eval = best_eval
+            base_conf_stats = best_stats
             if has_base and len(s_confirm) >= 32:
                 beats_incumbent, guard_ok, best_rej_reason, eff_a1 = (
                     _evaluate_confirmation(
@@ -1459,12 +1005,19 @@ class SwarmReferee:
                         alpha_cutoff=0.030,
                     )
                 )
-                look1_p = float(best_pair.get("sign_perm_p", 1.0) or 1.0)
+                look1_p = opt_float(best_pair, "sign_perm_p", 1.0)
+                l1_wins = opt_int(best_pair, "wins", 0)
+                l1_losses = opt_int(best_pair, "losses", 0)
+                l1_dec = l1_wins + l1_losses
+                in_obf_band = eff_a1 <= look1_p < 0.16
+                in_sparse_trigger_band = (
+                    l1_wins >= 2 and l1_dec < 16 and (l1_wins / max(1, l1_dec)) >= 0.65
+                )
                 if (
                     not beats_incumbent
                     and guard_ok
                     and _has_positive_dominance(best_pair)
-                    and eff_a1 <= look1_p < 0.16
+                    and (in_obf_band or in_sparse_trigger_band)
                 ):
                     ext_n = min(64, len(s_confirm))
                     used_seeds = set(s_select) | set(s_confirm)
@@ -1475,9 +1028,14 @@ class SwarmReferee:
                             s_obf.append(cand_sd)
                             used_seeds.add(cand_sd)
                         cand_sd += 1
+                    ext_lbl = (
+                        "OBF Stage-3b"
+                        if in_obf_band
+                        else "Triggered Sparse-Surgical Stage-3b"
+                    )
                     ui.info(
-                        f"Gen {generation}: OBF Stage-3b extension on `{best_cand.peer_id}` "
-                        f"(look1 p={look1_p:.4f} in [{eff_a1:.3f}, 0.160), +{len(s_obf)} unseen seeds)..."
+                        f"Gen {generation}: {ext_lbl} extension on `{best_cand.peer_id}` "
+                        f"(look1 W/L={l1_wins}/{l1_losses}, p={look1_p:.4f}, +{len(s_obf)} unseen seeds)..."
                     )
                     obf_batches = _run_batch_slice(
                         [
@@ -1505,7 +1063,6 @@ class SwarmReferee:
                     pooled_cand_eval = _assemble_batch_eval(
                         f"obf_pool_{best_cand.peer_id}_g{generation}", pooled_cand_runs
                     )
-                    best_eval = pooled_cand_eval
                     pooled_inc_stats = _extract_stats(
                         pooled_inc_eval, base_policy, base_skills, loc_override=base_loc
                     )
@@ -1527,8 +1084,13 @@ class SwarmReferee:
                             alpha_cutoff=0.032,
                         )
                     )
+                    best_eval = pooled_cand_eval
+                    best_stats = pooled_cand_stats
+                    inc_batch_eval = pooled_inc_eval
+                    inc_stats = pooled_inc_stats
                     best_pair = dict(pooled_pair)
                     best_pair["obf_extended"] = True
+                    best_pair["triggered_extension"] = bool(not in_obf_band)
                     best_pair["obf_look1_p"] = look1_p
                     best_pair["obf_alpha2"] = eff_a2
             else:
@@ -1546,27 +1108,26 @@ class SwarmReferee:
                 best_rej_reason = "scenario_gate_failed"
 
             holdout_avg_depth: float | None = float(best_stats["avg_depth"])
-            holdout_iqm_delta: float | None = float(best_pair.get("iqm_delta", 0.0))
+            holdout_iqm_delta: float | None = opt_float(best_pair, "iqm_delta", 0.0)
             holdout_rejected = bool(not beats_incumbent and guard_ok and has_base)
 
             d_delta = float(best_stats["avg_depth"]) - float(inc_stats["avg_depth"])
             s_delta = float(best_stats["avg_score"]) - float(inc_stats["avg_score"])
 
-            # Update scoreboard entry for C* with its out-of-sample S_confirm stats
             for row in scoreboard:
                 if row["peer_id"] == best_cand.peer_id:
                     row["stage"] = "confirm"
                     row["avg_depth"] = round(float(best_stats["avg_depth"]), 3)
                     row["avg_score"] = round(float(best_stats["avg_score"]), 1)
                     row["winsor_delta"] = round(
-                        float(best_pair.get("winsor_delta", 0.0)), 4
+                        opt_float(best_pair, "winsor_delta", 0.0), 4
                     )
-                    row["iqm_delta"] = round(float(best_pair.get("iqm_delta", 0.0)), 4)
+                    row["iqm_delta"] = round(opt_float(best_pair, "iqm_delta", 0.0), 4)
                     row["sign_perm_p"] = round(
-                        float(best_pair.get("sign_perm_p", 1.0)), 4
+                        opt_float(best_pair, "sign_perm_p", 1.0), 4
                     )
-                    row["wins"] = int(best_pair.get("wins", 0) or 0)
-                    row["losses"] = int(best_pair.get("losses", 0) or 0)
+                    row["wins"] = opt_int(best_pair, "wins", 0)
+                    row["losses"] = opt_int(best_pair, "losses", 0)
 
             attempts_summary = []
             seen_ids = set()
@@ -1630,7 +1191,8 @@ class SwarmReferee:
             if sel_inc_eval is not None and "inc" not in sel_batches_out:
                 sel_batches_out["inc"] = sel_inc_eval
 
-            if not beats_incumbent and inc_batch_eval is not None:
+            # Fix C-4: Unconditional `if not beats_incumbent:` — never promote a rejected bootstrap candidate!
+            if not beats_incumbent:
                 if inc_fp:
                     rej_set = self._rejected_fingerprints.setdefault(inc_fp, set())
                     for c, _be, _st, _pr, _s_ok, _sr in sel_entries:
@@ -1641,19 +1203,20 @@ class SwarmReferee:
                         stone_pool_rej.append(
                             {
                                 "candidate": c,
-                                "policy_exceptions": int(
-                                    best_stats.get("policy_exceptions", 0) or 0
+                                "policy_exceptions": opt_int(
+                                    best_stats, "policy_exceptions", 0
                                 ),
-                                "wins": int(best_pair.get("wins", 0) or 0),
-                                "losses": int(best_pair.get("losses", 0) or 0),
-                                "iqm_delta": float(
-                                    best_pair.get("iqm_delta", 0.0) or 0.0
-                                ),
-                                "winsor_delta": float(
-                                    best_pair.get("winsor_delta", 0.0) or 0.0
+                                "wins": opt_int(best_pair, "wins", 0),
+                                "losses": opt_int(best_pair, "losses", 0),
+                                "iqm_delta": opt_float(best_pair, "iqm_delta", 0.0),
+                                "winsor_delta": opt_float(
+                                    best_pair, "winsor_delta", 0.0
                                 ),
                                 "wilcoxon_p": best_pair.get(
                                     "wilcoxon_p", best_pair.get("sign_perm_p", 1.0)
+                                ),
+                                "sign_perm_p": best_pair.get(
+                                    "sign_perm_p", best_pair.get("wilcoxon_p", 1.0)
                                 ),
                                 "reject_reason": best_rej_reason,
                                 "seeds_gained": list(
@@ -1668,17 +1231,18 @@ class SwarmReferee:
                         stone_pool_rej.append(
                             {
                                 "candidate": c,
-                                "policy_exceptions": int(
-                                    st.get("policy_exceptions", 0) or 0
+                                "policy_exceptions": opt_int(
+                                    st, "policy_exceptions", 0
                                 ),
-                                "wins": int(pr.get("wins", 0) or 0),
-                                "losses": int(pr.get("losses", 0) or 0),
-                                "iqm_delta": float(pr.get("iqm_delta", 0.0) or 0.0),
-                                "winsor_delta": float(
-                                    pr.get("winsor_delta", 0.0) or 0.0
-                                ),
+                                "wins": opt_int(pr, "wins", 0),
+                                "losses": opt_int(pr, "losses", 0),
+                                "iqm_delta": opt_float(pr, "iqm_delta", 0.0),
+                                "winsor_delta": opt_float(pr, "winsor_delta", 0.0),
                                 "wilcoxon_p": pr.get(
                                     "wilcoxon_p", pr.get("sign_perm_p", 1.0)
+                                ),
+                                "sign_perm_p": pr.get(
+                                    "sign_perm_p", pr.get("wilcoxon_p", 1.0)
                                 ),
                                 "reject_reason": s_reason
                                 if not s_ok
@@ -1691,14 +1255,18 @@ class SwarmReferee:
                         )
                 reject_note = (
                     f"{best_rej_reason} on S_confirm "
-                    f"(W/L={best_pair.get('wins', 0)}/{best_pair.get('losses', 0)}, "
-                    f"winsorΔ={best_pair.get('winsor_delta', 0.0):+.3f}, "
-                    f"p={best_pair.get('sign_perm_p', 1.0):.4f})"
+                    f"(W/L={opt_int(best_pair, 'wins', 0)}/{opt_int(best_pair, 'losses', 0)}, "
+                    f"winsorΔ={opt_float(best_pair, 'winsor_delta', 0.0):+.3f}, "
+                    f"p={opt_float(best_pair, 'sign_perm_p', 1.0):.4f})"
                 )
                 ui.warn(
                     f"Gen {generation}: Selected `{best_cand.peer_id}` rejected ({reject_note}). Retaining Incumbent."
                 )
-                retained_eval = _clone_incumbent_eval(inc_batch_eval, generation)
+                retained_eval = (
+                    _clone_incumbent_eval(inc_batch_eval, generation)
+                    if inc_batch_eval is not None
+                    else best_eval
+                )
                 return TournamentVerdict(
                     promoted=False,
                     winner_id="incumbent",
@@ -1721,9 +1289,15 @@ class SwarmReferee:
                     best_pair=dict(best_pair),
                     reason=f"Rejected `{best_cand.peer_id}` ({reject_note}); kept incumbent.",
                     select_batches=sel_batches_out,
+                    select_pair_by_peer=sel_pair_map,
+                    select_stats_by_peer=sel_stats_map,
+                    select_inc_avg_depth=sel_inc_avg_d,
+                    select_inc_auto_esc=sel_inc_esc,
                     confirm_challenger_eval=(best_cand.peer_id, best_eval),
-                    qualifying_stepping_stone=select_qualifying_stepping_stone(
-                        generation, stone_pool_rej
+                    qualifying_stepping_stone=(
+                        select_qualifying_stepping_stone(generation, stone_pool_rej)
+                        if inc_batch_eval is not None
+                        else None
                     ),
                 )
 
@@ -1733,8 +1307,8 @@ class SwarmReferee:
                 skills=best_cand.skills,
                 seeds=s_confirm,
                 max_steps=max_steps,
-                batch_eval=best_eval,
-                stats=best_stats,
+                batch_eval=base_conf_eval,
+                stats=base_conf_stats,
                 benchmark=bm_name,
             )
             return TournamentVerdict(
@@ -1760,10 +1334,14 @@ class SwarmReferee:
                 reason=(
                     f"Promoted `{best_cand.peer_id}` on S_confirm targeting `{best_cand.claimed_deficit_id}` "
                     f"(Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}, "
-                    f"winsorΔ={best_pair.get('winsor_delta', 0.0):+.3f}, "
-                    f"p={best_pair.get('sign_perm_p', 1.0):.4f})."
+                    f"winsorΔ={opt_float(best_pair, 'winsor_delta', 0.0):+.3f}, "
+                    f"p={opt_float(best_pair, 'sign_perm_p', 1.0):.4f})."
                 ),
                 select_batches=sel_batches_out,
+                select_pair_by_peer=sel_pair_map,
+                select_stats_by_peer=sel_stats_map,
+                select_inc_avg_depth=sel_inc_avg_d,
+                select_inc_auto_esc=sel_inc_esc,
             )
 
         # =====================================================================
@@ -1826,9 +1404,9 @@ class SwarmReferee:
                 )
                 if inc_runs_b
                 else {
-                    "mean_delta": float(st.get("mean_prog", 1.0)),
-                    "winsor_delta": float(st.get("mean_prog", 1.0)),
-                    "iqm_delta": float(st.get("iqm_prog", 1.0)),
+                    "mean_delta": opt_float(st, "mean_prog", 1.0),
+                    "winsor_delta": opt_float(st, "mean_prog", 1.0),
+                    "iqm_delta": opt_float(st, "iqm_prog", 1.0),
                     "wins": len(s_confirm),
                     "losses": 0,
                     "ties": 0,
@@ -1850,13 +1428,13 @@ class SwarmReferee:
                     "stage": "direct",
                     "avg_depth": round(float(st["avg_depth"]), 3),
                     "avg_score": round(float(st["avg_score"]), 1),
-                    "winsor_delta": round(float(pr.get("winsor_delta", 0.0)), 4),
-                    "iqm_delta": round(float(pr.get("iqm_delta", 0.0)), 4),
-                    "sign_perm_p": round(float(pr.get("sign_perm_p", 1.0)), 4),
-                    "wins": int(pr.get("wins", 0) or 0),
-                    "losses": int(pr.get("losses", 0) or 0),
+                    "winsor_delta": round(opt_float(pr, "winsor_delta", 0.0), 4),
+                    "iqm_delta": round(opt_float(pr, "iqm_delta", 0.0), 4),
+                    "sign_perm_p": round(opt_float(pr, "sign_perm_p", 1.0), 4),
+                    "wins": opt_int(pr, "wins", 0),
+                    "losses": opt_int(pr, "losses", 0),
                     "loc": int(cand.loc_total),
-                    "ast_nodes": int(st.get("ast_nodes", 0)),
+                    "ast_nodes": opt_int(st, "ast_nodes", 0),
                 }
             )
 
@@ -1880,7 +1458,6 @@ class SwarmReferee:
             best_rej_reason,
         ) = eval_rows_b[best_idx]
 
-        # Optional Scenario Gate + Explicit Holdout Check (no fallback loop)
         holdout_avg_depth = None
         holdout_iqm_delta = None
         holdout_rejected = False
@@ -1919,10 +1496,14 @@ class SwarmReferee:
                     h_cand_runs, h_inc_runs, benchmark=bm_name
                 )
                 holdout_avg_depth = float(h_cand_stats["avg_depth"])
-                holdout_iqm_delta = float(h_pair.get("iqm_delta", 0.0))
-                h_winsor_d = float(h_pair.get("winsor_delta", holdout_iqm_delta))
+                holdout_iqm_delta = opt_float(h_pair, "iqm_delta", 0.0)
+                h_winsor_d = opt_float(h_pair, "winsor_delta", holdout_iqm_delta)
                 h_safe, h_sreason = _passes_safety_invariants(
-                    h_cand_stats, h_inc_stats, has_base=True
+                    h_cand_stats,
+                    h_inc_stats,
+                    has_base=True,
+                    pair_stats=h_pair,
+                    stage="confirm",
                 )
                 if not h_safe or holdout_iqm_delta < -0.25 or h_winsor_d < -0.25:
                     beats_incumbent = False
@@ -1931,7 +1512,6 @@ class SwarmReferee:
                         "holdout_rejected" if h_safe else f"holdout_{h_sreason}"
                     )
                 elif holdout_iqm_delta < -0.05 or h_winsor_d < -0.05:
-                    # Mild holdout dip: pool main + holdout and re-check unified gate
                     p_cand_runs = list(best_eval.get("runs", []) or []) + h_cand_runs
                     p_inc_runs = inc_runs_b + h_inc_runs
                     p_cand_st = _extract_stats(
@@ -2018,7 +1598,8 @@ class SwarmReferee:
             f"Gen {generation} CRN Tournament: Incumbent D={inc_stats['avg_depth']:.2f} | {scoreboard_str}"
         )
 
-        if not beats_incumbent and inc_batch_eval is not None:
+        # Fix C-4: Unconditional `if not beats_incumbent:` so bootstrap failures never promote!
+        if not beats_incumbent:
             if inc_fp:
                 rej_set = self._rejected_fingerprints.setdefault(inc_fp, set())
                 for c, _be, _st, _pr, _cb, _cs, _cr in eval_rows_b:
@@ -2026,12 +1607,13 @@ class SwarmReferee:
             stone_pool_b = [
                 {
                     "candidate": c,
-                    "policy_exceptions": int(st.get("policy_exceptions", 0) or 0),
-                    "wins": int(pr.get("wins", 0) or 0),
-                    "losses": int(pr.get("losses", 0) or 0),
-                    "iqm_delta": float(pr.get("iqm_delta", 0.0) or 0.0),
-                    "winsor_delta": float(pr.get("winsor_delta", 0.0) or 0.0),
+                    "policy_exceptions": opt_int(st, "policy_exceptions", 0),
+                    "wins": opt_int(pr, "wins", 0),
+                    "losses": opt_int(pr, "losses", 0),
+                    "iqm_delta": opt_float(pr, "iqm_delta", 0.0),
+                    "winsor_delta": opt_float(pr, "winsor_delta", 0.0),
                     "wilcoxon_p": pr.get("wilcoxon_p", pr.get("sign_perm_p", 1.0)),
+                    "sign_perm_p": pr.get("sign_perm_p", pr.get("wilcoxon_p", 1.0)),
                     "reject_reason": best_rej_reason
                     if c.peer_id == best_cand.peer_id
                     else c_rej,
@@ -2047,15 +1629,25 @@ class SwarmReferee:
                 for c, be, _st, _pr, _cb, _cs, _cr in eval_rows_b
                 if c.peer_id != best_cand.peer_id
             }
+            b_pair_map = {
+                c.peer_id: dict(pr) for c, _be, _st, pr, _cb, _cs, _cr in eval_rows_b
+            }
+            b_stats_map = {
+                c.peer_id: dict(st) for c, _be, st, _pr, _cb, _cs, _cr in eval_rows_b
+            }
             reject_note = (
                 f"{best_rej_reason} "
-                f"(Δdepth={d_delta:+.2f}, winsorΔ={best_pair.get('winsor_delta', 0.0):+.3f}, "
-                f"p={best_pair.get('sign_perm_p', 1.0):.4f})"
+                f"(Δdepth={d_delta:+.2f}, winsorΔ={opt_float(best_pair, 'winsor_delta', 0.0):+.3f}, "
+                f"p={opt_float(best_pair, 'sign_perm_p', 1.0):.4f})"
             )
             ui.warn(
                 f"Gen {generation}: Best peer `{best_cand.peer_id}` rejected ({reject_note}). Retaining Incumbent."
             )
-            retained_eval = _clone_incumbent_eval(inc_batch_eval, generation)
+            retained_eval = (
+                _clone_incumbent_eval(inc_batch_eval, generation)
+                if inc_batch_eval is not None
+                else best_eval
+            )
             return TournamentVerdict(
                 promoted=False,
                 winner_id="incumbent",
@@ -2078,9 +1670,17 @@ class SwarmReferee:
                 best_pair=dict(best_pair),
                 reason=f"Rejected `{best_cand.peer_id}` ({reject_note}); kept incumbent.",
                 select_batches=b_sel_out,
+                select_pair_by_peer=b_pair_map,
+                select_stats_by_peer=b_stats_map,
+                select_inc_avg_depth=opt_float(inc_stats, "avg_depth", 1.0),
+                select_inc_auto_esc=opt_int(
+                    inc_stats, "auto_esc_total", opt_int(inc_stats, "auto_esc", 0)
+                ),
                 confirm_challenger_eval=(best_cand.peer_id, best_eval),
-                qualifying_stepping_stone=select_qualifying_stepping_stone(
-                    generation, stone_pool_b
+                qualifying_stepping_stone=(
+                    select_qualifying_stepping_stone(generation, stone_pool_b)
+                    if inc_batch_eval is not None
+                    else None
                 ),
             )
 
@@ -2117,8 +1717,8 @@ class SwarmReferee:
             reason=(
                 f"Promoted `{best_cand.peer_id}` targeting `{best_cand.claimed_deficit_id}` "
                 f"(Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}, "
-                f"winsorΔ={best_pair.get('winsor_delta', 0.0):+.3f}, "
-                f"p={best_pair.get('sign_perm_p', 1.0):.4f})."
+                f"winsorΔ={opt_float(best_pair, 'winsor_delta', 0.0):+.3f}, "
+                f"p={opt_float(best_pair, 'sign_perm_p', 1.0):.4f})."
             ),
         )
 

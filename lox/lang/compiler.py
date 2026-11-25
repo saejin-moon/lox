@@ -1,10 +1,11 @@
 """
-Policy & Macro Compiler.
-Compiles `macros.py` + `policy.py` with `PolicyInstrumentTransformer` into an
+Policy & Skill Compiler.
+Compiles `policy.py` + `skills/` with `PolicyInstrumentTransformer` into an
 executable `CompiledPolicy` factory that instantiates fast per-episode `PolicyRunner` objects.
 """
 
 from __future__ import annotations
+import __future__ as _future_mod
 
 import ast
 import bisect
@@ -14,6 +15,7 @@ import dataclasses
 import enum
 import functools
 import heapq
+import importlib
 import inspect
 import itertools
 import math
@@ -52,19 +54,6 @@ from lox.env.state import (
     astar_next_step,
     bfs_distance_grid,
 )
-from lox.lang.bt import (
-    ActionLeaf,
-    BehaviorNode,
-    BehaviorTree,
-    Blackboard,
-    ConditionLeaf,
-    Inverter,
-    MemorySequence,
-    NodeStatus,
-    PrioritySelector,
-    Sequence,
-    bt_leaf,
-)
 from lox.lang.contracts import (
     CapabilityScorer,
     GoalIntent,
@@ -72,26 +61,79 @@ from lox.lang.contracts import (
     ThreatEvaluator,
     WorldTracker,
 )
+from lox.lang.contracts_check import check_undefined_symbols
 from lox.lang.instrument import (
     ExecutionTracer,
     PolicyInstrumentTransformer,
     PolicyLoopError,
+    _TracerProxy,
 )
-from lox.lang.strategy import (
-    StrategyFrame,
-    StrategyStack,
-    preempt_if,
-    until,
-    with_cleanup,
-)
-from lox.lang.validator import (
+from lox.lang.sandbox import (
+    ALLOWED_DUNDERS,
+    ALLOWED_LOX_SUBMODULES,
+    FORBIDDEN_DUNDERS,
+    FORBIDDEN_IMPORT_NAMES,
+    SAFE_STDLIB_SUBMODULES,
     PolicyValidationError,
-    check_undefined_symbols,
     normalize_skill_key,
+    skill_key_to_relpath,
     validate_python_code,
 )
 
 _COMPILE_EXEC_LOCK = threading.RLock()
+
+
+def _is_forbidden_attr(obj: Any, name: Any) -> bool:
+    if not isinstance(name, str):
+        return False
+    if name in FORBIDDEN_DUNDERS or (
+        name.startswith("__") and name not in ALLOWED_DUNDERS
+    ):
+        return True
+    if isinstance(obj, types.ModuleType) and (
+        name.startswith("_") or name in FORBIDDEN_IMPORT_NAMES
+    ):
+        return True
+    return False
+
+
+def _safe_getattr(obj: Any, name: str, *default: Any) -> Any:
+    if _is_forbidden_attr(obj, name):
+        raise AttributeError(
+            f"Access to attribute '{name}' is forbidden in policy sandbox."
+        )
+    if (
+        isinstance(obj, (_TracerProxy, ExecutionTracer))
+        and name not in _TracerProxy.__slots__
+    ):
+        raise AttributeError(
+            f"Access to internal tracer attribute '{name}' is forbidden in policy sandbox."
+        )
+    if default:
+        return getattr(obj, name, default[0])
+    return getattr(obj, name)
+
+
+def _safe_setattr(obj: Any, name: str, value: Any) -> None:
+    if _is_forbidden_attr(obj, name) or isinstance(
+        obj, (types.ModuleType, _TracerProxy, ExecutionTracer)
+    ):
+        raise AttributeError(
+            f"Setting attribute '{name}' is forbidden in policy sandbox."
+        )
+    setattr(obj, name, value)
+
+
+def _safe_hasattr(obj: Any, name: str) -> bool:
+    if _is_forbidden_attr(obj, name):
+        return False
+    if (
+        isinstance(obj, (_TracerProxy, ExecutionTracer))
+        and name not in _TracerProxy.__slots__
+    ):
+        return False
+    return hasattr(obj, name)
+
 
 SAFE_BUILTINS: dict[str, Any] = {
     "abs": abs,
@@ -112,8 +154,8 @@ SAFE_BUILTINS: dict[str, Any] = {
     "float": float,
     "format": format,
     "frozenset": frozenset,
-    "getattr": getattr,
-    "hasattr": hasattr,
+    "getattr": _safe_getattr,
+    "hasattr": _safe_hasattr,
     "hash": hash,
     "hex": hex,
     "int": int,
@@ -136,7 +178,7 @@ SAFE_BUILTINS: dict[str, Any] = {
     "reversed": reversed,
     "round": round,
     "set": set,
-    "setattr": setattr,
+    "setattr": _safe_setattr,
     "slice": slice,
     "sorted": sorted,
     "staticmethod": staticmethod,
@@ -155,41 +197,202 @@ SAFE_BUILTINS: dict[str, Any] = {
     "TypeError": TypeError,
     "ZeroDivisionError": ZeroDivisionError,
     "StopIteration": StopIteration,
+    "AssertionError": AssertionError,
+    "NotImplementedError": NotImplementedError,
+    "LookupError": LookupError,
     "True": True,
     "False": False,
     "None": None,
 }
 
 
+def _build_safe_lox_modules() -> dict[str, types.ModuleType]:
+    """Constructs sanitized, minimal proxy modules for the explicit `lox.*` allowlist."""
+    lox_root = types.ModuleType("lox")
+    lox_env = types.ModuleType("lox.env")
+    lox_lang = types.ModuleType("lox.lang")
+
+    actions_mod = types.ModuleType("lox.env.actions")
+    for k, v in (
+        ("Action", Action),
+        ("RawAction", RawAction),
+        ("ActionSequence", ActionSequence),
+        ("DIR_DELTAS", DIR_DELTAS),
+        ("ACTION_BY_NAME", ACTION_BY_NAME),
+        ("ACTION_BY_CHAR", ACTION_BY_CHAR),
+        ("key", key),
+        ("seq", seq),
+        ("repeat", repeat),
+        ("extcmd", extcmd),
+    ):
+        setattr(actions_mod, k, v)
+    # Include optional safe direction helpers if present on lox.env.actions
+    from lox.env import actions as _real_actions
+
+    for opt_k in (
+        "OPPOSITE_DIR",
+        "CARDINAL_DELTAS",
+        "menu_pick",
+        "delta_to_dir",
+        "dir_to_action",
+    ):
+        if hasattr(_real_actions, opt_k):
+            setattr(actions_mod, opt_k, getattr(_real_actions, opt_k))
+
+    state_mod = types.ModuleType("lox.env.state")
+    for k, v in (
+        ("GameState", GameState),
+        ("WorldMemory", WorldMemory),
+        ("FloorMemory", FloorMemory),
+        ("InventoryItem", InventoryItem),
+        ("MonsterInfo", MonsterInfo),
+        ("ObjectInfo", ObjectInfo),
+        ("VisibleMonster", VisibleMonster),
+        ("VisibleObject", VisibleObject),
+        ("bfs_distance_grid", bfs_distance_grid),
+        ("astar_next_step", astar_next_step),
+    ):
+        setattr(state_mod, k, v)
+
+    contracts_mod = types.ModuleType("lox.lang.contracts")
+    for k, v in (
+        ("GoalIntent", GoalIntent),
+        ("SafetyReport", SafetyReport),
+        ("WorldTracker", WorldTracker),
+        ("CapabilityScorer", CapabilityScorer),
+        ("ThreatEvaluator", ThreatEvaluator),
+    ):
+        setattr(contracts_mod, k, v)
+
+    setattr(lox_env, "actions", actions_mod)
+    setattr(lox_env, "state", state_mod)
+    setattr(lox_lang, "contracts", contracts_mod)
+    setattr(lox_root, "env", lox_env)
+    setattr(lox_root, "lang", lox_lang)
+
+    return {
+        "lox": lox_root,
+        "lox.env": lox_env,
+        "lox.lang": lox_lang,
+        "lox.env.actions": actions_mod,
+        "lox.env.state": state_mod,
+        "lox.lang.contracts": contracts_mod,
+    }
+
+
+_SAFE_LOX_MODULES = _build_safe_lox_modules()
+
+
+def _make_safe_module_proxy(
+    mod_name: str,
+    raw_mod: types.ModuleType,
+    safe_submods: tuple[str, ...] = (),
+) -> types.ModuleType:
+    """Builds a sanitized module proxy stripping all private (`_*`), forbidden, and submodule attributes."""
+    proxy = types.ModuleType(mod_name)
+    for attr_name in dir(raw_mod):
+        if attr_name.startswith("_") or attr_name in FORBIDDEN_IMPORT_NAMES:
+            continue
+        try:
+            val = getattr(raw_mod, attr_name)
+        except Exception:
+            continue
+        if isinstance(val, types.ModuleType):
+            continue
+        setattr(proxy, attr_name, val)
+    for sub_name in safe_submods:
+        sub_val = getattr(raw_mod, sub_name, None)
+        if not isinstance(sub_val, types.ModuleType):
+            try:
+                sub_val = importlib.import_module(f"{mod_name}.{sub_name}")
+            except ImportError:
+                continue
+        setattr(
+            proxy,
+            sub_name,
+            _make_safe_module_proxy(f"{mod_name}.{sub_name}", sub_val),
+        )
+    return proxy
+
+
+def _build_safe_stdlib_modules() -> dict[str, types.ModuleType]:
+    raw_modules: dict[str, types.ModuleType] = {
+        "math": math,
+        "collections": collections,
+        "heapq": heapq,
+        "itertools": itertools,
+        "functools": functools,
+        "re": re,
+        "enum": enum,
+        "dataclasses": dataclasses,
+        "typing": typing,
+        "numpy": np,
+        "random": random,
+        "operator": operator,
+        "bisect": bisect,
+        "copy": copy,
+    }
+    proxies: dict[str, types.ModuleType] = {}
+    for m_name, raw_mod in raw_modules.items():
+        proxies[m_name] = _make_safe_module_proxy(
+            m_name, raw_mod, SAFE_STDLIB_SUBMODULES.get(m_name, ())
+        )
+    proxies["np"] = proxies["numpy"]
+    return proxies
+
+
+_SAFE_STDLIB_MODULES: dict[str, types.ModuleType] = _build_safe_stdlib_modules()
+
+
 def _make_scoped_import(scoped_modules: dict[str, types.ModuleType] | None = None):
-    """Returns an isolated `__import__` bound to this runner's `skills.*` namespace."""
+    """Returns an isolated `__import__` bound strictly to safe stdlib, safe `lox.*` proxies, and this runner's `skills.*` dict."""
     scoped = scoped_modules if scoped_modules is not None else {}
 
     def _safe_import(
         name: str, globals_dict=None, locals_dict=None, fromlist=(), level=0
     ):
+        if level != 0:
+            raise ImportError("Relative imports are not permitted in policy sandbox.")
+        if name == "__future__":
+            fl = tuple(fromlist or ())
+            if any(x != "annotations" for x in fl):
+                raise ImportError(f"Unsupported __future__ import: {fl}")
+            return _future_mod
+
         root = name.split(".")[0]
-        allowed_map = {
-            "math": math,
-            "collections": collections,
-            "heapq": heapq,
-            "itertools": itertools,
-            "functools": functools,
-            "re": re,
-            "enum": enum,
-            "dataclasses": dataclasses,
-            "typing": typing,
-            "numpy": np,
-            "np": np,
-            "random": random,
-            "operator": operator,
-            "bisect": bisect,
-            "copy": copy,
-        }
-        if root in allowed_map and root == name:
-            return allowed_map[root]
+
+        if root in _SAFE_STDLIB_MODULES:
+            for item in fromlist or ():
+                if str(item).startswith("_") or str(item) in FORBIDDEN_IMPORT_NAMES:
+                    raise ImportError(
+                        f"Import of private/re-exported symbol '{item}' from '{name}' is forbidden."
+                    )
+            root_proxy = _SAFE_STDLIB_MODULES[root]
+            if name == root:
+                return root_proxy
+            parts = name.split(".")
+            if len(parts) != 2 or parts[1] not in SAFE_STDLIB_SUBMODULES.get(root, ()):
+                raise ImportError(
+                    f"Submodule import '{name}' is not permitted in policy sandbox."
+                )
+            return root_proxy if not fromlist else getattr(root_proxy, parts[1])
+
+        if root == "lox":
+            if name not in ALLOWED_LOX_SUBMODULES:
+                raise ImportError(
+                    f"Import of internal module '{name}' is not permitted in policy sandbox."
+                )
+            for item in fromlist or ():
+                if str(item).startswith("_") or str(item) in FORBIDDEN_IMPORT_NAMES:
+                    raise ImportError(
+                        f"Import of private symbol '{item}' from '{name}' is forbidden."
+                    )
+            if not fromlist:
+                return _SAFE_LOX_MODULES["lox"]
+            return _SAFE_LOX_MODULES[name]
+
         if root == "skills":
-            if name != "skills" and name not in scoped and name not in sys.modules:
+            if name != "skills" and name not in scoped:
                 avail_skills = sorted(k for k in scoped if k.startswith("skills."))
                 raise ImportError(
                     f"Skill module '{name}' not found. Available skills: {avail_skills or 'none'}"
@@ -204,22 +407,8 @@ def _make_scoped_import(scoped_modules: dict[str, types.ModuleType] | None = Non
                     return scoped[name]
                 if root in scoped:
                     return scoped[root]
-        if root in allowed_map or root in ("skills", "lox"):
-            if root == "skills" and name != "skills" and name not in sys.modules:
-                avail_skills = sorted(k for k in sys.modules if k.startswith("skills."))
-                raise ImportError(
-                    f"Skill module '{name}' not found. Available skills: {avail_skills or 'none'}"
-                )
-            if not fromlist:
-                if root in sys.modules:
-                    return sys.modules[root]
-                if name in sys.modules:
-                    return sys.modules[name]
-            else:
-                if name in sys.modules:
-                    return sys.modules[name]
-                if root in sys.modules:
-                    return sys.modules[root]
+            raise ImportError(f"Skill module '{name}' not found.")
+
         raise ImportError(f"Import of '{name}' is not permitted in policy sandbox.")
 
     return _safe_import
@@ -233,36 +422,38 @@ SAFE_BUILTINS["__build_class__"] = __build_class__
 def _build_base_namespace(
     tracer: ExecutionTracer,
     scoped_modules: dict[str, types.ModuleType] | None = None,
+    module_name: str = "lox_policy",
 ) -> dict[str, Any]:
-    """Builds the sandboxed execution globals with 1-to-1 actions, state utilities, and stdlib."""
+    """Builds the sandboxed execution globals with 1-to-1 actions, state utilities, read-only tracer proxy, and stdlib."""
     builtins_ns = dict(SAFE_BUILTINS)
     if scoped_modules is not None:
         builtins_ns["__import__"] = _make_scoped_import(scoped_modules)
+    tracer_proxy = tracer.make_proxy()
     ns: dict[str, Any] = {
         "__builtins__": builtins_ns,
-        "__name__": "lox_policy",
-        "_lox_tracer": tracer,
-        # Standard library modules pre-loaded for convenience
-        "math": math,
-        "collections": collections,
+        "__name__": module_name,
+        "_lox_tracer": tracer_proxy,
+        # Sanitized standard library module proxies pre-loaded for convenience
+        "math": _SAFE_STDLIB_MODULES["math"],
+        "collections": _SAFE_STDLIB_MODULES["collections"],
         "deque": collections.deque,
         "defaultdict": collections.defaultdict,
         "Counter": collections.Counter,
-        "heapq": heapq,
-        "itertools": itertools,
-        "functools": functools,
-        "re": re,
-        "enum": enum,
-        "dataclasses": dataclasses,
+        "heapq": _SAFE_STDLIB_MODULES["heapq"],
+        "itertools": _SAFE_STDLIB_MODULES["itertools"],
+        "functools": _SAFE_STDLIB_MODULES["functools"],
+        "re": _SAFE_STDLIB_MODULES["re"],
+        "enum": _SAFE_STDLIB_MODULES["enum"],
+        "dataclasses": _SAFE_STDLIB_MODULES["dataclasses"],
         "dataclass": dataclasses.dataclass,
-        "typing": typing,
+        "typing": _SAFE_STDLIB_MODULES["typing"],
         "Any": Any,
-        "np": np,
-        "numpy": np,
-        "random": random,
-        "operator": operator,
-        "bisect": bisect,
-        "copy": copy,
+        "np": _SAFE_STDLIB_MODULES["np"],
+        "numpy": _SAFE_STDLIB_MODULES["numpy"],
+        "random": _SAFE_STDLIB_MODULES["random"],
+        "operator": _SAFE_STDLIB_MODULES["operator"],
+        "bisect": _SAFE_STDLIB_MODULES["bisect"],
+        "copy": _SAFE_STDLIB_MODULES["copy"],
         # 1-to-1 Action & State primitives
         "Action": Action,
         "RawAction": RawAction,
@@ -284,56 +475,27 @@ def _build_base_namespace(
         "VisibleObject": VisibleObject,
         "bfs_distance_grid": bfs_distance_grid,
         "astar_next_step": astar_next_step,
-        # Behavior Tree Components
-        "BehaviorNode": BehaviorNode,
-        "BehaviorTree": BehaviorTree,
-        "PrioritySelector": PrioritySelector,
-        "Sequence": Sequence,
-        "MemorySequence": MemorySequence,
-        "ActionLeaf": ActionLeaf,
-        "ConditionLeaf": ConditionLeaf,
-        "Inverter": Inverter,
-        "Blackboard": Blackboard,
-        "NodeStatus": NodeStatus,
-        "bt_leaf": bt_leaf,
-        # StrategyStack & Contracts
-        "StrategyStack": StrategyStack,
-        "StrategyFrame": StrategyFrame,
-        "preempt_if": preempt_if,
-        "until": until,
-        "with_cleanup": with_cleanup,
+        # Contracts
         "GoalIntent": GoalIntent,
         "SafetyReport": SafetyReport,
         "WorldTracker": WorldTracker,
         "CapabilityScorer": CapabilityScorer,
         "ThreatEvaluator": ThreatEvaluator,
-        # Decorator no-op for `@macro`
-        "macro": lambda fn: fn,
         # Global parameter helper `param("name", default, min_val, max_val)`
         "param": tracer.get_param,
     }
     return ns
 
 
-def _purge_skills_modules() -> None:
-    """Removes cached `skills` and `skills.*` modules from `sys.modules`."""
-    for mod_key in list(sys.modules.keys()):
-        if mod_key == "skills" or mod_key.startswith("skills."):
-            sys.modules.pop(mod_key, None)
-
-
 def _exec_skills_into_namespace(
     ordered_skill_objs: dict[str, Any],
     ns: dict[str, Any],
-    scoped_modules: dict[str, types.ModuleType] | None = None,
+    scoped_modules: dict[str, types.ModuleType],
 ) -> None:
-    """Registers and executes compiled skills (1-level and 2-level `domain/mod`) cleanly in a scoped dict."""
-    target_mods = scoped_modules if scoped_modules is not None else {}
-    _purge_skills_modules()
+    """Executes compiled skills (1-level and 2-level `domain/mod`) strictly in per-runner `scoped_modules` without mutating global `sys.modules`."""
     skills_pkg = types.ModuleType("skills")
     skills_pkg.__path__ = []
-    target_mods["skills"] = skills_pkg
-    sys.modules["skills"] = skills_pkg
+    scoped_modules["skills"] = skills_pkg
     ns["skills"] = skills_pkg
 
     for s_name, s_code_obj in ordered_skill_objs.items():
@@ -343,22 +505,30 @@ def _exec_skills_into_namespace(
         mod_full = f"skills.{'.'.join(parts)}"
         if len(parts) == 2:
             pkg_full = f"skills.{parts[0]}"
-            pkg_mod = target_mods.get(pkg_full)
+            pkg_mod = scoped_modules.get(pkg_full)
             if pkg_mod is None:
                 pkg_mod = types.ModuleType(pkg_full)
                 pkg_mod.__path__ = []
-                target_mods[pkg_full] = pkg_mod
-                sys.modules[pkg_full] = pkg_mod
+                scoped_modules[pkg_full] = pkg_mod
                 setattr(skills_pkg, parts[0], pkg_mod)
         s_mod = types.ModuleType(mod_full)
         s_mod.__dict__.update(ns)
         s_mod.__name__ = mod_full
         s_mod.__package__ = f"skills.{parts[0]}" if len(parts) == 2 else "skills"
-        target_mods[mod_full] = s_mod
+        scoped_modules[mod_full] = s_mod
+        # Temporarily bind in sys.modules ONLY during exec so `@dataclass` / `from __future__ import annotations`
+        # resolves cls.__module__ cleanly, then restore immediately so global sys.modules stays unpolluted.
+        prev_mod = sys.modules.get(mod_full)
         sys.modules[mod_full] = s_mod
-        exec(s_code_obj, s_mod.__dict__)
+        try:
+            exec(s_code_obj, s_mod.__dict__)
+        finally:
+            if prev_mod is None:
+                sys.modules.pop(mod_full, None)
+            else:
+                sys.modules[mod_full] = prev_mod
         if len(parts) == 2:
-            setattr(target_mods[f"skills.{parts[0]}"], parts[1], s_mod)
+            setattr(scoped_modules[f"skills.{parts[0]}"], parts[1], s_mod)
         else:
             setattr(skills_pkg, parts[0], s_mod)
 
@@ -368,7 +538,7 @@ class PolicyRunner:
     Per-episode driver for a compiled policy instance.
     Supports both:
     - Generator policies: `def run(self, state): while True: state = yield action`
-    - Step policies: `def step(self, state) -> action` (or `act(self, state)`)
+    - Step policies: `def step(self, state) -> action` (including step methods returning subgenerators)
     """
 
     def __init__(self, policy_instance: Any, tracer: ExecutionTracer):
@@ -382,6 +552,7 @@ class PolicyRunner:
         self.auto_esc_count: int = 0
         self.subgen_preemptions: int = 0
         self.policy_exceptions: int = 0
+        self.last_exception_msg: str = ""
 
         # Inject `self.param(...)` onto the policy instance if not already defined
         if not hasattr(self.instance, "param"):
@@ -396,55 +567,81 @@ class PolicyRunner:
             self._mode = "step"
         elif hasattr(self.instance, "act") and callable(self.instance.act):
             self._mode = "act"
-        elif hasattr(self.instance, "tree") and hasattr(self.instance.tree, "tick"):
-            self._mode = "bt"
         elif callable(self.instance):
             self._mode = "callable"
         else:
             raise PolicyValidationError(
                 "Policy class must define `def run(self, state):` (generator) or `def step(self, state):`."
             )
-        self._blackboards_cache: tuple[Any, ...] | None = None
+        self._goal_holders_cache: tuple[Any, ...] | None = None
 
-    def _iter_instance_blackboards(self) -> tuple[Any, ...]:
-        if self._blackboards_cache is not None:
-            return self._blackboards_cache
-        bbs: list[Any] = []
+    def _iter_goal_holders(self) -> tuple[Any, ...]:
+        if self._goal_holders_cache:
+            return self._goal_holders_cache
+        holders: list[Any] = []
         for obj in (
             self.instance,
             getattr(self.instance, "ws", None),
             getattr(self.instance, "world_state", None),
-            getattr(self.instance, "blackboard", None),
-            getattr(self.instance, "bb", None),
-            getattr(getattr(self.instance, "tree", None), "blackboard", None),
         ):
             if (
                 obj is not None
                 and (
-                    hasattr(obj, "last_active_leaf") or hasattr(obj, "last_active_goal")
+                    hasattr(obj, "last_active_goal") or hasattr(obj, "last_active_leaf")
                 )
-                and obj not in bbs
+                and obj not in holders
             ):
-                bbs.append(obj)
-        self._blackboards_cache = tuple(bbs)
-        return self._blackboards_cache
+                holders.append(obj)
+        # Only cache once non-empty so lazily initialized `self.ws` created during turn 1 is picked up
+        if holders:
+            self._goal_holders_cache = tuple(holders)
+        return tuple(holders)
 
-    def _clear_bt_last_active_leaf(self) -> None:
-        for bb in self._iter_instance_blackboards():
-            if hasattr(bb, "last_active_leaf"):
-                bb.last_active_leaf = ""
-            if hasattr(bb, "last_active_goal"):
-                bb.last_active_goal = ""
+    def _clear_last_active_goal(self) -> None:
+        for obj in self._iter_goal_holders():
+            if hasattr(obj, "last_active_goal"):
+                obj.last_active_goal = ""
+            if hasattr(obj, "last_active_leaf"):
+                obj.last_active_leaf = ""
 
-    def _get_bt_last_active_leaf(self) -> str:
-        for bb in self._iter_instance_blackboards():
-            goal = str(getattr(bb, "last_active_goal", "") or "").strip()
+    def _get_last_active_goal(self) -> str:
+        for obj in self._iter_goal_holders():
+            goal = str(getattr(obj, "last_active_goal", "") or "").strip()
             if goal:
                 return goal
-            leaf = str(getattr(bb, "last_active_leaf", "") or "").strip()
+            leaf = str(getattr(obj, "last_active_leaf", "") or "").strip()
             if leaf:
                 return leaf
         return ""
+
+    def _close_subgen(self) -> None:
+        sg = self._active_subgen
+        self._active_subgen = None
+        if sg is not None and hasattr(sg, "close"):
+            try:
+                sg.close()
+            except Exception:
+                pass
+
+    def _unwind_nested_subgen(self, gen: Any) -> tuple[Any, bool]:
+        """Advances a newly returned generator (unwrapping nested generators). Returns `(action, yielded_ok)`."""
+        cur = gen
+        depth = 0
+        while inspect.isgenerator(cur) and depth < 8:
+            depth += 1
+            self._active_subgen = cur
+            try:
+                nxt = next(cur)
+            except StopIteration as stop_exc:
+                self._active_subgen = None
+                if stop_exc.value is not None:
+                    return stop_exc.value, True
+                return None, False
+            if inspect.isgenerator(nxt):
+                cur = nxt
+                continue
+            return nxt, True
+        return cur, True
 
     def next_action(self, state: GameState) -> tuple[Any, str]:
         """
@@ -452,7 +649,7 @@ class PolicyRunner:
         Returns `(raw_yielded_action, active_function_name)`.
         """
         self.tracer.loop_ticks = 0
-        self._clear_bt_last_active_leaf()
+        self._clear_last_active_goal()
         try:
             setattr(self.instance, "state", state)
         except Exception:
@@ -466,7 +663,7 @@ class PolicyRunner:
                 policy_preempt = False
 
         if self._active_subgen is not None and policy_preempt:
-            self._active_subgen = None
+            self._close_subgen()
             self.subgen_preemptions += 1
 
         if self._active_subgen is not None:
@@ -480,14 +677,21 @@ class PolicyRunner:
                 except TypeError:
                     act = next(self._active_subgen)
                 if inspect.isgenerator(act):
-                    self._active_subgen = act
-                    act = next(self._active_subgen)
-                active_fn = self.tracer.record_turn_yield(
-                    preferred_fn=self._get_bt_last_active_leaf()
-                )
-                return act, active_fn
-            except StopIteration:
+                    act, got_act = self._unwind_nested_subgen(act)
+                    if not got_act:
+                        act = None
+                if act is not None:
+                    active_fn = self.tracer.record_turn_yield(
+                        preferred_fn=self._get_last_active_goal()
+                    )
+                    return act, active_fn
+            except StopIteration as stop_exc:
                 self._active_subgen = None
+                if stop_exc.value is not None:
+                    active_fn = self.tracer.record_turn_yield(
+                        preferred_fn=self._get_last_active_goal()
+                    )
+                    return stop_exc.value, active_fn
 
         try:
             if self._mode == "run":
@@ -507,20 +711,23 @@ class PolicyRunner:
             elif self._mode == "step":
                 res = self.instance.step(state)
                 if inspect.isgenerator(res):
-                    self._gen = res
-                    self._mode = "run"
-                    self._started = True
-                    act = next(self._gen)
+                    # Keep self._mode == "step" and track generator in self._active_subgen
+                    # so preemption and post-exhaustion re-entry into step() both work cleanly.
+                    act, got_act = self._unwind_nested_subgen(res)
+                    if not got_act:
+                        act = Action.WAIT
                 else:
                     act = res
             elif self._mode == "act":
                 act = self.instance.act(state)
-            elif self._mode == "bt":
-                act = self.instance.tree.tick(state)
             else:
                 act = self.instance(state)
-        except StopIteration:
-            if self._mode == "run" and hasattr(self.instance, "run"):
+        except StopIteration as stop_exc:
+            if stop_exc.value is not None:
+                act = stop_exc.value
+                self._gen = None
+                self._started = False
+            elif self._mode == "run" and hasattr(self.instance, "run"):
                 try:
                     res = self.instance.run(state)
                     if inspect.isgenerator(res):
@@ -529,23 +736,22 @@ class PolicyRunner:
                     else:
                         self._mode = "run_direct"
                         act = res
-                except StopIteration:
-                    act = Action.WAIT
+                except StopIteration as stop_exc2:
+                    act = (
+                        stop_exc2.value if stop_exc2.value is not None else Action.WAIT
+                    )
             else:
                 act = Action.WAIT
         except PolicyLoopError:
             raise
 
         if inspect.isgenerator(act):
-            self._active_subgen = act
-            try:
-                act = next(self._active_subgen)
-            except StopIteration:
-                self._active_subgen = None
+            act, got_act = self._unwind_nested_subgen(act)
+            if not got_act:
                 act = Action.WAIT
 
         active_fn = self.tracer.record_turn_yield(
-            preferred_fn=self._get_bt_last_active_leaf()
+            preferred_fn=self._get_last_active_goal()
         )
         return act, active_fn
 
@@ -557,10 +763,10 @@ def _extract_skill_dependencies(tree: ast.AST, known_skills: set[str]) -> set[st
     return extract_skill_imports(tree, known_skills).referenced_keys
 
 
-def _topological_skill_order(skill_trees: dict[str, ast.AST]) -> list[str]:
+def _topological_skill_order(skill_trees: dict[str, Any]) -> list[str]:
     """
-    Orders skill modules so dependencies (e.g. `skills.shared`) execute BEFORE
-    importers (e.g. `skills.equip`, `skills.combat`), regardless of alphabetical name.
+    Orders skill modules so dependencies (e.g. `skills.world`) execute BEFORE
+    importers (e.g. `skills.combat.core`), regardless of alphabetical name.
     """
     if len(skill_trees) <= 1:
         return list(skill_trees.keys())
@@ -581,7 +787,7 @@ def _topological_skill_order(skill_trees: dict[str, ast.AST]) -> list[str]:
             dependents[d].append(name)
 
     def _sort_key(name: str) -> tuple[int, str]:
-        return (0 if name.startswith("shared") else 1, name)
+        return (0 if name.startswith(("shared", "world")) else 1, name)
 
     ready: list[tuple[tuple[int, str], str]] = [
         (_sort_key(k), k) for k, deg in in_degree.items() if deg == 0
@@ -617,8 +823,6 @@ def _compile_skill_unit_cached(
     skill_code: str,
     is_macro_module: bool,
 ) -> tuple[Any, list[str], frozenset[str]]:
-    from lox.lang.validator import normalize_skill_key, skill_key_to_relpath
-
     norm_name = normalize_skill_key(skill_name)
     rel_fn = skill_key_to_relpath(norm_name)
     skill_tree = validate_python_code(skill_code, filename=rel_fn)
@@ -646,7 +850,8 @@ def _compile_skill_unit_cached(
             mod = str(node.module or "")
             if mod == "skills":
                 for alias in node.names:
-                    raw_deps.add(str(alias.name or "").split(".", 1)[0])
+                    if alias.name != "*":
+                        raw_deps.add(str(alias.name or "").split(".", 1)[0])
             elif mod.startswith("skills."):
                 tail = mod[len("skills.") :].replace(".", "/")
                 raw_deps.add(tail)
@@ -662,15 +867,28 @@ def _compile_skill_unit(
     skill_code: str,
     is_macro_module: bool = True,
 ) -> tuple[Any, list[str], frozenset[str]]:
-    from lox.lang.validator import normalize_skill_key
-
     norm_name = normalize_skill_key(skill_name)
     with _SKILL_CACHE_LOCK:
         return _compile_skill_unit_cached(norm_name, skill_code, is_macro_module)
 
 
+def _expand_skill_deps(
+    raw_deps: frozenset[str], known_skill_keys: set[str]
+) -> set[str]:
+    """Expands both exact keys and package-level dependencies (e.g. `combat` -> `combat/core`, `combat/ranged`)."""
+    expanded: set[str] = set()
+    for dep in raw_deps:
+        if dep in known_skill_keys:
+            expanded.add(dep)
+        prefix = f"{dep}/"
+        for k in known_skill_keys:
+            if k.startswith(prefix):
+                expanded.add(k)
+    return expanded
+
+
 class CompiledPolicy:
-    """Compiled bytecode bundle for `macros.py` + `policy.py` + optional `skills/` package."""
+    """Compiled bytecode bundle for `policy.py` + `skills/` package."""
 
     def __init__(
         self,
@@ -679,8 +897,6 @@ class CompiledPolicy:
         skills: dict[str, str] | None = None,
         max_loop_ticks: int = 250000,
     ):
-        from lox.lang.validator import normalize_skill_key
-
         self.policy_code = policy_code
         self.macros_code = macros_code
         self.max_loop_ticks = max_loop_ticks
@@ -694,7 +910,7 @@ class CompiledPolicy:
         self.skill_function_names: dict[str, list[str]] = {}
         self.macro_function_names: list[str] = []
 
-        # Parse, validate, and instrument skills package in dependency order (per-skill LRU cached)
+        # Parse, validate, and instrument skills package in topological dependency order
         raw_skill_deps: dict[str, set[str]] = {}
         raw_skill_code_objs: dict[str, Any] = {}
         known_skill_keys = {k for k, v in self.skills.items() if v and v.strip()}
@@ -704,44 +920,17 @@ class CompiledPolicy:
             c_obj, fn_names, deps_fs = _compile_skill_unit(
                 skill_name, skill_code, is_macro_module=True
             )
-            raw_skill_deps[skill_name] = {d for d in deps_fs if d in known_skill_keys}
+            raw_skill_deps[skill_name] = _expand_skill_deps(
+                deps_fs, known_skill_keys
+            ) - {skill_name}
             raw_skill_code_objs[skill_name] = c_obj
             self.skill_function_names[skill_name] = list(fn_names)
         self._skill_order: list[str] = _topological_skill_order(raw_skill_deps)
         for skill_name in self._skill_order:
             self._skill_code_objs[skill_name] = raw_skill_code_objs[skill_name]
 
-        # Legacy macros support (compiled if provided for backwards compatibility)
-        if macros_code and macros_code.strip():
-            macro_tree = validate_python_code(macros_code, filename="macros.py")
-            macro_tree = PolicyInstrumentTransformer(is_macro_module=True).visit(
-                macro_tree
-            )
-            ast.fix_missing_locations(macro_tree)
-            self._macro_code_obj = compile(
-                macro_tree, filename="macros.py", mode="exec"
-            )
-            for n in macro_tree.body:
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    if n.name != "__init__" and n.name not in self.macro_function_names:
-                        self.macro_function_names.append(n.name)
-                elif isinstance(n, ast.Assign):
-                    for tgt in n.targets:
-                        if (
-                            isinstance(tgt, ast.Name)
-                            and tgt.id not in self.macro_function_names
-                        ):
-                            self.macro_function_names.append(tgt.id)
-                elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
-                    if n.target.id not in self.macro_function_names:
-                        self.macro_function_names.append(n.target.id)
-        else:
-            self._macro_code_obj = None
-
         # Fast (<2ms) CPython symtable undefined-symbol and cross-skill export gate
-        allowed_globals = frozenset(
-            _build_base_namespace(ExecutionTracer()).keys()
-        ) | frozenset(self.macro_function_names)
+        allowed_globals = frozenset(_build_base_namespace(ExecutionTracer()).keys())
         check_undefined_symbols(
             policy_code=policy_code,
             skills=self.skills,
@@ -755,11 +944,11 @@ class CompiledPolicy:
         ast.fix_missing_locations(policy_tree)
         self._policy_code_obj = compile(policy_tree, filename="policy.py", mode="exec")
 
-        # Extract all function names defined in policy, macros, and skills
         self.policy_function_names: list[str] = [
             n.name
             for n in ast.walk(policy_tree)
-            if isinstance(n, ast.FunctionDef) and n.name != "__init__"
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name != "__init__"
         ]
         for skill_fns in self.skill_function_names.values():
             for sfn in skill_fns:
@@ -776,61 +965,61 @@ class CompiledPolicy:
                 param_overrides=param_overrides,
             )
             scoped_modules: dict[str, types.ModuleType] = {}
-            ns = _build_base_namespace(tracer, scoped_modules=scoped_modules)
-            # Register a fresh `lox_policy` module in sys.modules so `@dataclass` works cleanly
-            # without leaking stale globals from previous compiled policies.
-            mod_obj = types.ModuleType("lox_policy")
-            sys.modules["lox_policy"] = mod_obj
+            mod_name = "lox_policy"
+            ns = _build_base_namespace(
+                tracer, scoped_modules=scoped_modules, module_name=mod_name
+            )
+            mod_obj = types.ModuleType(mod_name)
             mod_obj.__dict__.update(ns)
 
-            if self._macro_code_obj is not None:
-                exec(self._macro_code_obj, ns)
+            prev_pol_mod = sys.modules.get(mod_name)
+            sys.modules[mod_name] = mod_obj
+            try:
+                _exec_skills_into_namespace(
+                    self._skill_code_objs, ns, scoped_modules=scoped_modules
+                )
+                exec(self._policy_code_obj, ns)
                 mod_obj.__dict__.update(ns)
 
-            # Register 1-level / 2-level skills modules into isolated per-runner `scoped_modules`
-            _exec_skills_into_namespace(
-                self._skill_code_objs, ns, scoped_modules=scoped_modules
-            )
+                policy_cls = ns.get("Policy") or ns.get("Agent")
+                if policy_cls is None:
+                    for val in ns.values():
+                        if (
+                            isinstance(val, type)
+                            and val.__module__ == mod_name
+                            and (
+                                hasattr(val, "run")
+                                or hasattr(val, "step")
+                                or hasattr(val, "act")
+                            )
+                        ):
+                            policy_cls = val
+                            break
 
-            exec(self._policy_code_obj, ns)
-            mod_obj.__dict__.update(ns)
-
-            # Find policy class (`Policy` or `Agent` or any user class defining `run`/`step`)
-            policy_cls = ns.get("Policy") or ns.get("Agent")
-            if policy_cls is None:
-                for val in ns.values():
-                    if (
-                        isinstance(val, type)
-                        and val.__module__ == "lox_policy"
-                        and (
-                            hasattr(val, "run")
-                            or hasattr(val, "step")
-                            or hasattr(val, "act")
-                        )
-                    ):
-                        policy_cls = val
-                        break
-
-            if policy_cls is not None:
-                # Attach `self.param(...)` onto `policy_cls` BEFORE calling `__init__()`
-                if not hasattr(policy_cls, "param"):
-                    try:
-                        setattr(
-                            policy_cls,
-                            "param",
-                            lambda self, *a, **kw: tracer.get_param(*a, **kw),
-                        )
-                    except Exception:
-                        pass
-                instance = policy_cls()
-            elif "policy" in ns and callable(ns["policy"]):
-                instance = ns["policy"]
-            elif "run" in ns and callable(ns["run"]):
-                instance = ns["run"]
-            else:
-                raise PolicyValidationError(
-                    "Policy code must define `class Policy:` (or `class Agent:`) with `run(self, state)` or `step(self, state)`."
-                )
+                if policy_cls is not None:
+                    if not hasattr(policy_cls, "param"):
+                        try:
+                            setattr(
+                                policy_cls,
+                                "param",
+                                lambda self, *a, **kw: tracer.get_param(*a, **kw),
+                            )
+                        except Exception:
+                            pass
+                    instance = policy_cls()
+                elif "policy" in ns and callable(ns["policy"]):
+                    instance = ns["policy"]
+                elif "run" in ns and callable(ns["run"]):
+                    instance = ns["run"]
+                else:
+                    raise PolicyValidationError(
+                        "Policy code must define `class Policy:` (or `class Agent:`) with `run(self, state)` or `step(self, state)`."
+                    )
+            finally:
+                if prev_pol_mod is None:
+                    sys.modules.pop(mod_name, None)
+                else:
+                    sys.modules[mod_name] = prev_pol_mod
 
             return PolicyRunner(instance, tracer)
 
@@ -857,7 +1046,7 @@ def compile_policy_and_macros(
     skills_tuple: tuple[tuple[str, str], ...] = (),
     max_loop_ticks: int = 250000,
 ) -> CompiledPolicy:
-    """Validates and compiles `policy_code`, `macros_code`, and skills into a reusable `CompiledPolicy`."""
+    """Validates and compiles `policy_code` and skills into a reusable `CompiledPolicy`."""
     with _POLICY_CACHE_LOCK:
         return _compile_policy_and_macros_cached(
             policy_code, macros_code, skills_tuple, max_loop_ticks
@@ -878,111 +1067,3 @@ def compile_policy_package(
         skills_tuple=skills_tuple,
         max_loop_ticks=max_loop_ticks,
     )
-
-
-def compile_bt_subtree(
-    code: str,
-    filename: str = "subtree.py",
-    skills: dict[str, str] | None = None,
-) -> Any:
-    """Validates and executes a standalone Behavior Tree subtree, returning the root node or instance."""
-    with _COMPILE_EXEC_LOCK:
-        tree = validate_python_code(code, filename=filename)
-        tree = PolicyInstrumentTransformer().visit(tree)
-        ast.fix_missing_locations(tree)
-        tracer = ExecutionTracer()
-        scoped_modules: dict[str, types.ModuleType] = {}
-        ns = _build_base_namespace(tracer, scoped_modules=scoped_modules)
-        mod_obj = types.ModuleType("lox_policy")
-        sys.modules["lox_policy"] = mod_obj
-        mod_obj.__dict__.update(ns)
-
-        if skills:
-            norm_bt_skills = {
-                normalize_skill_key(k): v
-                for k, v in skills.items()
-                if k and str(v or "").strip()
-            }
-            known_bt_keys = set(norm_bt_skills.keys())
-            bt_skill_deps: dict[str, set[str]] = {}
-            bt_skill_objs: dict[str, Any] = {}
-            for s_name, s_code in norm_bt_skills.items():
-                c_obj, _fns, deps_fs = _compile_skill_unit(
-                    s_name, s_code, is_macro_module=False
-                )
-                bt_skill_deps[s_name] = {d for d in deps_fs if d in known_bt_keys}
-                bt_skill_objs[s_name] = c_obj
-            ordered_bt_objs = {
-                s_name: bt_skill_objs[s_name]
-                for s_name in _topological_skill_order(bt_skill_deps)
-                if s_name in bt_skill_objs
-            }
-            _exec_skills_into_namespace(
-                ordered_bt_objs, ns, scoped_modules=scoped_modules
-            )
-        else:
-            _purge_skills_modules()
-
-        exec(compile(tree, filename=filename, mode="exec"), ns)
-        mod_obj.__dict__.update(ns)
-
-        def _attach_tracer(obj: Any) -> Any:
-            try:
-                setattr(obj, "_lox_tracer", tracer)
-            except Exception:
-                pass
-            return obj
-
-        for preferred in ("subtree", "root", "tree", "node", "policy"):
-            if preferred in ns:
-                cand = ns[preferred]
-                if isinstance(cand, (BehaviorTree, BehaviorNode)):
-                    return _attach_tracer(cand)
-                if not inspect.isclass(cand) and (
-                    hasattr(cand, "tick") or hasattr(cand, "step")
-                ):
-                    return _attach_tracer(cand)
-
-        bt_trees = [v for v in ns.values() if isinstance(v, BehaviorTree)]
-        if bt_trees:
-            return _attach_tracer(bt_trees[-1])
-
-        composites = [
-            v
-            for v in ns.values()
-            if isinstance(v, (PrioritySelector, Sequence, MemorySequence, Inverter))
-        ]
-        if composites:
-            return _attach_tracer(composites[-1])
-
-        leaves = [v for v in ns.values() if isinstance(v, BehaviorNode)]
-        if leaves:
-            return _attach_tracer(leaves[-1])
-
-        user_classes = [
-            v
-            for v in ns.values()
-            if inspect.isclass(v)
-            and getattr(v, "__module__", None) == "lox_policy"
-            and (hasattr(v, "tick") or hasattr(v, "step") or hasattr(v, "run"))
-        ]
-        for cls in reversed(user_classes):
-            try:
-                return _attach_tracer(cls())
-            except Exception:
-                pass
-
-        user_fns = [
-            v
-            for k, v in ns.items()
-            if not k.startswith("_")
-            and callable(v)
-            and not inspect.isclass(v)
-            and getattr(v, "__module__", None) == "lox_policy"
-        ]
-        if user_fns:
-            return _attach_tracer(user_fns[-1])
-
-        raise PolicyValidationError(
-            "No BehaviorTree, PrioritySelector, Sequence, ActionLeaf, ConditionLeaf, or Policy class found in subtree code."
-        )

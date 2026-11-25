@@ -10,16 +10,24 @@ import enum
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 from nle.nethack.actions import (
     Command,
-    CompassDirection,
-    CompassDirectionLonger,
     MiscAction,
     MiscDirection,
     TextCharacters,
     UnsafeActions,
     WizardCommand,
 )
+from nle.nethack.actions import (
+    CompassDirection as _RawCompassDirection,
+)
+from nle.nethack.actions import (
+    CompassDirectionLonger as _RawCompassDirectionLonger,
+)
+
+CompassDirection: Any = _RawCompassDirection
+CompassDirectionLonger: Any = _RawCompassDirectionLonger
 
 
 class Action(enum.IntEnum):
@@ -186,9 +194,13 @@ class Action(enum.IntEnum):
     NUM_9 = TextCharacters.NUM_9.value
 
 
-# Lookup dicts for fast 1-to-1 resolution
-ACTION_BY_NAME: dict[str, int] = {a.name: int(a.value) for a in Action}
-ACTION_BY_NAME.update({a.name.lower(): int(a.value) for a in Action})
+# Lookup dicts for fast 1-to-1 resolution (including all 15 Action aliases)
+ACTION_BY_NAME: dict[str, int] = {
+    name: int(member.value) for name, member in Action.__members__.items()
+}
+ACTION_BY_NAME.update(
+    {name.lower(): int(member.value) for name, member in Action.__members__.items()}
+)
 
 ACTION_BY_CHAR: dict[int, str] = {int(a.value): a.name for a in Action}
 
@@ -236,12 +248,13 @@ class ActionSequence:
         return "seq(" + ",".join(parts) + ")"
 
 
-def key(ch: str | int | Action) -> RawAction:
+def key(ch: str | int | np.integer | Action) -> RawAction:
     """Constructs a 1-to-1 single-keystroke action from a character, Action enum, or byte int."""
     if isinstance(ch, Action):
         return RawAction(int(ch.value), ch.name)
-    if isinstance(ch, int) and not isinstance(ch, bool):
-        return RawAction(ch & 0xFF, ACTION_BY_CHAR.get(ch & 0xFF, f"KEY_{ch & 0xFF}"))
+    if isinstance(ch, (int, np.integer)) and not isinstance(ch, bool):
+        v = int(ch) & 0xFF
+        return RawAction(v, ACTION_BY_CHAR.get(v, f"KEY_{v}"))
     if isinstance(ch, str):
         if len(ch) == 1:
             v = ord(ch) & 0xFF
@@ -252,7 +265,10 @@ def key(ch: str | int | Action) -> RawAction:
     raise ValueError(f"Cannot convert {ch!r} to a single NetHack keystroke.")
 
 
-def seq(*steps: str | int | Action | RawAction, label: str = "") -> ActionSequence:
+def seq(
+    *steps: str | int | np.integer | Action | RawAction | tuple[int, int] | list[int],
+    label: str = "",
+) -> ActionSequence:
     """
     Constructs a multi-keystroke sequence (e.g. `seq(Action.EAT, 'f')` or `seq(Action.ENGRAVE, '-', 'Elbereth\\r')`).
     Strings longer than 1 character (that are not uppercase Action enum names) are expanded character-by-character.
@@ -264,8 +280,8 @@ def seq(*steps: str | int | Action | RawAction, label: str = "") -> ActionSequen
             out.append(int(item.value))
         elif isinstance(item, RawAction):
             out.append(item.byte_val)
-        elif isinstance(item, int) and not isinstance(item, bool):
-            out.append(item & 0xFF)
+        elif isinstance(item, (int, np.integer)) and not isinstance(item, bool):
+            out.append(int(item) & 0xFF)
         elif isinstance(item, str):
             after_extcmd = bool(out and out[-1] == extcmd_byte)
             if (
@@ -282,7 +298,9 @@ def seq(*steps: str | int | Action | RawAction, label: str = "") -> ActionSequen
             isinstance(item, (tuple, list))
             and len(item) == 2
             and all(
-                isinstance(x, (int, float)) and not isinstance(x, bool) for x in item
+                isinstance(x, (int, float, np.integer, np.floating))
+                and not isinstance(x, bool)
+                for x in item
             )
         ):
             # Support (dy, dx) direction delta tuple
@@ -332,8 +350,8 @@ def normalize_action_to_bytes(yielded: Any) -> tuple[tuple[int, ...], str]:
         if not yielded.bytes_seq:
             return (int(Action.WAIT.value),), "WAIT"
         return yielded.bytes_seq, yielded.name
-    if isinstance(yielded, int):
-        b = yielded & 0xFF
+    if isinstance(yielded, (int, np.integer)):
+        b = int(yielded) & 0xFF
         return (b,), ACTION_BY_CHAR.get(b, f"KEY_{b}")
     if isinstance(yielded, str):
         if not yielded:

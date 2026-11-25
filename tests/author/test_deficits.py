@@ -53,7 +53,8 @@ def test_deficit_analyzer_filters_rejected_renders_memory_and_vitals(tmp_path):
         con.execute(
             """
             INSERT INTO runs (run_id, batch_id, generation, seed, role, depth, max_depth, score, turns, final_ac, xp_level, end_reason, died_unarmored, milestones_json)
-            VALUES ('r_prom', 'b_prom_58', 58, 1000, 'val-hum-law-fem', 5, 5, 650, 1800, 6, 4, 'killed by fire ant', FALSE, '{"unworn_armor_in_pack": true}'),
+            VALUES ('r_prom', 'b_prom_58', 58, 1000, 'val-hum-law-fem', 5, 5, 650, 1800, 8, 4, 'killed by fire ant', FALSE, '{"unworn_armor_in_pack": true}'),
+                   ('r_prom_armored', 'b_prom_58', 58, 1001, 'val-hum-law-fem', 5, 5, 650, 1800, 4, 4, 'killed by fire ant', FALSE, '{"unworn_armor_in_pack": true}'),
                    ('r_rej', 'b_rej_60', 60, 1000, 'val-hum-law-fem', 1, 1, 100, 50, 10, 1, 'stalled_bad_candidate', TRUE, '{}')
             """
         )
@@ -80,7 +81,10 @@ def test_deficit_analyzer_filters_rejected_renders_memory_and_vitals(tmp_path):
     assert "Recent Experiment & Rejection Memory" in brief
     assert "stalled_bad_candidate" not in brief
     assert any(
-        c.cluster_id == "slice_unequipped_progression" for c in report.fail_clusters
+        c.cluster_id == "slice_unequipped_progression"
+        and 1000 in c.sample_seeds
+        and 1001 not in c.sample_seeds
+        for c in report.fail_clusters
     )
 
 
@@ -560,8 +564,8 @@ def test_gen60_rejection_memory_mech_and_tight_incubation_guard(tmp_path):
         for ra in rep.recent_attempts
     )
 
-    # 2. incubate_candidate rejects depth_delta = -0.17 across 6 paired shards (<= -0.15),
-    #    while allowing -0.25 across only 4 shards (> -0.35).
+    # 2. v3 calibrated incubation: tolerates noisy -0.17 depth drift on 6 shards,
+    #    rejects catastrophic <= -0.50 on 6 shards, and rejects >15 ms/step (>3x incumbent) latency regressions.
     base_pol = (
         "from lox.env.actions import Action\n"
         "class Policy:\n"
@@ -572,6 +576,10 @@ def test_gen60_rejection_memory_mech_and_tight_incubation_guard(tmp_path):
     class _MildRegPool:
         benchmark = "nethack"
 
+        def __init__(self, drop_count: int = 1, wall_ms: float = 200.0):
+            self.drop_count = drop_count
+            self.wall_ms = wall_ms
+
         def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
             s_list = list(priority_seeds or [])
             return {
@@ -580,10 +588,12 @@ def test_gen60_rejection_memory_mech_and_tight_incubation_guard(tmp_path):
                     {
                         "run_id": f"r_{s}",
                         "seed": s,
-                        "depth": 3 if s == 1 else 4,
-                        "max_depth": 3 if s == 1 else 4,
+                        "depth": 3 if s <= self.drop_count else 4,
+                        "max_depth": 3 if s <= self.drop_count else 4,
                         "score": 500,
                         "turns": 400,
+                        "steps": 400,
+                        "wall_ms": self.wall_ms,
                         "policy_exceptions": 0,
                         "action_bytes": b"BB",
                     }
@@ -592,12 +602,21 @@ def test_gen60_rejection_memory_mech_and_tight_incubation_guard(tmp_path):
             }
 
     inc6 = {
-        s: {"seed": s, "depth": 4, "max_depth": 4, "score": 500, "action_bytes": b"AA"}
+        s: {
+            "seed": s,
+            "depth": 4,
+            "max_depth": 4,
+            "score": 500,
+            "steps": 400,
+            "wall_ms": 200.0,
+            "action_bytes": b"AA",
+        }
         for s in range(1, 7)
     }
-    c6 = incubate_candidate(
+    # Mild -0.17 drift across 6 shards now passes (noise tolerance)
+    c6_mild = incubate_candidate(
         PeerCandidate(
-            peer_id="p_reg6",
+            peer_id="p_mild6",
             claimed_deficit_id="d1",
             claimed_label="mild_reg",
             policy_code=base_pol,
@@ -605,14 +624,47 @@ def test_gen60_rejection_memory_mech_and_tight_incubation_guard(tmp_path):
         ),
         deficit_report=DeficitReport(generation=61, regime="PLATEAU"),
         claimed_deficit=DeficitCluster(cluster_id="d1", kind="k", label="l"),
-        eval_pool=_MildRegPool(),
+        eval_pool=_MildRegPool(drop_count=1),
         incumbent_shard_runs=inc6,
-        shard_seeds=list(
-            range(1, 7)
-        ),  # 1 seed -1 depth across 6 -> avg -0.1667 <= -0.15!
+        shard_seeds=list(range(1, 7)),
     )
-    assert c6.sandbox_passed is False
-    assert "Incubation paired depth regression" in c6.error
+    assert c6_mild.sandbox_passed is True
+
+    # Catastrophic -0.67 (4 of 6 seeds drop by 1) is rejected (<= -0.50)
+    c6_cat = incubate_candidate(
+        PeerCandidate(
+            peer_id="p_cat6",
+            claimed_deficit_id="d1",
+            claimed_label="cat_reg",
+            policy_code=base_pol,
+            skills={},
+        ),
+        deficit_report=DeficitReport(generation=61, regime="PLATEAU"),
+        claimed_deficit=DeficitCluster(cluster_id="d1", kind="k", label="l"),
+        eval_pool=_MildRegPool(drop_count=4),
+        incumbent_shard_runs=inc6,
+        shard_seeds=list(range(1, 7)),
+    )
+    assert c6_cat.sandbox_passed is False
+    assert "Incubation paired depth regression" in c6_cat.error
+
+    # Latency guard rejects > 15 ms/step and > 3x incumbent (20 ms/step vs 0.5 ms/step)
+    c6_slow = incubate_candidate(
+        PeerCandidate(
+            peer_id="p_slow6",
+            claimed_deficit_id="d1",
+            claimed_label="slow_loop",
+            policy_code=base_pol,
+            skills={},
+        ),
+        deficit_report=DeficitReport(generation=61, regime="PLATEAU"),
+        claimed_deficit=DeficitCluster(cluster_id="d1", kind="k", label="l"),
+        eval_pool=_MildRegPool(drop_count=0, wall_ms=8000.0),
+        incumbent_shard_runs=inc6,
+        shard_seeds=list(range(1, 7)),
+    )
+    assert c6_slow.sandbox_passed is False
+    assert "Incubation latency guard" in c6_slow.error
 
     inc4 = {s: inc6[s] for s in range(1, 5)}
     c4 = incubate_candidate(
@@ -625,9 +677,9 @@ def test_gen60_rejection_memory_mech_and_tight_incubation_guard(tmp_path):
         ),
         deficit_report=DeficitReport(generation=61, regime="PLATEAU"),
         claimed_deficit=DeficitCluster(cluster_id="d1", kind="k", label="l"),
-        eval_pool=_MildRegPool(),
+        eval_pool=_MildRegPool(drop_count=1),
         incumbent_shard_runs=inc4,
-        shard_seeds=list(range(1, 5)),  # 1 seed -1 depth across 4 -> avg -0.25 > -0.35
+        shard_seeds=list(range(1, 5)),
     )
     assert c4.sandbox_passed is True
 
@@ -857,3 +909,81 @@ def test_deficit_analyzer_excludes_non_champion_peer_and_pilot_runs(tmp_path):
     assert all("It bites!" not in c.label for c in rep.fail_clusters), [
         c.label for c in rep.fail_clusters
     ]
+
+
+def test_v3_deficit_12gen_memory_fresh_guards_and_expert_parity_gaps(tmp_path):
+    """Verifies Component 1: 12-gen rejection memory, fresh d_succ_seeds (<=10 gens), and domain-agnostic expert_parity_gaps."""
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.db.schema import init_db
+
+    dbp = str(tmp_path / "v3_deficits.duckdb")
+    con = init_db(dbp)
+    try:
+        # Old gen 1 champion with high depth (should be excluded from fresh d_succ_seeds when latest is gen 20)
+        con.execute(
+            "INSERT INTO batches (batch_id, generation, mode, hypothesis_passed) VALUES ('b1', 1, 'SWARM', TRUE), ('b20', 20, 'SWARM', TRUE)"
+        )
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, depth, max_depth, score, turns, final_ac, xp_level, end_reason, run_kind)
+            VALUES
+              ('r_old_deep', 'b1', 1, 1111, 12, 12, 5000, 3000, 1, 8, 'killed', 'champion'),
+              ('r_fresh_1', 'b20', 20, 2001, 4, 4, 900, 1200, 4, 4, 'killed', 'champion'),
+              ('r_fresh_2', 'b20', 20, 2002, 5, 5, 1100, 1400, 3, 5, 'killed', 'champion'),
+              ('r_fresh_3', 'b20', 20, 2003, 2, 2, 200, 600, 8, 2, 'starved', 'champion')
+            """
+        )
+        # 10-gen-old rejection attempt (within 12-gen window, outside old 4-gen window)
+        con.execute(
+            """
+            INSERT INTO tournament_attempts (
+                attempt_id, generation, peer_id, deficit_id, promoted, sandbox_passed,
+                avg_depth, max_depth, avg_ac, policy_exceptions, reject_reason, wins, losses,
+                winsor_delta, sign_perm_p
+            )
+            VALUES ('att_g10', 10, 'reactive_1', 'slice_starvation', FALSE, TRUE, 3.8, 6, 4.0, 0, 'below_sign_perm_alpha', 6, 4, 0.14, 0.19)
+            """
+        )
+        # Populate champion_ticks (heavy SEARCH, zero QUAFF/DROP) vs expert_ticks (active QUAFF/DROP/E, lower SEARCH)
+        for i in range(40):
+            con.execute(
+                """
+                INSERT INTO ticks (run_id, step_idx, turn, depth, hp, max_hp, ac, xp_level, action_name, active_function)
+                VALUES ('r_fresh_1', ?, ?, 2, 15, 20, 6, 2, ?, 'explore')
+                """,
+                [i, i + 1, "SEARCH" if i < 20 else "E"],
+            )
+        con.execute(
+            "INSERT INTO expert_runs (run_id, source, role, max_depth, final_ac, xp_level, turns, score) VALUES ('exp_1', 'nao', 'Val', 40, -10, 14, 25000, 100000)"
+        )
+        for i in range(40):
+            act_e = (
+                "QUAFF"
+                if i < 6
+                else ("DROP" if i < 10 else ("SEARCH" if i < 12 else "E"))
+            )
+            con.execute(
+                """
+                INSERT INTO expert_ticks (run_id, step_idx, turn, depth, hp, max_hp, ac, xp_level, action_name)
+                VALUES ('exp_1', ?, ?, 2, 20, 20, 2, 4, ?)
+                """,
+                [i, i + 1, act_e],
+            )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=21, current_policy="class Policy: pass"
+    )
+    # 1. 12-gen rejection memory includes Gen 10 with winsor_delta / sign_perm_p
+    assert any(
+        "Gen 10" in line and "WΔ=+0.14" in line and "p=0.190" in line
+        for line in rep.recent_attempts
+    ), rep.recent_attempts
+    # 2. Fresh guard seeds exclude stale Gen 1 seed 1111
+    assert 1111 not in rep.d_succ_seeds
+    assert 2002 in rep.d_succ_seeds
+    # 3. Domain-agnostic expert_parity_gaps detects unused QUAFF & overused SEARCH
+    assert "State Parity:" in rep.expert_parity_gaps
+    assert "QUAFF" in rep.expert_parity_gaps
+    assert "SEARCH" in rep.expert_parity_gaps

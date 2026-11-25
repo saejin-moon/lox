@@ -12,13 +12,16 @@ Partitions recent rollout telemetry into:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from lox.author.swarm_critic import extract_priority_selector_branches
+from lox.author.directives import extract_policy_branches
 from lox.db.schema import connect_db
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -63,6 +66,7 @@ class DeficitReport:
     skill_bloat_notes: list[str] = field(default_factory=list)
     vital_summary: str = ""
     efficiency_summary: str = ""
+    expert_parity_gaps: str = ""
     plateau_streak: int = 0
     recent_attempts: list[str] = field(default_factory=list)
     recent_theories: list[str] = field(default_factory=list)
@@ -111,7 +115,7 @@ class DeficitReport:
             )
         if self.dormant_branches:
             lines.append(
-                f"- Dormant BT Branches (0 active turns recently — prune or consolidate): {', '.join(self.dormant_branches[:10])}"
+                f"- Dormant Branches (0 active turns recently — prune or consolidate): {', '.join(self.dormant_branches[:10])}"
             )
         if self.end_reason_histogram:
             hist_str = " | ".join(
@@ -128,7 +132,7 @@ class DeficitReport:
             lines.append(
                 "### Recent Experiment & Rejection Memory (DO NOT Repeat Rejected Mechanisms):"
             )
-            for ra in self.recent_attempts[:6]:
+            for ra in self.recent_attempts[:12]:
                 lines.append(f"  * {ra}")
         if self.recent_theories:
             lines.append("### Relevant DuckDB Theory Notes:")
@@ -185,8 +189,8 @@ class DeficitAnalyzer:
         )
 
         raw_branches = (
-            extract_priority_selector_branches(current_policy)
-            if current_policy.strip()
+            extract_policy_branches(current_policy, skills_map)
+            if current_policy.strip() or skills_map
             else []
         )
 
@@ -201,9 +205,28 @@ class DeficitAnalyzer:
             self._populate_plateau_signal(con, report)
             self._populate_vital_summary(con, report)
             self._populate_efficiency_telemetry(con, report)
+            self._populate_expert_parity_gaps(con, report)
             self._populate_recent_attempts(con, report)
             self._populate_d_succ_and_branches(con, report, raw_branches)
             self._populate_d_fail_clusters(con, report)
+            # Exclude guard seeds that overlap target cluster sample_seeds (preserving up to 4 clean guards)
+            if report.d_succ_seeds and report.fail_clusters:
+                target_seeds_union = {
+                    int(sd)
+                    for cl in report.fail_clusters
+                    for sd in (getattr(cl, "sample_seeds", []) or [])
+                }
+                non_overlap = [
+                    sd
+                    for sd in report.d_succ_seeds
+                    if int(sd) not in target_seeds_union
+                ]
+                if non_overlap:
+                    report.d_succ_seeds = non_overlap[:4]
+                else:
+                    report.d_succ_seeds = report.d_succ_seeds[:4]
+            elif report.d_succ_seeds:
+                report.d_succ_seeds = report.d_succ_seeds[:4]
             self._attach_premortem_and_wiki_context(con, report)
             try:
                 th_rows = con.execute(
@@ -222,9 +245,12 @@ class DeficitAnalyzer:
                     f"[Gen {tg} | {tr}] {tt}" + (f" ({trule})" if trule else "")
                     for tg, tr, tt, trule in th_rows
                 ]
-            except Exception:
-                pass
-        except Exception:
+            except Exception as exc:
+                _LOG.warning(
+                    "Failed querying recent theories in DeficitAnalyzer: %s", exc
+                )
+        except Exception as exc:
+            _LOG.warning("DeficitAnalyzer DB analysis error: %s", exc)
             if not report.fail_clusters:
                 report.fail_clusters = self._bootstrap_clusters()
         finally:
@@ -245,8 +271,8 @@ class DeficitAnalyzer:
             DeficitCluster(
                 cluster_id="bootstrap_survival",
                 kind="initial_synthesis",
-                label="Initial BehaviorTree survival & progression scaffold",
-                evidence="No prior empirical failures recorded yet; build clean modular BehaviorTree Policy.",
+                label="Initial Option-A survival & progression scaffold",
+                evidence="No prior empirical failures recorded yet; build clean modular Option-A Policy.",
             ),
             DeficitCluster(
                 cluster_id="bootstrap_exploration",
@@ -266,8 +292,8 @@ class DeficitAnalyzer:
             ).fetchone()
             if row and row[0] is not None:
                 report.latest_completed_gen = int(row[0])
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("Failed querying latest_completed_gen: %s", exc)
         try:
             t_row = con.execute(
                 "SELECT COALESCE(MIN(r.generation), 0) "
@@ -278,8 +304,8 @@ class DeficitAnalyzer:
             ).fetchone()
             if t_row and t_row[0] is not None:
                 report.ticks_min_gen = int(t_row[0])
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("Failed querying ticks_min_gen: %s", exc)
 
     @staticmethod
     def _has_verified_batches(con: Any) -> bool:
@@ -456,10 +482,191 @@ class DeficitAnalyzer:
         except Exception:
             pass
 
+    @classmethod
+    def _populate_expert_parity_gaps(cls, con: Any, report: DeficitReport) -> None:
+        """
+        Domain-agnostic Champion-vs-Expert capability & efficiency parity digest
+        computed purely via SQL across `Dlvl 1 .. min(10, p90_depth + 2)`.
+        Zero hardcoded game actions or strategies.
+        """
+        try:
+            where_sql = cls._valid_runs_clause(con)
+            latest_row = con.execute(
+                f"SELECT MAX(generation) FROM runs WHERE {where_sql}"
+            ).fetchone()
+            lat_gen = int(latest_row[0] or 0) if latest_row else 0
+            if lat_gen <= 0:
+                return
+
+            p90_row = con.execute(
+                f"""
+                SELECT QUANTILE_CONT(max_depth, 0.90),
+                       ROUND(AVG(COALESCE(final_ac, 10)), 2),
+                       ROUND(AVG(COALESCE(xp_level, 1)), 2),
+                       ROUND(AVG(COALESCE(dungeons_visited, 1)), 2)
+                FROM runs
+                WHERE {where_sql} AND generation = ?
+                """,
+                [lat_gen],
+            ).fetchone()
+            p90_d = float(p90_row[0]) if (p90_row and p90_row[0] is not None) else 2.0
+            c_ac = float(p90_row[1]) if (p90_row and p90_row[1] is not None) else 10.0
+            c_xl = float(p90_row[2]) if (p90_row and p90_row[2] is not None) else 1.0
+            c_br = float(p90_row[3]) if (p90_row and p90_row[3] is not None) else 1.0
+            tier_max = min(10, max(3, int(round(p90_d)) + 2))
+
+            exp_cnt_row = con.execute("SELECT COUNT(*) FROM expert_ticks").fetchone()
+            if not exp_cnt_row or int(exp_cnt_row[0] or 0) == 0:
+                return
+
+            _norm_act_expr = (
+                "CASE WHEN action_name LIKE 'seq(%' "
+                "THEN RTRIM(SPLIT_PART(SUBSTR(action_name, 5), ',', 1), ')') "
+                "ELSE COALESCE(action_name, '') END"
+            )
+            exp_acts = con.execute(
+                f"""
+                WITH filtered AS (
+                    SELECT {_norm_act_expr} AS act
+                    FROM expert_ticks
+                    WHERE depth BETWEEN 1 AND ?
+                      AND COALESCE(action_name, '') != ''
+                ),
+                tot AS (SELECT COUNT(*) AS n FROM filtered)
+                SELECT f.act, 100.0 * COUNT(*) / NULLIF(t.n, 0) AS pct
+                FROM filtered f, tot t
+                GROUP BY f.act, t.n
+                HAVING COUNT(*) >= 5
+                ORDER BY pct DESC
+                """,
+                [tier_max],
+            ).fetchall()
+
+            _norm_t_act_expr = (
+                "CASE WHEN t.action_name LIKE 'seq(%' "
+                "THEN RTRIM(SPLIT_PART(SUBSTR(t.action_name, 5), ',', 1), ')') "
+                "ELSE COALESCE(t.action_name, '') END"
+            )
+            champ_acts = con.execute(
+                f"""
+                WITH gen_runs AS (
+                    SELECT run_id FROM runs WHERE {where_sql} AND generation = ?
+                ),
+                filtered AS (
+                    SELECT {_norm_t_act_expr} AS act
+                    FROM ticks t
+                    JOIN gen_runs r ON t.run_id = r.run_id
+                    WHERE t.depth BETWEEN 1 AND ?
+                      AND COALESCE(t.action_name, '') != ''
+                ),
+                tot AS (SELECT COUNT(*) AS n FROM filtered)
+                SELECT f.act, 100.0 * COUNT(*) / NULLIF(t.n, 0) AS pct
+                FROM filtered f, tot t
+                GROUP BY f.act, t.n
+                ORDER BY pct DESC
+                """,
+                [lat_gen, tier_max],
+            ).fetchall()
+
+            exp_map = {str(a): float(p or 0.0) for a, p in exp_acts}
+            champ_map = {str(a): float(p or 0.0) for a, p in champ_acts}
+
+            missing_gaps: list[str] = []
+            for act, epct in sorted(
+                exp_map.items(), key=lambda kv: kv[1], reverse=True
+            ):
+                if epct < 0.5:
+                    continue
+                cpct = champ_map.get(act, 0.0)
+                if cpct <= 0.01 or cpct < 0.2 * epct:
+                    missing_gaps.append(
+                        f"`{act}` (expert {epct:.1f}% vs champ {cpct:.2f}%)"
+                    )
+                if len(missing_gaps) >= 8:
+                    break
+
+            excess_gaps: list[str] = []
+            for act, cpct in sorted(
+                champ_map.items(), key=lambda kv: kv[1], reverse=True
+            ):
+                if cpct < 5.0:
+                    continue
+                epct = exp_map.get(act, 0.0)
+                if cpct > max(5.0, 3.0 * epct):
+                    excess_gaps.append(
+                        f"`{act}` (champ {cpct:.1f}% vs expert {epct:.1f}%)"
+                    )
+                if len(excess_gaps) >= 4:
+                    break
+
+            exp_st_row = con.execute(
+                """
+                SELECT ROUND(AVG(ac), 2), ROUND(AVG(xp_level), 2)
+                FROM expert_ticks
+                WHERE depth BETWEEN 1 AND ?
+                """,
+                [tier_max],
+            ).fetchone()
+            exp_pace_row = con.execute(
+                """
+                SELECT ROUND(AVG(span_t), 0)
+                FROM (
+                    SELECT run_id, depth, MAX(turn) - MIN(turn) + 1 AS span_t
+                    FROM expert_ticks
+                    WHERE depth BETWEEN 1 AND ?
+                    GROUP BY run_id, depth
+                )
+                """,
+                [tier_max],
+            ).fetchone()
+            champ_pace_row = con.execute(
+                f"""
+                WITH gen_runs AS (
+                    SELECT run_id FROM runs WHERE {where_sql} AND generation = ?
+                )
+                SELECT ROUND(AVG(span_t), 0)
+                FROM (
+                    SELECT t.run_id, t.depth, MAX(t.turn) - MIN(t.turn) + 1 AS span_t
+                    FROM ticks t
+                    JOIN gen_runs r ON t.run_id = r.run_id
+                    WHERE t.depth BETWEEN 1 AND ?
+                    GROUP BY t.run_id, t.depth
+                )
+                """,
+                [lat_gen, tier_max],
+            ).fetchone()
+            parts: list[str] = [
+                f"Scope: Dlvl 1..{tier_max} (p90_depth={p90_d:.1f} + 2)"
+            ]
+            if exp_st_row and exp_st_row[0] is not None:
+                pace_s = ""
+                if (
+                    champ_pace_row
+                    and champ_pace_row[0] is not None
+                    and exp_pace_row
+                    and exp_pace_row[0] is not None
+                ):
+                    pace_s = f", turns/floor={int(champ_pace_row[0])}t vs expert {int(exp_pace_row[0])}t"
+                parts.append(
+                    f"State Parity: champ(AC={c_ac:.1f}, XL={c_xl:.1f}, branches={c_br:.2f}{pace_s}) "
+                    f"vs expert@D1..{tier_max}(AC={float(exp_st_row[0]):.1f}, XL={float(exp_st_row[1] or 1.0):.1f})"
+                )
+            if missing_gaps:
+                parts.append(
+                    "Under-Used/Missing Expert Actions: " + ", ".join(missing_gaps)
+                )
+            if excess_gaps:
+                parts.append(
+                    "Over-Concentrated Champion Actions: " + ", ".join(excess_gaps)
+                )
+            report.expert_parity_gaps = "\n- ".join(parts)
+        except Exception as exc:
+            _LOG.warning("Failed computing expert_parity_gaps: %s", exc)
+
     @staticmethod
     def _populate_recent_attempts(con: Any, report: DeficitReport) -> None:
         attempts: list[str] = []
-        min_g = max(1, int(report.generation) - 4)
+        min_g = max(1, int(report.generation) - 12)
         # 1. Query exact challenger records from `tournament_attempts` (including rejected peers & tracebacks)
         try:
             mech_by_gen_peer: dict[tuple[int, str], str] = {}
@@ -493,18 +700,27 @@ class DeficitAnalyzer:
             except Exception:
                 pass
 
+            ta_cols = {
+                str(r[1])
+                for r in con.execute(
+                    "PRAGMA table_info('tournament_attempts')"
+                ).fetchall()
+            }
+            wd_expr = "winsor_delta" if "winsor_delta" in ta_cols else "NULL"
+            sp_expr = "sign_perm_p" if "sign_perm_p" in ta_cols else "NULL"
             ta_rows = con.execute(
-                """
+                f"""
                 SELECT generation, peer_id, deficit_id, promoted, sandbox_passed,
                        ROUND(avg_depth, 2), max_depth, ROUND(avg_ac, 1),
                        policy_exceptions, seeds_gained_json, seeds_lost_json,
                        top_tracebacks_json, sandbox_error,
                        COALESCE(holdout_rejected, FALSE), holdout_iqm_delta,
-                       COALESCE(reject_reason, ''), wins, losses
+                       COALESCE(reject_reason, ''), wins, losses,
+                       {wd_expr}, {sp_expr}
                 FROM tournament_attempts
                 WHERE generation >= ? AND generation < ?
                 ORDER BY generation DESC, promoted DESC, avg_depth DESC
-                LIMIT 8
+                LIMIT 16
                 """,
                 [min_g, int(report.generation)],
             ).fetchall()
@@ -527,6 +743,8 @@ class DeficitAnalyzer:
                 rej_reason,
                 wins_i,
                 losses_i,
+                winsor_d,
+                sign_p,
             ) in ta_rows:
                 tag = (
                     "PROMOTED"
@@ -545,6 +763,10 @@ class DeficitAnalyzer:
                     extra.append(f"reason={rej_reason}")
                 if wins_i is not None and losses_i is not None:
                     extra.append(f"W/L={int(wins_i)}/{int(losses_i)}")
+                if winsor_d is not None:
+                    extra.append(f"WΔ={float(winsor_d):+.2f}")
+                if sign_p is not None:
+                    extra.append(f"p={float(sign_p):.3f}")
                 if holdout_iqm is not None:
                     extra.append(f"holdout_iqm={float(holdout_iqm):+.2f}")
                 if gained:
@@ -564,8 +786,8 @@ class DeficitAnalyzer:
                 attempts.append(
                     f"Gen {gen_i} [{tag} | {pid}@{did} | D={ad} (Max={md}), AC={aac}]{ext_s}"
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("Failed populating recent tournament_attempts: %s", exc)
 
         if attempts:
             report.recent_attempts = attempts
@@ -683,15 +905,30 @@ class DeficitAnalyzer:
         bt_branches: list[dict[str, str]],
     ) -> None:
         where_runs = cls._valid_runs_clause(con)
+        recent_min_g = max(
+            1, int(report.latest_completed_gen or report.generation or 1) - 10
+        )
         succ_rows = con.execute(
             f"""
             SELECT run_id, seed, max_depth, score, turns
             FROM runs
             WHERE {where_runs}
+              AND generation >= ?
             ORDER BY is_outlier_good DESC, max_depth DESC, score DESC, turns DESC
-            LIMIT 4
-            """
+            LIMIT 12
+            """,
+            [recent_min_g],
         ).fetchall()
+        if not succ_rows:
+            succ_rows = con.execute(
+                f"""
+                SELECT run_id, seed, max_depth, score, turns
+                FROM runs
+                WHERE {where_runs}
+                ORDER BY is_outlier_good DESC, max_depth DESC, score DESC, turns DESC
+                LIMIT 12
+                """
+            ).fetchall()
         report.d_succ_run_ids = [str(r[0]) for r in succ_rows]
         report.d_succ_seeds = list(
             dict.fromkeys(int(r[1]) for r in succ_rows if r[1] is not None)
@@ -781,7 +1018,8 @@ class DeficitAnalyzer:
                    COALESCE(summary_digest, '') AS summary_digest,
                    action_bytes,
                    milestones_json,
-                   COALESCE(RIGHT(game_log, 600), '') AS game_log_tail
+                   COALESCE(RIGHT(game_log, 600), '') AS game_log_tail,
+                   COALESCE(final_ac, 10) AS final_ac
             FROM runs
             WHERE {where_runs}
               AND generation = (SELECT MAX(generation) FROM runs WHERE {where_runs})
@@ -801,7 +1039,8 @@ class DeficitAnalyzer:
                        COALESCE(summary_digest, '') AS summary_digest,
                        action_bytes,
                        milestones_json,
-                       COALESCE(RIGHT(game_log, 600), '') AS game_log_tail
+                       COALESCE(RIGHT(game_log, 600), '') AS game_log_tail,
+                       COALESCE(final_ac, 10) AS final_ac
                 FROM runs
                 WHERE {where_runs}
                 ORDER BY generation DESC, run_id ASC
@@ -958,6 +1197,7 @@ class DeficitAnalyzer:
                 _abytes,
                 m_json,
                 game_log_tail,
+                final_ac_val,
             ) = row
 
             end_str = str(end_reason or "unknown").strip() or "unknown"
@@ -1062,13 +1302,16 @@ class DeficitAnalyzer:
                     f"policy_exceptions={policy_excs}, auto_esc={auto_esc}"
                     + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
                 )
-            elif bool(_unarmored) or unworn_armor_pack:
+            elif bool(_unarmored) or (
+                unworn_armor_pack
+                and int(final_ac_val if final_ac_val is not None else 10) >= 7
+            ):
                 _add_to_cluster(
                     "slice_unequipped_progression",
                     "capability_gap",
                     "Terminated carrying unequipped gear / stagnant protection",
                     row,
-                    f"end=`{end_str}`, Dlvl={max_depth}, unworn_armor={bool(_unarmored) or unworn_armor_pack}",
+                    f"end=`{end_str}`, Dlvl={max_depth}, ac={final_ac_val}, unworn_armor={bool(_unarmored) or unworn_armor_pack}",
                 )
             elif float(max_depth or 1) >= max(2.0, high_depth_cut):
                 _add_to_cluster(

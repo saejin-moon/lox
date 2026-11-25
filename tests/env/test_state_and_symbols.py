@@ -8,8 +8,6 @@ from lox.datasets.symbols import SYMBOL_REGISTRY, NetHackSymbolRegistry
 from lox.env.actions import (
     Action,
 )
-from lox.env.craftax.actions import CraftaxAction
-from lox.env.craftax.harness import CraftaxHarness
 from lox.env.harness import NetHackHarness
 from lox.env.state import FloorMemory, WorldMemory
 from lox.lang.compiler import compile_policy_package
@@ -214,37 +212,6 @@ def test_world_memory_multi_floor_bookkeeping_and_oscillation():
     assert bool(fl2.visited[5, 5]) is False
 
 
-def test_pass2_bug2_world_memory_craftax_bounds() -> None:
-    """Pass 2 Bug 2: WorldMemory must handle Craftax (48, 48) grid without clipping at y >= 21."""
-    harness = CraftaxHarness(max_steps=50)
-    try:
-        st = harness.reset(seed=42)
-        # Craftax player spawns at (24, 24)
-        assert st.y == 24
-        assert st.x == 24
-        assert st.mem.visited[24, 24]
-        assert st.mem.visit_count[24, 24] >= 1
-        assert st.mem.pos_history[-1] == (0, 1, 24, 24)
-
-        # Move RIGHT to (24, 25)
-        st, _, _ = harness.step(CraftaxAction.RIGHT)
-        assert st.y == 24
-        assert st.x == 25
-        assert st.mem.visited[24, 25]
-        assert st.mem.visit_count[24, 25] >= 1
-
-        # Move LEFT to (24, 24)
-        st, _, _ = harness.step(CraftaxAction.LEFT)
-        assert st.mem.visit_count[24, 24] >= 2
-
-        # Move UP to (23, 24)
-        st, _, _ = harness.step(CraftaxAction.UP)
-        assert st.mem.visited[23, 24]
-        assert st.mem.visit_count[23, 24] >= 1
-    finally:
-        harness.close()
-
-
 def test_gamestate_cursed_bug_traps_menu_and_guarded_range():
     from lox.env.harness import NetHackHarness
     from lox.env.state import _FLOOR_GLYPH_FLAGS_LUT, InventoryItem
@@ -329,3 +296,43 @@ def test_gamestate_cursed_bug_traps_menu_and_guarded_range():
         raise AssertionError("Expected PolicyLoopError")
     except PolicyLoopError:
         pass
+
+
+def test_v3_gamestate_hotpath_caches_and_trap_mask_parity():
+    """Verifies Component 5 cached GameState slots, WorldMemory._cached_floor, cached trap_mask/is_trap, and stairs_down_positions."""
+    from lox.env.state import _IS_TRAP_LUT
+
+    h = NetHackHarness(max_steps=40)
+    try:
+        st = h.reset(seed=77)
+        bl = st.blstats.tolist()
+        assert st.x == bl[0]
+        assert st.y == bl[1]
+        assert st.pos == (bl[1], bl[0])
+        assert st.depth == bl[12]
+        assert st.ac == bl[16]
+        assert st.xp_level == bl[18]
+        assert st.turn == bl[20]
+        assert st.dungeon_num == bl[23]
+        assert st.level_num == bl[24]
+        assert st.condition_mask == (bl[25] if len(bl) > 25 else 0)
+        assert st.mem._cached_floor is st.mem.current_floor
+
+        # Inject a known trap glyph and verify trap_mask & is_trap agree 100%
+        trap_glyphs = np.where(_IS_TRAP_LUT)[0]
+        assert len(trap_glyphs) > 0
+        tg = int(trap_glyphs[0])
+        st._trap_mask_cache = None
+        st._trap_grid_cache = None
+        st.glyphs[5, 10] = tg
+        tm = st.trap_mask
+        assert tm.dtype == np.bool_ and tm.shape == (21, 79)
+        assert bool(tm[5, 10]) is True
+        assert st.is_trap(5, 10) is True
+        assert st.is_trap(0, 0) is False
+        # Cached object identity on repeat access
+        assert st.trap_mask is tm
+        sd1 = st.stairs_down_positions
+        assert st.stairs_down_positions is sd1
+    finally:
+        h.close()

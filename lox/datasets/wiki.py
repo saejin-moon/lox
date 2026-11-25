@@ -131,13 +131,25 @@ class WikiEngine:
         if not os.path.exists(self.db_path) or os.path.getsize(self.db_path) < 10000:
             ensure_wiki_ready(self.db_path)
 
-    def _resolve_redirect(self, cur: sqlite3.Cursor, query: str) -> str:
-        cur.execute(
-            "SELECT target_title FROM redirects WHERE alias = ? COLLATE NOCASE LIMIT 1;",
-            (query,),
-        )
-        row = cur.fetchone()
-        return row[0] if row else query
+    def _resolve_redirect(
+        self, cur: sqlite3.Cursor, query: str, max_hops: int = 5
+    ) -> str:
+        current = query
+        seen: set[str] = {current.lower()}
+        for _ in range(max_hops):
+            cur.execute(
+                "SELECT target_title FROM redirects WHERE alias = ? COLLATE NOCASE LIMIT 1;",
+                (current,),
+            )
+            row = cur.fetchone()
+            if not row or not row[0]:
+                break
+            nxt = str(row[0])
+            if nxt.lower() in seen:
+                break
+            seen.add(nxt.lower())
+            current = nxt
+        return current
 
     def exact_title_lookup(
         self, cur: sqlite3.Cursor, title: str
@@ -354,6 +366,10 @@ class WikiEngine:
         if section.strip():
             sec_l = section.strip().lower()
             lines = body.splitlines()
+            uses_mediawiki_headings = any(
+                ln.strip().startswith("==") and ln.strip().endswith("==")
+                for ln in lines
+            )
             start_idx = None
             end_idx = len(lines)
             sec_level = 0
@@ -365,7 +381,7 @@ class WikiEngine:
                     lvl = len(s) - len(s.lstrip("="))
                     hdr_txt = s.strip("= ").lower()
                     is_heading = True
-                elif s.startswith("#"):
+                elif not uses_mediawiki_headings and s.startswith("#"):
                     lvl = len(s) - len(s.lstrip("#"))
                     hdr_txt = s.lstrip("# ").lower()
                     is_heading = True

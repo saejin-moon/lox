@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-CLI Entrypoint for the LOX Hierarchical Multi-Agent Swarm Campaign.
-Coordinates dynamic macro-category discovery, concurrent worker exploration on frontier checkpoints,
-and Behavior Tree policy synthesis.
+CLI Entrypoint for the LOX Layout A (`2R + 2P`) Option-A Peer Swarm Campaign.
+Coordinates orthogonal `DeficitAnalyzer` + `SwarmDirectivePlanner` scoping,
+concurrent Peer Agent exploration on frontier checkpoints & `expert_ticks`,
+and Split-Sample Paired CRN tournament promotion (`SwarmReferee`).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from lox.ui.console import ui
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="LOX Hierarchical Multi-Agent Swarm Campaign Entrypoint."
+        description="LOX Option-A Peer Swarm Synthesis Campaign Entrypoint."
     )
     parser.add_argument(
         "--generations",
@@ -36,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=int,
         default=4,
-        help="Number of concurrent LLM peer agents / category specialists (default: 4).",
+        help="Number of concurrent LLM peer agents (`reactive_1..2`, `proactive_1..2`, default: 4).",
     )
     parser.add_argument(
         "--eval-workers",
@@ -50,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="turns_per_worker",
         type=int,
         default=3,
-        help="Number of competing hypotheses per category worker per generation (default: 3).",
+        help="Number of synthesis hypotheses / micro-pilots budget per peer agent (default: 3).",
     )
     parser.add_argument(
         "--seeds",
@@ -114,26 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to frontier checkpoint directory (defaults to <workspace-dir>/checkpoints when custom workspace is set, else data/frontier).",
     )
     parser.add_argument(
-        "--benchmark",
-        default="nethack",
-        help="Environment benchmark (default: nethack).",
-    )
-    parser.add_argument(
         "--role",
         default="val-hum-law-fem",
         help="Character role/race/alignment/gender (default: val-hum-law-fem).",
     )
     parser.add_argument(
-        "--swarm-architecture",
-        choices=["peer", "legacy"],
-        default="peer",
-        help="Swarm coordination topology: 'peer' (democratized data-assigned peers + CRN tournament) or 'legacy' (default: peer).",
-    )
-    parser.add_argument(
         "--clean",
         action="store_true",
         help=(
-            "Reset campaign tables in DuckDB and workspace artifacts (policy.py, skills/, theories.lance) "
+            "Reset campaign tables in DuckDB and workspace artifacts (policy.py, skills/) "
             "to Generation 0 clean state before running, while preserving expert_runs and wiki."
         ),
     )
@@ -167,20 +157,13 @@ def main() -> None:
         reset_clean(
             db_path=args.db_path,
             policy_path=os.path.join(args.workspace_dir, "policy.py"),
-            macros_path=os.path.join(args.workspace_dir, "macros.py"),
-            theories_path=os.path.join(args.workspace_dir, "theories.lance"),
             frontier_dir=args.frontier_dir,
         )
 
-    ui.header(
-        "LOX Peer Swarm Synthesis Engine"
-        if args.swarm_architecture == "peer"
-        else "LOX Hierarchical Swarm Synthesis Engine"
-    )
+    ui.header("LOX Peer Swarm Synthesis Engine (Layout A: 2 Reactive + 2 Proactive)")
     ui.info(
         f"Config: {args.generations} generations | {args.workers} workers | "
-        f"{args.turns_per_worker} turns/worker | Arch: {args.swarm_architecture} | "
-        f"Provider: {args.provider} ({args.model})"
+        f"{args.turns_per_worker} turns/worker | Provider: {args.provider} ({args.model})"
     )
 
     orchestrator = SwarmCampaignOrchestrator(
@@ -192,9 +175,7 @@ def main() -> None:
         num_workers=args.workers,
         turns_per_worker=args.turns_per_worker,
         seeds_per_batch=args.seeds,
-        benchmark=args.benchmark,
         role=args.role,
-        swarm_architecture=args.swarm_architecture,
         eval_workers=args.eval_workers,
         reasoning_effort=args.reasoning_effort,
         routing=args.routing,

@@ -1,7 +1,7 @@
 """
 Unified DuckDB Theory & Reflection Store for LOX.
-Replaces the external LanceDB store so theories, peer hypotheses, and tournament verdicts
-live inside the single canonical DuckDB file (`theories` table) and are queryable both via
+Stores qualitative hypotheses, peer findings, and tournament verdicts inside
+the single canonical DuckDB file (`theories` table), queryable both via
 `query_theories` (tokenized parameterized SQL ranking) and `query_db`.
 """
 
@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import itertools
 import json
-import os
 import re
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from lox.db.schema import _INITIALIZED_DBS, DEFAULT_DB_PATH, connect_db, init_db
+from lox.db.schema import DEFAULT_DB_PATH, connect_db, init_db, is_db_initialized
 
 DEFAULT_THEORIES_PATH = DEFAULT_DB_PATH
 _THEORY_LOCK = threading.RLock()
@@ -49,8 +48,7 @@ class TheoryDocumentStore:
 
     def _init_table(self) -> None:
         with _THEORY_LOCK:
-            abs_p = os.path.abspath(self.db_path)
-            if abs_p not in _INITIALIZED_DBS or not os.path.exists(self.db_path):
+            if not is_db_initialized(self.db_path):
                 init_db(self.db_path).close()
             con = connect_db(self.db_path, read_only=False)
             try:
@@ -161,16 +159,19 @@ class TheoryDocumentStore:
             score_exprs: list[str] = []
             score_params: list[Any] = []
             for tok in tokens:
-                pat = f"%{tok}%"
+                esc_tok = (
+                    tok.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                )
+                pat = f"%{esc_tok}%"
                 token_clauses.append(
-                    "(title ILIKE ? OR content ILIKE ? OR tags ILIKE ? OR verified_c_rule ILIKE ?)"
+                    "(title ILIKE ? ESCAPE '\\' OR content ILIKE ? ESCAPE '\\' OR tags ILIKE ? ESCAPE '\\' OR verified_c_rule ILIKE ? ESCAPE '\\')"
                 )
                 where_params.extend([pat, pat, pat, pat])
                 score_exprs.append(
-                    "(CASE WHEN title ILIKE ? THEN 3 ELSE 0 END"
-                    " + CASE WHEN tags ILIKE ? THEN 2 ELSE 0 END"
-                    " + CASE WHEN verified_c_rule ILIKE ? THEN 2 ELSE 0 END"
-                    " + CASE WHEN content ILIKE ? THEN 1 ELSE 0 END)"
+                    "(CASE WHEN title ILIKE ? ESCAPE '\\' THEN 3 ELSE 0 END"
+                    " + CASE WHEN tags ILIKE ? ESCAPE '\\' THEN 2 ELSE 0 END"
+                    " + CASE WHEN verified_c_rule ILIKE ? ESCAPE '\\' THEN 2 ELSE 0 END"
+                    " + CASE WHEN content ILIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
                 )
                 score_params.extend([pat, pat, pat, pat])
             where_parts.append(f"({' OR '.join(token_clauses)})")
@@ -256,7 +257,7 @@ class TheoryDocumentStore:
                                tags, verified_c_rule, metrics_json, created_at
                         FROM theories
                         WHERE doc_type = 'REFLECTION_REPORT'
-                        ORDER BY created_at DESC
+                        ORDER BY generation DESC, created_at DESC
                         """
                     )
                     cols = [d[0] for d in cur.description]

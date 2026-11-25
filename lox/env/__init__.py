@@ -11,12 +11,6 @@ from lox.env.actions import (
 )
 from lox.env.base import BenchmarkAdapter, EnvHarness
 from lox.env.benchmarks.nethack_scenarios import NetHackScenariosAdapter
-from lox.env.craftax import (
-    CraftaxAction,
-    CraftaxAdapter,
-    CraftaxGameState,
-    CraftaxHarness,
-)
 from lox.env.grid_utils import astar_next_step, bfs_distance_grid
 from lox.env.harness import NetHackHarness
 from lox.env.nethack import NetHackAdapter
@@ -34,7 +28,6 @@ from lox.env.state import (
 _ADAPTERS: dict[str, type[BenchmarkAdapter]] = {
     "nethack": NetHackAdapter,
     "nethack_scenarios": NetHackScenariosAdapter,
-    "craftax": CraftaxAdapter,
 }
 
 
@@ -64,10 +57,6 @@ __all__ = [
     "Action",
     "ActionSequence",
     "BenchmarkAdapter",
-    "CraftaxAction",
-    "CraftaxAdapter",
-    "CraftaxGameState",
-    "CraftaxHarness",
     "EnvHarness",
     "FloorMemory",
     "GameState",

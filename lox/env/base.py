@@ -1,7 +1,6 @@
 """
 Abstract Benchmark Adapter & Environment Harness Protocol ("Hard Code Nothing").
-Defines the clean, pluggable contract for running synthesis across NetHack, Craftax,
-and external reinforcement learning / synthesis benchmarks.
+Defines the clean, pluggable contract for running synthesis on NetHack / MiniHack scenarios.
 """
 
 from __future__ import annotations
@@ -15,6 +14,8 @@ class EnvHarness(Protocol):
     """Protocol for a deterministic benchmark simulation harness."""
 
     step_count: int
+    max_steps: int
+    allow_menu_linger: bool
     done: bool
     action_bytes: bytearray
     current_seed: int
@@ -24,7 +25,7 @@ class EnvHarness(Protocol):
         """Resets the environment with the given deterministic seed."""
         ...
 
-    def step(self, action: Any) -> tuple[Any, bool, dict[str, Any]]:
+    def step(self, action: Any, /) -> tuple[Any, bool, dict[str, Any]]:
         """Advances the simulation by 1 high-level action, returning (state, done, info)."""
         ...
 
@@ -33,6 +34,7 @@ class EnvHarness(Protocol):
         seed: int,
         recorded_bytes: bytes | bytearray | None = None,
         stop_at_byte_idx: int | None = None,
+        action_bytes: bytes | bytearray | None = None,
     ) -> Any:
         """Fast-forwards simulation directly in C/compiled code from recorded byte prefix."""
         ...
@@ -51,7 +53,7 @@ class BenchmarkAdapter(abc.ABC):
     @property
     @abc.abstractmethod
     def name(self) -> str:
-        """Unique identifier of the benchmark (e.g. 'nethack', 'craftax')."""
+        """Unique identifier of the benchmark (e.g. 'nethack', 'nethack_scenarios')."""
         ...
 
     @abc.abstractmethod
@@ -96,8 +98,6 @@ class BenchmarkAdapter(abc.ABC):
         """
         from collections import Counter
 
-        from lox.lang.bt import extract_runner_leaf_errors
-
         runner = compiled.create_runner()
         h_kwargs: dict[str, Any] = {"max_steps": max_steps}
         if self.name == "nethack" and policy_code:
@@ -116,10 +116,13 @@ class BenchmarkAdapter(abc.ABC):
                 acts.append(str(info.get("action_name", "")))
                 if done:
                     break
-            leaf_errs = extract_runner_leaf_errors(runner)
-            if leaf_errs:
+            exc_cnt = int(getattr(runner, "policy_exceptions", 0) or 0)
+            if exc_cnt > 0:
+                last_err = str(
+                    getattr(runner, "last_exception_msg", "") or "policy exception"
+                )
                 return (
-                    f"Swallowed leaf error(s): {leaf_errs[0][0]} -> {leaf_errs[0][1]}",
+                    f"Runtime policy exception(s) ({exc_cnt}): {last_err}",
                     {"fn_turns": dict(fn_turns)},
                 )
             non_wait = [a for a in acts if a != "WAIT"]

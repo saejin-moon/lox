@@ -19,7 +19,7 @@ def progression_metric(run: dict[str, Any], benchmark: str | None = None) -> flo
     """
     Single-source-of-truth composite progression metric:
     Delegates 100% to `get_adapter(benchmark).progression_metric(run)` so NetHack,
-    Craftax, and future benchmarks share zero duplicated or drifted scoring code.
+    NetHack and future benchmarks share zero duplicated or drifted scoring code.
     """
     bench = (
         str(benchmark or run.get("benchmark") or "nethack").strip().lower() or "nethack"
@@ -46,13 +46,19 @@ def compute_confidence_sequence(
         return mean_d, mean_d - 1.0, mean_d + 1.0
 
     std_d = float(np.std(deltas, ddof=1))
-    if std_d < 1e-9:
-        return mean_d, mean_d, mean_d
-
     # Honest time-uniform anytime-valid boundary (no fixed-sample clip!)
     t_eff = max(2.0, float(n))
     a_safe = max(1e-6, min(0.5, float(alpha)))
     log_term = math.log(math.log(2.0 * t_eff) + 1.0) + 0.72 * math.log(10.4 / a_safe)
+    if std_d < 1e-9:
+        if n >= 5:
+            return mean_d, mean_d, mean_d
+        # Empirical-Bernstein scale floor: tiny samples (n < 5) with identical deltas
+        # must not claim zero-width infinite precision.
+        scale_floor = max(1.0, abs(mean_d))
+        radius = scale_floor * math.sqrt(2.0 * log_term / t_eff)
+        return mean_d, mean_d - radius, mean_d + radius
+
     radius = std_d * math.sqrt(2.0 * log_term / t_eff)
     return mean_d, mean_d - radius, mean_d + radius
 
@@ -120,7 +126,7 @@ def wilcoxon_signed_rank_p(deltas: np.ndarray) -> tuple[float, int, int, int]:
 def exact_sign_permutation_p(
     deltas: np.ndarray,
     seed: int = 0,
-    n_perms: int = 2000,
+    n_perms: int = 10000,
 ) -> tuple[float, int, int, int]:
     """
     One-sided Paired Sign-Permutation Test on `mean(deltas) > 0` (exact finite-sample
@@ -477,6 +483,19 @@ def interquartile_mean(values: list[float] | np.ndarray) -> float:
     return float(np.mean(core)) if len(core) > 0 else float(np.mean(arr))
 
 
+def _run_pair_key(r: dict[str, Any], idx_r: int) -> tuple[str, Any]:
+    """Stable pairing key handling explicit `seed == 0` without falling back to row index."""
+    if r.get("is_shard"):
+        sh_id = str(r.get("shard_id") or "").strip()
+        if sh_id:
+            return ("shard", sh_id)
+        if "seed" in r and r["seed"] is not None:
+            return ("shard_seed", int(r["seed"]))
+        return ("shard_idx", idx_r)
+    raw_seed = r.get("seed")
+    return ("seed", 0 if raw_seed is None else int(raw_seed))
+
+
 def evaluate_tournament_pair(
     candidate_runs: list[dict[str, Any]],
     incumbent_runs: list[dict[str, Any]],
@@ -490,29 +509,23 @@ def evaluate_tournament_pair(
     """
     inc_by_key: dict[Any, dict[str, Any]] = {}
     for idx_r, r in enumerate(incumbent_runs or []):
-        key = (
-            ("shard", str(r.get("shard_id") or r.get("seed") or idx_r))
-            if r.get("is_shard")
-            else ("seed", int(r.get("seed", 0) or 0))
-        )
-        inc_by_key[key] = r
+        inc_by_key[_run_pair_key(r, idx_r)] = r
 
     cand_progs: list[float] = []
     inc_progs: list[float] = []
     deltas: list[float] = []
+    paired_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
     seeds_gained: list[int] = []
     seeds_lost: list[int] = []
 
     for idx_r, r in enumerate(candidate_runs or []):
-        sd = int(r.get("seed") or 0)
-        key = (
-            ("shard", str(r.get("shard_id") or sd or idx_r))
-            if r.get("is_shard")
-            else ("seed", sd)
-        )
+        raw_sd = r.get("seed")
+        sd = 0 if raw_sd is None else int(raw_sd)
+        key = _run_pair_key(r, idx_r)
         base_r = inc_by_key.get(key)
         if base_r is None:
             continue
+        paired_rows.append((r, base_r))
         cp = progression_metric(r, benchmark=benchmark)
         ip = progression_metric(base_r, benchmark=benchmark)
         cand_progs.append(cp)
@@ -537,6 +550,11 @@ def evaluate_tournament_pair(
             "cvar25_cand": 0.0,
             "cvar25_inc": 0.0,
             "cvar25_delta": 0.0,
+            "paired_cvar25_delta": 0.0,
+            "paired_cvar25_se": 0.0,
+            "hw_worsened": 0,
+            "hw_improved": 0,
+            "hw_mcnemar_p": 1.0,
             "ci_lower": 0.0,
             "ci_upper": 0.0,
             "wilcoxon_p": 1.0,
@@ -553,11 +571,52 @@ def evaluate_tournament_pair(
     arr = np.asarray(deltas, dtype=np.float64)
     mean_d, ci_low, ci_high = compute_confidence_sequence(arr, alpha=alpha)
     p_wilc, wins, losses, ties = wilcoxon_signed_rank_p(arr)
-    p_perm, _pw, _pl, _pt = exact_sign_permutation_p(arr, seed=len(deltas) * 97 + wins)
+    p_perm, _pw, _pl, _pt = exact_sign_permutation_p(arr, seed=len(deltas) * 97 + 13)
     iqm_c = interquartile_mean(cand_progs)
     iqm_i = interquartile_mean(inc_progs)
     cvar_c = cvar_bottom_quantile(cand_progs, q=0.25)
     cvar_i = cvar_bottom_quantile(inc_progs, q=0.25)
+
+    # Paired bottom-quartile tail delta & SE (evaluated strictly on incumbent's worst 25% seeds;
+    # lexsort breaks exact ties in inc_progs deterministically by cand_progs ascending)
+    n_tail = max(1, int(math.ceil(len(inc_progs) * 0.25)))
+    tail_idx = np.lexsort(
+        (
+            np.asarray(cand_progs, dtype=np.float64),
+            np.asarray(inc_progs, dtype=np.float64),
+        )
+    )[:n_tail]
+    tail_diffs = arr[tail_idx]
+    paired_cvar_d = float(np.mean(tail_diffs)) if len(tail_diffs) > 0 else 0.0
+    paired_cvar_se = (
+        float(np.std(tail_diffs, ddof=1) / math.sqrt(len(tail_diffs)))
+        if len(tail_diffs) > 1
+        else 0.0
+    )
+
+    # Paired horizon-waste discordance (exact one-sided McNemar binomial test)
+    def _is_hw(run_row: dict[str, Any]) -> bool:
+        er = str(run_row.get("end_reason", "") or "").lower()
+        return er == "max_steps" or "stalled" in er
+
+    hw_worsened = 0
+    hw_improved = 0
+    for c_row, i_row in paired_rows:
+        c_hw = _is_hw(c_row)
+        i_hw = _is_hw(i_row)
+        if c_hw and not i_hw:
+            hw_worsened += 1
+        elif i_hw and not c_hw:
+            hw_improved += 1
+    hw_disc = hw_worsened + hw_improved
+    if hw_disc > 0 and hw_worsened > 0:
+        hw_mcnemar_p = float(
+            sum(math.comb(hw_disc, k) for k in range(hw_worsened, hw_disc + 1))
+            / (1 << hw_disc)
+        )
+    else:
+        hw_mcnemar_p = 1.0
+
     win_d, win_se = sparse_winsorized_stats(arr, pct=0.05)
     lcb_score = win_d - 0.5 * win_se
     frac_changed = float((wins + losses) / max(1, len(deltas)))
@@ -572,10 +631,15 @@ def evaluate_tournament_pair(
         "cvar25_cand": round(cvar_c, 4),
         "cvar25_inc": round(cvar_i, 4),
         "cvar25_delta": round(cvar_c - cvar_i, 4),
+        "paired_cvar25_delta": round(paired_cvar_d, 4),
+        "paired_cvar25_se": round(paired_cvar_se, 4),
+        "hw_worsened": hw_worsened,
+        "hw_improved": hw_improved,
+        "hw_mcnemar_p": float(hw_mcnemar_p),
         "ci_lower": round(ci_low, 4),
         "ci_upper": round(ci_high, 4),
-        "wilcoxon_p": round(p_wilc, 5),
-        "sign_perm_p": round(p_perm, 5),
+        "wilcoxon_p": float(p_wilc),
+        "sign_perm_p": float(p_perm),
         "frac_seeds_changed": round(frac_changed, 4),
         "wins": wins,
         "losses": losses,

@@ -7,9 +7,8 @@ from pathlib import Path
 
 import duckdb
 
-from lox.author.tools import AuthorToolRegistry
 from lox.db.logger import BatchDatabaseLogger
-from lox.db.schema import compute_llm_cost, connect_db, init_db
+from lox.db.schema import compute_llm_cost, init_db
 from lox.db.shards import extract_shards_from_db, extract_shards_from_runs
 from lox.db.theories import TheoryDocumentStore
 from lox.engine.hypothesis import (
@@ -18,7 +17,7 @@ from lox.engine.hypothesis import (
 )
 from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
-from lox.runner.pool import PersistentEvalPool, run_single_episode
+from lox.runner.pool import run_single_episode
 
 
 def test_theory_document_store_lancedb(tmp_path):
@@ -348,47 +347,3 @@ def test_pass2_bug4_extract_shards_from_db_and_pilot_logging(tmp_path: Path) -> 
     assert any("pre_death" in t for t in shard_types)
     assert any("floor_entry:2" in t for t in shard_types)
     assert any("floor_entry:3" in t for t in shard_types)
-
-    # 2. Test pilot evaluation DuckDB saving completeness via AuthorToolRegistry
-    pool = PersistentEvalPool(workers=2, max_steps=10)
-    try:
-        tools = AuthorToolRegistry(db_path=db_path)
-        tools.configure_generation(
-            pool=pool,
-            baseline_runs=runs,
-            max_pilot_runs=3,
-            pilot_episodes=10,
-            generation=1,
-        )
-        # Test valid code dry run
-        code = """class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.WAIT
-"""
-        diag, status = tools.dry_run_policy(code=code, is_macro=False)
-        assert "PASSED" in status or "PILOT" in status
-
-        # Verify DuckDB has policies, batches, and experiments rows with generation=1
-        con = connect_db(db_path, read_only=True)
-        try:
-            cand_count = con.execute(
-                "SELECT COUNT(*) FROM policies WHERE mode = 'PILOT'"
-            ).fetchone()[0]
-            assert cand_count >= 1
-            batch_count = con.execute(
-                "SELECT COUNT(*) FROM batches WHERE mode = 'PILOT'"
-            ).fetchone()[0]
-            assert batch_count >= 1
-            exp_count = con.execute(
-                "SELECT COUNT(*) FROM experiments WHERE mode = 'PILOT'"
-            ).fetchone()[0]
-            assert exp_count >= 1
-            gen_val = con.execute(
-                "SELECT generation FROM experiments WHERE mode = 'PILOT'"
-            ).fetchone()[0]
-            assert gen_val == 1
-        finally:
-            con.close()
-    finally:
-        pool.close()

@@ -59,6 +59,14 @@ def _collect_local_bindings(body: list[ast.stmt]) -> set[str]:
                     _add_target(item.optional_vars)
         elif isinstance(node, ast.ExceptHandler) and node.name:
             bound.add(node.name)
+        elif isinstance(node, ast.NamedExpr):
+            _add_target(node.target)
+        elif isinstance(node, ast.MatchAs) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchStar) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for al in node.names:
                 bound.add(al.asname or al.name.split(".")[0])
@@ -205,12 +213,26 @@ def modularize_policy_source(
         return "\n".join(lines[start:end])
 
     import_stmts: list[tuple[ast.Import | ast.ImportFrom, str]] = []
+    future_imports: list[str] = []
+    star_imports: list[str] = []
     const_defs: dict[str, tuple[str, set[str]]] = {}
     fn_defs: dict[str, tuple[str, ast.FunctionDef, set[str]]] = {}
     helper_classes: dict[str, tuple[str, set[str]]] = {}
     build_tree_node: ast.FunctionDef | None = None
     build_tree_src: str = ""
     policy_classes: list[tuple[str, ast.ClassDef]] = []
+    root_misc_stmts: list[tuple[str, ast.stmt]] = []
+
+    def _collect_target_names(tgt: ast.AST) -> list[str]:
+        out: list[str] = []
+        if isinstance(tgt, ast.Name):
+            out.append(tgt.id)
+        elif isinstance(tgt, (ast.Tuple, ast.List)):
+            for elt in tgt.elts:
+                out.extend(_collect_target_names(elt))
+        elif isinstance(tgt, ast.Starred):
+            out.extend(_collect_target_names(tgt.value))
+        return out
 
     mod_docstring = ""
     for i_stmt, stmt in enumerate(tree.body):
@@ -223,14 +245,24 @@ def modularize_policy_source(
             mod_docstring = _slice_stmt(stmt)
             continue
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-            import_stmts.append((stmt, _slice_stmt(stmt)))
+            src_imp = _slice_stmt(stmt)
+            if isinstance(stmt, ast.ImportFrom) and stmt.module == "__future__":
+                future_imports.append(src_imp)
+            elif isinstance(stmt, ast.ImportFrom) and any(
+                al.name == "*" for al in stmt.names
+            ):
+                star_imports.append(src_imp)
+            else:
+                import_stmts.append((stmt, src_imp))
         elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
             src = _slice_stmt(stmt)
             refs = _extract_names_used(stmt)
             if isinstance(stmt, ast.Assign):
+                names_hit: list[str] = []
                 for tgt in stmt.targets:
-                    if isinstance(tgt, ast.Name):
-                        const_defs[tgt.id] = (src, refs - {tgt.id})
+                    names_hit.extend(_collect_target_names(tgt))
+                for nm in names_hit:
+                    const_defs[nm] = (src, refs - set(names_hit))
             elif isinstance(stmt.target, ast.Name):
                 const_defs[stmt.target.id] = (src, refs - {stmt.target.id})
         elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -249,6 +281,9 @@ def modularize_policy_source(
                     _slice_stmt(stmt),
                     _extract_names_used(stmt) - {stmt.name},
                 )
+        else:
+            # Preserve module-level statements like `goals.register_goal(...)` or `if ...:` in policy.py
+            root_misc_stmts.append((_slice_stmt(stmt), stmt))
 
     all_defined = set(const_defs) | set(fn_defs) | set(helper_classes)
     if not all_defined or (build_tree_node is None and len(fn_defs) < 3):
@@ -331,6 +366,8 @@ def modularize_policy_source(
         root_direct_refs |= _extract_names_used(build_tree_node) & all_defined
     for _, cls_node in policy_classes:
         root_direct_refs |= _extract_names_used(cls_node) & all_defined
+    for _, misc_node in root_misc_stmts:
+        root_direct_refs |= _extract_names_used(misc_node) & all_defined
     non_leaf_root_refs = root_direct_refs - set(leaf_fns)
 
     shared_syms: set[str] = {
@@ -371,30 +408,19 @@ def modularize_policy_source(
         covered |= cl
     shared_syms |= all_defined - covered
 
-    decl_order = [
-        name
-        for stmt in tree.body
-        for name in (
-            (
-                [stmt.name]
-                if isinstance(
-                    stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                )
-                else []
-            )
-            + (
-                [t.id for t in stmt.targets if isinstance(t, ast.Name)]
-                if isinstance(stmt, ast.Assign)
-                else (
-                    [stmt.target.id]
-                    if isinstance(stmt, ast.AnnAssign)
-                    and isinstance(stmt.target, ast.Name)
-                    else []
-                )
-            )
-        )
-        if name in all_defined
-    ]
+    decl_order: list[str] = []
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if stmt.name in all_defined:
+                decl_order.append(stmt.name)
+        elif isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                for nm in _collect_target_names(t):
+                    if nm in all_defined:
+                        decl_order.append(nm)
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            if stmt.target.id in all_defined:
+                decl_order.append(stmt.target.id)
 
     def _emit_used_imports(syms: set[str], extra_text: str = "") -> list[str]:
         used_tokens: set[str] = set()
@@ -410,7 +436,7 @@ def modularize_policy_source(
                 used_tokens |= _extract_names_used(ast.parse(extra_text))
             except Exception:
                 pass
-        imp_lines: list[str] = []
+        imp_lines: list[str] = list(future_imports) + list(star_imports)
         for stmt, src in import_stmts:
             if _import_bound_names(stmt) & used_tokens:
                 imp_lines.append(src)
@@ -506,6 +532,7 @@ def modularize_policy_source(
     root_text = "\n\n".join(
         ([build_tree_src] if build_tree_src else [])
         + [cls_src for cls_src, _ in policy_classes]
+        + [m_src for m_src, _ in root_misc_stmts]
     )
     root_imports = _emit_used_imports(set(), extra_text=root_text)
     header_doc = (mod_docstring + "\n\n") if mod_docstring else ""
@@ -835,11 +862,16 @@ def verify_bit_identical(
     new_skills: dict[str, str],
     seeds: list[int],
     steps: int = 300,
+    macros_code: str = "",
 ) -> None:
     """Compiles both packages and asserts exact step-by-step action_bytes identity."""
     with _COMPILE_EXEC_LOCK:
-        orig_compiled = compile_policy_package(orig_policy, "", skills=orig_skills)
-        new_compiled = compile_policy_package(new_policy, "", skills=new_skills)
+        orig_compiled = compile_policy_package(
+            orig_policy, macros_code, skills=orig_skills
+        )
+        new_compiled = compile_policy_package(
+            new_policy, macros_code, skills=new_skills
+        )
 
     for sd in seeds:
         h1 = NetHackHarness(max_steps=steps)
@@ -1089,6 +1121,10 @@ def _rewrite_symbol_imports_in_source(
 
     lines = source.splitlines()
     old_aliases: set[str] = set()
+    dotted_src_parts = tuple(src_mod_dotted.split("."))
+    parent_pkg, leaf_mod = (
+        src_mod_dotted.rsplit(".", 1) if "." in src_mod_dotted else ("", src_mod_dotted)
+    )
     used_dst_alias = dst_mod_dotted.rsplit(".", 1)[-1]
     alias_collisions = _extract_names_used(tree)
     if used_dst_alias in alias_collisions:
@@ -1122,6 +1158,29 @@ def _rewrite_symbol_imports_in_source(
                         module=dst_mod_dotted, names=moved_als, level=stmt.level
                     )
                 )
+        elif isinstance(stmt, ast.ImportFrom) and stmt.module == parent_pkg:
+            # Handle `from skills import combat` / `from skills.combat import core as c`
+            new_from_names: list[ast.alias] = []
+            for al in stmt.names:
+                if al.name == leaf_mod:
+                    alias_id = al.asname or al.name
+                    old_aliases.add(alias_id)
+                    if src_renamed_to:
+                        new_body.append(
+                            ast.Import(
+                                names=[ast.alias(name=src_renamed_to, asname=alias_id)]
+                            )
+                        )
+                    else:
+                        new_from_names.append(al)
+                else:
+                    new_from_names.append(al)
+            if new_from_names:
+                new_body.append(
+                    ast.ImportFrom(
+                        module=stmt.module, names=new_from_names, level=stmt.level
+                    )
+                )
         elif isinstance(stmt, ast.Import):
             new_names: list[ast.alias] = []
             for al in stmt.names:
@@ -1140,12 +1199,29 @@ def _rewrite_symbol_imports_in_source(
         else:
             new_body.append(stmt)
 
+    def _attr_chain(expr: ast.AST) -> tuple[str, ...] | None:
+        parts: list[str] = []
+        cur: ast.AST = expr
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        if isinstance(cur, ast.Name):
+            parts.append(cur.id)
+            parts.reverse()
+            return tuple(parts)
+        return None
+
     # Check if any attribute accesses `<alias>.<moved_sym>` or `skills.<...>.<moved_sym>` exist
     class _AttrRewriter(ast.NodeTransformer):
         def __init__(self) -> None:
             self.shadowed: set[str] = set()
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+            node.decorator_list = [self.visit(d) for d in node.decorator_list]
+            node.args.defaults = [self.visit(d) for d in node.args.defaults]
+            node.args.kw_defaults = [
+                self.visit(d) if d is not None else None for d in node.args.kw_defaults
+            ]
             fn_params = {
                 a.arg
                 for a in (
@@ -1165,6 +1241,11 @@ def _rewrite_symbol_imports_in_source(
             return node
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+            node.decorator_list = [self.visit(d) for d in node.decorator_list]
+            node.args.defaults = [self.visit(d) for d in node.args.defaults]
+            node.args.kw_defaults = [
+                self.visit(d) if d is not None else None for d in node.args.kw_defaults
+            ]
             fn_params = {
                 a.arg
                 for a in (
@@ -1186,14 +1267,31 @@ def _rewrite_symbol_imports_in_source(
         def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
             nonlocal need_dst_import
             self.generic_visit(node)
-            if node.attr in moved_symbols and isinstance(node.value, ast.Name):
-                if node.value.id in old_aliases and node.value.id not in self.shadowed:
-                    need_dst_import = True
-                    return ast.Attribute(
-                        value=ast.Name(id=used_dst_alias, ctx=ast.Load()),
-                        attr=node.attr,
-                        ctx=node.ctx,
-                    )
+            if node.attr in moved_symbols:
+                if isinstance(node.value, ast.Name):
+                    if (
+                        node.value.id in old_aliases
+                        and node.value.id not in self.shadowed
+                    ):
+                        need_dst_import = True
+                        return ast.Attribute(
+                            value=ast.Name(id=used_dst_alias, ctx=ast.Load()),
+                            attr=node.attr,
+                            ctx=node.ctx,
+                        )
+                else:
+                    chain = _attr_chain(node.value)
+                    if (
+                        chain is not None
+                        and chain == dotted_src_parts
+                        and chain[0] not in self.shadowed
+                    ):
+                        need_dst_import = True
+                        return ast.Attribute(
+                            value=ast.Name(id=used_dst_alias, ctx=ast.Load()),
+                            attr=node.attr,
+                            ctx=node.ctx,
+                        )
             return node
 
     tree.body = new_body

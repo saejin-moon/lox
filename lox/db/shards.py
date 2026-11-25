@@ -93,7 +93,7 @@ def extract_shards_from_runs(
     Stratifies extracted shards into Frontier (>= p90_depth), Mid-Band, and Foundation tiers.
     """
     clean_depths = [
-        int(r.get("max_depth", r.get("depth", 1)))
+        int(r.get("max_depth") or r.get("depth") or 1)
         for r in runs
         if not r.get("is_shard")
     ]
@@ -122,18 +122,21 @@ def extract_shards_from_runs(
         runs_to_process.sort(key=lambda r_item: 0 if _has_target(r_item) else 1)
 
     for r in runs_to_process:
+        if r.get("is_shard"):
+            continue
         raw_bytes = r.get("action_bytes")
         if not raw_bytes or len(raw_bytes) < 10:
             continue
 
         b_bytes = bytes(raw_bytes)
-        run_id = str(r.get("run_id", "run"))
-        seed = int(r.get("seed", 0))
+        run_id = str(r.get("run_id") or "run")
+        raw_seed = r.get("seed")
+        seed = 0 if raw_seed is None else int(raw_seed)
         steps = int(r.get("steps") or r.get("turns") or len(b_bytes))
         turns = int(r.get("turns") or steps)
-        end_reason = str(r.get("end_reason", "ended"))
-        summary = str(r.get("summary_digest", ""))
-        depth = int(r.get("max_depth", r.get("depth", 1)))
+        end_reason = str(r.get("end_reason") or "ended")
+        summary = str(r.get("summary_digest") or "")
+        depth = int(r.get("max_depth") or r.get("depth") or 1)
         ticks = r.get("ticks") or []
         step_offsets = r.get("step_byte_offsets")
 

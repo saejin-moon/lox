@@ -51,25 +51,30 @@ class ConsoleUI:
     ) -> None:
         if not self.enabled:
             return
-        self._clear_progress()
-        line = "─" * 74
-        print(self._c(self.CYAN, f"┌{line}┐"))
-        title = "LOX  │  Autonomous Policy Synthesis Engine ('Hard Code Nothing')"
-        print(
-            self._c(self.CYAN, "│ ")
-            + self._c(self.BOLD, f"{title:<72}")
-            + self._c(self.CYAN, " │")
-        )
-        meta = f"Model: {model} ({provider})  │  Role: {role}  │  Workers: {workers}  │  DB: {db_path}"
-        print(self._c(self.CYAN, "│ ") + f"{meta[:72]:<72}" + self._c(self.CYAN, " │"))
-        print(self._c(self.CYAN, f"└{line}┘"))
+        with self._lock:
+            self._clear_progress()
+            line = "─" * 74
+            print(self._c(self.CYAN, f"┌{line}┐"))
+            title = "LOX  │  Autonomous Policy Synthesis Engine ('Hard Code Nothing')"
+            print(
+                self._c(self.CYAN, "│ ")
+                + self._c(self.BOLD, f"{title:<72}")
+                + self._c(self.CYAN, " │")
+            )
+            meta = f"Model: {model} ({provider})  │  Role: {role}  │  Workers: {workers}  │  DB: {db_path}"
+            print(
+                self._c(self.CYAN, "│ ") + f"{meta[:72]:<72}" + self._c(self.CYAN, " │")
+            )
+            print(self._c(self.CYAN, f"└{line}┘"))
 
     def header(self, title: str) -> None:
         if not self.enabled:
             return
-        self._clear_progress()
-        line = "═" * max(10, 72 - len(title))
-        print("\n" + self._c(self.BOLD + self.CYAN, f"═══ {title} {line}"))
+        t = str(title or "")
+        with self._lock:
+            self._clear_progress()
+            line = "═" * max(10, 72 - len(t))
+            print("\n" + self._c(self.BOLD + self.CYAN, f"═══ {t} {line}"))
 
     def gen_header(
         self,
@@ -80,60 +85,65 @@ class ConsoleUI:
     ) -> None:
         if not self.enabled:
             return
-        self._clear_progress()
-        fn_str = f" │ Targets: {', '.join(target_fns)}" if target_fns else ""
-        eps_str = (
-            f"{target_episodes:,} eps"
-            if target_episodes > 0
-            else "0 eps (instant commit)"
-        )
-        hdr = f"═══ Gen {gen:03d} │ Mode: {mode} │ Budget: {eps_str}{fn_str} "
-        pad = max(0, 76 - len(hdr))
-        print("\n" + self._c(self.BOLD + self.BLUE, hdr + "═" * pad))
+        g_i = int(gen or 0)
+        te_i = int(target_episodes or 0)
+        with self._lock:
+            self._clear_progress()
+            fn_str = f" │ Targets: {', '.join(target_fns)}" if target_fns else ""
+            eps_str = f"{te_i:,} eps" if te_i > 0 else "0 eps (instant commit)"
+            hdr = f"═══ Gen {g_i:03d} │ Mode: {mode or ''} │ Budget: {eps_str}{fn_str} "
+            pad = max(0, 76 - len(hdr))
+            print("\n" + self._c(self.BOLD + self.BLUE, hdr + "═" * pad))
 
     def tool_call(
         self,
         turn_idx: int,
         tool_name: str,
-        arg_summary: str,
-        result_summary: str,
-        elapsed_ms: float,
-        agent_role: str = "",
+        arg_summary: str | None,
+        result_summary: str | None,
+        elapsed_ms: float | None,
+        agent_role: str | None = "",
     ) -> None:
         if not self.enabled:
             return
-        is_swarm = agent_role not in ("", "author")
-        if is_swarm and tool_name in (
+        role_s = str(agent_role or "")
+        tool_s = str(tool_name or "")
+        arg_s = str(arg_summary or "")
+        res_s = str(result_summary or "")
+        ms_v = float(elapsed_ms or 0.0)
+        turn_i = int(turn_idx or 0)
+
+        is_swarm = role_s not in ("", "author")
+        if is_swarm and tool_s in (
             "query_monster",
             "query_item",
             "query_policy_docs",
             "read_skill",
         ):
-            res_low = result_summary.lower()
+            res_low = res_s.lower()
             if "error" not in res_low and "not found" not in res_low:
                 return
 
-        arg_clean = " ".join(arg_summary.strip().split())
+        arg_clean = " ".join(arg_s.strip().split())
         if len(arg_clean) > 42:
             arg_clean = arg_clean[:39] + "..."
-        res_clean = " ".join(result_summary.strip().split())
+        res_clean = " ".join(res_s.strip().split())
         if len(res_clean) > 46:
             res_clean = res_clean[:43] + "..."
 
-        turn_tag = f"[{agent_role[:16]}:T{turn_idx}]" if is_swarm else f"[T{turn_idx}]"
+        turn_tag = f"[{role_s[:16]}:T{turn_i}]" if is_swarm else f"[T{turn_i}]"
         with self._lock:
             self._clear_progress()
             print(
                 f"  {self._c(self.DIM, turn_tag)} "
-                f"{self._c(self.CYAN, f'{tool_name:<18}')} "
+                f"{self._c(self.CYAN, f'{tool_s:<18}')} "
                 f"{self._c(self.DIM, f'({arg_clean})')} -> {res_clean} "
-                f"{self._c(self.DIM, f'[{elapsed_ms:.0f}ms]')}"
+                f"{self._c(self.DIM, f'[{ms_v:.0f}ms]')}"
             )
 
     def hypothesis_box(self, hypothesis: dict[str, Any]) -> None:
         if not self.enabled or not hypothesis:
             return
-        self._clear_progress()
         targets = (
             hypothesis.get("target_functions")
             or hypothesis.get("targeted_skill")
@@ -165,32 +175,33 @@ class ConsoleUI:
             extra_lines += (
                 f"\n             │ {self._c(self.DIM, 'State:  ')} {pers_str}"
             )
-
-        print(
-            f"  {self._c(self.MAGENTA + self.BOLD, 'Hypothesis')} │ "
-            f"{self._c(self.BOLD, 'Target:')} {targets}{extra_lines}\n"
-            f"             │ {self._c(self.DIM, 'Finding:')} {obs}\n"
-            f"             │ {self._c(self.DIM, 'Action: ')} {mech}"
-        )
+        with self._lock:
+            self._clear_progress()
+            print(
+                f"  {self._c(self.MAGENTA + self.BOLD, 'Hypothesis')} │ "
+                f"{self._c(self.BOLD, 'Target:')} {targets}{extra_lines}\n"
+                f"             │ {self._c(self.DIM, 'Finding:')} {obs}\n"
+                f"             │ {self._c(self.DIM, 'Action: ')} {mech}"
+            )
 
     def progress(
         self,
-        triggered_done: int,
-        triggered_target: int,
-        raw_done: int,
-        steps_per_sec: float,
-        avg_depth: float,
-        max_depth: int,
-        outliers: int = 0,
+        triggered_done: int | None,
+        triggered_target: int | None,
+        raw_done: int | None,
+        steps_per_sec: float | None,
+        avg_depth: float | None,
+        max_depth: int | None,
+        outliers: int | None = 0,
     ) -> None:
         if not self.enabled:
             return
+        td_i = int(triggered_done or 0)
+        tt_i = int(triggered_target or 0)
+        rd_i = int(raw_done or 0)
+        out_i = int(outliers or 0)
         with self._lock:
-            pct = (
-                min(100.0, 100.0 * triggered_done / max(1, triggered_target))
-                if triggered_target > 0
-                else 100.0
-            )
+            pct = min(100.0, 100.0 * td_i / max(1, tt_i)) if tt_i > 0 else 100.0
             bar_len = 16
             filled = int(round(bar_len * pct / 100.0))
             bar = "█" * filled + "░" * (bar_len - filled)
@@ -199,11 +210,11 @@ class ConsoleUI:
             max_d_v = int(max_depth if max_depth is not None else 0)
             msg = (
                 f"\r  {self._c(self.CYAN, f'[{bar}]')} {pct:5.1f}% │ "
-                f"Trig: {triggered_done:,}/{triggered_target:,} "
-                f"{self._c(self.DIM, f'(raw {raw_done:,})')} │ "
+                f"Trig: {td_i:,}/{tt_i:,} "
+                f"{self._c(self.DIM, f'(raw {rd_i:,})')} │ "
                 f"{sps_v:,.0f} sps │ "
                 f"Depth: {avg_d_v:.2f} (max {max_d_v}) │ "
-                f"Outliers: {outliers}"
+                f"Outliers: {out_i}"
             )
             sys.stdout.write(msg + "\033[K")
             sys.stdout.flush()
@@ -220,16 +231,10 @@ class ConsoleUI:
             self._clear_progress()
             eps = int(batch_stats.get("episodes_recorded") or 0)
             disc = int(batch_stats.get("episodes_discarded") or 0)
-            avg_d = float(
-                batch_stats.get("avg_depth")
-                if batch_stats.get("avg_depth") is not None
-                else 0.0
-            )
-            p90_d = float(
-                batch_stats.get("p90_depth")
-                if batch_stats.get("p90_depth") is not None
-                else 0.0
-            )
+            raw_avg_d = batch_stats.get("avg_depth")
+            avg_d = 0.0 if raw_avg_d is None else float(raw_avg_d)
+            raw_p90_d = batch_stats.get("p90_depth")
+            p90_d = 0.0 if raw_p90_d is None else float(raw_p90_d)
             max_d = int(batch_stats.get("max_depth") or 0)
             avg_s = float(batch_stats.get("avg_score") or 0.0)
             avg_t = float(batch_stats.get("avg_turns") or 0.0)
@@ -257,11 +262,8 @@ class ConsoleUI:
                 mean_d = float(verdict.get("mean_delta") or 0.0)
                 ci_l = float(verdict.get("ci_lower") or 0.0)
                 ci_u = float(verdict.get("ci_upper") or 0.0)
-                p_val = float(
-                    verdict.get("wilcoxon_p")
-                    if verdict.get("wilcoxon_p") is not None
-                    else 1.0
-                )
+                raw_p_val = verdict.get("wilcoxon_p")
+                p_val = 1.0 if raw_p_val is None else float(raw_p_val)
                 wins = int(verdict.get("wins") or 0)
                 losses = int(verdict.get("losses") or 0)
                 ties = int(verdict.get("ties") or 0)

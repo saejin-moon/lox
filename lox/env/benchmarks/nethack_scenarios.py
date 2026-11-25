@@ -108,8 +108,9 @@ def build_scenario_des(scenario: str, seed: int = 42) -> tuple[str, bytes]:
     mid_y = h // 2
     pre_trigger = b""
 
-    # Place downstair in right zone & reserve center-left spawn band
+    # Place hero in left zone & downstair in right zone
     used.add((2, mid_y))
+    lg.set_start_pos((2, mid_y))
     stair_pos = _rand_free_pos(rng, w, h, used, x_min=mid_x + 2)
     lg.add_stair_down(place=stair_pos)
 
@@ -205,13 +206,13 @@ def build_scenario_des(scenario: str, seed: int = 42) -> tuple[str, bytes]:
 
     elif name == "prompt_torture_call_name":
         lg.add_object(name="apple", symbol="%", place=(3, mid_y))
-        # '#' opens NetHack extended command text prompt (`in_text_prompt=True`)
-        pre_trigger = b"#"
+        # 'E' (engrave) -> '-' (fingers) opens real C `getlin` text prompt (`in_text_prompt=True`)
+        pre_trigger = b"E-"
 
     elif name == "prompt_torture_yn_confirm":
         lg.add_fountain(place=(3, mid_y))
-        # 'p' (#pray) triggers real C `[yn]` confirmation prompt (`in_yn_prompt=True`)
-        pre_trigger = b"p"
+        # '#pray' triggers real C `[yn]` confirmation prompt (`in_yn_prompt=True`)
+        pre_trigger = b"#pray\r"
 
     elif name == "prompt_torture_direction_count":
         _add_wall_column(lg, 5, h, used)
@@ -221,12 +222,12 @@ def build_scenario_des(scenario: str, seed: int = 42) -> tuple[str, bytes]:
         pre_trigger = b"o"
 
     elif name == "prompt_torture_multipage_menu":
-        # Rich pile on floor near player triggers drop / pickup multi-item interaction
+        # Rich pile directly under hero triggers real C pickup selection menu (`in_menu=True`)
         for _ in range(6):
             obj_n, obj_sym = rng.choice(_DISTRACTOR_OBJECTS)
-            lg.add_object(name=obj_n, symbol=obj_sym, place=(3, mid_y))
-        # 'd' (drop) triggers genuine C inventory drop prompt / menu
-        pre_trigger = b"d"
+            lg.add_object(name=obj_n, symbol=obj_sym, place=(2, mid_y))
+        # ',' (pickup) on multi-item pile triggers genuine C pickup menu
+        pre_trigger = b","
 
     return lg.get_des(), pre_trigger
 
@@ -252,6 +253,7 @@ class NetHackScenarioHarness(NetHackHarness):
             role=role,
             max_steps=max_steps,
             allow_menu_linger=allow_menu_linger,
+            _init_nh=False,
             **kwargs,
         )
 
@@ -279,7 +281,7 @@ class NetHackScenarioHarness(NetHackHarness):
         self._mh_env = mh
 
         # Bind directly onto the MiniHack-compiled Nethack C engine + full key table
-        unwrapped = mh.unwrapped
+        unwrapped: Any = mh.unwrapped
         self.nh = unwrapped.nethack
         self._obs_keys = list(unwrapped._observation_keys)
         self._idx_map = {k: i for i, k in enumerate(self._obs_keys)}
@@ -309,6 +311,7 @@ class NetHackScenarioHarness(NetHackHarness):
                 break
 
         self._last_raw_tuple = obs_tuple
+        self._prev_turn = self._extract_turn(obs_tuple)
         self.step_byte_offsets = [len(self.action_bytes)]
         return self.wrap_state(obs_tuple)
 
@@ -317,9 +320,12 @@ class NetHackScenarioHarness(NetHackHarness):
         seed: int,
         recorded_bytes: bytes | bytearray | None = None,
         stop_at_byte_idx: int | None = None,
+        action_bytes: bytes | bytearray | None = None,
     ) -> GameState:
         self.reset(seed=seed)
-        buf = bytes(recorded_bytes or b"")
+        buf = bytes(
+            recorded_bytes if recorded_bytes is not None else (action_bytes or b"")
+        )
         pre_len = len(self._last_pre_trigger)
         if stop_at_byte_idx is not None:
             buf = buf[: max(0, int(stop_at_byte_idx))]
@@ -327,7 +333,13 @@ class NetHackScenarioHarness(NetHackHarness):
             if self.done:
                 break
             self.action_bytes.append(b)
-            obs_tuple, self.done = self.nh.step(b)
+            try:
+                obs_tuple, self.done = self.nh.step(b)
+            except RuntimeError as err:
+                if "Called step on finished NetHack" in str(err):
+                    self.done = True
+                    break
+                raise
             self.step_count += 1
             self.step_byte_offsets.append(len(self.action_bytes))
             self._last_raw_tuple = obs_tuple
@@ -339,6 +351,7 @@ class NetHackScenarioHarness(NetHackHarness):
                 obs_idx_map=self._idx_map,
             )
             self.mem.update(st_step)
+        self._prev_turn = self._extract_turn(self._last_raw_tuple)
         return self.wrap_state()
 
     def close(self) -> None:
@@ -359,8 +372,21 @@ class NetHackScenariosAdapter(NetHackAdapter):
     def name(self) -> str:
         return "nethack_scenarios"
 
-    def create_harness(self, **kwargs: Any) -> NetHackScenarioHarness:
-        return NetHackScenarioHarness(**kwargs)
+    def create_harness(
+        self,
+        role: str = "val-hum-law-fem",
+        max_steps: int = 25000,
+        lean_obs: bool = True,
+        allow_menu_linger: bool = False,
+        **kwargs: Any,
+    ) -> NetHackScenarioHarness:
+        _ = lean_obs
+        return NetHackScenarioHarness(
+            role=role,
+            max_steps=max_steps,
+            allow_menu_linger=allow_menu_linger,
+            **kwargs,
+        )
 
 
 def run_scenario_gate(
@@ -380,7 +406,6 @@ def run_scenario_gate(
     `prompt_livelocks`, `scenario_results`).
     """
     from lox.env.harness import policy_handles_menus
-    from lox.lang.bt import extract_runner_leaf_errors
     from lox.lang.compiler import compile_policy_package
 
     compiled = compile_policy_package(policy_code, "", skills=dict(skills or {}))
@@ -451,8 +476,7 @@ def run_scenario_gate(
             if last_end_reason == "running" and steps_done >= max(10, int(max_steps)):
                 last_end_reason = "max_steps"
 
-            leaf_errs = extract_runner_leaf_errors(runner)
-            exc_cnt = int(getattr(runner, "policy_exceptions", 0) or 0) + len(leaf_errs)
+            exc_cnt = int(getattr(runner, "policy_exceptions", 0) or 0)
             resolved_prompt = (not livelocked) and (
                 not sc_name.startswith("prompt_torture_")
                 or (

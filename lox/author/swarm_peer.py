@@ -18,11 +18,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lox.author.agent import AuthorAgent
-from lox.author.swarm_critic import extract_priority_selector_branches
+from lox.author.directives import extract_policy_branches, prune_unused_skills
+from lox.author.parsing import safe_normalize_skill_key
 from lox.author.swarm_deficits import DeficitCluster, DeficitReport
-from lox.author.swarm_meta import SwarmMetaAgent
 from lox.env.harness import NetHackHarness, policy_handles_menus
-from lox.lang.bt import extract_runner_leaf_errors
 from lox.lang.compiler import _COMPILE_EXEC_LOCK, compile_policy_package
 from lox.ui.console import ui
 
@@ -46,6 +45,7 @@ class PeerCandidate:
     error: str = ""
     loc_total: int = 0
     clobbers_protected: bool = False
+    track: str = "reactive"
 
 
 def parse_peer_output(
@@ -60,11 +60,11 @@ def parse_peer_output(
     - Optional `### skill: <name>` followed by ```python ... ```
     - `<policy_code> ... </policy_code>` or the final ```python ... ``` defining `class Policy`
     """
+    from lox.author.tools import merge_skill_module_update
     from lox.lang.bundle import (
         extract_policy_fallback_from_markdown,
         extract_skill_modules,
     )
-    from lox.lang.validator import normalize_skill_key
 
     hyp, extracted_code = AuthorAgent.extract_yaml_and_python(raw_text or "")
 
@@ -73,13 +73,22 @@ def parse_peer_output(
     raw_prunes = hyp.get("skills_to_prune")
     if isinstance(raw_prunes, list):
         for s in raw_prunes:
-            s_name = normalize_skill_key(str(s or ""))
+            s_name = safe_normalize_skill_key(s)
             if s_name and s_name in updated_skills:
                 updated_skills.pop(s_name, None)
                 explicit_prunes.append(s_name)
 
-    extracted_skills = extract_skill_modules(raw_text or "", include_markdown=True)
-    updated_skills.update(extracted_skills)
+    extracted_skills = extract_skill_modules(
+        raw_text or "",
+        merge_fn=merge_skill_module_update,
+        include_markdown=True,
+    )
+    for k, v in extracted_skills.items():
+        updated_skills[k] = (
+            merge_skill_module_update(updated_skills[k], v)
+            if k in updated_skills
+            else v
+        )
 
     # If <policy_code> wasn't explicit and the trailing python block was actually a skill block,
     # inspect any remaining python block containing `class Policy`.
@@ -93,26 +102,26 @@ def parse_peer_output(
         policy_code = str(base_policy or "").strip()
 
     # Transitive prune so unused skills aren't carried into evaluation
-    kept_skills = SwarmMetaAgent.prune_unused_skills(policy_code, updated_skills)
+    kept_skills = prune_unused_skills(policy_code, updated_skills)
     auto_pruned = [k for k in updated_skills if k not in kept_skills]
     all_pruned = list(dict.fromkeys(explicit_prunes + auto_pruned))
     return hyp, policy_code, kept_skills, all_pruned
 
 
-def _extract_branch_names(policy_code: str) -> list[str]:
-    if not policy_code or not policy_code.strip():
+def _extract_branch_names(
+    policy_code: str, skills: dict[str, str] | None = None
+) -> list[str]:
+    if not (policy_code and policy_code.strip()) and not skills:
         return []
-    raw = extract_priority_selector_branches(policy_code)
+    raw = extract_policy_branches(policy_code, skills)
     names: list[str] = []
+    seen: set[str] = set()
     for b in raw:
-        if isinstance(b, dict):
-            nm = str(b.get("leaf_name") or b.get("fn_name") or "").strip()
-            if nm:
+        for k in ("leaf_name", "fn_name"):
+            nm = str(b.get(k) or "").strip()
+            if nm and nm not in seen:
+                seen.add(nm)
                 names.append(nm)
-        else:
-            s = str(b or "").strip()
-            if s:
-                names.append(s)
     return names
 
 
@@ -130,19 +139,20 @@ def compute_candidate_footprint(
         if skills.get(sk, "").strip() != base_skills.get(sk, "").strip():
             touched_skills.add(sk)
 
-    cur_branches = _extract_branch_names(policy_code)
-    base_branches = _extract_branch_names(base_policy)
+    cur_branches = _extract_branch_names(policy_code, skills)
+    base_branches = _extract_branch_names(base_policy, base_skills)
     touched_branches = set(cur_branches) ^ set(base_branches)
     if policy_code.strip() != base_policy.strip() and not touched_branches:
         # Changed internal logic on existing policy branches
         touched_branches.update(cur_branches or ["step"])
 
     clobbers_protected = False
-    if protected_branches and base_policy.strip():
+    if protected_branches and (base_policy.strip() or base_skills):
         cur_set = set(cur_branches)
+        base_set = set(base_branches)
         for pb in protected_branches:
             fn = str(pb.get("fn", ""))
-            if fn and fn in base_branches and fn not in cur_set:
+            if fn and fn in base_set and fn not in cur_set:
                 clobbers_protected = True
                 break
 
@@ -205,7 +215,7 @@ def _run_replay_probe(
     action_bytes: bytes,
     stop_at_byte_idx: int | None = None,
     live_steps: int = 80,
-    harness: NetHackHarness | None = None,
+    harness: Any = None,
 ) -> tuple[bool, int, int, str]:
     """
     Fast-forwards a candidate policy into a recorded mid/late-game trajectory byte stream
@@ -242,14 +252,6 @@ def _run_replay_probe(
                 max_seen_depth = cur_d
             if r_done:
                 break
-        r_errs = extract_runner_leaf_errors(r_runner)
-        if r_errs:
-            return (
-                False,
-                start_depth,
-                max_seen_depth,
-                f"leaf error: {r_errs[0][0]} -> {r_errs[0][1]}",
-            )
         return not rh.done, start_depth, max_seen_depth, ""
     except Exception as exc:
         return False, 1, 1, f"runtime error: {type(exc).__name__}: {exc}"
@@ -272,7 +274,7 @@ def incubate_candidate(
     """
     Isolated Sandbox Incubation (`tau_iso`):
     1. Compiles candidate `(policy_code, skills)` cleanly under `_COMPILE_EXEC_LOCK`.
-    2. Smoke-tests execution, checks `WAIT`-only deadlock and `extract_runner_leaf_errors`.
+    2. Smoke-tests execution and checks `WAIT`-only deadlock.
     3. Runs paired micro-shard (`D_succ` guards + `D_fail` cluster seeds + baseline) when `eval_pool` is present.
     4. Checks wrapper attribution ratio and guard regressions before admitting candidate to tournament.
     """
@@ -419,8 +421,10 @@ def incubate_candidate(
                         runs=c_runs,
                         run_id_prefix=f"g{deficit_report.generation}_{candidate.peer_id}_inc",
                     )
-                except Exception:
-                    pass
+                except Exception as log_exc:
+                    ui.warn(
+                        f"Peer `{candidate.peer_id}`: failed persisting incubation runs ({log_exc})"
+                    )
             # Hard exception gate across incubation episodes & organic scenarios
             exc_total = sum(int(r.get("policy_exceptions", 0) or 0) for r in c_runs)
             if exc_total > 0:
@@ -543,7 +547,9 @@ def incubate_candidate(
                     if guard_d_diffs:
                         g_delta = sum(guard_d_diffs) / len(guard_d_diffs)
                         metrics["guard_depth_delta"] = round(g_delta, 4)
-                    reg_thresh = -0.15 if len(paired_d_diffs) >= 6 else -0.35
+
+                    # Catastrophe-only depth regression guard (avoid noisy -0.15 vetoes on 12-14 seeds)
+                    reg_thresh = -0.50 if len(paired_d_diffs) >= 6 else -0.75
                     if len(paired_d_diffs) >= 4 and avg_d_delta <= reg_thresh:
                         candidate.sandbox_metrics = metrics
                         candidate.sandbox_passed = False
@@ -552,6 +558,39 @@ def incubate_candidate(
                             f"(depth_delta={avg_d_delta:+.2f}, score_delta={avg_s_delta:+.1f})"
                         )
                         return candidate
+
+                    # Per-step latency hygiene guard (catches O(21*79) Python per-step loops early)
+                    cand_ms_tot = sum(
+                        float(r.get("wall_ms", 0.0) or 0.0) for r in c_runs
+                    )
+                    cand_steps_tot = sum(int(r.get("steps", 0) or 0) for r in c_runs)
+                    inc_ms_tot = sum(
+                        float(r.get("wall_ms", 0.0) or 0.0)
+                        for r in incumbent_shard_runs.values()
+                    )
+                    inc_steps_tot = sum(
+                        int(r.get("steps", 0) or 0)
+                        for r in incumbent_shard_runs.values()
+                    )
+                    if cand_steps_tot >= 200 and cand_ms_tot > 0.0:
+                        cand_ms_per_step = cand_ms_tot / float(cand_steps_tot)
+                        inc_ms_per_step = (
+                            inc_ms_tot / float(inc_steps_tot)
+                            if inc_steps_tot >= 200 and inc_ms_tot > 0.0
+                            else 2.0
+                        )
+                        metrics["ms_per_step"] = round(cand_ms_per_step, 3)
+                        if cand_ms_per_step > max(
+                            15.0, 3.0 * max(0.5, inc_ms_per_step)
+                        ):
+                            candidate.sandbox_metrics = metrics
+                            candidate.sandbox_passed = False
+                            candidate.error = (
+                                f"Incubation latency guard: {cand_ms_per_step:.2f} ms/step "
+                                f"(> 3x incumbent {inc_ms_per_step:.2f} ms/step and > 15 ms/step; "
+                                "use vectorized NumPy masks like `state.passable_mask` / `state.trap_mask`)"
+                            )
+                            return candidate
         except Exception as exc:
             candidate.sandbox_passed = False
             candidate.error = f"Incubation shard failed: {type(exc).__name__}: {exc}"
@@ -613,7 +652,10 @@ class SwarmPeerAgent:
         stepping_stone: dict[str, Any] | None = None,
         incumbent_policy: str = "",
         incumbent_skills: dict[str, str] | None = None,
+        track: str = "reactive",
+        proactive_branch: dict[str, Any] | None = None,
     ) -> PeerCandidate:
+        peer_track = str(track or "reactive").strip().lower()
         skills_copy = dict(current_skills or {})
         base_inc_policy = str(incumbent_policy or current_policy or "")
         base_inc_skills = dict(
@@ -658,13 +700,14 @@ class SwarmPeerAgent:
                     "mechanism": f"Mock peer improvement targeting {claimed_deficit.cluster_id}",
                 },
                 policy_code=mock_code,
-                skills=SwarmMetaAgent.prune_unused_skills(mock_code, skills_copy),
+                skills=prune_unused_skills(mock_code, skills_copy),
                 touched_skills=touched_skills,
                 touched_branches=touched_branches,
                 touched_skill_symbols=compute_candidate_skill_symbols(
                     skills_copy, skills_copy
                 ),
                 clobbers_protected=clobbers,
+                track=peer_track,
             )
             cand = incubate_candidate(
                 cand,
@@ -778,9 +821,60 @@ class SwarmPeerAgent:
                 f"(or `{st_rej}`) regressed, then refine the stepping stone while preserving `seeds_gained`.\n"
             )
 
+        proactive_block = ""
+        expert_gaps_txt = str(
+            getattr(deficit_report, "expert_parity_gaps", "") or ""
+        ).strip()
+        if peer_track == "proactive_capability":
+            proactive_block = (
+                f"\n### Proactive Capability Track (`{self.peer_id}` — Expert-Driven & Future-Oriented):\n"
+                "- **Mission**: Unlike reactive peers fixing recent death clusters, YOU start from the current champion "
+                "and mine `expert_ticks` / `expert_runs` + the NetHack Wiki across `Dlvl 1 .. p90+2` to design ONE clean, "
+                "self-contained missing capability or proactive efficiency upgrade (as a modular 2-level skill under `skills/<domain>/<module>.py`).\n"
+                "- **Empirical Grounding**: Query `expert_ticks` directly via `query_db` (e.g., actions, item/consumable usage, "
+                "floor residence, or branch behavior at your target depths) and verify exact C rules with `query_wiki` / `query_item` / `query_monster`.\n"
+                "- **Triggered Confirmation Ready**: Your candidate competes directly in the tournament and benefits from "
+                "Triggered Divergent-Seed Confirmation (`max N=128`) — so clean capabilities that trigger selectively without regressing early floors can promote cleanly!\n"
+                + (f"\n{expert_gaps_txt}\n" if expert_gaps_txt else "")
+            )
+        elif peer_track == "proactive_branch":
+            br = proactive_branch if isinstance(proactive_branch, dict) else {}
+            br_id = str(br.get("branch_id", "") or f"proactive_g{generation}")
+            br_step = int(br.get("steps_taken", 0) or 0) + 1
+            br_max = int(br.get("max_steps", 4) or 4)
+            br_goal = str(br.get("goal_summary", "") or "").strip()
+            br_caps = list(br.get("capabilities_added") or [])
+            br_prev_d = float(br.get("last_avg_depth", 0.0) or 0.0)
+            br_prev_wd = float(br.get("last_winsor_delta", 0.0) or 0.0)
+            br_state_line = (
+                f"- **Continuing Branch `{br_id}` (Step {br_step}/{br_max})**: "
+                f"goal=`{br_goal}`, capabilities_added={br_caps}, last S_select avg_depth={br_prev_d:.2f} (winsorΔ={br_prev_wd:+.3f}).\n"
+                if br
+                else f"- **New Sheltered Proactive Branch `{br_id}` (Step 1/{br_max})**: "
+                "Starting from current champion; establish a clean multi-step architectural foundation.\n"
+            )
+            proactive_block = (
+                f"\n### Sheltered Proactive Branch Track (`{self.peer_id}` — Multi-Step Architecture Horizon):\n"
+                f"{br_state_line}"
+                "- **Two-Tier Gate Advantage**: Your branch advances safely on a non-catastrophic branch-internal `S_select` gate "
+                "(0 exceptions, non-catastrophic depth) without polluting the Champion, and **graduates to Champion** as soon as it "
+                f"beats the Champion on strict `S_confirm` (resets to Champion after {br_max} steps if ungraduated).\n"
+                "- **Mission**: Mine `expert_ticks` + Wiki + codebase architecture (`architecture_map`) to build multi-step proactive "
+                "capabilities, structural efficiency upgrades (e.g., vectorized `state.trap_mask`, cleaner goal planning, inventory/resource/branch prep) "
+                "that single-step reactive patches cannot reach in one generation.\n"
+                + (f"\n{expert_gaps_txt}\n" if expert_gaps_txt else "")
+            )
+
+        situational_expert_note = (
+            "\n- Optional Situational Expert Check: When inspecting a specific encounter, floor, or stuck state in `champion_ticks`, "
+            "you may optionally check how human ascensions acted in `expert_ticks` (`WHERE depth = <D>` or `message LIKE '%...%'` / `screen_ascii LIKE '%...%'`)."
+            if peer_track in ("reactive", "revision")
+            else ""
+        )
+
         extra_context = (
-            f"{deficit_report.format_brief()}{arch_block}{plateau_directive}{directive_block}{revision_block}\n\n"
-            f"### Your Claimed Target Deficit (`{self.peer_id}`):\n"
+            f"{deficit_report.format_brief()}{arch_block}{plateau_directive}{directive_block}{revision_block}{proactive_block}\n\n"
+            f"### Your Claimed Target Scope (`{self.peer_id}`, track=`{peer_track}`):\n"
             f"- Cluster ID: `{claimed_deficit.cluster_id}` ({claimed_deficit.kind})\n"
             f"- Description: {claimed_deficit.label}\n"
             f"- Evidence: {claimed_deficit.evidence}\n"
@@ -788,6 +882,7 @@ class SwarmPeerAgent:
             f"- Guard Seeds (preserve non-regression; do NOT over-tighten on neutral drift): {list(deficit_report.d_succ_seeds[:2])}\n"
             f"- Unseen Probe Seeds (generalization check in `dry_run_policy`): {list((probe_seeds or [])[:6])}\n"
             f"- Diagnosis Note: Inspect `champion_ticks`, `peer_ticks`, `all_ticks`, and workspace `skills/` directly via `query_db` to locate the true root cause across module boundaries."
+            f"{situational_expert_note}"
             f"{frontier_block}\n"
         )
 
@@ -810,6 +905,7 @@ class SwarmPeerAgent:
                 skills=skills_copy,
                 sandbox_passed=False,
                 error=str(exc),
+                track=peer_track,
             )
             self._record_peer_theory(generation, claimed_deficit, failed_cand)
             return failed_cand
@@ -828,6 +924,7 @@ class SwarmPeerAgent:
                 skills=skills_copy,
                 sandbox_passed=False,
                 error=str(getattr(proposal, "abort_reason", "") or "Synthesis aborted"),
+                track=peer_track,
             )
             self._record_peer_theory(generation, claimed_deficit, aborted_cand)
             return aborted_cand
@@ -839,9 +936,7 @@ class SwarmPeerAgent:
 
         updated_skills = dict(skills_copy)
         for s_name, s_src in (getattr(proposal, "skill_modules", {}) or {}).items():
-            from lox.lang.validator import normalize_skill_key
-
-            clean_s = normalize_skill_key(str(s_name or ""))
+            clean_s = safe_normalize_skill_key(s_name)
             if clean_s and str(s_src or "").strip():
                 # `AuthorAgent.synthesize` already ran `merge_skill_module_update` on edited skills.
                 updated_skills[clean_s] = str(s_src)
@@ -849,17 +944,93 @@ class SwarmPeerAgent:
         explicit_prunes: list[str] = []
         raw_prunes = hyp.get("skills_to_prune")
         if isinstance(raw_prunes, list):
-            from lox.lang.validator import normalize_skill_key
-
             for s in raw_prunes:
-                s_name = normalize_skill_key(str(s or ""))
+                s_name = safe_normalize_skill_key(s)
                 if s_name and s_name in updated_skills:
                     updated_skills.pop(s_name, None)
                     explicit_prunes.append(s_name)
 
-        kept_skills = SwarmMetaAgent.prune_unused_skills(pol_code, updated_skills)
+        kept_skills = prune_unused_skills(pol_code, updated_skills)
         auto_pruned = [k for k in updated_skills if k not in kept_skills]
         pruned = list(dict.fromkeys(explicit_prunes + auto_pruned))
+
+        # Soft micro-pilot submission hygiene: only applies when the final submitted
+        # package matches the last micro-piloted draft (never clobbering a peer that
+        # edited/fixed its code in the final turn after its last dry_run_policy call).
+        last_mp = getattr(self.author.tools, "last_peer_micro_pilot", None)
+        best_mp = getattr(self.author.tools, "best_peer_micro_pilot", None)
+        effective_mp: dict[str, Any] | None = None
+        if isinstance(last_mp, dict):
+            last_code = str(last_mp.get("code", "") or "").strip()
+            last_skills_pruned = prune_unused_skills(
+                last_code, dict(last_mp.get("skills") or {})
+            )
+            final_matches_last_mp = pol_code.strip() == last_code and {
+                k: v.strip() for k, v in kept_skills.items()
+            } == {k: v.strip() for k, v in last_skills_pruned.items()}
+            if final_matches_last_mp:
+                effective_mp = last_mp
+                last_div = int(last_mp.get("diverged", 0) or 0)
+                last_dd = float(last_mp.get("avg_depth_delta", 0.0) or 0.0)
+                last_w = int(last_mp.get("wins", 0) or 0)
+                last_exc = int(last_mp.get("policy_exceptions", 0) or 0)
+                last_bad = (
+                    last_div == 0 or last_exc > 0 or (last_dd <= -0.75 and last_w == 0)
+                )
+                if last_bad and isinstance(best_mp, dict) and best_mp is not last_mp:
+                    best_div = int(best_mp.get("diverged", 0) or 0)
+                    best_dd = float(best_mp.get("avg_depth_delta", -999.0) or -999.0)
+                    best_exc = int(best_mp.get("policy_exceptions", 0) or 0)
+                    best_code = str(best_mp.get("code", "") or "").strip()
+                    strictly_better = last_exc > 0 or last_div == 0 or best_dd > last_dd
+                    if best_div > 0 and best_exc == 0 and best_code and strictly_better:
+                        pol_code = best_code
+                        rec_skills = dict(best_mp.get("skills") or {})
+                        kept_skills = prune_unused_skills(pol_code, rec_skills)
+                        effective_mp = best_mp
+                        ui.info(
+                            f"Peer [{self.peer_id}]: Auto-recovered earlier best micro-pilot "
+                            f"(attempt #{best_mp.get('attempt', '?')}, Δdepth={best_dd:+.2f}, "
+                            f"W/L={best_mp.get('wins', 0)}/{best_mp.get('losses', 0)}) over degraded final draft."
+                        )
+
+        if isinstance(effective_mp, dict):
+            eff_div = int(effective_mp.get("diverged", 0) or 0)
+            eff_dd = float(effective_mp.get("avg_depth_delta", 0.0) or 0.0)
+            eff_w = int(effective_mp.get("wins", 0) or 0)
+            if eff_div == 0:
+                dead_cand = PeerCandidate(
+                    peer_id=self.peer_id,
+                    claimed_deficit_id=claimed_deficit.cluster_id,
+                    claimed_label=claimed_deficit.label,
+                    hypothesis_yaml=hyp,
+                    policy_code=pol_code,
+                    skills=kept_skills,
+                    pruned_skills=pruned,
+                    sandbox_passed=False,
+                    error="Micro-pilot hygiene: 0-byte behavioral divergence across all micro-pilot seeds (dead patch).",
+                    track=peer_track,
+                )
+                self._record_peer_theory(generation, claimed_deficit, dead_cand)
+                return dead_cand
+            if peer_track != "proactive_branch" and eff_dd <= -0.75 and eff_w == 0:
+                cat_cand = PeerCandidate(
+                    peer_id=self.peer_id,
+                    claimed_deficit_id=claimed_deficit.cluster_id,
+                    claimed_label=claimed_deficit.label,
+                    hypothesis_yaml=hyp,
+                    policy_code=pol_code,
+                    skills=kept_skills,
+                    pruned_skills=pruned,
+                    sandbox_passed=False,
+                    error=(
+                        f"Micro-pilot hygiene: catastrophic regression (avg_Δdepth={eff_dd:+.2f}, "
+                        f"wins=0, losses={effective_mp.get('losses', 0)})."
+                    ),
+                    track=peer_track,
+                )
+                self._record_peer_theory(generation, claimed_deficit, cat_cand)
+                return cat_cand
 
         touched_skills, touched_branches, clobbers = compute_candidate_footprint(
             pol_code,
@@ -883,6 +1054,7 @@ class SwarmPeerAgent:
                 kept_skills, base_inc_skills
             ),
             clobbers_protected=clobbers,
+            track=peer_track,
         )
 
         cand = incubate_candidate(
@@ -912,7 +1084,7 @@ class SwarmPeerAgent:
         claimed_deficit: DeficitCluster,
         cand: PeerCandidate,
     ) -> None:
-        """Persists peer hypothesis and empirical incubation outcome into LanceDB `theories`."""
+        """Persists peer hypothesis and empirical incubation outcome into DuckDB `theories`."""
         if self.theories is None or not hasattr(self.theories, "save_document"):
             return
         hyp = dict(cand.hypothesis_yaml or {})
@@ -953,8 +1125,10 @@ class SwarmPeerAgent:
                 verified_c_rule=c_rule,
                 metrics=dict(cand.sandbox_metrics or {}),
             )
-        except Exception:
-            pass
+        except Exception as th_exc:
+            ui.warn(
+                f"Peer `{self.peer_id}` Gen {generation}: failed saving theory note ({th_exc})"
+            )
 
     @staticmethod
     def _build_mock_peer_policy(current_policy: str) -> str:

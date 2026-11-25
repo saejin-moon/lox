@@ -18,6 +18,12 @@ from typing import Any
 import numpy as np
 
 
+def _tick_int(tick: dict[str, Any], key: str, default: int = 0) -> int:
+    """Safely extracts an integer tick field without clobbering `0` or raising on `None`."""
+    val = tick.get(key)
+    return default if val is None else int(val)
+
+
 def _detect_confinement_stalls(
     ticks: list[dict[str, Any]],
     covered_spans: list[tuple[int, int]],
@@ -39,8 +45,8 @@ def _detect_confinement_stalls(
     tick_positions: list[tuple[int, int]] = []
 
     for idx_t, t in enumerate(ticks):
-        d_key = (int(t.get("dungeon_num", 0) or 0), int(t.get("depth", 1) or 1))
-        pos = (int(t.get("y", 0) or 0), int(t.get("x", 0) or 0))
+        d_key = (_tick_int(t, "dungeon_num", 0), _tick_int(t, "depth", 1))
+        pos = (_tick_int(t, "y", 0), _tick_int(t, "x", 0))
         tick_depths.append(d_key)
         tick_positions.append(pos)
         seen_map = first_seen_by_depth.setdefault(d_key, {})
@@ -132,8 +138,8 @@ def summarize_episode_ticks(
     dungeons_seen: set[int] = set()
     hazard_events: set[str] = set()
     ascension_milestones: set[str] = set()
-    best_ac = int(ticks[0].get("ac", 10))
-    max_xl = int(ticks[0].get("xp_level", 1))
+    best_ac = 10 if ticks[0].get("ac") is None else int(ticks[0]["ac"])
+    max_xl = 1 if ticks[0].get("xp_level") is None else int(ticks[0]["xp_level"])
     log_lines: list[str] = []
     last_msg = ""
     msg_repeat = 0
@@ -145,19 +151,21 @@ def summarize_episode_ticks(
     action_counts: Counter[str] = Counter()
 
     for t in ticks:
-        d = int(t.get("depth", 1))
-        turn = int(t.get("turn", 0))
-        act_name = str(t.get("action_name", "")).strip()
+        d = 1 if t.get("depth") is None else int(t["depth"])
+        turn = 0 if t.get("turn") is None else int(t["turn"])
+        act_name = str(t.get("action_name", "") or "").strip()
         if act_name:
             action_counts[act_name] += 1
-        ac = int(t.get("ac", 10))
-        xl = int(t.get("xp_level", 1))
-        cur_hp = int(t.get("hp", 0))
-        cur_max_hp = int(t.get("max_hp", 0))
-        sc = float(t.get("score", 0))
-        ach = float(t.get("achievements", 0))
-        dnum = int(t.get("dungeon_num", 0))
-        pos = (dnum, d, int(t.get("y", 0)), int(t.get("x", 0)))
+        ac = 10 if t.get("ac") is None else int(t["ac"])
+        xl = 1 if t.get("xp_level") is None else int(t["xp_level"])
+        cur_hp = 0 if t.get("hp") is None else int(t["hp"])
+        cur_max_hp = 0 if t.get("max_hp") is None else int(t["max_hp"])
+        sc = 0.0 if t.get("score") is None else float(t["score"])
+        ach = 0.0 if t.get("achievements") is None else float(t["achievements"])
+        dnum = 0 if t.get("dungeon_num") is None else int(t["dungeon_num"])
+        ty = 0 if t.get("y") is None else int(t["y"])
+        tx = 0 if t.get("x") is None else int(t["x"])
+        pos = (dnum, d, ty, tx)
         dungeons_seen.add(dnum)
 
         # Universal composite progress monotonic evaluation
@@ -259,12 +267,12 @@ def summarize_episode_ticks(
     # 2. Part A: Run-Length Encoded (RLE) Phase Timeline by (depth, active_function)
     segments: list[dict[str, Any]] = []
     for t in ticks:
-        d = t.get("depth", 1)
+        d = _tick_int(t, "depth", 1)
         fn = t.get("active_function", "root")
         act = t.get("action_name", "")
-        hp = t.get("hp", 0)
-        turn = t.get("turn", 0)
-        pos = (t.get("y", 0), t.get("x", 0))
+        hp = _tick_int(t, "hp", 0)
+        turn = _tick_int(t, "turn", 0)
+        pos = (_tick_int(t, "y", 0), _tick_int(t, "x", 0))
         msg = str(t.get("message", "")).strip()
 
         if not segments or segments[-1]["depth"] != d or segments[-1]["fn"] != fn:
@@ -329,8 +337,8 @@ def summarize_episode_ticks(
     for i in range(0, max(1, n - window), 1):
         t0 = ticks[i]
         t1 = ticks[min(n - 1, i + window)]
-        drop = int(t0.get("hp", 0)) - int(t1.get("hp", 0))
-        max_hp = max(1, int(t0.get("max_hp", 1)))
+        drop = _tick_int(t0, "hp", 0) - _tick_int(t1, "hp", 0)
+        max_hp = max(1, _tick_int(t0, "max_hp", 1))
         if drop > max_hp_drop and drop / max_hp >= 0.25:
             max_hp_drop = drop
             best_drop_idx = i
@@ -340,12 +348,12 @@ def summarize_episode_ticks(
         pre_idx = max(0, best_drop_idx - 5)
         pre_inflection_fn = str(ticks[pre_idx].get("active_function", ""))
 
-    for i in range(0, max(1, n - window), window):
+    for i in range(0, n, window):
         t0 = ticks[i]
         t1 = ticks[min(n - 1, i + window)]
-        hp_diff = abs(int(t1.get("hp", 0)) - int(t0.get("hp", 0)))
-        d_diff = abs(int(t1.get("depth", 1)) - int(t0.get("depth", 1))) * 15.0
-        sc_diff = abs(int(t1.get("score", 0)) - int(t0.get("score", 0))) * 0.1
+        hp_diff = abs(_tick_int(t1, "hp", 0) - _tick_int(t0, "hp", 0))
+        d_diff = abs(_tick_int(t1, "depth", 1) - _tick_int(t0, "depth", 1)) * 15.0
+        sc_diff = abs(_tick_int(t1, "score", 0) - _tick_int(t0, "score", 0)) * 0.1
         mag = hp_diff + d_diff + sc_diff
         if mag >= 4.0:
             candidates.append((mag, i))
@@ -354,10 +362,10 @@ def summarize_episode_ticks(
     chosen_indices = sorted(idx for _, idx in candidates[:3])
     for idx in chosen_indices:
         sub = ticks[idx : min(n, idx + window + 1)]
-        t_start = sub[0].get("turn", 0)
-        t_end = sub[-1].get("turn", 0)
-        d0, d1 = sub[0].get("depth", 1), sub[-1].get("depth", 1)
-        hp0, hp1 = sub[0].get("hp", 0), sub[-1].get("hp", 0)
+        t_start = _tick_int(sub[0], "turn", 0)
+        t_end = _tick_int(sub[-1], "turn", 0)
+        d0, d1 = _tick_int(sub[0], "depth", 1), _tick_int(sub[-1], "depth", 1)
+        hp0, hp1 = _tick_int(sub[0], "hp", 0), _tick_int(sub[-1], "hp", 0)
         msgs = [
             str(s.get("message", "")).strip()
             for s in sub
@@ -372,7 +380,7 @@ def summarize_episode_ticks(
     # Final 8 ticks before end (preserve full message text up to 160 chars)
     tail = ticks[-min(8, n) :]
     tail_str = " -> ".join(
-        f"T{s.get('turn', 0)}({s.get('active_function', '')}:{s.get('action_name', '')} HP={s.get('hp', 0)} '{str(s.get('message', ''))[:160]}')"
+        f"T{_tick_int(s, 'turn', 0)}({s.get('active_function', '')}:{s.get('action_name', '')} HP={_tick_int(s, 'hp', 0)} '{str(s.get('message', ''))[:160]}')"
         for s in tail
     )
 
@@ -424,9 +432,9 @@ def summarize_episode_ticks(
 
     t_last = ticks[-1]
     overview = (
-        f"Depth={t_last.get('depth', 1)} (Max={max(depths_seen) if depths_seen else 1}) | "
-        f"Turns={t_last.get('turn', 0)} (Steps={n}) | "
-        f"HP={t_last.get('hp', 0)}/{t_last.get('max_hp', 0)} | AC={best_ac} | XL={max_xl}"
+        f"Depth={_tick_int(t_last, 'depth', 1)} (Max={max(depths_seen) if depths_seen else 1}) | "
+        f"Turns={_tick_int(t_last, 'turn', 0)} (Steps={n}) | "
+        f"HP={_tick_int(t_last, 'hp', 0)}/{_tick_int(t_last, 'max_hp', 0)} | AC={best_ac} | XL={max_xl}"
     )
     stall_line = f"Stalls: {'; '.join(stalls[:3])}" if stalls else "Stalls: None"
 
@@ -442,7 +450,7 @@ def summarize_episode_ticks(
         ]
     )
 
-    d1_ticks = [t for t in ticks if t.get("depth", 1) == 1]
+    d1_ticks = [t for t in ticks if _tick_int(t, "depth", 1) == 1]
     stairs_found = any(
         t.get("action_name") == "DOWN"
         or t.get("raw_key") == ord(">")
@@ -450,18 +458,18 @@ def summarize_episode_ticks(
         for t in ticks
     )
 
-    t_end = int(ticks[-1].get("turn", len(ticks))) if ticks else 0
+    t_end = _tick_int(ticks[-1], "turn", len(ticks)) if ticks else 0
     stagnation_turns = max(0, t_end - last_progress_turn)
     stagnation_ratio = float(stagnation_turns / max(1, t_end))
 
     # Recurrence rate and active function attribution over stagnation window
-    stagnant_ticks = [t for t in ticks if int(t.get("turn", 0)) >= last_progress_turn]
+    stagnant_ticks = [t for t in ticks if _tick_int(t, "turn", 0) >= last_progress_turn]
     stagnation_positions = {
         (
-            int(t.get("dungeon_num", 0)),
-            int(t.get("depth", 1)),
-            int(t.get("y", 0)),
-            int(t.get("x", 0)),
+            _tick_int(t, "dungeon_num", 0),
+            _tick_int(t, "depth", 1),
+            _tick_int(t, "y", 0),
+            _tick_int(t, "x", 0),
         )
         for t in stagnant_ticks
     }
@@ -499,7 +507,9 @@ def summarize_episode_ticks(
         "inflection_function": inflection_fn,
         "pre_inflection_function": pre_inflection_fn,
         "unique_tiles_d1": (
-            len({(t.get("y", 0), t.get("x", 0)) for t in d1_ticks}) if d1_ticks else 0
+            len({(_tick_int(t, "y", 0), _tick_int(t, "x", 0)) for t in d1_ticks})
+            if d1_ticks
+            else 0
         ),
         "stairs_down_found": stairs_found,
         "stagnation_ratio": round(stagnation_ratio, 4),
@@ -542,7 +552,7 @@ def mark_outlier_good_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             + max(
                 0.0,
                 10.0
-                - float(r.get("final_ac") if r.get("final_ac") is not None else 10),
+                - float(raw_ac if (raw_ac := r.get("final_ac")) is not None else 10),
             )
             * 6.0
             + float(r.get("score") or 0) * 0.05
@@ -616,6 +626,10 @@ def compute_function_stats(
         generation = int(generation_or_runs)  # type: ignore[arg-type]
         runs = runs or []
 
+    full_only = [r for r in runs if not r.get("is_shard")]
+    if full_only:
+        runs = full_only
+
     total_runs = len(runs)
     if total_runs == 0:
         return []
@@ -648,6 +662,7 @@ def compute_function_stats(
         parsed_trig.append(t_dict)
         parsed_turns.append(u_dict)
         all_fns.update(t_dict.keys())
+        all_fns.update(u_dict.keys())
 
         ms = _extract_run_milestones(r)
         s_dict = ms.get("stagnation_fn_turns") or {}
@@ -669,9 +684,9 @@ def compute_function_stats(
         for idx, r in enumerate(runs):
             c = int(parsed_trig[idx].get(fn, 0))
             t = int(parsed_turns[idx].get(fn, 0))
-            if c > 0:
+            if c > 0 or t > 0:
                 eps_trig += 1
-                total_calls += c
+                total_calls += c if c > 0 else t
                 total_turns += t
                 depths_when_trig.append(int(r.get("max_depth", 1)))
                 if r.get("is_outlier_good"):
@@ -980,8 +995,8 @@ def build_batch_contrast_digest(
         lines.append("- **Depth-Tier Mortality Matrix**:\n" + "\n".join(tier_lines))
 
     # Dynamic failure telemetry & environmental diagnostics
-    max_d = int(batch_stats.get("max_depth", 1))
-    norm_d = float(batch_stats.get("avg_depth", 1.0))
+    max_d = int(batch_stats.get("max_depth") or 1)
+    _batch_avg_d = float(batch_stats.get("avg_depth") or 1.0)
     max_steps_runs = sum(1 for r in runs if r.get("end_reason") == "max_steps")
     max_steps_rate = max_steps_runs / float(len(runs)) if runs else 0.0
 
@@ -1024,9 +1039,7 @@ def build_batch_contrast_digest(
         lines.append(f"- **Top Environmental Stalls**: {'; '.join(stall_items)}")
 
     # Unique tiles explored
-    tiles_seen = [
-        r.get("unique_tiles") for r in runs if r.get("unique_tiles") is not None
-    ]
+    tiles_seen = [int(val) for r in runs if (val := r.get("unique_tiles")) is not None]
     if tiles_seen:
         lines.append(
             f"- **Exploration Tile Coverage**: Avg {np.mean(tiles_seen):.1f} unique tiles mapped per run."
@@ -1042,7 +1055,7 @@ def build_batch_contrast_digest(
             for k, v in dft.items()
             if str(k).isdigit() or isinstance(k, int)
         }
-        turns = int(r.get("turns", 0))
+        turns = int(r.get("turns") or 0)
         if dft_ints:
             sorted_depths = sorted(dft_ints.keys())
             for idx_d, d_val in enumerate(sorted_depths):
@@ -1266,7 +1279,6 @@ def build_batch_contrast_digest(
             ),
         ),
         ("Amulet of Yendor", milestone_counts["amulet_of_yendor"]),
-        ("Planes Reached", milestone_counts["planes_reached"]),
         ("Ascensions", milestone_counts["ascended"]),
     ]
     achieved_ms = [f"{label}: {cnt} runs" for label, cnt in ms_display if cnt > 0]
@@ -1357,33 +1369,37 @@ def build_batch_contrast_digest(
             lines.append(
                 f"- **Zero-Usage Tactical/Survival Primitives Across Entire Batch**: {', '.join(zero_caps)}"
             )
-        if lethal_runs:
-            n_leth = len(lethal_runs)
-            inv_parts = []
-            if unused_potions_runs > 0:
-                inv_parts.append(
-                    f"Potions held at death: {unused_potions_runs}/{n_leth} deaths"
-                )
-            if unused_scrolls_runs > 0:
-                inv_parts.append(
-                    f"Scrolls held at death: {unused_scrolls_runs}/{n_leth} deaths"
-                )
-            if unused_wands_runs > 0:
-                inv_parts.append(
-                    f"Wands held at death: {unused_wands_runs}/{n_leth} deaths"
-                )
-            if unused_ranged_runs > 0:
-                inv_parts.append(
-                    f"Projectiles/Ranged weapons held at death: {unused_ranged_runs}/{n_leth} deaths"
-                )
-            if unused_food_runs > 0:
-                inv_parts.append(
-                    f"Comestibles held at death: {unused_food_runs}/{n_leth} deaths"
-                )
-            if inv_parts:
+    if lethal_runs:
+        n_leth = len(lethal_runs)
+        inv_parts = []
+        if unused_potions_runs > 0:
+            inv_parts.append(
+                f"Potions held at death: {unused_potions_runs}/{n_leth} deaths"
+            )
+        if unused_scrolls_runs > 0:
+            inv_parts.append(
+                f"Scrolls held at death: {unused_scrolls_runs}/{n_leth} deaths"
+            )
+        if unused_wands_runs > 0:
+            inv_parts.append(
+                f"Wands held at death: {unused_wands_runs}/{n_leth} deaths"
+            )
+        if unused_ranged_runs > 0:
+            inv_parts.append(
+                f"Projectiles/Ranged weapons held at death: {unused_ranged_runs}/{n_leth} deaths"
+            )
+        if unused_food_runs > 0:
+            inv_parts.append(
+                f"Comestibles held at death: {unused_food_runs}/{n_leth} deaths"
+            )
+        if inv_parts:
+            if not batch_action_counts:
                 lines.append(
-                    f"- **Unused Inventory Items Carried at Moment of Death**: {' | '.join(inv_parts)}."
+                    "\n### 🛠️ Action Primitive & Terminal Inventory Capability Audit:"
                 )
+            lines.append(
+                f"- **Unused Inventory Items Carried at Moment of Death**: {' | '.join(inv_parts)}."
+            )
 
     # 3 Concrete Lethal Pre-Mortem Trace Exemplars
     if lethal_runs:
@@ -1503,14 +1519,19 @@ def build_batch_contrast_digest(
     # Sample top 2 Outlier Good Run summaries right in the digest
     if outliers:
         top_outliers = sorted(
-            outliers, key=lambda x: x.get("outlier_z_score", 0.0), reverse=True
+            outliers, key=lambda x: float(x.get("outlier_z_score") or 0.0), reverse=True
         )[:2]
         lines.append(
             "\n### Sample Statistical Outlier Good Runs (`is_outlier_good = TRUE`):"
         )
         for r in top_outliers:
+            rid = r.get("run_id", "unknown")
+            r_seed = r.get("seed", 0)
+            r_steps = int(r.get("steps") or 0)
+            r_z = float(r.get("outlier_z_score") or 0.0)
+            r_pctl = float(r.get("batch_percentile") or 0.0)
             lines.append(
-                f"#### Outlier Run `{r['run_id']}` (Seed={r['seed']}, Steps={r.get('steps', 0)}, Z={r['outlier_z_score']:+.2f}, Pctl={r['batch_percentile']:.1f}%):\n"
+                f"#### Outlier Run `{rid}` (Seed={r_seed}, Steps={r_steps}, Z={r_z:+.2f}, Pctl={r_pctl:.1f}%):\n"
                 f"```text\n{r.get('summary_digest', '')}\n```"
             )
 
@@ -1518,17 +1539,21 @@ def build_batch_contrast_digest(
     if normals:
         target_d = max(1, int(round(norm_d)))
         frontier_samples = [
-            r for r in normals if int(r.get("max_depth", 1)) >= target_d
+            r for r in normals if int(r.get("max_depth") or 1) >= target_d
         ][:2]
         stalled_samples = frontier_samples or normals[:2]
         lines.append(
             f"\n### Sample Frontier Failure/Stall Runs (Dlvl {target_d} Bottleneck for Prefix Replay / Diagnosis):"
         )
         for r in stalled_samples:
+            rid = r.get("run_id", "unknown")
+            r_seed = r.get("seed", 0)
+            r_steps = int(r.get("steps") or 0)
+            r_max_d = int(r.get("max_depth") or 1)
             lines.append(
-                f"#### Run `{r['run_id']}` (Seed={r['seed']}, Steps={r.get('steps', 0)}, Depth={r.get('max_depth', 1)}, End={r.get('end_reason', 'ended')}):\n"
+                f"#### Run `{rid}` (Seed={r_seed}, Steps={r_steps}, Depth={r_max_d}, End={r.get('end_reason') or 'ended'}):\n"
                 f"```text\n{r.get('summary_digest', '')}\n```\n"
-                f'*Replay Hint: `dry_run_policy(code=..., replay_run_id="{r["run_id"]}", replay_steps={max(0, int(r.get("steps", 0)) - 25)})`*'
+                f'*Replay Hint: `dry_run_policy(code=..., replay_run_id="{rid}", replay_steps={max(0, r_steps - 25)})`*'
             )
 
     return "\n".join(lines)

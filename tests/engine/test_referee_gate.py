@@ -129,13 +129,12 @@ def test_referee_closes_noop_and_significance_loopholes():
     assert verdict.winner_id in ("incumbent", "peer_noisy")
 
 
-def test_promotion_gate_v2_split_sample_anti_goodhart_safety_and_craftax():
+def test_promotion_gate_v2_split_sample_anti_goodhart_safety():
     """Verifies every Promotion Gate v2 invariant:
-    1. Anti-Goodhart NetHackAdapter + CraftaxAdapter progression_metric.
+    1. Anti-Goodhart NetHackAdapter progression_metric.
     2. Exact Paired Sign-Permutation & exact small-N Wilcoxon calibration (4W-0L=0.0625, 5W-0L=0.03125).
     3. Split-Sample Select(32) -> Confirm(64): zero fallback leakage on noise winner, unbiased S_confirm logging.
     4. 4 benchmark-agnostic safety invariants (horizon_waste_rate at D3+, auto_esc, cvar25) & AST bloat alpha bar.
-    5. Multi-benchmark Craftax SwarmReferee end-to-end promotion.
     """
     import numpy as np
 
@@ -148,9 +147,8 @@ def test_promotion_gate_v2_split_sample_anti_goodhart_safety_and_craftax():
         winsorized_mean,
     )
     from lox.engine.swarm_referee import SwarmReferee
-    from lox.env.craftax.adapter import CraftaxAdapter
 
-    # 1. Anti-Goodhart NetHackAdapter & CraftaxAdapter progression_metric
+    # 1. Anti-Goodhart NetHackAdapter progression_metric
     for depth in (1, 2, 3, 4):
         normal_run = {
             "depth": depth,
@@ -172,18 +170,6 @@ def test_promotion_gate_v2_split_sample_anti_goodhart_safety_and_craftax():
         assert progression_metric(camper_run) < progression_metric(normal_run), (
             f"D{depth} max_steps camper must score strictly below genuine D{depth} run"
         )
-
-    craftax_adapter = CraftaxAdapter()
-    assert (
-        craftax_adapter.progression_metric({"achievements": 0, "steps": 10000}) == 0.0
-    )
-    assert (
-        craftax_adapter.progression_metric({"achievements": 1, "steps": 10000})
-        < 1.08 + 1e-9
-    )
-    assert progression_metric(
-        {"achievements": 3, "steps": 200}, benchmark="craftax"
-    ) > (progression_metric({"achievements": 2, "steps": 50000}, benchmark="craftax"))
 
     # 2. Exact Paired Sign-Permutation & Exact Wilcoxon (fixes 4W-0L anti-conservative normal approx!)
     p4, w4, l4, t4 = exact_sign_permutation_p(np.array([1.0, 1.0, 1.0, 1.0, 0.0, 0.0]))
@@ -466,52 +452,6 @@ def test_promotion_gate_v2_split_sample_anti_goodhart_safety_and_craftax():
         v_bloat.attempts_summary[0]["reject_reason"]
         == "ast_bloat_below_tightened_alpha"
     )
-
-    # 5. Multi-Benchmark Craftax SwarmReferee integrity (zero NetHack assumptions)
-    class _CraftaxPool:
-        benchmark = "craftax"
-
-        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
-            s_list = list(priority_seeds or [])
-            is_inc = "_inc_" in batch_id
-            return {
-                "batch_id": batch_id,
-                "runs": [
-                    {
-                        "run_id": f"{'inc' if is_inc else 'c'}_{s}",
-                        "seed": s,
-                        "achievements": 2 if is_inc else 4,
-                        "steps": 400,
-                        "depth": 1,
-                        "max_depth": 1,
-                        "score": 0,
-                        "end_reason": "died",
-                    }
-                    for s in s_list
-                ],
-            }
-
-    v_cx = SwarmReferee().evaluate_tournament(
-        generation=1,
-        candidates=[
-            PeerCandidate(
-                peer_id="p_cx",
-                claimed_deficit_id="d1",
-                claimed_label="craftax_ach",
-                policy_code=base_pol + "\n_CX = 1\n",
-                skills={},
-                sandbox_passed=True,
-                loc_total=5,
-            )
-        ],
-        base_policy=base_pol,
-        base_skills={},
-        eval_pool=_CraftaxPool(),
-        select_seeds=[100001 + i for i in range(8)],
-        seeds=[10000001 + i for i in range(16)],
-    )
-    assert v_cx.promoted is True, v_cx.reason
-    assert v_cx.best_pair["mean_delta"] >= 1.9
 
 
 def test_swarm_referee_blocks_hard_stall_regression_on_minor_depth_tick():
@@ -1124,7 +1064,7 @@ def test_swarm_referee_promotes_explorer_over_wait_zombie_incumbent_and_preserve
     finally:
         con.close()
 
-    reg = AuthorToolRegistry(db_path=db_p, macros_path=str(tmp_path / "macros.py"))
+    reg = AuthorToolRegistry(db_path=db_p)
     p_text, _ = reg.read_policy("cell_v2_d0_v1_t0")
     assert "MAP_ELITES" in p_text
     assert "class Policy:" in p_text
@@ -1300,3 +1240,233 @@ def test_stepping_stone_hybrid_metric_and_select_record_ticks():
     assert "peer_cand" in verdict.select_batches
     assert verdict.confirm_challenger_eval is not None
     assert verdict.confirm_challenger_eval[0] == "peer_cand"
+
+
+def test_v3_promotion_gate_ranker_triggered_extension_and_paired_guards():
+    """
+    Verifies Component 2:
+    1. S_select admission floor blocks 1W/0L near-no-op (winsor_delta=+0.0002) and ranker puts 5W/2L above 1W/0L.
+    2. Triggered Sparse-Surgical Stage-3b Extension (+64 unseen seeds, max N=128) rescues a clean 3W/0L surgical fix.
+    3. OBF/Triggered 128-seed pooled winner_avg_depth & incumbent_avg_depth stay synchronized (no stale 64-seed stats).
+    4. Paired McNemar horizon_waste guard tolerates 1 noisy extra max_steps while rejecting systematic regressions.
+    5. select_qualifying_stepping_stone prioritizes clean confirm_challenger near-misses and excludes proactive_2.
+    """
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.engine.swarm_referee import (
+        SwarmReferee,
+        _meets_select_admission_floor,
+        _passes_safety_invariants,
+        _selection_rank_key,
+        select_qualifying_stepping_stone,
+    )
+
+    # 1. Admission floor & ranker fix
+    pr_noop = {
+        "wins": 1,
+        "losses": 0,
+        "mean_delta": 0.0002,
+        "winsor_delta": 0.0002,
+        "sign_perm_p": 0.5,
+        "lcb_score": 0.0001,
+    }
+    pr_real = {
+        "wins": 5,
+        "losses": 2,
+        "mean_delta": 0.25,
+        "winsor_delta": 0.22,
+        "sign_perm_p": 0.18,
+        "lcb_score": -0.05,
+    }
+    assert _meets_select_admission_floor(pr_noop, has_base=True) is False
+    assert _meets_select_admission_floor(pr_real, has_base=True) is True
+    assert _selection_rank_key({"ast_nodes": 50}, pr_real) > _selection_rank_key(
+        {"ast_nodes": 50}, pr_noop
+    )
+
+    # 2. Paired McNemar horizon-waste tolerates 1-seed noise, rejects 6-seed worsening
+    ok_noise, _ = _passes_safety_invariants(
+        {
+            "policy_exceptions": 0,
+            "auto_esc_total": 0,
+            "horizon_waste_rate": 0.10,
+            "cvar25_prog": 2.0,
+            "run_count": 32,
+        },
+        {
+            "policy_exceptions": 0,
+            "auto_esc_total": 0,
+            "horizon_waste_rate": 0.06,
+            "cvar25_prog": 2.0,
+            "run_count": 32,
+        },
+        has_base=True,
+        pair_stats={
+            "hw_worsened": 1,
+            "hw_improved": 0,
+            "hw_mcnemar_p": 0.5,
+            "paired_cvar25_delta": 0.0,
+            "paired_cvar25_se": 0.1,
+        },
+        stage="select",
+    )
+    assert ok_noise is True
+    bad_hw, bad_reason = _passes_safety_invariants(
+        {
+            "policy_exceptions": 0,
+            "auto_esc_total": 0,
+            "horizon_waste_rate": 0.25,
+            "cvar25_prog": 2.0,
+            "run_count": 32,
+        },
+        {
+            "policy_exceptions": 0,
+            "auto_esc_total": 0,
+            "horizon_waste_rate": 0.05,
+            "cvar25_prog": 2.0,
+            "run_count": 32,
+        },
+        has_base=True,
+        pair_stats={
+            "hw_worsened": 6,
+            "hw_improved": 0,
+            "hw_mcnemar_p": 0.0156,
+            "paired_cvar25_delta": 0.0,
+            "paired_cvar25_se": 0.1,
+        },
+        stage="select",
+    )
+    assert bad_hw is False and bad_reason == "horizon_waste_regression"
+
+    # 3. Triggered Sparse-Surgical Stage-3b Extension (max N=128) rescues clean 3W/0L -> 7W/0L across 128 seeds
+    base_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.WAIT\n"
+    cand_pol = base_pol.replace("Action.WAIT", "Action.SEARCH")
+
+    class _SparseSurgicalPool:
+        benchmark = "nethack"
+
+        def __init__(self):
+            self.seen_obf = False
+
+        def evaluate_batch(self, batch_id, priority_seeds=None, **kwargs):
+            s_list = list(priority_seeds or [])
+            is_cand = "proactive_1" in str(batch_id)
+            is_obf = "obf_" in str(batch_id)
+            if is_obf:
+                self.seen_obf = True
+            runs = []
+            for idx, sd in enumerate(s_list):
+                if is_cand:
+                    # S_select (32): 3W/0L; S_confirm Look 1 (64): 3W/0L (p=0.125 -> triggers sparse extension!);
+                    # Stage-3b (+64): 4W/0L -> pooled 7W/0L (p=0.0078 < 0.032 -> PROMOTED!)
+                    win_k = 4 if is_obf else 3
+                    d = 5 if idx < win_k else 3
+                    sc = 1100 if idx < win_k else 500
+                else:
+                    d, sc = 3, 500
+                runs.append(
+                    {
+                        "run_id": f"{batch_id}_{sd}",
+                        "seed": sd,
+                        "depth": d,
+                        "max_depth": d,
+                        "score": sc,
+                        "turns": 1000,
+                        "end_reason": "killed",
+                    }
+                )
+            return {"batch_id": batch_id, "runs": runs}
+
+    sp_pool = _SparseSurgicalPool()
+    c_p1 = PeerCandidate(
+        peer_id="proactive_1",
+        claimed_deficit_id="proactive_expert_capability",
+        claimed_label="surgical_capability",
+        policy_code=cand_pol,
+        skills={},
+        sandbox_passed=True,
+        loc_total=4,
+        track="proactive_capability",
+    )
+    v_ext = SwarmReferee().evaluate_tournament(
+        generation=80,
+        candidates=[c_p1],
+        base_policy=base_pol,
+        base_skills={},
+        eval_pool=sp_pool,
+        select_seeds=list(range(1000, 1032)),
+        seeds=list(range(2000, 2064)),
+    )
+    assert sp_pool.seen_obf is True
+    assert v_ext.promoted is True, v_ext.reason
+    assert len(v_ext.winner_batch_eval["runs"]) == 128
+    # Winner avg_depth synchronized with 128-seed pooled eval: (7*5 + 121*3)/128 = 3.109375
+    assert abs(v_ext.winner_avg_depth - (7 * 5 + 121 * 3) / 128.0) < 1e-3
+
+    # 4. select_qualifying_stepping_stone prioritizes clean confirm_challenger & excludes proactive_2
+    c_p2 = PeerCandidate(
+        peer_id="proactive_2",
+        claimed_deficit_id="pb",
+        claimed_label="pb",
+        policy_code=cand_pol,
+        skills={},
+        track="proactive_branch",
+    )
+    c_conf = PeerCandidate(
+        peer_id="reactive_1",
+        claimed_deficit_id="d1",
+        claimed_label="d1",
+        policy_code=cand_pol,
+        skills={},
+        track="reactive",
+    )
+    c_guard = PeerCandidate(
+        peer_id="reactive_2",
+        claimed_deficit_id="d2",
+        claimed_label="d2",
+        policy_code=cand_pol,
+        skills={},
+        track="reactive",
+    )
+    picked = select_qualifying_stepping_stone(
+        81,
+        [
+            {
+                "candidate": c_p2,
+                "policy_exceptions": 0,
+                "wins": 10,
+                "losses": 0,
+                "winsor_delta": 0.5,
+                "iqm_delta": 0.5,
+                "wilcoxon_p": 0.001,
+                "sign_perm_p": 0.001,
+                "reject_reason": "below_sign_perm_alpha",
+                "source_run_kind": "confirm_challenger",
+            },
+            {
+                "candidate": c_guard,
+                "policy_exceptions": 0,
+                "wins": 10,
+                "losses": 2,
+                "winsor_delta": 0.4,
+                "iqm_delta": 0.4,
+                "wilcoxon_p": 0.02,
+                "sign_perm_p": 0.02,
+                "reject_reason": "cvar25_tail_regression",
+                "source_run_kind": "select",
+            },
+            {
+                "candidate": c_conf,
+                "policy_exceptions": 0,
+                "wins": 6,
+                "losses": 2,
+                "winsor_delta": 0.18,
+                "iqm_delta": 0.18,
+                "wilcoxon_p": 0.12,
+                "sign_perm_p": 0.09,
+                "reject_reason": "below_sign_perm_alpha",
+                "source_run_kind": "confirm_challenger",
+            },
+        ],
+    )
+    assert picked is not None
+    assert picked["source_peer_id"] == "reactive_1"

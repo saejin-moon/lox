@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 
-from lox.author.swarm_meta import SwarmMetaAgent
+from lox.author.directives import prune_unused_skills
 from lox.db.schema import connect_db
 from lox.env.actions import Action
 from lox.env.harness import NetHackHarness
@@ -75,7 +75,7 @@ goals.register_goal("explore_stub", priority=10, trigger=_trig, step=_step)
     assert normalize_skill_key("skills.goals.explore") == "goals/explore"
     validate_cross_module_contracts(pol2, skills)
     assert run_pyright_on_package(pol2, skills=skills) == []
-    kept = SwarmMetaAgent.prune_unused_skills(pol2, skills)
+    kept = prune_unused_skills(pol2, skills)
     assert "goals/explore" in kept
 
     compiled2 = compile_policy_package(pol2, "", skills=skills)
@@ -188,33 +188,29 @@ def test_ast_modularizer_hysteresis_incremental_and_orchestrator(tmp_path):
     )
 
     monolith = (
-        "from lox.env.actions import Action\n"
-        "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n\n"
+        "from lox.env.actions import Action\n\n"
         "SHARED_CONST = 1\n\n"
         "def _shared_ok(state):\n"
         "    return state.hp >= SHARED_CONST\n\n"
-        "def leaf_one(state, bb):\n"
+        "def leaf_one(state):\n"
         "    if not _shared_ok(state):\n"
         "        return Action.WAIT\n"
         "    return None\n\n"
-        "def leaf_two(state, bb):\n"
+        "def leaf_two(state):\n"
         "    if _shared_ok(state) and state.step_count % 2 == 0:\n"
         "        return Action.SEARCH\n"
         "    return None\n\n"
-        "def leaf_three(state, bb):\n"
+        "def leaf_three(state):\n"
         "    return Action.WAIT if _shared_ok(state) else Action.SEARCH\n\n"
-        "def build_tree(bb):\n"
-        "    return PrioritySelector([\n"
-        "        ActionLeaf(leaf_one, name='l1'),\n"
-        "        ActionLeaf(leaf_two, name='l2'),\n"
-        "        ActionLeaf(leaf_three, name='l3'),\n"
-        "    ], name='root')\n\n"
+        "def dispatch_action(state):\n"
+        "    for fn in (leaf_one, leaf_two, leaf_three):\n"
+        "        act = fn(state)\n"
+        "        if act is not None:\n"
+        "            return act\n"
+        "    return Action.WAIT\n\n"
         "class Policy:\n"
-        "    def __init__(self):\n"
-        "        self.blackboard = Blackboard()\n"
-        "        self.tree = BehaviorTree(root=build_tree(self.blackboard), blackboard=self.blackboard)\n"
         "    def step(self, state):\n"
-        "        return self.tree.tick(state) or Action.WAIT\n"
+        "        return dispatch_action(state)\n"
     )
     # 1. Fresh monolith split + bit-identical check
     new_pol, new_skills = modularize_policy_source(monolith, num_modules=2)
@@ -233,34 +229,36 @@ def test_ast_modularizer_hysteresis_incremental_and_orchestrator(tmp_path):
 
     # 3. Incremental split when existing `skills/` + imports are already present
     augmented = new_pol.replace(
-        "def build_tree(bb):",
+        "class Policy:",
         "EXTRA_CONST = 2\n\n"
         "def _extra_helper(state):\n    return state.step_count >= EXTRA_CONST\n\n"
-        "def leaf_four(state, bb):\n    return Action.SEARCH if _extra_helper(state) else None\n\n"
-        "def leaf_five(state, bb):\n    return Action.WAIT if _extra_helper(state) else None\n\n"
-        "def build_tree(bb):",
+        "def leaf_four(state):\n    return Action.SEARCH if _extra_helper(state) else None\n\n"
+        "def leaf_five(state):\n    return Action.WAIT if _extra_helper(state) else None\n\n"
+        "class Policy:",
     ).replace(
-        "ActionLeaf(leaf_three, name='l3'),",
-        "ActionLeaf(leaf_three, name='l3'),\n        ActionLeaf(leaf_four, name='l4'),\n        ActionLeaf(leaf_five, name='l5'),",
+        "return dispatch_action(state)",
+        "return leaf_four(state) or leaf_five(state) or dispatch_action(state)",
     )
     inc_pol, inc_skills = modularize_policy_source(
         augmented, num_modules=2, existing_skills=new_skills
     )
     assert set(new_skills.keys()).issubset(set(inc_skills.keys()))
     assert inc_skills["shared"] == new_skills["shared"]
-    assert len(inc_skills) > len(new_skills)
+    assert any("leaf_four" in v for v in inc_skills.values())
+    assert any("leaf_five" in v for v in inc_skills.values())
     verify_bit_identical(
         augmented, new_skills, inc_pol, inc_skills, seeds=[1000, 1001], steps=50
     )
 
-    # 4. SwarmCampaignOrchestrator auto-modularizes a bloated monolith in _run_generation_peer
+    # 4. SwarmCampaignOrchestrator auto-modularizes a bloated monolith in run_generation
     ws_dir = tmp_path / "ws"
     ws_dir.mkdir(parents=True, exist_ok=True)
     padded_helpers = "\n".join(
         f"def _noop_helper_{i}(state):\n    return state.hp > {i}\n" for i in range(135)
     )
     bloated_monolith = monolith.replace(
-        "def build_tree(bb):", f"{padded_helpers}\n\ndef build_tree(bb):"
+        "def dispatch_action(state):",
+        f"{padded_helpers}\n\ndef dispatch_action(state):",
     )
     (ws_dir / "policy.py").write_text(bloated_monolith, encoding="utf-8")
 
@@ -273,7 +271,6 @@ def test_ast_modularizer_hysteresis_incremental_and_orchestrator(tmp_path):
         num_workers=2,
         eval_workers=2,
         seeds_per_batch=2,
-        swarm_architecture="peer",
     )
     try:
         res = orch.run_generation(1)

@@ -84,7 +84,17 @@ pub fn fast_bfs_distance_grid<'py>(
         let sx_u = sx as usize;
         let passable_slice = passable.as_slice()?;
         let no_diag_slice = match &no_diag {
-            Some(nd) => Some(nd.as_slice()?),
+            Some(nd) => {
+                if nd.shape() != [h, w] {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "no_diag shape {:?} does not match passable shape [{}, {}]",
+                        nd.shape(),
+                        h,
+                        w
+                    )));
+                }
+                Some(nd.as_slice()?)
+            }
             None => None,
         };
 
@@ -251,7 +261,17 @@ pub fn fast_astar_next_step(
 
     let passable_slice = passable.as_slice()?;
     let no_diag_slice = match &no_diag {
-        Some(nd) => Some(nd.as_slice()?),
+        Some(nd) => {
+            if nd.shape() != [h, w] {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "no_diag shape {:?} does not match passable shape [{}, {}]",
+                    nd.shape(),
+                    h,
+                    w
+                )));
+            }
+            Some(nd.as_slice()?)
+        }
         None => None,
     };
 

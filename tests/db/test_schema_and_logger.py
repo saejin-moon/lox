@@ -16,7 +16,6 @@ from lox.lang.compiler import compile_policy_package
 
 def test_duckdb_logger_and_author_tools(tmp_path):
     db_file = str(tmp_path / "test_lox.duckdb")
-    macros_file = str(tmp_path / "macros.py")
     con = init_db(db_file)
     con.close()
 
@@ -102,7 +101,7 @@ def test_duckdb_logger_and_author_tools(tmp_path):
     )
 
     # Test AuthorToolRegistry tools
-    tools = AuthorToolRegistry(db_path=db_file, macros_path=macros_file)
+    tools = AuthorToolRegistry(db_path=db_file)
 
     # 1. query_db on runs (outlier good runs) and expert_runs
     out_good, _ = tools.query_db(
@@ -118,7 +117,7 @@ def test_duckdb_logger_and_author_tools(tmp_path):
     # Read-only guardrail blocks DROP/DELETE
     blocked, status = tools.query_db("DROP TABLE runs")
     assert status == "error"
-    assert "forbidden" in blocked.lower()
+    assert "only read-only" in blocked.lower() or "forbidden" in blocked.lower()
 
     # 2. query_wiki
     wiki_res, _ = tools.query_wiki("Excalibur fountain dip")
@@ -406,7 +405,6 @@ def test_gen0_logging_and_campaign_on_migrated_schema(tmp_path):
 
     from lox.db.logger import BatchDatabaseLogger
     from lox.db.schema import connect_db, init_db
-    from lox.engine.orchestrator import CampaignOrchestrator
 
     db_file = str(tmp_path / "migrated_test.duckdb")
     if Path("data/lox.duckdb").exists():
@@ -462,35 +460,6 @@ def test_gen0_logging_and_campaign_on_migrated_schema(tmp_path):
     assert abs(b_row[2] - 0.45) < 1e-6
     assert b_row[3] is not None
     con.close()
-
-    # 2. Now run an end-to-end Generation 0 Campaign on this DB
-    pol_file = str(tmp_path / "policy.py")
-    orch = CampaignOrchestrator(
-        provider="mock",
-        model="mock-model",
-        db_path=db_file,
-        policy_path=pol_file,
-        workers=2,
-        max_steps=30,
-        full_write_episodes=4,
-    )
-    try:
-        res = orch.run_campaign(
-            max_generations=1, forced_mode="FULL_WRITE", seed_base=123
-        )
-        assert res["active_policy_code"] != ""
-        con = connect_db(db_file, read_only=True)
-        gen0_batches = con.execute(
-            "SELECT COUNT(*) FROM batches WHERE generation=0"
-        ).fetchone()[0]
-        gen0_exps = con.execute(
-            "SELECT COUNT(*) FROM experiments WHERE generation=0"
-        ).fetchone()[0]
-        assert gen0_batches >= 1
-        assert gen0_exps >= 1
-        con.close()
-    finally:
-        orch.pool.close()
 
 
 def test_concurrent_scoped_modules_and_threadsafe_db_writes(tmp_path):
@@ -843,3 +812,64 @@ def test_unified_runs_ticks_concurrency_and_stepping_stones(tmp_path):
     assert loaded2 is not None and loaded2["revision_count"] == 1
     logger.increment_stepping_stone_revision("stone_g2_peer_2", max_revisions=2)
     assert logger.load_active_stepping_stone("fp_abc", max_revisions=2) is None
+
+    # v3 proactive_branches CRUD & tournament_attempts (winsor_delta, sign_perm_p)
+    logger.save_proactive_branch(
+        {
+            "branch_id": "pbranch_g10_fp1",
+            "base_champion_fp": "fp_abc",
+            "generation_started": 10,
+            "last_generation": 10,
+            "steps_taken": 1,
+            "max_steps": 4,
+            "status": "active",
+            "policy_code": "class Policy:\n    pass\n",
+            "skills": {"goals/prep": "def prep(s, ws): return None\n"},
+            "goal_summary": "Proactive inventory & altar preparation",
+            "capabilities_added": ["altar_identification"],
+            "last_avg_depth": 4.2,
+            "last_winsor_delta": 0.12,
+        }
+    )
+    br = logger.load_active_proactive_branch("fp_abc")
+    assert br is not None
+    assert br["branch_id"] == "pbranch_g10_fp1"
+    assert br["steps_taken"] == 1
+    assert br["capabilities_added"] == ["altar_identification"]
+    assert "goals/prep" in br["skills"]
+
+    logger.retire_proactive_branches_for_champion("fp_abc", new_status="superseded")
+    assert logger.load_active_proactive_branch("fp_abc") is None
+
+    logger.save_tournament_attempts(
+        [
+            {
+                "attempt_id": "att_v3_1",
+                "generation": 10,
+                "peer_id": "proactive_1",
+                "deficit_id": "proactive_expert_capability",
+                "promoted": True,
+                "sandbox_passed": True,
+                "avg_depth": 4.5,
+                "max_depth": 8,
+                "avg_ac": 3.0,
+                "policy_exceptions": 0,
+                "reject_reason": "promoted",
+                "wins": 9,
+                "losses": 1,
+                "iqm_delta": 0.35,
+                "winsor_delta": 0.31,
+                "sign_perm_p": 0.0042,
+            }
+        ]
+    )
+    con_v3 = connect_db(logger.db_path, read_only=True)
+    try:
+        r_att = con_v3.execute(
+            "SELECT winsor_delta, sign_perm_p FROM tournament_attempts WHERE attempt_id='att_v3_1'"
+        ).fetchone()
+        assert r_att is not None
+        assert abs(float(r_att[0]) - 0.31) < 1e-6
+        assert abs(float(r_att[1]) - 0.0042) < 1e-6
+    finally:
+        con_v3.close()

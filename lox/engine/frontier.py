@@ -8,6 +8,7 @@ so candidate policies can be tested on mid-game tactical situations without grin
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import random
@@ -19,6 +20,7 @@ from typing import Any
 
 from lox.env.harness import NetHackHarness
 
+_LOG = logging.getLogger(__name__)
 DEFAULT_FRONTIER_DIR = "data/frontier"
 
 
@@ -112,8 +114,8 @@ class FrontierArchive:
                         )
                         bytes_tmp.write_bytes(cp.action_bytes)
                         os.replace(bytes_tmp, bytes_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOG.warning("Frontier persist warning (%s): %s", cp.checkpoint_id, exc)
 
     def load_checkpoints(self) -> int:
         loaded = 0
@@ -140,10 +142,13 @@ class FrontierArchive:
                         )
                         self.checkpoints[cid] = cp
                         loaded += 1
-                    except Exception:
+                    except Exception as item_exc:
+                        _LOG.warning(
+                            "Skipping corrupt frontier checkpoint %s: %s", cid, item_exc
+                        )
                         continue
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOG.warning("Frontier load_checkpoints warning: %s", exc)
         return loaded
 
     def sample_checkpoint(

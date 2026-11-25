@@ -9,7 +9,6 @@ from lox.db.schema import connect_db, init_db
 from lox.engine.frontier import FrontierArchive
 from lox.engine.hypothesis import progression_metric
 from lox.engine.map_elites import MAPElitesArchive
-from lox.engine.orchestrator import CampaignOrchestrator, PolicyArchiveEntry
 
 
 # ---------------------------------------------------------------------------
@@ -176,54 +175,6 @@ def test_frontier_bootstrapping_and_checkpoints(tmp_path):
         max_checkpoints_per_depth=2,
     )
     assert count == 2
-
-
-def test_map_elites_archive_and_failed_pilot_logging(tmp_path):
-    db_path = str(tmp_path / "archive.duckdb")
-    init_db(db_path)
-
-    orch = CampaignOrchestrator(
-        provider="mock",
-        db_path=db_path,
-        policy_path=str(tmp_path / "policy.py"),
-        macros_path=str(tmp_path / "macros.py"),
-        workers=1,
-    )
-
-    # Initial empty archive
-    assert len(orch.policy_archive) == 0
-
-    # Add entries across niches
-    orch.policy_archive["descent"] = PolicyArchiveEntry(
-        policy_id="pol_1",
-        policy_code="class Policy: pass",
-        niche="descent",
-        avg_depth=2.5,
-        p90_depth=3.0,
-        max_depth=4,
-        avg_ac=5.0,
-        avg_xl=2.0,
-        baseline_runs=[],
-    )
-    orch.policy_archive["survivability"] = PolicyArchiveEntry(
-        policy_id="pol_2",
-        policy_code="class Policy: pass",
-        niche="survivability",
-        avg_depth=1.8,
-        p90_depth=2.0,
-        max_depth=3,
-        avg_ac=-2.0,
-        avg_xl=4.0,
-        baseline_runs=[],
-    )
-
-    assert len(orch.policy_archive) == 2
-    assert orch.policy_archive["descent"].avg_depth == 2.5
-    assert orch.policy_archive["survivability"].avg_ac == -2.0
-
-    # Verify recent experiments limit
-    md = orch.get_recent_experiments_markdown(limit=10)
-    assert isinstance(md, str)
 
 
 def test_map_elites_v2_calibration_deficits_confinement_and_private_symbols(tmp_path):

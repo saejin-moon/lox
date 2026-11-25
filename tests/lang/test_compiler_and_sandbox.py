@@ -167,103 +167,6 @@ def run(self, state):
     assert changed_fns == ["pray_when_weak"]
 
 
-def test_phase2_memory_sequence_coroutines_halting_and_floor_scoping():
-    from types import SimpleNamespace
-
-    from lox.lang.bt import (
-        ActionLeaf,
-        Blackboard,
-        MemorySequence,
-        NodeStatus,
-        PrioritySelector,
-        bt_leaf,
-    )
-    from lox.lang.validator import PolicyValidationError
-
-    bb = Blackboard()
-    closed = []
-
-    def multi_step_gen(state, b):
-        try:
-            s1 = yield Action.EAST
-            yield (NodeStatus.SUCCESS, Action.SOUTH if s1 is not None else Action.WAIT)
-        finally:
-            closed.append(True)
-
-    leaf_gen = ActionLeaf(multi_step_gen, name="coro_leaf")
-    seq_node = MemorySequence(
-        [leaf_gen, ActionLeaf(lambda s: Action.NORTH, name="done_leaf")]
-    )
-    sel = PrioritySelector(
-        [
-            ActionLeaf(
-                lambda s, b: Action.WAIT if b.get_var("urgent") else None, name="urgent"
-            ),
-            seq_node,
-        ]
-    )
-
-    st_f1 = SimpleNamespace(dungeon_num=0, level_num=1)
-    st_f2 = SimpleNamespace(dungeon_num=0, level_num=2)
-    bb.floor_set(st_f1, "shops", [(5, 5)])
-    assert bb.floor_get(st_f1, "shops") == [(5, 5)]
-    assert bb.floor_get(st_f2, "shops", []) == []
-
-    # Step 1: coroutine runs step 1 -> RUNNING
-    status0, act0 = sel.tick(st_f1, bb)
-    assert status0 == NodeStatus.RUNNING and act0 == Action.EAST
-    assert id(seq_node) in bb._seq_indices
-
-    # Step 2: urgent branch preempts -> halts MemorySequence and closes generator
-    bb.set_var("urgent", True)
-    status1, act1 = sel.tick(st_f1, bb)
-    assert status1 == NodeStatus.SUCCESS and act1 == Action.WAIT
-    assert closed == [True]
-    assert id(seq_node) not in bb._seq_indices
-
-    # Step 3: resume from scratch when urgent clears, complete coroutine then next child
-    bb.set_var("urgent", False)
-    _, act2 = sel.tick(st_f1, bb)
-    assert act2 == Action.EAST
-    status3, act3 = sel.tick(st_f1, bb)
-    assert status3 == NodeStatus.SUCCESS and act3 == Action.NORTH
-
-    # Floor-scoped update + traceback recording
-    cnt = bb.floor_update(st_f2, "visits", lambda v: (v or 0) + 1)
-    assert cnt == 1
-    try:
-        raise ValueError("boom")
-    except ValueError as exc:
-        bb.record_leaf_error("bad_leaf", exc)
-    assert "test_phase2_memory_sequence" in bb.leaf_errors[-1][1]
-    assert "ValueError: boom" in bb.leaf_errors[-1][1]
-
-    # @bt_leaf + PrioritySelector.from_modules + circular check
-    class Mod:
-        @bt_leaf(priority=10)
-        def low_hi(st):
-            return Action.WAIT
-
-        @bt_leaf(priority=1, before="low_hi")
-        def first(st):
-            return Action.SEARCH
-
-    built = PrioritySelector.from_modules(Mod)
-    assert [c.name for c in built.children] == ["first", "low_hi"]
-
-    class BadMod:
-        @bt_leaf(before="b")
-        def a(st):
-            return None
-
-        @bt_leaf(before="a")
-        def b(st):
-            return None
-
-    with pytest.raises(PolicyValidationError):
-        PrioritySelector.from_modules(BadMod)
-
-
 def test_subgenerator_skills_and_emergency_interrupt():
     code = """
 class Policy:
@@ -296,3 +199,66 @@ class Policy:
     assert act1 is not None
     assert act2 is not None
     assert act3 is not None
+
+
+def test_v3_tracer_primitive_fastpath_and_leaf_subfunction_attribution():
+    """Verifies Component 1 & 5: ExecutionTracer unmasks `explore._open_adjacent_door` while ignoring non-action helpers and preserving Action IntEnum fast-path."""
+    from lox.lang.compiler import compile_policy_package
+    from lox.lang.starter import build_clean_option_a_starter
+
+    pol, skills = build_clean_option_a_starter()
+    skills["goals/explore"] = '''"""Explore goal calling a leaf action helper."""
+from lox.env.actions import Action
+import skills.goals.core as goals
+
+
+def _is_blocked(y, x):
+    return (y + x) < 0
+
+
+def _open_adjacent_door(state):
+    if _is_blocked(state.y, state.x):
+        return None
+    return Action.SEARCH
+
+
+def _explore_step(state, ws):
+    _ = ws.floor(state)
+    return _open_adjacent_door(state)
+
+
+goals.register_goal("explore", priority=10, trigger=lambda s, w: True, step=_explore_step)
+'''
+    pol2 = "import skills.goals.explore  # noqa: F401\n" + pol
+    compiled = compile_policy_package(pol2, "", skills=skills)
+    runner = compiled.create_runner()
+    h = NetHackHarness(max_steps=10)
+    try:
+        st = h.reset(seed=42)
+        act, fn = runner.next_action(st)
+        assert act == Action.SEARCH
+        # Unmasks sub-function under goal wrapper instead of opaque `explore` or `ws.floor`!
+        assert fn == "explore._open_adjacent_door", fn
+        assert runner.tracer.fn_calls.get("_is_blocked", 0) >= 1
+        assert runner.tracer.fn_calls.get("explore._open_adjacent_door", 0) >= 1
+        # Verify compute_function_stats retains the unmasked sub-function for DuckDB `function_stats`
+        from lox.db.summarizer import compute_function_stats
+
+        fstats = compute_function_stats(
+            "b_test",
+            1,
+            [
+                {
+                    "triggered_functions": dict(runner.tracer.fn_calls),
+                    "fn_turns": dict(runner.tracer.fn_turns),
+                    "max_depth": 2,
+                    "is_outlier_good": True,
+                    "end_reason": "killed",
+                }
+            ],
+        )
+        fn_map = {row["function_name"]: row for row in fstats}
+        assert "explore._open_adjacent_door" in fn_map
+        assert fn_map["explore._open_adjacent_door"]["total_turns_active"] >= 1
+    finally:
+        h.close()

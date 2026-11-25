@@ -8,8 +8,6 @@ from lox.author.agent import AuthorAgent, SynthesisProposal
 from lox.author.prompts import build_user_prompt
 from lox.author.swarm_deficits import DeficitCluster
 from lox.author.tools import AuthorToolRegistry
-from lox.db.schema import init_db
-from lox.runner.pool import PersistentEvalPool
 
 
 def test_author_yaml_and_code_extraction():
@@ -46,319 +44,6 @@ def flee_corridor(self, state):
     assert "def flee_corridor" in code
 
 
-def test_author_agent_auto_pilot_dispatch(tmp_path, monkeypatch):
-
-    db_path = str(tmp_path / "test_ap.duckdb")
-    con = init_db(db_path)
-    con.close()
-
-    pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=20)
-    try:
-        agent = AuthorAgent(provider="openrouter", db_path=db_path)
-        baseline_runs = [
-            {"seed": 10, "max_depth": 0, "score": 0},
-            {"seed": 11, "max_depth": 0, "score": 0},
-        ]
-
-        turn_count = 0
-
-        def mock_call_llm_api(messages, allow_tools=True):
-            nonlocal turn_count
-            turn_count += 1
-            if turn_count == 1:
-                # LLM outputs YAML + code directly without calling dry_run_policy
-                return {
-                    "role": "assistant",
-                    "content": """```yaml
-mode: FUNC_MOD_ADD
-target_functions: [run]
-observation_from_db: "Baseline exploration"
-mechanism: "Wait actions"
-```
-
-```python
-class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.WAIT
-```""",
-                    "tool_calls": [],
-                }
-            else:
-                # LLM responds after pilot feedback
-                return {
-                    "role": "assistant",
-                    "content": """```yaml
-mode: FUNC_MOD_ADD
-target_functions: [run]
-observation_from_db: "Revised exploration"
-mechanism: "Wait and search"
-```
-
-```python
-class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.SEARCH
-```""",
-                    "tool_calls": [],
-                }
-
-        monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm_api)
-
-        proposal = agent.synthesize(
-            mode="FUNC_MOD_ADD",
-            generation=2,
-            current_policy="class Policy:\n    def run(self, state):\n        state = yield Action.WAIT",
-            pool=pool,
-            baseline_runs=baseline_runs,
-            max_pilot_runs=3,
-            pilot_episodes=2,
-            max_tool_turns=4,
-        )
-
-        # Auto-pilot should have automatically executed the candidate code
-        assert agent.tools.pilot_runs_used >= 1
-        assert "class Policy" in proposal.full_policy_code
-    finally:
-        pool.close()
-
-
-def test_scientific_investigation_protocol_and_failure_hints(tmp_path, monkeypatch):
-    from lox.author.prompts import build_user_prompt
-
-    # 1. Prompt check: FUNC_MOD_ADD mandates empirical research on Turn 1
-    prompt = build_user_prompt(
-        mode="FUNC_MOD_ADD",
-        generation=2,
-        current_policy="class Policy:\n    pass\n",
-        macros_docs="",
-        batch_digest="Sample digest",
-    )
-    assert "MANDATORY Empirical Research (Turn 1)" in prompt
-    assert "DO NOT OUTPUT CODE ON TURN 1" in prompt
-    assert "query_wiki" in prompt
-    assert "query_db" in prompt
-
-    # 2. Pilot failure report includes diagnostic research recommendations
-    pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=10)
-    try:
-        tools = AuthorToolRegistry(db_path=str(tmp_path / "diag.duckdb"))
-        # Baseline with higher depth so candidate policy fails
-        baseline_runs = [
-            {"seed": 100, "max_depth": 5, "score": 500},
-            {"seed": 101, "max_depth": 5, "score": 500},
-        ]
-        tools.configure_generation(
-            pool=pool,
-            baseline_runs=baseline_runs,
-            max_pilot_runs=2,
-            pilot_episodes=2,
-        )
-
-        failing_code = """class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.WAIT
-"""
-        msg, status = tools.dry_run_policy(failing_code)
-        assert status.startswith("PILOT_FAILED")
-        assert "PILOT BATCH" in msg
-        assert "End Reasons:" in msg
-        assert "MANDATORY INVESTIGATION PROTOCOL" not in msg
-        assert tools.last_pilot_improved is False
-
-        # 3. Agent synthesize sends scientific investigation guidance on pilot failure
-        agent = AuthorAgent(
-            provider="openrouter",
-            db_path=str(tmp_path / "diag.duckdb"),
-            pilot_fallback="abort",
-        )
-        received_messages = []
-
-        def mock_call_llm(messages, allow_tools=True):
-            received_messages.extend(messages)
-            if len(received_messages) <= 3:
-                # Turn 1: LLM emits code that fails
-                return {
-                    "role": "assistant",
-                    "content": f"```yaml\nmode: FUNC_MOD_ADD\ntarget_functions: [run]\nobservation_from_db: 'test'\nmechanism: 'test'\n```\n```python\n{failing_code}```",
-                    "tool_calls": [],
-                }
-            else:
-                # Turn 2: LLM receives failure guidance
-                return {
-                    "role": "assistant",
-                    "content": f"```yaml\nmode: FUNC_MOD_ADD\ntarget_functions: [run]\nobservation_from_db: 'fixed'\nmechanism: 'fixed'\n```\n```python\n{failing_code}```",
-                    "tool_calls": [],
-                }
-
-        monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm)
-        proposal = agent.synthesize(
-            mode="FUNC_MOD_ADD",
-            generation=2,
-            current_policy=failing_code,
-            pool=pool,
-            baseline_runs=baseline_runs,
-            max_pilot_runs=2,
-            pilot_episodes=2,
-        )
-        assert proposal.aborted is True
-        assert "PILOT_GATE_ABORT" in proposal.abort_reason
-
-        user_msgs = [m["content"] for m in received_messages if m.get("role") == "user"]
-        failure_guidance = [m for m in user_msgs if "🛑 PILOT REVISION FAILED" in m]
-        assert len(failure_guidance) > 0, (
-            "Agent must send scientific investigation guidance on pilot failure"
-        )
-        assert "DO NOT BLINDLY GUESS CODE EDITS!" in failure_guidance[0]
-        assert "query_wiki" in failure_guidance[0]
-        assert "query_db" in failure_guidance[0]
-    finally:
-        pool.close()
-
-
-def test_pass4_system_prompt_restructuring_and_turn1_gating(tmp_path, monkeypatch):
-    """
-    Pass 4 Verification:
-    1. System prompt contains Empirical Differential Diagnostics with expert_ticks queries,
-       Pre-Submission Invariant Checklist, and pruned action working set routing to query_policy_docs("actions").
-    2. User prompt enforces Binding Constraint rule and Causal Hypothesis schema across modes.
-    3. extract_yaml_and_python enforces Causal Hypothesis schema fields.
-    4. AuthorAgent.synthesize intercepts Turn-1 code generation when zero tools were called
-       and enforces Phase 1 research without executing auto-pilot.
-    """
-    from lox.author.agent import AuthorAgent
-    from lox.author.prompts import build_system_prompt, build_user_prompt
-
-    # 1. System Prompt Verification
-    sys_prompt = build_system_prompt(str(tmp_path / "test.duckdb"))
-    assert "Empirical Differential Diagnostics" in sys_prompt
-    assert "expert_ticks" in sys_prompt
-    assert "champion_runs" in sys_prompt
-    assert "SELECT 'champion_failures' AS source" in sys_prompt
-    assert "Pre-Submission Invariant Checklist" in sys_prompt
-    assert "Generator Invariant" in sys_prompt
-    assert "Passability" in sys_prompt
-    assert 'query_policy_docs("actions")' in sys_prompt
-
-    # Verify query_policy_docs("actions") tool route
-    tools = AuthorToolRegistry(db_path=str(tmp_path / "test.duckdb"))
-    action_docs, summary = tools.query_policy_docs("actions")
-    assert "Action.SEARCH" in action_docs
-    assert "Action.KICK" in action_docs
-    assert "Action.PRAY" in action_docs
-    assert summary == "action docs"
-
-    # 2. User Prompt Verification across modes
-    for mode in ("FUNC_MOD_ADD", "STRUCTURAL_REFACTOR", "FULL_WRITE"):
-        user_prompt = build_user_prompt(
-            mode=mode,
-            generation=1,
-            current_policy="class Policy:\n    def run(self, state):\n        state = yield Action.WAIT\n",
-            macros_docs="",
-            batch_digest="Batch summary: 75% died to starvation.",
-        )
-        assert (
-            "The Binding Constraint Rule" in user_prompt
-            or "binding_constraint" in user_prompt
-        )
-        assert "binding_constraint:" in user_prompt
-        assert "verified_c_rule:" in user_prompt
-        assert "state_persistence:" in user_prompt
-        assert "mechanism:" in user_prompt
-        assert "target_functions:" in user_prompt
-
-    # 3. Hypothesis Extraction Schema Enforcement
-    sample_llm_output = """
-```yaml
-mode: FUNC_MOD_ADD
-target_functions: [explore_step]
-observation_from_db: "70% died from wall stalling"
-mechanism: "Check get_passable_mask"
-```
-```python
-def explore_step(self, state):
-    state = yield Action.SEARCH
-    return state
-```
-"""
-    hyp, code = AuthorAgent.extract_yaml_and_python(sample_llm_output)
-    assert hyp["target_functions"] == ["explore_step"]
-    assert hyp["binding_constraint"] == "70% died from wall stalling"
-    assert "verified_c_rule" in hyp
-    assert hyp["mechanism"] == "Check get_passable_mask"
-    assert "state_persistence" in hyp
-    assert "def explore_step" in code
-
-    # 4. Turn-1 Mandatory Investigation Gating in AuthorAgent.synthesize
-    agent = AuthorAgent(provider="openrouter", db_path=str(tmp_path / "test.duckdb"))
-    turn_counter = 0
-    received_user_prompts = []
-
-    def mock_call_llm_turn1_gate(messages, allow_tools=True):
-        nonlocal turn_counter
-        turn_counter += 1
-        for m in messages:
-            if m.get("role") == "user":
-                received_user_prompts.append(m.get("content", ""))
-
-        if turn_counter == 1:
-            # Emits code immediately on Turn 1 without calling query_db or query_wiki
-            return {
-                "role": "assistant",
-                "content": """```yaml
-mode: FUNC_MOD_ADD
-target_functions: [run]
-binding_constraint: "Stalling"
-verified_c_rule: "C door rule"
-mechanism: "Kick doors"
-state_persistence: "self.tried"
-```
-```python
-class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.WAIT
-```""",
-                "tool_calls": [],
-            }
-        else:
-            # Turn 2: returns a response after gating
-            return {
-                "role": "assistant",
-                "content": """```yaml
-mode: FUNC_MOD_ADD
-target_functions: [run]
-binding_constraint: "Stalling"
-verified_c_rule: "C door rule"
-mechanism: "Kick doors"
-state_persistence: "self.tried"
-```
-```python
-class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.SEARCH
-```""",
-                "tool_calls": [],
-            }
-
-    monkeypatch.setattr(agent, "_call_llm_api", mock_call_llm_turn1_gate)
-
-    proposal = agent.synthesize(
-        mode="FUNC_MOD_ADD",
-        generation=1,
-        current_policy="class Policy:\n    def run(self, state):\n        state = yield Action.WAIT\n",
-        max_tool_turns=3,
-    )
-
-    # Verify that Turn 1 Phase 1 enforcement intercepted Turn 1 and auto-pilot was blocked on Turn 1
-    assert any("🛑 PHASE 1 ENFORCEMENT" in p for p in received_user_prompts)
-    assert turn_counter >= 2
-    assert "class Policy" in proposal.full_policy_code
-
-
 def test_in_turn_repair_caret_and_prompts():
     """Verify that format_code_with_line_numbers formats caret pointers and build_repair_prompt provides category guidance."""
     from lox.author.agent import AuthorAgent
@@ -373,23 +58,23 @@ def test_in_turn_repair_caret_and_prompts():
     unreach_p = agent.build_repair_prompt(
         status="UNREACHABLE_ERROR",
         diag="Method ['stealth_step'] was never called by run",
-        mode="FUNC_MOD_ADD",
+        mode="SWARM_PEER",
         repair_idx=1,
         max_repair_turns=5,
     )
-    assert "UNREACHABLE METHOD IN POLICY" in unreach_p
-    assert "The updated caller method" in unreach_p
-    assert "def run(self, state):" in unreach_p
+    assert "stealth_step" in unreach_p
+    assert "SWARM PEER PATCH FAILED VERIFICATION" in unreach_p
+    assert "<skill_code" in unreach_p
 
     syntax_p = agent.build_repair_prompt(
         status="COMPILE_ERROR",
         diag="SyntaxError: invalid syntax",
-        mode="FUNC_MOD_ADD",
+        mode="WRITE",
         repair_idx=1,
         max_repair_turns=5,
     )
     assert "PYTHON SYNTAX OR INDENTATION ERROR" in syntax_p
-    assert "4 spaces per indentation level" in syntax_p
+    assert "<skill_code>" in syntax_p
 
 
 def test_agent_64k_max_tokens_and_wait_dominant_rejection():
@@ -427,16 +112,15 @@ def test_agent_64k_max_tokens_and_wait_dominant_rejection():
 def test_context_scoped_user_prompt_includes_skill_registry():
     combat_code = "def attack(state):\n    '''Attacks monster.'''\n    pass\n"
     prompt = build_user_prompt(
-        mode="FUNC_MOD_ADD",
+        mode="SWARM_PEER",
         generation=1,
         current_policy="class Policy: pass",
-        macros_docs="### Macros: None",
         skills={"combat": combat_code},
     )
 
-    assert "Hierarchical Skill Registry" in prompt
-    assert "# Module: combat" in prompt
-    assert "def attack(state):" in prompt
+    assert "Domain Skill Tree" in prompt
+    assert "skills/combat.py" in prompt
+    assert "attack" in prompt
     assert "read_skill" in prompt
 
 
@@ -504,12 +188,12 @@ def test_gen41_xml_bundle_and_partial_skill_patch_preservation(tmp_path):
         "from lox.env.actions import Action\n\n"
         "def _delta_of(a, b):\n"
         "    return (b[0] - a[0], b[1] - a[1])\n\n"
-        "def choose_move(state, bb):\n"
+        "def choose_move(state):\n"
         "    return Action.WAIT\n"
     )
     partial_patch = (
         "# PATCH\n"
-        "def choose_move(state, bb):\n"
+        "def choose_move(state):\n"
         "    dx, dy = _delta_of((0, 0), (1, 0))\n"
         "    return Action.SEARCH if dx == 1 and dy == 0 else Action.WAIT\n"
     )
@@ -520,17 +204,13 @@ def test_gen41_xml_bundle_and_partial_skill_patch_preservation(tmp_path):
     # 3. dry_run_policy unpacks XML bundle (<skill_code> + <policy_code>) and keeps _delta_of
     base_policy = (
         "from lox.env.actions import Action\n"
-        "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n"
         "from skills.shared import _delta_of, choose_move\n\n"
-        "def build_tree(bb):\n"
-        "    return PrioritySelector([ActionLeaf(choose_move, name='mv')], name='root')\n\n"
+        "def dispatch_move(state):\n"
+        "    return choose_move(state)\n\n"
         "class Policy:\n"
-        "    def __init__(self):\n"
-        "        self.blackboard = Blackboard()\n"
-        "        self.tree = BehaviorTree(root=build_tree(self.blackboard), blackboard=self.blackboard)\n"
         "    def step(self, state):\n"
         "        _ = _delta_of((0, 0), (0, 1))\n"
-        "        return self.tree.tick(state) or Action.WAIT\n"
+        "        return dispatch_move(state) or Action.WAIT\n"
     )
     tools = AuthorToolRegistry(db_path=str(tmp_path / "xml.duckdb"))
     tools.configure_generation(
@@ -543,7 +223,7 @@ def test_gen41_xml_bundle_and_partial_skill_patch_preservation(tmp_path):
     xml_skill_only = (
         '<skill_code module="shared">\n'
         "# PATCH: update choose_move without deleting _delta_of\n"
-        "def choose_move(state, bb):\n"
+        "def choose_move(state):\n"
         "    dx, _ = _delta_of((0, 0), (1, 0))\n"
         "    return Action.SEARCH if dx == 1 else Action.WAIT\n"
         "</skill_code>\n"
@@ -560,12 +240,13 @@ def test_gen41_xml_bundle_and_partial_skill_patch_preservation(tmp_path):
     # 4. XML bundle with both <skill_code> and <policy_code> splice
     xml_both = (
         '<skill_code module="shared">\n'
-        "def choose_move(state, bb):\n"
+        "def choose_move(state):\n"
         "    return Action.SEARCH\n"
         "</skill_code>\n"
         "<policy_code>\n"
-        "def build_tree(bb):\n"
-        "    return PrioritySelector([ActionLeaf(choose_move, name='mv2')], name='root')\n"
+        "def dispatch_move(state):\n"
+        "    _tag = 'mv2'\n"
+        "    return choose_move(state)\n"
         "</policy_code>\n"
     )
     res_b, sum_b = tools.dry_run_policy(code=xml_both, max_turns=20, smoke_only=True)
@@ -617,19 +298,15 @@ def test_prompt_docs_split_schema_noop_diff_and_map_elites(tmp_path):
     assert "state.in_menu" in sys_swarm
     assert "no_diag=state.mem.door_mask" in sys_swarm
     assert "`experiments`" not in sys_swarm
-    assert 'ActionLeaf(fn, name="...", min_commit=0)' in sys_swarm
+    assert "register_goal" in sys_swarm
 
     base_pol = (
-        "from lox.env.actions import Action\n"
-        "from lox.lang.bt import Blackboard, ActionLeaf, PrioritySelector, BehaviorTree\n\n"
-        "def leaf_wait(state, bb):\n"
+        "from lox.env.actions import Action\n\n"
+        "def leaf_wait(state):\n"
         "    return Action.WAIT\n\n"
         "class Policy:\n"
-        "    def __init__(self):\n"
-        "        self.blackboard = Blackboard()\n"
-        "        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(leaf_wait, name='w')]), blackboard=self.blackboard)\n"
         "    def step(self, state):\n"
-        "        return self.tree.tick(state) or Action.WAIT\n"
+        "        return leaf_wait(state) or Action.WAIT\n"
     )
     tools = AuthorToolRegistry(db_path=str(tmp_path / "noop.duckdb"))
     tools.configure_generation(mode="SWARM_PEER", generation=62, skills={})
@@ -757,3 +434,88 @@ def test_g17_fixes_glm5_medium_reasoning_export_preserve_and_no_nested_resplit()
         verify_steps=10,
     )
     assert ch is False
+
+
+def test_v3_agent_probe_preservation_repair_prompt_and_tool_compaction(tmp_path):
+    """Verifies Component 1 & 4: synthesize preserves peer_probe_seeds, build_repair_prompt uses Option A, and _compact_tool_messages shrinks older tool outputs."""
+    from unittest.mock import patch
+
+    from lox.author.agent import AuthorAgent
+
+    # 1. build_repair_prompt uses Option-A (self.ws / self.goals.tick), not legacy self.tree.tick
+    agent = AuthorAgent(provider="openrouter", db_path=str(tmp_path / "ag.duckdb"))
+    rep_p = agent.build_repair_prompt(
+        status="COMPILE_ERROR",
+        diag="AttributeError: bad attr",
+        mode="SWARM_PEER",
+        repair_idx=1,
+        max_repair_turns=3,
+    )
+    assert "self.tree.tick" not in rep_p
+    assert "self.goals.tick" in rep_p or "self.ws" in rep_p
+
+    # 2. Rolling tool-output compaction keeps last 4 tool turns verbatim and compacts older large tool outputs
+    msgs: list[dict] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u0"},
+    ]
+    for i in range(6):
+        msgs.append({"role": "assistant", "content": f"step {i}"})
+        msgs.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"tc_{i}",
+                "content": f"HDR_{i}_" + ("X" * 1200),
+            }
+        )
+    compacted = AuthorAgent._compact_tool_messages(
+        msgs, keep_recent_turns=4, max_old_chars=600, head_chars=350
+    )
+    tool_msgs = [m for m in compacted if m.get("role") == "tool"]
+    assert len(tool_msgs) == 6
+    assert "compacted earlier" in tool_msgs[0]["content"]
+    assert "compacted earlier" in tool_msgs[1]["content"]
+    assert len(tool_msgs[0]["content"]) < 500
+    # Last 4 tool turns stay verbatim
+    for tm in tool_msgs[2:]:
+        assert "compacted earlier" not in tm["content"]
+        assert len(tm["content"]) > 1000
+
+    # 3. synthesize() in SWARM_PEER preserves peer_probe_seeds, peer_id, baseline_policy_code, baseline_skills
+    base_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.E\n"
+    agent.tools.configure_generation(
+        mode="SWARM_PEER",
+        generation=5,
+        skills={"goals/explore": "def go(s): return None\n"},
+        peer_guard_seeds=[10, 11],
+        peer_target_seeds=[20, 21],
+        peer_probe_seeds=[30, 31, 32, 33, 34, 35],
+        peer_id="reactive_1",
+    )
+    agent.tools.baseline_policy_code = base_pol
+    agent.tools.baseline_skills = {"goals/explore": "def go(s): return None\n"}
+
+    seen_probes: list[list[int]] = []
+
+    def _fake_api(messages, allow_tools=True, **kwargs):
+        seen_probes.append(list(agent.tools.peer_probe_seeds))
+        return {
+            "role": "assistant",
+            "content": (
+                "```yaml\nobservation_from_db: test\nmechanism: ok\n```\n"
+                "<policy_code>\n" + base_pol + "\n</policy_code>"
+            ),
+            "tool_calls": [],
+        }
+
+    with patch.object(agent, "_call_llm_api", side_effect=_fake_api):
+        agent.synthesize(
+            mode="SWARM_PEER",
+            generation=5,
+            current_policy=base_pol,
+            skills={"goals/explore": "def go(s): return None\n"},
+            max_tool_turns=2,
+        )
+    assert seen_probes and seen_probes[0] == [30, 31, 32, 33, 34, 35]
+    assert agent.tools.peer_id == "reactive_1"
+    assert agent.tools.baseline_policy_code == base_pol

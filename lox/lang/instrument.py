@@ -1,8 +1,10 @@
 """
 AST Compile-Time Instrumentation:
-1. ExecutionTracer: Tracks per-episode function/macro call counts, active turns per function,
+1. ExecutionTracer: Tracks per-episode function call counts, active turns per function,
    and loop-iteration watchdogs with <1 us overhead per step.
-2. TunableParam: Tracks `self.param(name, default, min_val, max_val)` declarations for SPSA tuning.
+2. _TracerProxy: Non-writable read-only proxy exposed to sandboxed policy code so policies
+   cannot tamper with `max_loop_ticks` or override `tick_loop`.
+3. TunableParam: Tracks `self.param(name, default, min_val, max_val)` declarations.
 """
 
 from __future__ import annotations
@@ -31,14 +33,64 @@ class TunableParam:
         return getattr(self, key)
 
 
+class _TracerProxy:
+    """Read-only proxy exposing ONLY tracer hook callables to policy code (blocks attribute mutation)."""
+
+    __slots__ = (
+        "enter_fn",
+        "exit_fn",
+        "on_return",
+        "on_yield",
+        "tick_loop",
+        "guarded_range",
+        "guarded_iter",
+        "get_param",
+    )
+
+    def __init__(self, tracer: ExecutionTracer) -> None:
+        object.__setattr__(self, "enter_fn", tracer.enter_fn)
+        object.__setattr__(self, "exit_fn", tracer.exit_fn)
+        object.__setattr__(self, "on_return", tracer.on_return)
+        object.__setattr__(self, "on_yield", tracer.on_yield)
+        object.__setattr__(self, "tick_loop", tracer.tick_loop)
+        object.__setattr__(self, "guarded_range", tracer.guarded_range)
+        object.__setattr__(self, "guarded_iter", tracer.guarded_iter)
+        object.__setattr__(self, "get_param", tracer.get_param)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(
+            f"Cannot modify read-only tracer attribute '{name}' in policy sandbox."
+        )
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(
+            f"Cannot delete read-only tracer attribute '{name}' in policy sandbox."
+        )
+
+
+def _is_valid_delta_tuple(val: tuple[Any, ...]) -> bool:
+    if len(val) != 2:
+        return False
+    a, b = val[0], val[1]
+    if isinstance(a, bool) or isinstance(b, bool):
+        return False
+    if not (
+        (type(a) is int or type(a).__module__ == "numpy")
+        and (type(b) is int or type(b).__module__ == "numpy")
+    ):
+        return False
+    try:
+        ia, ib = int(a), int(b)
+    except Exception:
+        return False
+    return -1 <= ia <= 1 and -1 <= ib <= 1 and not (ia == 0 and ib == 0)
+
+
 class ExecutionTracer:
     """
-    Lightweight per-episode runtime tracer injected into compiled policies and macros.
-    Powers:
-    - Conditional Episode Filtering (`did episode trigger modified function X?`)
-    - Per-function dwell-time and mortality attribution (`function_stats` table)
-    - Zero-yield infinite loop protection (`tick_loop()`)
-    - Parameter registration and overrides (`get_param()`)
+    Lightweight per-episode runtime tracer injected into compiled policies and skills.
+    Uses unique invocation frame IDs so closing/GCing suspended generators never corrupts
+    the active call stack.
     """
 
     __slots__ = (
@@ -48,7 +100,9 @@ class ExecutionTracer:
         "fn_calls",
         "fn_turns",
         "call_stack",
+        "_next_frame_id",
         "active_fn",
+        "_leaf_action_fn",
         "_turn_fn_locked",
         "registered_params",
         "param_overrides",
@@ -66,13 +120,19 @@ class ExecutionTracer:
         self.total_turns: int = 0
         self.fn_calls: dict[str, int] = {}
         self.fn_turns: dict[str, int] = {}
+        # Stack frame: [frame_id, fn_name, enter_turn, returned_action_like, is_gen]
         self.call_stack: list[list[Any]] = []
+        self._next_frame_id: int = 0
         self.active_fn: str = "root"
+        self._leaf_action_fn: str = ""
         self._turn_fn_locked: bool = False
         self.registered_params: dict[str, TunableParam] = {}
         self.param_overrides: dict[str, float] = (
             dict(param_overrides) if param_overrides else {}
         )
+
+    def make_proxy(self) -> _TracerProxy:
+        return _TracerProxy(self)
 
     def reset_for_episode(self) -> None:
         self.loop_ticks = 0
@@ -80,13 +140,17 @@ class ExecutionTracer:
         self.fn_calls.clear()
         self.fn_turns.clear()
         self.call_stack.clear()
+        self._next_frame_id = 0
         self.active_fn = "root"
+        self._leaf_action_fn = ""
         self._turn_fn_locked = False
 
     def enter_fn(
         self, fn_name: str, has_value_return: bool = False, is_gen: bool = False
-    ) -> None:
-        self.call_stack.append([fn_name, self.total_turns, False])
+    ) -> int:
+        self._next_frame_id += 1
+        fid = self._next_frame_id
+        self.call_stack.append([fid, fn_name, self.total_turns, False, bool(is_gen)])
         if not has_value_return:
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
             if is_gen:
@@ -95,40 +159,42 @@ class ExecutionTracer:
                     self._turn_fn_locked = True
             elif fn_name in self._ROOT_FNS and not self._turn_fn_locked:
                 self.active_fn = fn_name
+        return fid
 
-    def on_return(self, fn_name: str, val: Any) -> Any:
-        is_noop = val is None or (
-            isinstance(val, tuple) and len(val) == 2 and val == (0, 0)
-        )
-        if not is_noop:
+    def on_return(self, fn_name: str, val: Any, is_gen: bool = False) -> Any:
+        if val is None:
+            return val
+        val_type = type(val)
+        if not is_gen:
+            if val_type is bool or val_type is int or val_type is float:
+                self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
+                return val
+            if val_type is tuple and len(val) == 2 and val == (0, 0):
+                return val
             self.fn_calls[fn_name] = self.fn_calls.get(fn_name, 0) + 1
-            is_action_like = False
-            val_type = type(val)
-            val_type_name = val_type.__name__
-            if val_type_name in ("Action", "RawAction", "ActionSequence"):
-                is_action_like = True
-            elif isinstance(val, str) and len(val) == 1:
-                is_action_like = True
-            elif (
-                isinstance(val, tuple)
-                and len(val) == 2
-                and all(
-                    (isinstance(c, int) or type(c).__module__ == "numpy")
-                    and not isinstance(c, bool)
-                    for c in val
-                )
+
+        is_action_like = False
+        is_direct_action = False
+        val_type_name = val_type.__name__
+        if val_type_name in ("Action", "RawAction", "ActionSequence"):
+            is_action_like = True
+            is_direct_action = True
+        elif val_type is str and len(val) == 1:
+            is_action_like = True
+            is_direct_action = True
+        elif val_type is tuple and _is_valid_delta_tuple(val):
+            is_action_like = True
+        if is_action_like:
+            if self.call_stack:
+                self.call_stack[-1][3] = True
+            if (
+                is_direct_action
+                and not self._leaf_action_fn
+                and fn_name not in self._ROOT_FNS
             ):
-                is_action_like = True
-            elif (
-                not isinstance(val, (bool, int, float, str, set, dict, list, tuple))
-                and val_type_name != "ndarray"
-            ):
-                is_action_like = True
-            if is_action_like:
-                if self.call_stack:
-                    self.call_stack[-1][2] = True
-                if not self._turn_fn_locked:
-                    self.active_fn = fn_name
+                self._leaf_action_fn = fn_name
+            if not self._turn_fn_locked:
+                self.active_fn = fn_name
         return val
 
     def on_yield(self, fn_name: str, val: Any) -> Any:
@@ -138,26 +204,49 @@ class ExecutionTracer:
             self._turn_fn_locked = True
         return val
 
-    def exit_fn(self, fn_name: str) -> None:
+    def exit_fn(self, frame_or_name: int | str, fn_name: str | None = None) -> None:
         returned_non_noop = False
-        if self.call_stack:
-            top_frame = self.call_stack.pop()
-            top_fn = top_frame[0]
-            returned_non_noop = bool(top_frame[2])
-            if top_fn != fn_name:
-                while self.call_stack and self.call_stack[-1][0] != fn_name:
-                    self.call_stack.pop()
-                if self.call_stack and self.call_stack[-1][0] == fn_name:
-                    matched_frame = self.call_stack.pop()
-                    returned_non_noop = bool(matched_frame[2])
+        resolved_name: str
+        if isinstance(frame_or_name, int):
+            fid = frame_or_name
+            resolved_name = fn_name or ""
+            # Search from top for this exact frame_id; never wipe unrelated frames if already popped/suspended.
+            match_idx = -1
+            for i in range(len(self.call_stack) - 1, -1, -1):
+                if self.call_stack[i][0] == fid:
+                    match_idx = i
+                    break
+            if match_idx < 0:
+                return
+            frame = self.call_stack.pop(match_idx)
+            resolved_name = resolved_name or str(frame[1])
+            returned_non_noop = bool(frame[3])
+            # If the popped frame was NOT the top frame (e.g. a suspended generator closing beneath an active call),
+            # leave the active call stack and active_fn undisturbed.
+            if match_idx != len(self.call_stack):
+                return
+        else:
+            resolved_name = str(frame_or_name)
+            if self.call_stack:
+                match_idx = -1
+                for i in range(len(self.call_stack) - 1, -1, -1):
+                    if self.call_stack[i][1] == resolved_name:
+                        match_idx = i
+                        break
+                if match_idx < 0:
+                    return
+                frame = self.call_stack.pop(match_idx)
+                returned_non_noop = bool(frame[3])
+                if match_idx != len(self.call_stack):
+                    return
 
         if not self.call_stack:
             return
 
-        caller_fn = self.call_stack[-1][0]
+        caller_fn = self.call_stack[-1][1]
         if returned_non_noop:
-            if caller_fn in self._ROOT_FNS and fn_name not in self._ROOT_FNS:
-                self.active_fn = fn_name
+            if caller_fn in self._ROOT_FNS and resolved_name not in self._ROOT_FNS:
+                self.active_fn = resolved_name
                 self._turn_fn_locked = True
             elif not self._turn_fn_locked and caller_fn not in self._ROOT_FNS:
                 self.active_fn = caller_fn
@@ -170,16 +259,30 @@ class ExecutionTracer:
         self.loop_ticks = 0
         self.total_turns += 1
         fn = self.active_fn
+        leaf = self._leaf_action_fn
+        self._leaf_action_fn = ""
         if isinstance(preferred_fn, str):
             pref = preferred_fn.strip()
             if pref and pref != "root":
                 if pref != fn:
                     self.fn_calls[pref] = self.fn_calls.get(pref, 0) + 1
-                fn = pref
+                if (
+                    leaf
+                    and leaf != pref
+                    and leaf.lstrip("_") != pref.lstrip("_")
+                    and leaf not in ("tick", "step", "_step", "run", "act")
+                    and not leaf.startswith(pref + ".")
+                ):
+                    fn = f"{pref}.{leaf}"
+                    self.fn_calls[fn] = self.fn_calls.get(fn, 0) + 1
+                else:
+                    fn = pref
+        elif leaf and fn in self._ROOT_FNS:
+            fn = leaf
         self.fn_turns[fn] = self.fn_turns.get(fn, 0) + 1
         self._turn_fn_locked = False
         if self.call_stack:
-            self.active_fn = self.call_stack[-1][0]
+            self.active_fn = self.call_stack[-1][1]
         else:
             self.active_fn = "root"
         return fn
@@ -193,10 +296,10 @@ class ExecutionTracer:
             )
 
     def guarded_range(self, r: range) -> Any:
-        """Upfront watchdog guard for `range(...)` loops avoiding per-iteration Python calls."""
+        """Watchdog guard for `range(...)` loops: fast path for small ranges (<=64), chunked charging otherwise."""
         if isinstance(r, range):
             n = len(r)
-            if n <= 4096:
+            if n <= 64:
                 self.loop_ticks += n
                 if self.loop_ticks > self.max_loop_ticks:
                     raise PolicyLoopError(
@@ -204,9 +307,10 @@ class ExecutionTracer:
                         f"(>{self.max_loop_ticks} iterations without yielding an action)."
                     )
                 return r
-        return self._guarded_iter(r)
+        return self.guarded_iter(r)
 
-    def _guarded_iter(self, r: Any) -> Any:
+    def guarded_iter(self, r: Any) -> Any:
+        """Incremental tick-counting wrapper for arbitrary iterables (ranges, comprehensions, generators)."""
         ticks = 0
         for item in r:
             ticks += 1
@@ -218,6 +322,14 @@ class ExecutionTracer:
                         f"(>{self.max_loop_ticks} iterations without yielding an action)."
                     )
             yield item
+        rem = ticks & 63
+        if rem:
+            self.loop_ticks += rem
+            if self.loop_ticks > self.max_loop_ticks:
+                raise PolicyLoopError(
+                    f"Infinite zero-yield loop detected in '{self.active_fn}' "
+                    f"(>{self.max_loop_ticks} iterations without yielding an action)."
+                )
 
     def get_param(
         self,
@@ -274,22 +386,66 @@ class ExecutionTracer:
         return any(self.fn_calls.get(fn, 0) > 0 for fn in target_fns)
 
 
+def _node_binds_range(stmts: list[ast.stmt]) -> bool:
+    """Returns True if any binding in `stmts` (shallow over nested defs) shadows `range`."""
+    stack: list[ast.AST] = list(stmts)
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if cur.name == "range":
+                return True
+            continue
+        if (
+            isinstance(cur, ast.Name)
+            and isinstance(cur.ctx, ast.Store)
+            and cur.id == "range"
+        ):
+            return True
+        if isinstance(cur, (ast.Import, ast.ImportFrom)):
+            for al in cur.names:
+                if (al.asname or al.name.split(".")[0]) == "range":
+                    return True
+        if isinstance(cur, ast.MatchAs) and cur.name == "range":
+            return True
+        if isinstance(cur, ast.MatchStar) and cur.name == "range":
+            return True
+        if isinstance(cur, ast.MatchMapping) and cur.rest == "range":
+            return True
+        for ch in ast.iter_child_nodes(cur):
+            stack.append(ch)
+    return False
+
+
 class PolicyInstrumentTransformer(ast.NodeTransformer):
     """
     AST Transformer that injects:
-    - `_lox_tracer.enter_fn("<fn_name>")` at the top of every `FunctionDef` (and after every `yield` / `yield from` inside a function so `active_fn` restores when resuming a caller!)
-    - `_lox_tracer.tick_loop()` at the top of every `while` and `for` loop body.
+    - `_lox_fid = _lox_tracer.enter_fn("<fn_name>", ...)` + `finally: _lox_tracer.exit_fn(_lox_fid, "<fn_name>")`
+    - `_lox_tracer.tick_loop()` / `_lox_tracer.guarded_range(...)` / `_lox_tracer.guarded_iter(...)`
+      on `while`, `for`, `async for`, and comprehension/generator-expression loops.
     """
 
     def __init__(self, is_macro_module: bool = False):
         super().__init__()
         self.is_macro_module = is_macro_module
-        self._current_fn_stack: list[str] = []
+        self._current_fn_stack: list[tuple[str, bool]] = []
+        self._range_shadowed: bool = False
+
+    def visit_Module(self, node: ast.Module) -> ast.Module:
+        prev_shadow = self._range_shadowed
+        self._range_shadowed = prev_shadow or _node_binds_range(node.body)
+        self.generic_visit(node)
+        self._range_shadowed = prev_shadow
+        return node
 
     def _make_enter_stmt(
-        self, fn_name: str, has_val_ret: bool = False, is_gen: bool = False
+        self,
+        fid_var: str,
+        fn_name: str,
+        has_val_ret: bool = False,
+        is_gen: bool = False,
     ) -> ast.stmt:
-        return ast.Expr(
+        return ast.Assign(
+            targets=[ast.Name(id=fid_var, ctx=ast.Store())],
             value=ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
@@ -302,10 +458,10 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                     ast.Constant(value=is_gen),
                 ],
                 keywords=[],
-            )
+            ),
         )
 
-    def _make_exit_stmt(self, fn_name: str) -> ast.stmt:
+    def _make_exit_stmt(self, fid_var: str, fn_name: str) -> ast.stmt:
         return ast.Expr(
             value=ast.Call(
                 func=ast.Attribute(
@@ -313,7 +469,10 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                     attr="exit_fn",
                     ctx=ast.Load(),
                 ),
-                args=[ast.Constant(value=fn_name)],
+                args=[
+                    ast.Name(id=fid_var, ctx=ast.Load()),
+                    ast.Constant(value=fn_name),
+                ],
                 keywords=[],
             )
         )
@@ -333,8 +492,8 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
 
     def visit_Return(self, node: ast.Return) -> ast.Return:
         self.generic_visit(node)
-        if self._current_fn_stack and self._current_fn_stack[-1] != "__init__":
-            fn_name = self._current_fn_stack[-1]
+        if self._current_fn_stack and self._current_fn_stack[-1][0] != "__init__":
+            fn_name, is_gen = self._current_fn_stack[-1]
             ret_val = node.value if node.value is not None else ast.Constant(value=None)
             node.value = ast.Call(
                 func=ast.Attribute(
@@ -342,15 +501,19 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                     attr="on_return",
                     ctx=ast.Load(),
                 ),
-                args=[ast.Constant(value=fn_name), ret_val],
+                args=[
+                    ast.Constant(value=fn_name),
+                    ret_val,
+                    ast.Constant(value=is_gen),
+                ],
                 keywords=[],
             )
         return node
 
     def visit_Yield(self, node: ast.Yield) -> ast.AST:
         self.generic_visit(node)
-        if self._current_fn_stack and self._current_fn_stack[-1] != "__init__":
-            fn_name = self._current_fn_stack[-1]
+        if self._current_fn_stack and self._current_fn_stack[-1][0] != "__init__":
+            fn_name = self._current_fn_stack[-1][0]
             inner_val = (
                 node.value if node.value is not None else ast.Constant(value=None)
             )
@@ -368,8 +531,8 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
 
     def visit_YieldFrom(self, node: ast.YieldFrom) -> ast.AST:
         self.generic_visit(node)
-        if self._current_fn_stack and self._current_fn_stack[-1] != "__init__":
-            fn_name = self._current_fn_stack[-1]
+        if self._current_fn_stack and self._current_fn_stack[-1][0] != "__init__":
+            fn_name = self._current_fn_stack[-1][0]
             marked = ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
@@ -383,7 +546,9 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
         return node
 
     @staticmethod
-    def _scan_fn_flags(node: ast.FunctionDef) -> tuple[bool, bool, bool]:
+    def _scan_fn_flags(
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> tuple[bool, bool, bool]:
         """Single shallow scan for yields, valued returns, and local `range` shadowing."""
         is_gen = False
         has_val_ret = False
@@ -396,8 +561,8 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                 + ([node.args.vararg] if node.args.vararg else [])
                 + ([node.args.kwarg] if node.args.kwarg else [])
             )
-        )
-        stack = list(node.body)
+        ) or _node_binds_range(node.body)
+        stack: list[ast.AST] = list(node.body)
         while stack:
             cur = stack.pop()
             if isinstance(cur, (ast.Yield, ast.YieldFrom)):
@@ -410,12 +575,6 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                 )
             ):
                 has_val_ret = True
-            elif (
-                isinstance(cur, ast.Name)
-                and isinstance(cur.ctx, ast.Store)
-                and cur.id == "range"
-            ):
-                shadows_range = True
             if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
             for child in ast.iter_child_nodes(cur):
@@ -425,17 +584,17 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
     def _visit_fn_like(self, node: Any) -> Any:
         fn_name = node.name
         is_gen, has_val_ret, shadows_range = self._scan_fn_flags(node)
-        self._current_fn_stack.append(fn_name)
-        prev_shadow = getattr(self, "_range_shadowed", False)
+        self._current_fn_stack.append((fn_name, is_gen))
+        prev_shadow = self._range_shadowed
         self._range_shadowed = prev_shadow or shadows_range
         self.generic_visit(node)
         self._range_shadowed = prev_shadow
         self._current_fn_stack.pop()
 
         if fn_name != "__init__":
-            enter_stmt = self._make_enter_stmt(fn_name, has_val_ret, is_gen)
-            exit_stmt = self._make_exit_stmt(fn_name)
-            # Keep docstring at index 0 if present
+            fid_var = f"_lox_fid_{len(self._current_fn_stack)}"
+            enter_stmt = self._make_enter_stmt(fid_var, fn_name, has_val_ret, is_gen)
+            exit_stmt = self._make_exit_stmt(fid_var, fn_name)
             if (
                 node.body
                 and isinstance(node.body[0], ast.Expr)
@@ -443,7 +602,7 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                 and isinstance(node.body[0].value.value, str)
             ):
                 doc_stmt = node.body[0]
-                rest_body = node.body[1:] or [ast.Pass()]
+                rest_body: list[ast.stmt] = list(node.body[1:]) or [ast.Pass()]
                 try_stmt = ast.Try(
                     body=rest_body,
                     handlers=[],
@@ -452,9 +611,9 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
                 )
                 node.body = [doc_stmt, enter_stmt, try_stmt]
             else:
-                rest_body = node.body or [ast.Pass()]
+                rest_body_all: list[ast.stmt] = list(node.body) or [ast.Pass()]
                 try_stmt = ast.Try(
-                    body=rest_body,
+                    body=rest_body_all,
                     handlers=[],
                     orelse=[],
                     finalbody=[exit_stmt],
@@ -478,7 +637,7 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
     def visit_For(self, node: ast.For) -> ast.For:
         self.generic_visit(node)
         if (
-            not getattr(self, "_range_shadowed", False)
+            not self._range_shadowed
             and isinstance(node.iter, ast.Call)
             and isinstance(node.iter.func, ast.Name)
             and node.iter.func.id == "range"
@@ -494,4 +653,61 @@ class PolicyInstrumentTransformer(ast.NodeTransformer):
             )
             return node
         node.body.insert(0, self._make_tick_stmt())
+        return node
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> ast.AsyncFor:
+        self.generic_visit(node)
+        node.body.insert(0, self._make_tick_stmt())
+        return node
+
+    def _guard_comprehension_generators(
+        self, generators: list[ast.comprehension]
+    ) -> None:
+        for gen in generators:
+            if gen.is_async:
+                continue
+            if (
+                not self._range_shadowed
+                and isinstance(gen.iter, ast.Call)
+                and isinstance(gen.iter.func, ast.Name)
+                and gen.iter.func.id == "range"
+            ):
+                gen.iter = ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
+                        attr="guarded_range",
+                        ctx=ast.Load(),
+                    ),
+                    args=[gen.iter],
+                    keywords=[],
+                )
+            else:
+                gen.iter = ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Name(id="_lox_tracer", ctx=ast.Load()),
+                        attr="guarded_iter",
+                        ctx=ast.Load(),
+                    ),
+                    args=[gen.iter],
+                    keywords=[],
+                )
+
+    def visit_ListComp(self, node: ast.ListComp) -> ast.ListComp:
+        self.generic_visit(node)
+        self._guard_comprehension_generators(node.generators)
+        return node
+
+    def visit_SetComp(self, node: ast.SetComp) -> ast.SetComp:
+        self.generic_visit(node)
+        self._guard_comprehension_generators(node.generators)
+        return node
+
+    def visit_DictComp(self, node: ast.DictComp) -> ast.DictComp:
+        self.generic_visit(node)
+        self._guard_comprehension_generators(node.generators)
+        return node
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> ast.GeneratorExp:
+        self.generic_visit(node)
+        self._guard_comprehension_generators(node.generators)
         return node

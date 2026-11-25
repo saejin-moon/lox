@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 import numpy as np
-from nle import nethack as nh
+from nle import nethack as _nle_nh
 
 from lox.env.actions import normalize_action_to_bytes
 from lox.env.state import (
@@ -19,6 +19,7 @@ from lox.env.state import (
     _HAS_RUST_FLOOR_MEM,
     _IS_CMAP_LUT,
     _IS_DOORWAY_GLYPH_LUT,
+    _IS_EXIT_CMAP_LUT,
     _IS_OBJECT_LUT,
     _IS_TRAP_LUT,
     GameState,
@@ -27,6 +28,8 @@ from lox.env.state import (
     bfs_distance_grid,
     lox_core,
 )
+
+nh: Any = _nle_nh
 
 DEFAULT_NETHACKOPTIONS: tuple[str, ...] = tuple(
     ["noautopickup"]
@@ -115,6 +118,7 @@ class NetHackHarness:
         lean_obs: bool = True,
         max_zero_turn_stalls: int = 100,
         allow_menu_linger: bool = True,
+        _init_nh: bool = True,
     ):
         self.role = role
         self.max_steps = max_steps
@@ -131,15 +135,19 @@ class NetHackHarness:
         self._msg_idx = self._idx_map["message"]
         self._internal_idx = self._idx_map["internal"]
 
-        self.nh = nh.Nethack(
-            observation_keys=self._obs_keys,
-            options=self.options,
-            playername=f"Agent-{self.role}",
-            ttyrec=None,
-            wizard=False,
-            spawn_monsters=True,
-            scoreprefix=None,
-            fix_moon_phase=True,
+        self.nh: Any = (
+            nh.Nethack(
+                observation_keys=self._obs_keys,
+                options=self.options,
+                playername=f"Agent-{self.role}",
+                ttyrec=None,
+                wizard=False,
+                spawn_monsters=True,
+                scoreprefix=None,
+                fix_moon_phase=True,
+            )
+            if _init_nh
+            else None
         )
 
         self.step_count: int = 0
@@ -327,6 +335,7 @@ class NetHackHarness:
                 break
 
         self._last_raw_tuple = obs_tuple
+        self._prev_turn = self._extract_turn(obs_tuple)
         self.step_byte_offsets = [len(self.action_bytes)]
         return self.wrap_state(obs_tuple)
 
@@ -365,6 +374,7 @@ class NetHackHarness:
                 GameState(
                     self._last_raw_tuple,
                     step_count=self.step_count,
+                    mem=self.mem,
                     obs_keys=self._obs_keys,
                     obs_idx_map=self._idx_map,
                 ),
@@ -583,94 +593,106 @@ class NetHackHarness:
                 raise
             if self.done:
                 break
+            in_moveloop = self._in_moveloop(obs_tuple)
             bl = obs_tuple[bl_idx]
             dnum, dlvl, by, bx = int(bl[23]), int(bl[24]), int(bl[1]), int(bl[0])
-            self.mem.pos_history.append((dnum, dlvl, by, bx))
-            fl = self.mem.get_floor(dnum, dlvl)
-            if 0 <= by < 21 and 0 <= bx < 79:
-                fl.visited[by, bx] = True
-                fl.visit_count[by, sx_clamped := bx] += 1
-                if fl.remembered_chars[by, sx_clamped] == 0:
-                    fl.remembered_chars[by, sx_clamped] = ord(".")
-            if b == ord("s"):
-                fl.searched_counts[
-                    max(0, by - 1) : min(21, by + 2), max(0, bx - 1) : min(79, bx + 2)
-                ] += 1
             floor_changed = False
-            if len(self.mem.pos_history) >= 2:
-                prev = self.mem.pos_history[-2]
-                now = self.mem.pos_history[-1]
-                if (prev[0], prev[1]) != (now[0], now[1]):
-                    floor_changed = True
-                    self.mem.stair_graph[prev] = now
-                    self.mem.stair_graph[now] = prev
+            if in_moveloop and dlvl > 0:
+                self.mem.pos_history.append((dnum, dlvl, by, bx))
+                fl = self.mem.get_floor(dnum, dlvl)
+                if 0 <= by < 21 and 0 <= bx < 79:
+                    fl.visited[by, bx] = True
+                    fl.visit_count[by, bx] += 1
+                    if fl.remembered_chars[by, bx] == 0:
+                        fl.remembered_chars[by, bx] = ord(".")
+                if b == ord("s"):
+                    fl.searched_counts[
+                        max(0, by - 1) : min(21, by + 2),
+                        max(0, bx - 1) : min(79, bx + 2),
+                    ] += 1
+                if len(self.mem.pos_history) >= 2:
+                    prev = self.mem.pos_history[-2]
+                    now = self.mem.pos_history[-1]
+                    if (prev[0], prev[1]) != (now[0], now[1]):
+                        floor_changed = True
+                        self.mem.stair_graph[prev] = now
+                        self.mem.stair_graph[now] = prev
 
-            in_moveloop = self._in_moveloop(obs_tuple)
-            need_floor_mem = (
-                i >= limit - 48 or floor_changed or (in_moveloop and (i & 31) == 0)
-            )
-            if need_floor_mem and (in_moveloop or floor_changed):
-                glyphs = obs_tuple[glyphs_idx]
-                chars = obs_tuple[chars_idx]
-                colors = (
-                    obs_tuple[colors_idx]
-                    if colors_idx is not None and colors_idx < len(obs_tuple)
-                    else np.zeros_like(chars, dtype=np.uint8)
-                )
-                if (
-                    _HAS_RUST_FLOOR_MEM
-                    and isinstance(glyphs, np.ndarray)
-                    and isinstance(chars, np.ndarray)
-                    and isinstance(colors, np.ndarray)
-                    and glyphs.dtype == np.int16
-                    and chars.dtype == np.uint8
-                    and colors.dtype == np.uint8
-                    and glyphs.flags.c_contiguous
-                    and chars.flags.c_contiguous
-                    and colors.flags.c_contiguous
-                ):
-                    if fl._passable_mask.shape != fl.remembered_chars.shape:
-                        fl._passable_mask = np.zeros_like(
-                            fl.remembered_chars, dtype=np.bool_
-                        )
-                    if fl._safe_passable_mask.shape != fl.remembered_chars.shape:
-                        fl._safe_passable_mask = np.zeros_like(
-                            fl.remembered_chars, dtype=np.bool_
-                        )
-                    lox_core.fast_update_floor_memory(
-                        glyphs,
-                        chars,
-                        colors,
-                        _FLOOR_GLYPH_FLAGS_LUT,
-                        fl.remembered_chars,
-                        fl.remembered_glyphs,
-                        fl.remembered_colors,
-                        fl.door_mask,
-                        fl.remembered_obj_glyphs,
-                        fl.remembered_trap_glyphs,
-                        fl._passable_mask,
-                        fl._safe_passable_mask,
-                        int(by),
-                        int(bx),
-                        False,
+                need_floor_mem = i >= limit - 48 or floor_changed or ((i & 31) == 0)
+                if need_floor_mem:
+                    glyphs = obs_tuple[glyphs_idx]
+                    chars = obs_tuple[chars_idx]
+                    colors = (
+                        obs_tuple[colors_idx]
+                        if colors_idx is not None and colors_idx < len(obs_tuple)
+                        else np.zeros_like(chars, dtype=np.uint8)
                     )
-                    fl._passable_dirty = False
-                else:
-                    is_cmap = _IS_CMAP_LUT[glyphs]
-                    cmap_mask = is_cmap & (chars != 0) & (chars != ord(" "))
-                    fl.remembered_chars[cmap_mask] = chars[cmap_mask]
-                    fl.remembered_glyphs[is_cmap] = glyphs[is_cmap]
-                    fl.remembered_colors[is_cmap] = colors[is_cmap]
-                    doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
-                    fl.door_mask[doorway_mask] = True
-                    fl.door_mask[is_cmap & (~_IS_DOORWAY_GLYPH_LUT[glyphs])] = False
-                    fl.remembered_obj_glyphs[is_cmap] = 0
-                    obj_mask = _IS_OBJECT_LUT[glyphs]
-                    fl.remembered_obj_glyphs[obj_mask] = glyphs[obj_mask]
-                    fl.remembered_trap_glyphs[is_cmap & (~_IS_TRAP_LUT[glyphs])] = 0
-                    trap_mask = _IS_TRAP_LUT[glyphs]
-                    fl.remembered_trap_glyphs[trap_mask] = glyphs[trap_mask]
-                    fl._passable_dirty = True
+                    if (
+                        _HAS_RUST_FLOOR_MEM
+                        and isinstance(glyphs, np.ndarray)
+                        and isinstance(chars, np.ndarray)
+                        and isinstance(colors, np.ndarray)
+                        and glyphs.dtype == np.int16
+                        and chars.dtype == np.uint8
+                        and colors.dtype == np.uint8
+                        and glyphs.flags.c_contiguous
+                        and chars.flags.c_contiguous
+                        and colors.flags.c_contiguous
+                    ):
+                        if fl._passable_mask.shape != fl.remembered_chars.shape:
+                            fl._passable_mask = np.zeros_like(
+                                fl.remembered_chars, dtype=np.bool_
+                            )
+                        if fl._safe_passable_mask.shape != fl.remembered_chars.shape:
+                            fl._safe_passable_mask = np.zeros_like(
+                                fl.remembered_chars, dtype=np.bool_
+                            )
+                        lox_core.fast_update_floor_memory(
+                            glyphs,
+                            chars,
+                            colors,
+                            _FLOOR_GLYPH_FLAGS_LUT,
+                            fl.remembered_chars,
+                            fl.remembered_glyphs,
+                            fl.remembered_colors,
+                            fl.door_mask,
+                            fl.remembered_obj_glyphs,
+                            fl.remembered_trap_glyphs,
+                            fl._passable_mask,
+                            fl._safe_passable_mask,
+                            int(by),
+                            int(bx),
+                            False,
+                        )
+                        fl._passable_dirty = False
+                        exits_list = lox_core.fast_extract_exits(
+                            glyphs, _IS_EXIT_CMAP_LUT
+                        )
+                        if exits_list:
+                            f_exits = self.mem.level_exits.setdefault((dnum, dlvl), {})
+                            for ey, ex, eg in exits_list:
+                                f_exits[(ey, ex)] = int(eg)
+                    else:
+                        is_cmap = _IS_CMAP_LUT[glyphs]
+                        cmap_mask = is_cmap & (chars != 0) & (chars != ord(" "))
+                        fl.remembered_chars[cmap_mask] = chars[cmap_mask]
+                        fl.remembered_glyphs[is_cmap] = glyphs[is_cmap]
+                        fl.remembered_colors[is_cmap] = colors[is_cmap]
+                        doorway_mask = is_cmap & _IS_DOORWAY_GLYPH_LUT[glyphs]
+                        fl.door_mask[doorway_mask] = True
+                        fl.door_mask[is_cmap & (~_IS_DOORWAY_GLYPH_LUT[glyphs])] = False
+                        fl.remembered_obj_glyphs[is_cmap] = 0
+                        obj_mask = _IS_OBJECT_LUT[glyphs]
+                        fl.remembered_obj_glyphs[obj_mask] = glyphs[obj_mask]
+                        fl.remembered_trap_glyphs[is_cmap & (~_IS_TRAP_LUT[glyphs])] = 0
+                        trap_mask = _IS_TRAP_LUT[glyphs]
+                        fl.remembered_trap_glyphs[trap_mask] = glyphs[trap_mask]
+                        fl._passable_dirty = True
+                        exit_ys, exit_xs = np.where(_IS_EXIT_CMAP_LUT[glyphs])
+                        if len(exit_ys) > 0:
+                            f_exits = self.mem.level_exits.setdefault((dnum, dlvl), {})
+                            for ey, ex in zip(exit_ys.tolist(), exit_xs.tolist()):
+                                f_exits[(ey, ex)] = int(glyphs[ey, ex])
 
             if in_moveloop and not self._waiting_for_space(obs_tuple):
                 step_ctr += 1
@@ -684,6 +706,7 @@ class NetHackHarness:
             obs_tuple, self.done = self._settle_prompts(obs_tuple, self.done)
 
         self._last_raw_tuple = obs_tuple
+        self._prev_turn = self._extract_turn(obs_tuple)
         self.step_count = step_ctr
         state = GameState(
             obs_tuple,
@@ -696,7 +719,9 @@ class NetHackHarness:
         return state
 
     def close(self) -> None:
-        try:
-            self.nh.close()
-        except Exception:
-            pass
+        if self.nh is not None:
+            try:
+                self.nh.close()
+            except Exception:
+                pass
+            self.nh = None

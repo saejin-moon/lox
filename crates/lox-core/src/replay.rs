@@ -95,10 +95,16 @@ pub fn fast_update_floor_memory(
             pm_sl[i] = (f & F_PASSABLE) != 0;
             spm_sl[i] = pm_sl[i] && (f & F_HAZARD) == 0;
         } else if (f & (F_OBJECT | F_MONSTER)) != 0 || hero_idx == Some(i) {
-            if rc_sl[i] == 0 {
+            if rc_sl[i] == 0 || rc_sl[i] == b'+' {
                 rc_sl[i] = b'.';
                 pm_sl[i] = true;
                 spm_sl[i] = rt_sl[i] == 0;
+                // Clear unseen/closed-door glyph so Python _recompute_passability stays in sync
+                if rg_sl[i] == 2359 || (rg_sl[i] > 0 && dm_sl[i]) {
+                    rg_sl[i] = 0;
+                }
+            } else if rg_sl[i] == 2359 {
+                rg_sl[i] = 0;
             }
             if (f & F_OBJECT) != 0 {
                 ro_sl[i] = g as i32;
@@ -118,26 +124,6 @@ pub fn fast_update_floor_memory(
     }
 
     Ok(())
-}
-
-/// Fast action byte replay into NetHackHarness instance.
-#[pyfunction]
-pub fn fast_replay_action_bytes(
-    py: Python,
-    harness: PyObject,
-    action_bytes: &[u8],
-) -> PyResult<bool> {
-    let nh = harness.getattr(py, "nh")?;
-    let action_list = harness.getattr(py, "action_bytes")?;
-    for &b in action_bytes {
-        action_list.call_method1(py, "append", (b,))?;
-        let res = nh.call_method1(py, "step", (b,))?;
-        let done: bool = res.bind(py).get_item(1)?.extract::<bool>()?;
-        if done {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Scans (H, W) `glyphs` using `exit_lut` and returns all `(y, x, glyph)` exit coordinates.

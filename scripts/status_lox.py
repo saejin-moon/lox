@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Morning / Evening check-in CLI for ongoing multi-week LOX campaigns.
-Safely queries DuckDB in read-only mode while `run_lox.py` is actively evaluating.
+Safely queries DuckDB in read-only mode while `run_swarm.py` is actively evaluating.
 """
 
 from __future__ import annotations
@@ -55,13 +55,14 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
         return
 
     try:
-        # Window stats
+        # Window stats (exclude non-campaign modes like PILOT / BASELINE_BACKFILL / MACRO_WRITE)
+        _valid_mode_sql = "UPPER(COALESCE(mode, '')) NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')"
         batch_row = con.execute(
-            """
+            f"""
             SELECT COUNT(*), MIN(generation), MAX(generation),
                    AVG(avg_depth), MAX(max_depth)
             FROM batches
-            WHERE created_at >= ?
+            WHERE created_at >= ? AND {_valid_mode_sql}
             """,
             (since_dt,),
         ).fetchone()
@@ -79,17 +80,22 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
 
         prom_count = (
             con.execute(
-                """
+                f"""
             SELECT COUNT(*)
             FROM batches
-            WHERE hypothesis_passed = TRUE AND created_at >= ?
+            WHERE hypothesis_passed = TRUE AND created_at >= ? AND {_valid_mode_sql}
             """,
                 (since_dt,),
             ).fetchone()[0]
             or 0
         )
 
-        total_batches = con.execute("SELECT COUNT(*) FROM batches").fetchone()[0] or 0
+        total_batches = (
+            con.execute(
+                f"SELECT COUNT(*) FROM batches WHERE {_valid_mode_sql}"
+            ).fetchone()[0]
+            or 0
+        )
         total_runs = (
             con.execute(
                 f"SELECT COUNT(*) FROM runs WHERE {NON_SHARD_RUNS_SQL}"
@@ -97,12 +103,12 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
             or 0
         )
         cost_row = con.execute(
-            """
+            f"""
             SELECT COALESCE(SUM(total_cost_usd), 0.0),
                    COALESCE(SUM(total_llm_tokens), 0),
                    COALESCE(AVG(avg_score), 0.0)
             FROM batches
-            WHERE created_at >= ?
+            WHERE created_at >= ? AND {_valid_mode_sql}
             """,
             (since_dt,),
         ).fetchone()
@@ -137,8 +143,13 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
                 print("\n💡 PROMOTED DISCOVERIES IN WINDOW:")
                 for d in discs:
                     gen_val, mode_val, tf, delta, depth, constraint, rule = d
+                    g_i = int(gen_val) if gen_val is not None else 0
+                    d_f = float(delta) if delta is not None else 0.0
+                    dep_f = float(depth) if depth is not None else 1.0
+                    c_s = str(constraint or "")[:35]
+                    r_s = str(rule or "")[:40]
                     print(
-                        f"  • Gen {gen_val:03d} [{mode_val} on {tf}]: Δ={delta:+.2f}, Dlvl {depth:.1f} | {constraint[:35]} | {rule[:40]}"
+                        f"  • Gen {g_i:03d} [{mode_val or ''} on {tf or ''}]: Δ={d_f:+.2f}, Dlvl {dep_f:.1f} | {c_s} | {r_s}"
                     )
             else:
                 print("\n💡 PROMOTED DISCOVERIES IN WINDOW: (None in this window)")

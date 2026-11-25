@@ -68,12 +68,15 @@ class NetHackSymbolRegistry:
 
     def _load_symbols(self) -> None:
         try:
-            import nle.nethack as nh
+            import nle.nethack as _nle_nh
+
+            nh: Any = _nle_nh
         except Exception:
             return
 
         # Index monsters from nh.permonst
-        for i in range(1000):
+        num_mons = int(getattr(nh, "NUMMONS", 381))
+        for i in range(num_mons):
             try:
                 pm = nh.permonst(i)
                 mname = str(pm.mname).strip().lower()
@@ -145,7 +148,9 @@ class NetHackSymbolRegistry:
                 break
 
     def query_monster(self, name: str) -> dict[str, Any] | None:
-        q = str(name).strip().lower()
+        q = str(name or "").strip().lower()
+        if not q:
+            return None
         if q in self._monsters_by_name:
             return self._monsters_by_name[q]
         # Partial prefix or substring match
@@ -158,7 +163,9 @@ class NetHackSymbolRegistry:
         return None
 
     def query_item(self, name: str) -> dict[str, Any] | None:
-        q = str(name).strip().lower()
+        q = str(name or "").strip().lower()
+        if not q:
+            return None
         if q in self._objects_by_name:
             return self._objects_by_name[q]
         for oname, data in self._objects_by_name.items():

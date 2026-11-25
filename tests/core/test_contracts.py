@@ -7,7 +7,6 @@ from lox.core.contracts import (
     assert_baseline_invariants,
     split_full_and_shard_runs,
 )
-from lox.engine.orchestrator import CampaignOrchestrator, PolicyArchiveEntry
 
 
 def test_episode_run_alias_synchronization():
@@ -114,48 +113,3 @@ def test_candidate_package_immutability_and_sync():
     assert pkg.skill_name == "combat"
     assert pkg.skill_code == "def fight(): pass"
     assert pkg.pilot_delta == 0.85
-
-
-def test_policy_archive_entry_skills_sync(tmp_path):
-    """Verify PolicyArchiveEntry bundles skills and sync_workspace_skills isolates them."""
-    workspace = tmp_path / "workspace"
-    skills_dir = workspace / "skills"
-    skills_dir.mkdir(parents=True)
-
-    orch = CampaignOrchestrator(
-        provider="mock",
-        db_path=str(tmp_path / "test.duckdb"),
-        policy_path=str(workspace / "policy.py"),
-        macros_path=str(workspace / "macros.py"),
-        workspace_dir=str(workspace),
-        workers=1,
-    )
-
-    # Save a skill
-    orch.save_workspace_skill("descent_v1", "def go_down(): pass")
-    assert (skills_dir / "descent_v1.py").exists()
-
-    entry = PolicyArchiveEntry(
-        policy_id="pol_v1",
-        policy_code="class Policy: pass",
-        niche="descent",
-        avg_depth=4.0,
-        p90_depth=5.0,
-        max_depth=6,
-        avg_ac=10.0,
-        avg_xl=2.0,
-        skills=orch.load_workspace_skills(),
-    )
-    assert "descent_v1" in entry.skills
-
-    # Add another skill in workspace
-    orch.save_workspace_skill("combat_v2", "def attack(): pass")
-    assert len(orch.load_workspace_skills()) == 2
-
-    # Now restore entry's skills into workspace
-    orch.sync_workspace_skills(entry.skills)
-    current_skills = orch.load_workspace_skills()
-    assert len(current_skills) == 1
-    assert "descent_v1" in current_skills
-    assert "combat_v2" not in current_skills
-    assert not (skills_dir / "combat_v2.py").exists()

@@ -530,7 +530,6 @@ def test_full_ascension_telemetry_digest():
 def test_autonomous_intelligence_and_deductive_parity_overhaul(tmp_path):
     """Verify all 10 components of the Autonomous Intelligence & Deductive Parity Overhaul."""
 
-    from lox.author.prompts import _format_context_scoped_policy
     from lox.db.schema import connect_db, init_db
     from lox.db.summarizer import build_batch_contrast_digest, summarize_episode_ticks
     from lox.lang.validator import (
@@ -739,15 +738,6 @@ def run(self, state):
         assert "potion of healing" in inv_val
     finally:
         con.close()
-
-    # 7. Prompt threshold raised to 1200 lines
-    long_pol = "class Policy:\n" + "\n".join(
-        f"    def fn_{i}(self, state):\n        return None" for i in range(400)
-    )
-    assert 700 <= len(long_pol.splitlines()) <= 1150
-    formatted_pol = _format_context_scoped_policy(long_pol)
-    assert "### Current `policy.py`:" in formatted_pol
-    assert "def fn_399" in formatted_pol
 
 
 def test_confinement_stall_detects_multi_leaf_oscillation():

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from lox.db.schema import connect_db
-from lox.engine.orchestrator import CampaignOrchestrator
-from lox.engine.scheduler import ModeScheduler
 from lox.lang.compiler import compile_policy_and_macros
 from lox.runner.pool import PersistentEvalPool, run_single_episode
 
@@ -63,59 +60,6 @@ class Policy:
         assert unreach["episodes_discarded"] >= 8
     finally:
         pool.close()
-
-
-def test_mode_scheduler_refactor_cadence_and_line_count():
-    sched = ModeScheduler()
-    # Gen 0 bootstraps
-    assert sched.select_mode(0, has_policy=False) == "CREATE"
-
-    # Small policy remains WRITE
-    assert sched.select_mode(1, has_policy=True, policy_line_count=200) == "WRITE"
-    assert sched.select_mode(2, has_policy=True, policy_line_count=350) == "WRITE"
-
-    # Line count >= 450 triggers REFACTOR when gens_since_refactor >= 4
-    sched.gens_since_refactor = 4
-    assert sched.select_mode(4, has_policy=True, policy_line_count=460) == "REFACTOR"
-
-    # Cooldown prevents immediate consecutive refactor
-    assert sched.select_mode(5, has_policy=True, policy_line_count=460) == "WRITE"
-
-
-def test_mode_scheduler_and_end_to_end_mock_campaign(tmp_path):
-    sched = ModeScheduler()
-    assert sched.select_mode(0, has_policy=False) == "CREATE"
-    assert sched.select_mode(1, has_policy=True) == "WRITE"
-
-    # End-to-end 3-generation mock campaign (`CREATE` -> `WRITE` -> `WRITE`)
-    db_path = str(tmp_path / "campaign.duckdb")
-    policy_path = str(tmp_path / "policy.py")
-    macros_path = str(tmp_path / "macros.py")
-
-    orch = CampaignOrchestrator(
-        provider="mock",
-        model="mock-model",
-        db_path=db_path,
-        policy_path=policy_path,
-        macros_path=macros_path,
-        workers=2,
-        max_steps=20,
-        full_write_episodes=6,
-        func_mod_episodes_per_fn=6,
-    )
-    res = orch.run_campaign(max_generations=3, target_depth=99.0, seed_base=2000)
-    assert res["active_policy_code"] != ""
-
-    con = connect_db(db_path, read_only=True)
-    try:
-        n_batches = con.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
-        n_runs = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-        n_exps = con.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
-        assert n_batches >= 2
-        assert n_runs >= 6
-        assert n_exps == 3
-    finally:
-        con.close()
 
 
 def test_pool_unique_tiles_floor_aware():

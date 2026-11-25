@@ -10,9 +10,11 @@ from typing import Any
 
 import numpy as np
 
+lox_core: Any = None
 try:
-    import lox_core
+    import lox_core as _lox_core_mod
 
+    lox_core = _lox_core_mod
     HAS_RUST_CORE = True
 except ImportError:
     HAS_RUST_CORE = False
@@ -130,6 +132,8 @@ def bfs_distance_grid(
             return lox_core.fast_bfs_distance_grid(
                 c_passable, int(sy), int(sx), bool(allow_diagonal), c_no_diag
             )
+        except ValueError:
+            raise
         except Exception:
             pass
     return _numba_bfs_distance_grid(passable, sy, sx, allow_diagonal, no_diag)
@@ -276,6 +280,8 @@ def astar_next_step(
                 bool(allow_diagonal),
                 c_no_diag,
             )
+        except ValueError:
+            raise
         except Exception:
             pass
     return _numba_astar_next_step(passable, sy, sx, ty, tx, allow_diagonal, no_diag)

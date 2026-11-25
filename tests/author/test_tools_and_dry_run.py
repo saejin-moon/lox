@@ -61,46 +61,6 @@ def test_dry_run_policy_behavioral_critic_detects_oscillation(tmp_path):
     assert "oscillation detected" in out
 
 
-def test_dry_run_policy_pilot_evaluation_and_revision_credits(tmp_path):
-    from lox.author.tools import AuthorToolRegistry
-    from lox.runner.pool import PersistentEvalPool
-
-    pool = PersistentEvalPool(workers=2, role="val-hum-law-fem", max_steps=40)
-    try:
-        tools = AuthorToolRegistry(db_path=str(tmp_path / "db.duckdb"))
-        baseline_runs = [
-            {"seed": 42, "max_depth": 1, "score": 10},
-            {"seed": 43, "max_depth": 1, "score": 15},
-            {"seed": 44, "max_depth": 2, "score": 50},
-        ]
-        tools.configure_generation(
-            pool=pool,
-            baseline_runs=baseline_runs,
-            max_pilot_runs=3,
-            pilot_episodes=3,
-        )
-
-        # 1. Syntax error should NOT burn pilot revision credits
-        bad_code = "def syntax_err(\n"
-        err_out, err_status = tools.dry_run_policy(bad_code)
-        assert err_status == "COMPILE_ERROR"
-        assert tools.pilot_runs_used == 0
-
-        # 2. Valid code runs pilot batch, increments pilot_runs_used to 1, and reports paired metrics
-        valid_policy = """class Policy:
-    def run(self, state):
-        while True:
-            state = yield Action.WAIT
-"""
-        out, status = tools.dry_run_policy(valid_policy, max_turns=20)
-        assert tools.pilot_runs_used == 1
-        assert "PILOT BATCH 1/3 REPORT" in out
-        assert "Paired vs Baseline:" in out
-        assert "Revisions Remaining: 2 left" in out
-    finally:
-        pool.close()
-
-
 def test_dry_run_policy_replay_run_id_fast_forward(tmp_path):
     from lox.author.tools import AuthorToolRegistry
     from lox.db.schema import init_db
@@ -148,15 +108,11 @@ def test_dry_run_check_does_not_log_false_pilot_failed(tmp_path):
 
     sample_policy = (
         "from lox.env.actions import Action\n"
-        "from lox.lang.bt import ActionLeaf, BehaviorTree, Blackboard, PrioritySelector\n"
-        "def act_fn(st, bb):\n"
+        "def act_fn(st):\n"
         "    return Action.SEARCH\n"
         "class Policy:\n"
-        "    def __init__(self):\n"
-        "        self.blackboard = Blackboard()\n"
-        "        self.tree = BehaviorTree(PrioritySelector([ActionLeaf(act_fn, name='act_fn')]), blackboard=self.blackboard)\n"
         "    def step(self, state):\n"
-        "        return self.tree.tick(state) or Action.WAIT\n"
+        "        return act_fn(state) or Action.WAIT\n"
     )
 
     import json
@@ -403,7 +359,7 @@ def test_ide_navigation_tools_read_symbol_ranged_skill_and_architecture_map(tmp_
     )
     pol = "import skills.goals.explore  # noqa: F401\n" + pol
 
-    reg = AuthorToolRegistry(db_path=dbp, macros_path=str(tmp_path / "macros.py"))
+    reg = AuthorToolRegistry(db_path=dbp)
     reg.configure_generation(
         pool=None,
         baseline_runs=[],
@@ -435,7 +391,7 @@ def test_read_symbol_resolves_skills_dotted_class_method(tmp_path):
     dbp = str(tmp_path / "tools2.duckdb")
     init_db(dbp).close()
     pol, skills = build_clean_option_a_starter()
-    reg = AuthorToolRegistry(db_path=dbp, macros_path=str(tmp_path / "macros.py"))
+    reg = AuthorToolRegistry(db_path=dbp)
     reg.configure_generation(
         pool=None,
         baseline_runs=[],
@@ -475,10 +431,6 @@ def test_option_a_peer_prompt_micro_pilot_research_gate_and_search_slice(tmp_pat
     assert "PrioritySelector" not in peer_sys
     assert "ActionLeaf" not in peer_sys
     assert "Blackboard" not in peer_sys
-
-    # Legacy is_swarm=True, is_peer=False remains backward-compatible
-    legacy_sys = build_system_prompt(is_swarm=True, is_peer=False)
-    assert "PrioritySelector" in legacy_sys
 
     # 2. Relaxed RESEARCH_REQUIRED gate: 1 query_db lookup unlocks dry_run_policy
     dbp = str(tmp_path / "mp.duckdb")
@@ -1034,3 +986,161 @@ def test_micro_pilot_logs_queryable_ticks_and_live_terminal_state(tmp_path):
     assert "6 rows" in sql_st, (sql_out, sql_st)
     assert "micro_pilot" in sql_out
     assert "micro_pilot_baseline" in sql_out
+
+
+def test_v3_micro_pilot_best_recovery_and_dead_patch_hygiene(tmp_path):
+    """Verifies Component 4: best_peer_micro_pilot tracks best passing attempt and SwarmPeerAgent auto-recovers it when final draft degrades."""
+    from unittest.mock import patch
+
+    from lox.author.agent import SynthesisProposal
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import SwarmPeerAgent
+    from lox.db.schema import init_db
+
+    dbp = str(tmp_path / "mp_hygiene.duckdb")
+    init_db(dbp).close()
+
+    base_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.SEARCH\n"
+    good_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.E\n"
+    bad_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.W\n"
+
+    peer = SwarmPeerAgent(
+        peer_id="reactive_1",
+        provider="openrouter",
+        model="test-model",
+        db_path=dbp,
+        max_tool_turns=22,
+    )
+
+    def _fake_synth(**kwargs):
+        # Simulate attempt 1 good (+1.5 depth, diverged) followed by attempt 2 degraded (-1.0 depth, 0 wins)
+        peer.author.tools.best_peer_micro_pilot = {
+            "attempt": 1,
+            "code": good_pol,
+            "skills": {},
+            "avg_depth_delta": 1.5,
+            "wins": 3,
+            "losses": 0,
+            "ties": 1,
+            "diverged": 3,
+            "probe_diverged": 2,
+            "policy_exceptions": 0,
+            "guard_regressions": 0,
+        }
+        peer.author.tools.last_peer_micro_pilot = {
+            "attempt": 2,
+            "code": bad_pol,
+            "skills": {},
+            "avg_depth_delta": -1.0,
+            "wins": 0,
+            "losses": 3,
+            "ties": 1,
+            "diverged": 3,
+            "probe_diverged": 2,
+            "policy_exceptions": 0,
+            "guard_regressions": 1,
+        }
+        return SynthesisProposal(
+            mode="SWARM_PEER",
+            hypothesis={"mechanism": "test_recovery"},
+            raw_code_patch=bad_pol,
+            full_policy_code=bad_pol,
+            full_macros_code="",
+            target_functions=["step"],
+        )
+
+    rep = DeficitReport(generation=10, regime="PLATEAU", d_succ_seeds=[1, 2])
+    cl = DeficitCluster("c1", "death", "test", 5, [3, 4], "ev")
+    with patch.object(peer.author, "synthesize", side_effect=_fake_synth):
+        cand = peer.run_cycle(
+            generation=10,
+            deficit_report=rep,
+            claimed_deficit=cl,
+            current_policy=base_pol,
+            current_skills={},
+            eval_pool=None,
+            track="reactive",
+        )
+    assert cand.sandbox_passed is True
+    assert "Action.E" in cand.policy_code
+
+    # Dead patch (0 diverged on both best & last) is rejected cleanly before tournament
+    def _fake_dead(**kwargs):
+        dead_rec = {
+            "attempt": 1,
+            "code": bad_pol,
+            "skills": {},
+            "avg_depth_delta": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "ties": 4,
+            "diverged": 0,
+            "probe_diverged": 0,
+            "policy_exceptions": 0,
+            "guard_regressions": 0,
+        }
+        peer.author.tools.best_peer_micro_pilot = dead_rec
+        peer.author.tools.last_peer_micro_pilot = dead_rec
+        return SynthesisProposal(
+            mode="SWARM_PEER",
+            hypothesis={"mechanism": "dead"},
+            raw_code_patch=bad_pol,
+            full_policy_code=bad_pol,
+            full_macros_code="",
+            target_functions=["step"],
+        )
+
+    with patch.object(peer.author, "synthesize", side_effect=_fake_dead):
+        cand_dead = peer.run_cycle(
+            generation=10,
+            deficit_report=rep,
+            claimed_deficit=cl,
+            current_policy=base_pol,
+            current_skills={},
+            eval_pool=None,
+            track="reactive",
+        )
+    assert cand_dead.sandbox_passed is False
+    assert "0-byte behavioral divergence" in cand_dead.error
+
+    # If the peer revises its final submission AFTER a failed/dead micro-pilot, hygiene must NOT clobber it!
+    fixed_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.N\n"
+
+    def _fake_fixed_after_dead(**kwargs):
+        peer.author.tools.best_peer_micro_pilot = {
+            "attempt": 1,
+            "code": bad_pol,
+            "skills": {},
+            "avg_depth_delta": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "ties": 4,
+            "diverged": 0,
+            "probe_diverged": 0,
+            "policy_exceptions": 0,
+            "guard_regressions": 0,
+        }
+        peer.author.tools.last_peer_micro_pilot = (
+            peer.author.tools.best_peer_micro_pilot
+        )
+        return SynthesisProposal(
+            mode="SWARM_PEER",
+            hypothesis={"mechanism": "fixed_in_final_turn"},
+            raw_code_patch=fixed_pol,
+            full_policy_code=fixed_pol,
+            full_macros_code="",
+            target_functions=["step"],
+        )
+
+    with patch.object(peer.author, "synthesize", side_effect=_fake_fixed_after_dead):
+        cand_fixed = peer.run_cycle(
+            generation=10,
+            deficit_report=rep,
+            claimed_deficit=cl,
+            current_policy=base_pol,
+            current_skills={},
+            eval_pool=None,
+            track="reactive",
+        )
+    assert cand_fixed.sandbox_passed is True
+    assert "Action.N" in cand_fixed.policy_code

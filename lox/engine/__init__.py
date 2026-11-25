@@ -1,25 +1,15 @@
-from lox.engine.hypothesis import (
-    compute_confidence_sequence,
-    evaluate_paired_hypothesis,
-    progression_metric,
-    should_stop_early_for_futility,
-    wilcoxon_signed_rank_p,
-)
-from lox.engine.modes import (
-    MODES,
-    ModeConfig,
-)
-from lox.engine.orchestrator import CampaignOrchestrator
-from lox.engine.scheduler import ModeScheduler
+"""LOX Evaluation, Statistical Gating, Archive, and Peer Swarm Orchestration Engine."""
+
+from lox.engine.frontier import FrontierArchive
+from lox.engine.map_elites import MAPElitesArchive
+from lox.engine.referee_gates import TournamentVerdict
+from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+from lox.engine.swarm_referee import SwarmReferee
 
 __all__ = [
-    "CampaignOrchestrator",
-    "MODES",
-    "ModeConfig",
-    "ModeScheduler",
-    "compute_confidence_sequence",
-    "evaluate_paired_hypothesis",
-    "progression_metric",
-    "should_stop_early_for_futility",
-    "wilcoxon_signed_rank_p",
+    "FrontierArchive",
+    "MAPElitesArchive",
+    "SwarmCampaignOrchestrator",
+    "SwarmReferee",
+    "TournamentVerdict",
 ]

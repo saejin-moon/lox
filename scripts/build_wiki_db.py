@@ -237,8 +237,9 @@ def _html_to_text(raw_html: str) -> str:
 
 
 def _init_sqlite_wiki(db_path: str) -> tuple[sqlite3.Connection, sqlite3.Cursor]:
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    for sidecar in (db_path, f"{db_path}-wal", f"{db_path}-shm"):
+        if os.path.exists(sidecar):
+            os.remove(sidecar)
     con = sqlite3.connect(db_path)
     cur = con.cursor()
     cur.execute("PRAGMA journal_mode = WAL;")
