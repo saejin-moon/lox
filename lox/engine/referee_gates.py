@@ -469,7 +469,7 @@ def _has_positive_dominance(pair_stats: dict[str, Any]) -> bool:
 def _meets_select_admission_floor(
     pair_stats: dict[str, Any], *, has_base: bool
 ) -> bool:
-    """Prevents trivial 1W/0L (+0.0002) near-no-ops from hijacking S_confirm."""
+    """Prevents trivial near-no-ops (`1W/0L` or sub-threshold score jitters) from hijacking `S_select`."""
     if not has_base:
         return True
     if not _has_positive_dominance(pair_stats):
@@ -478,7 +478,12 @@ def _meets_select_admission_floor(
     losses = opt_int(pair_stats, "losses", 0)
     mean_d = opt_float(pair_stats, "mean_delta", 0.0)
     winsor_d = opt_float(pair_stats, "winsor_delta", mean_d)
-    return wins >= 2 or (wins == 1 and losses == 0 and winsor_d >= 0.05)
+    n_paired = opt_int(pair_stats, "n_paired", opt_int(pair_stats, "paired_count", 0))
+    if wins >= 2:
+        min_w = min(0.02, 0.64 / float(n_paired)) if n_paired > 0 else 0.02
+        return winsor_d >= min_w
+    min_w1 = min(0.05, 1.60 / float(n_paired)) if n_paired > 0 else 0.05
+    return wins == 1 and losses == 0 and winsor_d >= min_w1
 
 
 def _evaluate_confirmation(

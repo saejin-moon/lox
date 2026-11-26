@@ -1144,3 +1144,55 @@ def test_v3_micro_pilot_best_recovery_and_dead_patch_hygiene(tmp_path):
         )
     assert cand_fixed.sandbox_passed is True
     assert "Action.N" in cand_fixed.policy_code
+
+
+def test_query_wiki_and_read_wiki_article_char_caps(tmp_path):
+    """Verifies Guidebook-sized exact/#1 wiki hits and default read_wiki_article tool reads stay bounded."""
+    import sqlite3
+
+    from lox.author.tools import AuthorToolRegistry
+
+    wdb = str(tmp_path / "mini_wiki.db")
+    con = sqlite3.connect(wdb)
+    try:
+        con.execute(
+            "CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT, content TEXT)"
+        )
+        con.execute(
+            "CREATE VIRTUAL TABLE wiki_fts USING fts5(title, content, content='articles', content_rowid='id')"
+        )
+        con.execute(
+            "CREATE TABLE redirects (alias TEXT PRIMARY KEY, target_title TEXT)"
+        )
+        big_text = "Guidebook entry about hunger and stamina. " * 2500  # ~105k chars
+        sec_text = "Secondary encyclopedia reference about food. " * 400  # ~17k chars
+        con.execute(
+            "INSERT INTO articles (id, title, content) VALUES (1, 'NetHack 3.6.6 Guidebook', ?)",
+            (big_text,),
+        )
+        con.execute(
+            "INSERT INTO articles (id, title, content) VALUES (2, 'HungerGuide', ?)",
+            (sec_text,),
+        )
+        con.execute(
+            "INSERT INTO wiki_fts (rowid, title, content) VALUES (1, 'NetHack 3.6.6 Guidebook', ?)",
+            (big_text,),
+        )
+        con.execute(
+            "INSERT INTO wiki_fts (rowid, title, content) VALUES (2, 'HungerGuide', ?)",
+            (sec_text,),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    reg = AuthorToolRegistry(db_path=str(tmp_path / "t.duckdb"), wiki_db_path=wdb)
+    q_out, _ = reg.query_wiki("NetHack 3.6.6 Guidebook", top_k=2)
+    assert len(q_out) < 12000
+    assert "Showing 8000/" in q_out
+    assert "read_wiki_article(" in q_out
+
+    r_out, _ = reg.read_wiki_article("NetHack 3.6.6 Guidebook")
+    assert len(r_out) < 17000
+    assert "TRUNCATED:" in r_out
+    assert "offset=16000" in r_out

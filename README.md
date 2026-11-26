@@ -255,7 +255,7 @@ uv run python scripts/run_swarm.py \
   --clean \
   --provider openrouter \
   --model z-ai/glm-5.3-flash:nitro \
-  --refactor-model <optional-stronger-model> \
+  --expert-model thinkingmachines/inkling-2-small:floor \
   --reasoning-effort medium \
   --workers 4 \
   --turns-per-worker 3 \

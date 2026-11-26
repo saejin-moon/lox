@@ -334,14 +334,24 @@ class MAPElitesArchive:
         return len(self.cells) / float(total)
 
     def load_from_db(self, con: Any) -> int:
-        """Loads v2 elites from `archive_policies`, purging legacy v1 `cell_d*` cells cleanly."""
+        """Loads v2 elites from `archive_policies`, purging legacy v1 `cell_d*` cells when writable."""
         try:
-            try:
-                con.execute(
-                    "DELETE FROM archive_policies WHERE cell_id NOT LIKE 'cell_v2_%'"
-                )
-            except Exception as purge_exc:
-                _LOG.warning("MAPElitesArchive v1 purge skipped: %s", purge_exc)
+            v1_row = con.execute(
+                "SELECT COUNT(*) FROM archive_policies WHERE cell_id NOT LIKE 'cell_v2_%'"
+            ).fetchone()
+            if v1_row and int(v1_row[0] or 0) > 0:
+                try:
+                    con.execute(
+                        "DELETE FROM archive_policies WHERE cell_id NOT LIKE 'cell_v2_%'"
+                    )
+                except Exception as purge_exc:
+                    if "read-only" in str(purge_exc).lower():
+                        _LOG.debug(
+                            "MAPElitesArchive v1 purge skipped on read-only DB: %s",
+                            purge_exc,
+                        )
+                    else:
+                        _LOG.warning("MAPElitesArchive v1 purge skipped: %s", purge_exc)
             rows = con.execute(
                 """
                 SELECT cell_id, depth_bin, caution_bin, resource_bin, fitness,

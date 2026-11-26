@@ -93,22 +93,20 @@ Motto: **"Hard Code Nothing" in harness—all strategy, memory, navigation, comb
    - Inspect the **Paired Micro-Pilot Diff** returned by `dry_run_policy`:
      - If a `GUARD` seed shows **`⚠️ REGRESSION`** (depth/exception/stall regression), fix the regressing logic and re-verify before submitting.
      - If a `GUARD` seed shows **`OK (non-regressing drift)`**, **do NOT over-tighten** — NEVER add artificial `depth <= X` or `xp_level <= Y` caps solely to silence benign `GUARD` byte-drift.
-     - Inspect the **6 unseen `PROBE` seeds** and **Micro-Pilot Net Summary** (`W/L`, `avg_Δdepth`). If `GENERALIZATION REGRESSION WARNING` fires, your change broke unseen runs (e.g., overly aggressive cap or unguarded flee loop) — broaden or soften the mechanism before submitting. If `ZERO-PROBE-DRIFT NOTE` fires, your precondition is likely over-narrow.
-     - If **`TARGET` seeds are `UNCHANGED` (`DEAD-PATCH WARNING`)**, your precondition is too narrow or unreachable — broaden it to the general root cause and re-test before submitting.
+     - Inspect the **unseen `PROBE` seeds** and **Micro-Pilot Net Summary** (`W/L`, `avg_Δdepth`). If `GENERALIZATION REGRESSION WARNING` fires, your change hurts unseen runs (e.g., overly aggressive cap or unguarded flee loop) — soften/fix before submitting. If `ZERO-PROBE-DRIFT NOTE` fires, check for over-narrow preconditions.
+     - If **`TARGET` seeds are `UNCHANGED` (`DEAD-PATCH WARNING`)**, broaden the precondition to the general root cause and re-test before submitting.
 
 2. **Schema-Safe `ws.domain(...)` State (Zero `KeyError`s)**:
-   - Never assume keys exist in an existing `ws.domain(...)` dictionary when patching a function—existing domains may be initialized elsewhere or evolved incrementally.
-   - Prefer a typed `@dataclass` factory (`ws.domain("illness", IllnessState)`) for new subsystems, and ALWAYS use `.get(key, default)` / `setdefault(...)` when reading or updating dict-backed domains.
+   - Never assume keys exist in an existing `ws.domain(...)` dict; prefer a typed `@dataclass` factory (`ws.domain("illness", IllnessState)`) or `.get(key, default)` / `setdefault(...)`.
 
 3. **Clean Modular Subsystems vs. Core Bloat**:
    - `Policy.step(state)` observes `self.ws = WorldState()`, checks prompts/survival/combat interrupts, and ticks/preempts committed goals in `GoalRunner` (`skills/goals/core.py`). Never fall through silently to `Action.WAIT`.
-   - **Surgical fix (<= 25 LOC)**: Patch only the owning function inside `<skill_code module="domain/submodule">` (e.g., `prompts`, `survival/core`, `goals/explore`) without rewriting unrelated helpers.
-   - **New capability (e.g., illness/corpse safety, encumbrance shedding, search bailout, ranged combat)**: Create a clean, self-contained 2-level module (`<skill_code module="survival/illness">...` or `<skill_code module="goals/search_bailout">...`, max depth 2, zero 5-LOC re-export facades) and wire it with a minimal hook in `register_goal(...)`, `policy.py`, or the owning dispatcher—never paste 150 lines of unrelated logic into `combat/core.py` or `survival/core.py`. Keep `policy.py` thin (`<= 80 LOC`).
+   - **Surgical fix (<= 25 LOC)**: Patch only the owning function inside `<skill_code module="domain/submodule">` (no unrelated helper copies). Keep `policy.py <= 80 LOC`, and wire new 2-level capability modules (`skills/<domain>/<module>.py`) cleanly via `register_goal(...)` or the owning dispatcher.
 
-4. **Batch Empirical Research & Iterate on Micro-Pilot Feedback**:
-   - **Never Guess**: Check C rules via `query_wiki` / `read_wiki_article` / `query_monster` / `query_item` and inspect live traces/code via `query_db` / `query_theories` / `diff_policies` / `read_symbol` / ranged `read_skill(name, start_line, end_line)` / `find_references` / `grep_skills` / `benchmark_expert_parity`.
-   - Use the pre-injected `Architecture Map (Option A)` in your prompt instead of blindly reading every skill file; read only the 1–2 files/symbols you plan to modify.
-   - Batch your initial empirical research (`query_db` on `champion_ticks`, `query_wiki`/`query_theories`, and targeted `read_symbol`/`read_skill`) in Turns 1–2, then use `dry_run_policy` (Pyright + cross-module checks + claimed fixtures + `prompt_torture` + Paired CRN Micro-Pilot) to verify rescue and eliminate guard drift before emitting your final YAML hypothesis + surgical XML `<skill_code module="domain/submodule">` / `<policy_code>` patches (omit unchanged functions; never put `<hypothesis>` inside `dry_run_policy(code=...)`).
+4. **Track-Aware 3-Phase Cadence & SQL Hygiene**:
+   - **Phase 1 — Batch Diagnose (Turns 1–2, parallel calls)**: Run **2–4 independent tool calls in ONE turn** rather than 1-file/1-query turns. Start from the pre-injected `Architecture Map (Option A)`. *Reactive/Revision*: batch `query_db` (`champion_ticks`/`peer_ticks`) + `read_symbol`/ranged `read_skill` (add `expert_ticks` / `query_wiki` only when rules are unclear). *Proactive (`proactive_1`, `proactive_2`)*: batch `query_db` (`champion_ticks` vs `expert_ticks`) + `query_wiki`/`query_item`/`query_monster` + `read_symbol`/`read_skill` (verify stats via `query_theories` / `benchmark_expert_parity` / `diff_policies` / `find_references` / `grep_skills` / `read_wiki_article` as needed).
+   - **Phase 2 — Single-Mechanism Micro-Pilot (Turns 2–4)**: Implement ONE clean mechanism and call `dry_run_policy(...)` immediately (never wrap `code=` in `<hypothesis>`).
+   - **Phase 3 — Post-Pilot Fix or Finalize Now**: If `TARGET` is rescued and `GUARD`/`PROBE` are clean, **output your final YAML hypothesis + surgical XML patches immediately** instead of running extra read queries. If pilot flagged a regression or `DEAD-PATCH`, inspect `peer_ticks` **from the outcome backward (`ORDER BY step_idx DESC LIMIT 20`) or via `GROUP BY`** (NEVER paginate forward with `OFFSET 12, 24, 36...` one turn at a time), fix, and re-run `dry_run_policy`.
 """
 
 
@@ -197,7 +195,6 @@ def build_user_prompt(
     return f"""### Gen {generation} — Mode: `{canon_mode}`
 {digest_block}{existing_policy_block}{skills_block}
 ### Task (`{canon_mode}`)
-- **Batch independent tool calls in parallel** during Turns 1–2 (e.g. combine `query_db`, `read_skill`/`read_symbol`, `query_wiki`/`query_theories` in the same turn rather than 1 tool call per turn). Never repeat rejected ideas from `Recent Experiment & Rejection Memory`, and honor any `exclude_overlap` scope assigned to you.
-- Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` via `dry_run_policy` (omit unchanged functions). After `dry_run_policy`, **query `peer_ticks` / `all_ticks` via `query_db`** on any regressed `GUARD`/`PROBE` seed or unchanged `TARGET` seed to observe the exact divergence turn, actions, and messages before iterating.
-- Output brief ```yaml``` hypothesis (plus optional `skills_to_prune: [...]`) and final `<skill_code module="...">` / `<policy_code>` XML blocks.
+- **Phase 1 (Turns 1–2, batch in parallel)**: Combine `query_db` + `read_skill`/`read_symbol` (and `expert_ticks` / `query_wiki` / `query_theories` where applicable) in 1–2 turns—not 1 tool call per turn. Honor `exclude_overlap` and never repeat rejected mechanisms from `Recent Experiment & Rejection Memory`.
+- **Phase 2 (`dry_run_policy`)**: Test surgical `<skill_code module="domain/submodule">...</skill_code>` / `<policy_code>...</policy_code>` (omit unchanged functions). If `TARGET` rescued + `GUARD`/`PROBE` clean, finalize immediately. If not, query `peer_ticks`/`all_ticks` **from outcome backward (`ORDER BY step_idx DESC`)** (never forward `OFFSET` pagination loops), fix, and re-run `dry_run_policy` before emitting final ```yaml``` + XML blocks (`skills_to_prune: [...]` optional).
 """

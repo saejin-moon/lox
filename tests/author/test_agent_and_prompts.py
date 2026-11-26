@@ -519,3 +519,125 @@ def test_v3_agent_probe_preservation_repair_prompt_and_tool_compaction(tmp_path)
     assert seen_probes and seen_probes[0] == [30, 31, 32, 33, 34, 35]
     assert agent.tools.peer_id == "reactive_1"
     assert agent.tools.baseline_policy_code == base_pol
+
+
+def test_openrouter_cost_tool_arg_compaction_and_budget_bypass_fix(tmp_path):
+    """Verifies live usage.cost extraction, stale tool_calls compaction, and post-pilot budget bypass fix."""
+    import json
+    from unittest.mock import patch
+
+    from lox.author.agent import AuthorAgent
+    from lox.author.llm_client import compact_tool_messages, extract_usage_cost
+
+    # 1. Exact OpenRouter usage.cost extraction preserves 0.0 and ignores bool/missing
+    assert extract_usage_cost({"cost": 0.0042, "prompt_tokens": 100}) == 0.0042
+    assert extract_usage_cost({"cost": 0.0}) == 0.0
+    assert extract_usage_cost({"total_cost": 0.015}) == 0.015
+    assert extract_usage_cost({"cost": True}) is None
+    assert extract_usage_cost({"prompt_tokens": 100}) is None
+
+    # 2. Old assistant tool_calls arguments > max_old_tool_arg_chars are compacted cleanly as valid JSON
+    big_code = "def x():\n    return 1\n" * 120
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u0"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "tc_old",
+                    "type": "function",
+                    "function": {
+                        "name": "dry_run_policy",
+                        "arguments": json.dumps({"code": big_code}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "tc_old",
+            "name": "dry_run_policy",
+            "content": "ok",
+        },
+        {"role": "assistant", "content": "r1"},
+        {"role": "tool", "tool_call_id": "tc_1", "name": "query_db", "content": "res1"},
+        {"role": "assistant", "content": "r2"},
+        {"role": "tool", "tool_call_id": "tc_2", "name": "query_db", "content": "res2"},
+    ]
+    comp = compact_tool_messages(msgs, keep_recent_turns=2)
+    comp_args = json.loads(comp[2]["tool_calls"][0]["function"]["arguments"])
+    assert "_compacted" in comp_args
+    assert "dry_run_policy" in comp_args["_compacted"]
+
+    # 3. _build_post_tool_budget_notice catches post-pilot SQL loops even when last_dry_run_passed=True
+    repilot_msg = AuthorAgent._build_post_tool_budget_notice(
+        turn_idx=8,
+        effective_max_turns=22,
+        turns_since_last_dry_run=3,
+        last_dry_run_passed=True,
+        last_peer_micro_pilot={
+            "diverged": 4,
+            "wins": 1,
+            "losses": 5,
+            "avg_depth_delta": -1.2,
+            "guard_regressions": 1,
+            "policy_exceptions": 0,
+        },
+    )
+    assert repilot_msg and "Re-Pilot Notice" in repilot_msg
+
+    clean_wrap_msg = AuthorAgent._build_post_tool_budget_notice(
+        turn_idx=8,
+        effective_max_turns=22,
+        turns_since_last_dry_run=3,
+        last_dry_run_passed=True,
+        last_peer_micro_pilot={
+            "diverged": 6,
+            "wins": 4,
+            "losses": 0,
+            "avg_depth_delta": 0.5,
+            "guard_regressions": 0,
+            "policy_exceptions": 0,
+        },
+    )
+    assert clean_wrap_msg and "already passed cleanly" in clean_wrap_msg
+
+    # 4. End-to-end save_synthesis_log receives exact OpenRouter usage.cost instead of rate-table fallback
+    dbp = str(tmp_path / "cost_log.duckdb")
+    agent = AuthorAgent(provider="openrouter", db_path=dbp)
+    pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.E\n"
+
+    def _fake_api_cost(messages, allow_tools=True, **kwargs):
+        return {
+            "role": "assistant",
+            "content": (
+                "```yaml\nobservation_from_db: ok\nmechanism: ok\n```\n"
+                "<policy_code>\n" + pol + "\n</policy_code>"
+            ),
+            "tool_calls": [],
+            "_usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 200,
+                "cost": 0.00777,
+            },
+        }
+
+    with patch.object(agent, "_call_llm_api", side_effect=_fake_api_cost):
+        agent.synthesize(
+            mode="SWARM_PEER",
+            generation=7,
+            current_policy=pol,
+            max_tool_turns=2,
+        )
+    from lox.db.schema import connect_db
+
+    con = connect_db(dbp, read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT cost_usd FROM synthesis_logs WHERE generation = 7"
+        ).fetchall()
+    finally:
+        con.close()
+    assert any(abs(float(r[0] or 0.0) - 0.00777) < 1e-9 for r in rows)

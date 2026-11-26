@@ -299,3 +299,48 @@ def test_map_elites_v2_calibration_deficits_confinement_and_private_symbols(tmp_
     assert "skills/nav.py" in prompt
     assert "public_step" in prompt
     assert "read_skill" in prompt
+
+
+def test_map_elites_load_from_db_readonly_zero_warnings(tmp_path, caplog):
+    """Verifies MAPElitesArchive.load_from_db on a read-only DuckDB connection emits zero purge warnings."""
+    import duckdb
+
+    db_path = str(tmp_path / "ro_map.duckdb")
+    con_rw = init_db(db_path)
+    try:
+        arch = MAPElitesArchive()
+        arch.add_candidate(
+            policy_code="class Policy: pass",
+            metrics={
+                "avg_depth": 2.0,
+                "max_depth": 2,
+                "avg_ac": 8.0,
+                "avg_xp_level": 2.0,
+                "avg_unique_tiles": 40.0,
+                "avg_turns": 100.0,
+                "avg_score": 150.0,
+            },
+            batch_id="b1",
+            generation=1,
+            con=con_rw,
+        )
+        # Also insert a legacy v1 row to confirm read-only load skips DELETE quietly without logging a warning
+        con_rw.execute(
+            """
+            INSERT INTO archive_policies (cell_id, depth_bin, caution_bin, resource_bin, fitness, policy_code, batch_id, generation, metrics_json)
+            VALUES ('cell_d1_v0_t0', 1, 0, 0, 1.0, 'class Policy: pass', 'b0', 0, '{}')
+            """
+        )
+    finally:
+        con_rw.close()
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="lox.engine.map_elites"):
+        con_ro = duckdb.connect(db_path, read_only=True)
+        try:
+            loaded = MAPElitesArchive().load_from_db(con_ro)
+        finally:
+            con_ro.close()
+
+    assert loaded == 1
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]

@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lox.db.schema import DEFAULT_DB_PATH
 from lox.engine.swarm_orchestrator import (
+    DEFAULT_EXPERT_MODEL,
     DEFAULT_FRONTIER_DIR,
     DEFAULT_WORKSPACE_DIR,
     SwarmCampaignOrchestrator,
@@ -77,9 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM model identifier (default: z-ai/glm-5.3-flash:nitro).",
     )
     parser.add_argument(
-        "--refactor-model",
+        "--expert-model",
         default=None,
-        help="Optional stronger LLM model identifier for refactor/plateau slots (defaults to --model).",
+        help=(
+            f"Stronger LLM model identifier always assigned to `proactive_2` "
+            f"(default: {DEFAULT_EXPERT_MODEL} when --provider openrouter, else --model)."
+        ),
     )
     parser.add_argument(
         "--reasoning-effort",
@@ -133,8 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = build_parser().parse_args(argv)
-    if not getattr(args, "refactor_model", None):
-        args.refactor_model = args.model
+    if not getattr(args, "expert_model", None):
+        args.expert_model = (
+            DEFAULT_EXPERT_MODEL
+            if str(getattr(args, "provider", "openrouter")).lower() == "openrouter"
+            else args.model
+        )
     return args
 
 
@@ -163,7 +171,7 @@ def main() -> None:
     ui.header("LOX Peer Swarm Synthesis Engine (Layout A: 2 Reactive + 2 Proactive)")
     ui.info(
         f"Config: {args.generations} generations | {args.workers} workers | "
-        f"{args.turns_per_worker} turns/worker | Provider: {args.provider} ({args.model})"
+        f"{args.turns_per_worker} turns/worker | Provider: {args.provider} ({args.model}, P2 expert: {args.expert_model})"
     )
 
     orchestrator = SwarmCampaignOrchestrator(
@@ -179,7 +187,7 @@ def main() -> None:
         eval_workers=args.eval_workers,
         reasoning_effort=args.reasoning_effort,
         routing=args.routing,
-        refactor_model=args.refactor_model,
+        expert_model=args.expert_model,
         race_seeds=args.race_seeds,
         scenario_gate=args.scenario_gate,
     )

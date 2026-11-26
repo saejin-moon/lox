@@ -426,10 +426,12 @@ class DBToolsMixin:
     def read_wiki_article(
         self, title: str, section: str = "", offset: int = 0, max_chars: int = 0
     ) -> tuple[str, str]:
-        """Reads full untruncated article or section from the offline NetHackWiki + Guidebook index."""
+        """Reads bounded article or section slices from the offline NetHackWiki + Guidebook index."""
         self.wiki_queries_run += 1
+        req_cap = int(max_chars or 0)
+        safe_cap = 16000 if req_cap <= 0 else min(24000, max(500, req_cap))
         out = self.wiki.read_article(
-            title=title, section=section, offset=offset, max_chars=max_chars
+            title=title, section=section, offset=offset, max_chars=safe_cap
         )
         return out, f"article:{title[:32]}"
 

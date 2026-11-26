@@ -5,6 +5,8 @@ and tool-output context compaction for LOX Author sessions.
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
 import time
@@ -71,15 +73,38 @@ def extract_usage_tokens(usage: Any) -> tuple[int, int, int]:
     return p_toks, c_toks, r_toks
 
 
+def extract_usage_cost(usage: Any) -> float | None:
+    """
+    Extracts exact provider-reported billed USD cost from `usage` (e.g. OpenRouter's
+    `usage.cost`), returning `None` when unavailable so callers can fall back to rate tables.
+    """
+    if not isinstance(usage, dict):
+        return None
+    raw_cost = usage.get("cost")
+    if raw_cost is None:
+        raw_cost = usage.get("total_cost")
+    if raw_cost is None or isinstance(raw_cost, bool):
+        return None
+    try:
+        cost_f = float(raw_cost)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(cost_f) or cost_f < 0.0:
+        return None
+    return cost_f
+
+
 def compact_tool_messages(
     messages: list[dict[str, Any]],
     keep_recent_turns: int = 4,
     max_old_chars: int = 600,
     head_chars: int = 350,
+    max_old_tool_arg_chars: int = 1000,
 ) -> list[dict[str, Any]]:
     """
     Returns a shallow-copied message list where the last `keep_recent_turns` assistant/tool
-    exchanges remain 100% verbatim while older large `role == 'tool'` outputs are compacted
+    exchanges remain 100% verbatim while older large `role == 'tool'` outputs and oversized
+    assistant `tool_calls` payloads (e.g. old `dry_run_policy` code bundles) are compacted
     to prevent quadratic context inflation across long ReAct sessions.
     """
     asst_indices = [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
@@ -101,6 +126,32 @@ def compact_tool_messages(
                         ),
                     }
                 )
+                continue
+        elif idx < cutoff_idx and m.get("role") == "assistant" and m.get("tool_calls"):
+            tcs = m.get("tool_calls") or []
+            changed_tc = False
+            new_tcs: list[Any] = []
+            for tc in tcs:
+                if isinstance(tc, dict):
+                    fn_obj = tc.get("function")
+                    if isinstance(fn_obj, dict):
+                        raw_args = str(fn_obj.get("arguments", "") or "")
+                        if len(raw_args) > max_old_tool_arg_chars:
+                            fn_nm = str(fn_obj.get("name", "tool") or "tool")
+                            new_fn = {
+                                **fn_obj,
+                                "arguments": json.dumps(
+                                    {
+                                        "_compacted": f"{fn_nm} args ({len(raw_args)} chars) omitted"
+                                    }
+                                ),
+                            }
+                            new_tcs.append({**tc, "function": new_fn})
+                            changed_tc = True
+                            continue
+                new_tcs.append(tc)
+            if changed_tc:
+                compacted.append({**m, "tool_calls": new_tcs})
                 continue
         compacted.append(m)
     return compacted

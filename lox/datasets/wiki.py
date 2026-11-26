@@ -427,13 +427,13 @@ class WikiEngine:
                 lines.append(f"> {h['snippet']}")
             raw_body = h.get("text") or h.get("preview") or ""
             cleaned = _clean_wiki_markup(raw_body)
-            # Deliver exact matches and primary (#1) hit completely untruncated;
-            # secondary hits preserve clean depth with explicit pointer to read_wiki_article.
-            if h.get("is_exact") or idx == 1 or len(cleaned) <= 4000:
+            # Bound exact/#1 hits (e.g. 200k-char Guidebook) cleanly so single lookups cannot bloat prompt history.
+            char_cap = 8000 if (h.get("is_exact") or idx == 1) else 2500
+            if len(cleaned) <= char_cap:
                 lines.append(f"```text\n{cleaned}\n```")
             else:
                 lines.append(
-                    f"```text\n{cleaned[:3000]}\n... [Showing 3000/{len(cleaned)} chars; call read_wiki_article('{h['title']}') for full article]\n```"
+                    f"```text\n{cleaned[:char_cap]}\n... [Showing {char_cap}/{len(cleaned)} chars; call read_wiki_article('{h['title']}', section='...', offset={char_cap}) for more]\n```"
                 )
 
         return "\n".join(lines)

@@ -521,11 +521,14 @@ def test_phase1_cli_args_wiki_and_prompts():
     from scripts.run_swarm import parse_args
 
     args_def = parse_args(["--provider", "openrouter", "--model", "z-ai/glm-5.3-flash"])
-    assert args_def.refactor_model == "z-ai/glm-5.3-flash"
+    assert args_def.expert_model == "thinkingmachines/inkling-2-small:floor"
     assert args_def.reasoning_effort == "medium"
     assert args_def.seeds == 64
     assert args_def.race_seeds == 32
     assert args_def.scenario_gate == "off"
+
+    args_non_or = parse_args(["--provider", "gemini", "--model", "gemini-2.5-flash"])
+    assert args_non_or.expert_model == "gemini-2.5-flash"
 
     args_custom = parse_args(
         [
@@ -533,7 +536,7 @@ def test_phase1_cli_args_wiki_and_prompts():
             "openrouter",
             "--model",
             "z-ai/glm-5.3-flash",
-            "--refactor-model",
+            "--expert-model",
             "anthropic/claude-opus-4.5",
             "--routing",
             "exacto",
@@ -543,7 +546,7 @@ def test_phase1_cli_args_wiki_and_prompts():
             "strict",
         ]
     )
-    assert args_custom.refactor_model == "anthropic/claude-opus-4.5"
+    assert args_custom.expert_model == "anthropic/claude-opus-4.5"
     assert args_custom.routing == "exacto"
     assert args_custom.race_seeds == 16
     assert args_custom.scenario_gate == "strict"
@@ -964,3 +967,87 @@ def test_v3_proactive_branch_advancement_4gen_reset_and_graduation(
                 con.close()
     finally:
         orch.close()
+
+
+def test_expert_model_always_routes_proactive_2(tmp_path):
+    """Verifies `--expert-model` defaults cleanly on OpenRouter and ALWAYS routes `proactive_2` (even at plateau=0)."""
+    from unittest.mock import patch
+
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.engine.swarm_orchestrator import (
+        DEFAULT_EXPERT_MODEL,
+        SwarmCampaignOrchestrator,
+    )
+
+    orch = SwarmCampaignOrchestrator(
+        db_path=str(tmp_path / "exp_route.duckdb"),
+        workspace_dir=str(tmp_path / "ws"),
+        frontier_dir=str(tmp_path / "fr"),
+        provider="openrouter",
+        model="z-ai/glm-5.3-flash:nitro",
+        seeds_per_batch=8,
+        num_workers=4,
+    )
+    assert orch.expert_model == DEFAULT_EXPERT_MODEL
+
+    seen_models: dict[str, str] = {}
+    rep = DeficitReport(
+        generation=1,
+        regime="CLIMBING",
+        plateau_streak=0,
+        bloat_warning=False,
+        d_succ_seeds=[11, 12],
+        fail_clusters=[
+            DeficitCluster(
+                cluster_id="c1", kind="early_mortality", label="c1", sample_seeds=[21]
+            )
+        ],
+    )
+
+    def _cap_run_cycle(self_peer, **kw):
+        seen_models[self_peer.peer_id] = self_peer.model
+        return PeerCandidate(
+            peer_id=self_peer.peer_id,
+            claimed_deficit_id="c1",
+            claimed_label="c1",
+            policy_code=str(kw.get("current_policy") or ""),
+            skills=dict(kw.get("current_skills") or {}),
+            sandbox_passed=False,
+            error="stop",
+        )
+
+    try:
+        with (
+            patch.object(orch.deficit_analyzer, "analyze", return_value=rep),
+            patch.object(
+                orch.directive_planner,
+                "plan_peer_directives",
+                return_value=[],
+            ),
+            patch.object(
+                orch.eval_pool,
+                "evaluate_batch",
+                return_value={"runs": [{"seed": 11, "depth": 2, "score": 50}]},
+            ),
+            patch(
+                "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+                new=_cap_run_cycle,
+            ),
+            patch.object(
+                orch.referee,
+                "evaluate_tournament",
+                side_effect=RuntimeError("stop_after_peers"),
+            ),
+        ):
+            try:
+                orch.run_generation(1)
+            except RuntimeError as exc:
+                assert "stop_after_peers" in str(exc)
+    finally:
+        orch.close()
+
+    assert seen_models.get("proactive_2") == DEFAULT_EXPERT_MODEL
+    assert seen_models.get("reactive_1") == "z-ai/glm-5.3-flash:nitro"
+    assert seen_models.get("reactive_2") == "z-ai/glm-5.3-flash:nitro"
+    assert seen_models.get("proactive_1") == "z-ai/glm-5.3-flash:nitro"

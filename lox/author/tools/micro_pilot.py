@@ -50,7 +50,7 @@ def run_peer_paired_micro_pilot(
     ]
     probe_seeds = [
         int(s)
-        for s in dict.fromkeys(int(x) for x in registry.peer_probe_seeds[:6])
+        for s in dict.fromkeys(int(x) for x in registry.peer_probe_seeds[:12])
         if int(s) not in guard_seeds and int(s) not in target_seeds
     ]
     all_seeds = guard_seeds + target_seeds + probe_seeds

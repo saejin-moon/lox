@@ -309,7 +309,7 @@ OPENAI_TOOL_SPECS: list[dict[str, Any]] = [
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Optional character cap (0 = full article).",
+                        "description": "Optional character cap (0 uses safe default 16000 chars, max 24000).",
                         "default": 0,
                     },
                 },

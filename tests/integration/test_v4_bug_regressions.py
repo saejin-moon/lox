@@ -984,3 +984,197 @@ def test_audit_p1_p2_guardrail1_logger_deficits_experts_grid_theories_and_peer_m
     _hyp, _pol, kept_sk, _pruned = parse_peer_output(raw_resp, base_pol, base_skills)
     assert "def untouched_helper" in kept_sk["nav"]
     assert "return untouched_helper(s)" in kept_sk["nav"]
+
+
+def test_select_admission_floor_and_incubation_probe_scaling(tmp_path):
+    """
+    Verifies Gen 81 findings:
+    1. `_meets_select_admission_floor` blocks score-jitter `3W/1L (+0.0003)` at both small and large N,
+       while admitting real depth fixes (`+0.097` at N=32 and sparse `+0.005` at N=512).
+    2. `SwarmCampaignOrchestrator` supplies 12 probes & up to 32 shard seeds when `seeds_per_batch >= 32`.
+    """
+    from unittest.mock import patch
+
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import PeerCandidate
+    from lox.author.tools import AuthorToolRegistry
+    from lox.db.schema import init_db
+    from lox.engine.referee_gates import _meets_select_admission_floor
+    from lox.engine.swarm_orchestrator import SwarmCampaignOrchestrator
+
+    # 1a. Gen 81 reactive_2 score jitter (3W/1L, winsor_delta=+0.0003) must fail
+    pr_jitter_32 = {
+        "wins": 3,
+        "losses": 1,
+        "n_paired": 32,
+        "mean_delta": 0.0003,
+        "winsor_delta": 0.0003,
+    }
+    pr_jitter_bare = {
+        "wins": 3,
+        "losses": 1,
+        "mean_delta": 0.0003,
+        "winsor_delta": 0.0003,
+    }
+    pr_jitter_zero = {
+        "wins": 2,
+        "losses": 0,
+        "n_paired": 32,
+        "mean_delta": 0.0,
+        "winsor_delta": 0.0,
+    }
+    pr_jitter_none = {
+        "wins": 2,
+        "losses": 0,
+        "n_paired": 32,
+        "mean_delta": 0.001,
+        "winsor_delta": None,
+    }
+    assert _meets_select_admission_floor(pr_jitter_32, has_base=True) is False
+    assert _meets_select_admission_floor(pr_jitter_bare, has_base=True) is False
+    assert _meets_select_admission_floor(pr_jitter_zero, has_base=True) is False
+    assert _meets_select_admission_floor(pr_jitter_none, has_base=True) is False
+
+    # 1b. Gen 81 reactive_1 (+0.097 at N=32) and large-N sparse gain (+0.005 at N=512 -> +2.56 total) pass
+    pr_real_32 = {
+        "wins": 3,
+        "losses": 1,
+        "n_paired": 32,
+        "mean_delta": 0.097,
+        "winsor_delta": 0.097,
+    }
+    pr_sparse_512 = {
+        "wins": 4,
+        "losses": 0,
+        "n_paired": 512,
+        "mean_delta": 0.005,
+        "winsor_delta": 0.005,
+    }
+    pr_jitter_512 = {
+        "wins": 3,
+        "losses": 1,
+        "n_paired": 512,
+        "mean_delta": 0.0003,
+        "winsor_delta": 0.0003,
+    }
+    assert _meets_select_admission_floor(pr_real_32, has_base=True) is True
+    assert _meets_select_admission_floor(pr_sparse_512, has_base=True) is True
+    assert _meets_select_admission_floor(pr_jitter_512, has_base=True) is False
+
+    # 2. Orchestrator scales probes to 12 and shard_seeds up to 32 when seeds_per_batch=64
+    dbp = str(tmp_path / "scale_probes.duckdb")
+    init_db(dbp)
+    ws_dir = tmp_path / "ws"
+    orch = SwarmCampaignOrchestrator(
+        db_path=dbp,
+        workspace_dir=str(ws_dir),
+        frontier_dir=str(tmp_path / "frontier"),
+        provider="mock",
+        seeds_per_batch=64,
+        race_seeds=32,
+    )
+    seen_probes: list[int] = []
+    seen_shards: list[int] = []
+    try:
+        fake_report = DeficitReport(
+            generation=1,
+            regime="CLIMBING",
+            d_succ_seeds=[11, 12, 13, 14, 15],
+            fail_clusters=[
+                DeficitCluster(
+                    cluster_id="c1",
+                    kind="early_mortality",
+                    label="c1",
+                    run_count=4,
+                    avg_depth=2.0,
+                    sample_seeds=[21, 22, 23, 24],
+                ),
+                DeficitCluster(
+                    cluster_id="c2",
+                    kind="early_mortality",
+                    label="c2",
+                    run_count=4,
+                    avg_depth=2.0,
+                    sample_seeds=[31, 32, 33, 34],
+                ),
+            ],
+        )
+
+        def _fake_run_cycle(self_peer, **kw):
+            seen_probes.append(len(list(kw.get("probe_seeds") or [])))
+            return PeerCandidate(
+                peer_id=self_peer.peer_id,
+                claimed_deficit_id="c1",
+                claimed_label="c1",
+                policy_code=str(kw.get("current_policy") or ""),
+                skills=dict(kw.get("current_skills") or {}),
+                sandbox_passed=False,
+                error="stop_test",
+            )
+
+        with (
+            patch.object(orch.deficit_analyzer, "analyze", return_value=fake_report),
+            patch.object(
+                orch.eval_pool,
+                "evaluate_batch",
+                return_value={"runs": [{"seed": 11, "depth": 2, "score": 100}]},
+            ) as mock_eval_batch,
+            patch(
+                "lox.engine.swarm_orchestrator.SwarmPeerAgent.run_cycle",
+                new=_fake_run_cycle,
+            ),
+            patch.object(
+                orch.referee,
+                "evaluate_tournament",
+                side_effect=RuntimeError("stop_after_setup"),
+            ),
+        ):
+            try:
+                orch.run_generation(1)
+            except RuntimeError as exc:
+                assert "stop_after_setup" in str(exc)
+            assert seen_probes and all(cnt == 12 for cnt in seen_probes)
+            seen_shards = list(
+                mock_eval_batch.call_args.kwargs.get("priority_seeds") or []
+            )
+            assert 20 <= len(seen_shards) <= 32
+    finally:
+        orch.close()
+
+    # 3. micro_pilot uses up to 12 probes without slicing back to 6
+    reg = AuthorToolRegistry(db_path=dbp)
+    probes13 = list(range(6000000, 6000013))
+
+    class _CountingPool:
+        def evaluate_batch(self, **kwargs):
+            ps = kwargs.get("priority_seeds") or []
+            return {
+                "runs": [
+                    {
+                        "seed": s,
+                        "depth": 2,
+                        "max_depth": 2,
+                        "score": 50,
+                        "turns": 50,
+                        "pct_search": 0.0,
+                        "end_reason": "killed",
+                        "action_bytes": b"A",
+                    }
+                    for s in ps
+                ]
+            }
+
+    reg.configure_generation(
+        pool=_CountingPool(),
+        baseline_runs=[],
+        peer_guard_seeds=[101],
+        peer_target_seeds=[202],
+        peer_probe_seeds=probes13,
+        max_peer_micro_pilots=2,
+    )
+    out = reg._run_peer_paired_micro_pilot(
+        "class Policy:\n    def step(self, s): return None\n", {}
+    )
+    assert out.count("PROBE seed=") == 12
+    assert "PROBE seed=6000011:" in out
+    assert "PROBE seed=6000012:" not in out

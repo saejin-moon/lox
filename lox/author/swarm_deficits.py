@@ -132,7 +132,7 @@ class DeficitReport:
             lines.append(
                 "### Recent Experiment & Rejection Memory (DO NOT Repeat Rejected Mechanisms):"
             )
-            for ra in self.recent_attempts[:12]:
+            for ra in self.recent_attempts[:8]:
                 lines.append(f"  * {ra}")
         if self.recent_theories:
             lines.append("### Relevant DuckDB Theory Notes:")
@@ -776,9 +776,9 @@ class DeficitAnalyzer:
                 if int(excs or 0) > 0:
                     extra.append(f"exc={excs}")
                 if tbs:
-                    extra.append(f"tb={str(tbs[0])[:240]}")
+                    extra.append(f"tb={str(tbs[0])[:150]}")
                 elif sb_err and not sb_ok:
-                    extra.append(f"err={str(sb_err)[:240]}")
+                    extra.append(f"err={str(sb_err)[:150]}")
                 mech_txt = mech_by_gen_peer.get((int(gen_i), str(pid or "")), "")
                 if mech_txt and not promoted:
                     extra.append(f"mech={mech_txt}")

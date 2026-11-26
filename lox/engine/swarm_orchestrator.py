@@ -53,6 +53,7 @@ from lox.ui.console import ui
 
 DEFAULT_WORKSPACE_DIR = "data/workspace"
 DEFAULT_FRONTIER_DIR = "data/frontier"
+DEFAULT_EXPERT_MODEL = "thinkingmachines/inkling-2-small:floor"
 
 
 class SwarmCampaignOrchestrator:
@@ -74,7 +75,7 @@ class SwarmCampaignOrchestrator:
         eval_workers: int | None = None,
         reasoning_effort: str = "medium",
         routing: str = "nitro",
-        refactor_model: str | None = None,
+        expert_model: str | None = None,
         race_seeds: int | None = None,
         scenario_gate: str = "off",
     ) -> None:
@@ -86,9 +87,12 @@ class SwarmCampaignOrchestrator:
         self.model = model
         self.reasoning_effort = str(reasoning_effort or "medium")
         self.routing = str(routing or "nitro")
-        self.refactor_model = (
-            str(refactor_model).strip() if refactor_model else str(model)
-        )
+        if expert_model and str(expert_model).strip():
+            self.expert_model = str(expert_model).strip()
+        elif str(provider or "").strip().lower() == "openrouter":
+            self.expert_model = DEFAULT_EXPERT_MODEL
+        else:
+            self.expert_model = str(model)
         self.race_seeds = max(4, int(race_seeds)) if race_seeds is not None else None
         self.scenario_gate = (
             str(scenario_gate or "off").strip().lower()
@@ -343,11 +347,14 @@ class SwarmCampaignOrchestrator:
         )
         used_eval_seeds = set(seeds) | set(select_seeds or [])
         probe_seeds: list[int] = []
-        target_probes = (
-            6
-            if int(self.seeds_per_batch) >= 12
-            else (2 if int(self.seeds_per_batch) >= 6 else 0)
-        )
+        if int(self.seeds_per_batch) >= 32:
+            target_probes = 12
+        elif int(self.seeds_per_batch) >= 12:
+            target_probes = 6
+        elif int(self.seeds_per_batch) >= 6:
+            target_probes = 2
+        else:
+            target_probes = 0
         if target_probes > 0:
             p_cand = 5_000_000 + int(generation) * 10_000
             while len(probe_seeds) < target_probes:
@@ -358,12 +365,12 @@ class SwarmCampaignOrchestrator:
 
         raw_shard_seeds = list(
             dict.fromkeys(
-                deficit_report.d_succ_seeds[:2]
-                + [sd for cl in clusters for sd in cl.sample_seeds[:2]]
+                deficit_report.d_succ_seeds[:4]
+                + [sd for cl in clusters for sd in cl.sample_seeds[:4]]
             )
         ) or [1, 2]
-        max_shard = min(16, max(2, int(self.seeds_per_batch)))
-        hist_cap = min(10, max(2, max_shard - len(probe_seeds)))
+        max_shard = min(32, max(2, int(self.seeds_per_batch)))
+        hist_cap = min(20, max(2, max_shard - len(probe_seeds)))
         shard_seeds = list(dict.fromkeys(raw_shard_seeds[:hist_cap] + probe_seeds))[
             :max_shard
         ]
@@ -491,17 +498,12 @@ class SwarmCampaignOrchestrator:
 
         peer_tool_turns = max(22, int(self.turns_per_worker) * 6)
         peer_candidates: list[PeerCandidate] = []
-        use_refactor_model_for_p2 = bool(
-            self.refactor_model != self.model
-            and (
-                self._plateau_streak >= 3
-                or deficit_report.bloat_warning
-                or bool(deficit_report.skill_bloat_notes)
-            )
+        use_expert_model_for_p2 = bool(
+            self.expert_model and self.expert_model != self.model
         )
-        if use_refactor_model_for_p2:
+        if use_expert_model_for_p2 and self.provider != "mock":
             ui.info(
-                f"Gen {generation}: Routing refactor/plateau slot `proactive_2` to `--refactor-model` `{self.refactor_model}`."
+                f"Gen {generation}: Routing sheltered branch `proactive_2` to `--expert-model` `{self.expert_model}`."
             )
 
         def _run_peer(
@@ -515,8 +517,8 @@ class SwarmCampaignOrchestrator:
             p_branch: dict[str, Any] | None,
         ) -> PeerCandidate:
             peer_model = (
-                self.refactor_model
-                if (use_refactor_model_for_p2 and peer_id == "proactive_2")
+                self.expert_model
+                if (use_expert_model_for_p2 and peer_id == "proactive_2")
                 else self.model
             )
             peer = SwarmPeerAgent(

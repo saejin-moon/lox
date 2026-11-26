@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from lox.author.llm_client import (
     call_llm_api,
     compact_tool_messages,
+    extract_usage_cost,
     extract_usage_tokens,
     resolve_api_key,
 )
@@ -167,6 +168,77 @@ class AuthorAgent:
                 "Review the error diagnostic above, fix the issue, and emit the corrected `<skill_code>` / `<policy_code>` blocks."
             )
         return f"{hdr}\n\n```\n{diag.strip()}\n```\n\n{guidance}"
+
+    @staticmethod
+    def _build_post_tool_budget_notice(
+        *,
+        turn_idx: int,
+        effective_max_turns: int,
+        turns_since_last_dry_run: int,
+        last_dry_run_passed: bool,
+        last_peer_micro_pilot: dict[str, Any] | None,
+    ) -> str | None:
+        """
+        Detects both pre-pilot research stalls AND post-pilot SQL death-balls when
+        smoke checks passed (`last_dry_run_passed=True`) yet the micro-pilot remained unresolved.
+        """
+        mp = last_peer_micro_pilot if isinstance(last_peer_micro_pilot, dict) else None
+        if mp is None and not last_dry_run_passed:
+            if turn_idx >= max(
+                4, min(effective_max_turns - 3, effective_max_turns // 2)
+            ):
+                return (
+                    f"⚠️ Budget Notice: You are on Turn {turn_idx}/{effective_max_turns}. "
+                    "You have completed empirical research. Please synthesize your candidate code now and call `dry_run_policy(code=...)` "
+                    "to verify your hypothesis before tool turns run out."
+                )
+            return None
+
+        if mp is not None:
+            mp_div = int(mp.get("diverged", 0) or 0)
+            mp_exc = int(mp.get("policy_exceptions", 0) or 0)
+            mp_greg = int(mp.get("guard_regressions", 0) or 0)
+            mp_w = int(mp.get("wins", 0) or 0)
+            mp_l = int(mp.get("losses", 0) or 0)
+            mp_dd = float(mp.get("avg_depth_delta", 0.0) or 0.0)
+            has_issue = (
+                mp_div == 0
+                or mp_exc > 0
+                or mp_greg > 0
+                or (mp_dd <= -0.25 and mp_w <= mp_l)
+                or (mp_l > mp_w and mp_dd < 0.0)
+            )
+            if has_issue:
+                if turns_since_last_dry_run >= 3 or (
+                    turn_idx >= effective_max_turns - 3
+                    and turns_since_last_dry_run >= 1
+                ):
+                    reasons: list[str] = []
+                    if mp_div == 0:
+                        reasons.append("0-byte divergence")
+                    if mp_exc > 0:
+                        reasons.append(f"exc={mp_exc}")
+                    if mp_greg > 0:
+                        reasons.append(f"guard_reg={mp_greg}")
+                    if mp_dd < 0.0 or mp_l > mp_w:
+                        reasons.append(f"W/L={mp_w}/{mp_l}, avg_Δdepth={mp_dd:+.2f}")
+                    issue_str = ", ".join(reasons) or f"W/L={mp_w}/{mp_l}"
+                    return (
+                        f"⚠️ Re-Pilot Notice (Turn {turn_idx}/{effective_max_turns}): Your last `dry_run_policy` micro-pilot is still "
+                        f"unresolved ({issue_str}). Do NOT spend remaining turns paginating sequential `OFFSET` tick diffs — "
+                        "query backward from outcomes (`ORDER BY step_idx DESC LIMIT 20`), fix your draft, and re-run `dry_run_policy(code=...)` "
+                        "before turns run out."
+                    )
+                return None
+
+        if turns_since_last_dry_run >= 2 and (
+            turn_idx >= effective_max_turns - 4 or turns_since_last_dry_run >= 3
+        ):
+            return (
+                f"ℹ️ Budget Notice (Turn {turn_idx}/{effective_max_turns}): Your latest `dry_run_policy` already passed cleanly. "
+                "Emit your final YAML hypothesis and `<skill_code>`/`<policy_code>` now unless you are testing a concrete edit."
+            )
+        return None
 
     def _call_llm_api(
         self,
@@ -554,6 +626,7 @@ class AuthorAgent:
         called_expert_query = False
         gen1_research_nudges = 0
         bonus_research_turns = 0
+        turns_since_last_dry_run = 0
         turn_idx = 0
         final_content = ""
         latest_hyp: dict[str, Any] = {}
@@ -579,7 +652,7 @@ class AuthorAgent:
                     f"Author Agent querying {self.model} ({'initial reasoning & tool generation' if turn_idx == 1 else f'tool synthesis turn {turn_idx}'})..."
                 )
             t0_turn = time.perf_counter()
-            llm_messages = self._compact_tool_messages(messages, keep_recent_turns=4)
+            llm_messages = self._compact_tool_messages(messages, keep_recent_turns=2)
             msg = self._invoke_llm(
                 llm_messages, allow_tools=allow_tools, tool_specs=active_tool_specs
             )
@@ -589,6 +662,7 @@ class AuthorAgent:
             prompt_toks, comp_toks, reasoning_toks = extract_usage_tokens(
                 msg.get("_usage")
             )
+            turn_cost_usd = extract_usage_cost(msg.get("_usage"))
 
             clean_text = re.sub(
                 r"<think>.*?</think>", "", msg_text, flags=re.DOTALL
@@ -700,6 +774,7 @@ class AuthorAgent:
                         ),
                         **(found_skills or {}),
                     }
+                    turns_since_last_dry_run = 0
                     dry_res, dry_summary = self.tools.dry_run_policy(
                         code=found_code,
                         skill_name=auto_s_name if auto_s_name else None,
@@ -763,6 +838,7 @@ class AuthorAgent:
                             completion_tokens=comp_toks,
                             reasoning_tokens=reasoning_toks,
                             agent_role=self.agent_role,
+                            cost_usd=turn_cost_usd,
                             wall_ms=turn_ms,
                         )
                     except Exception as log_exc:
@@ -862,31 +938,31 @@ class AuthorAgent:
                     }
                 )
 
-            if (
-                turn_idx
-                >= max(4, min(effective_max_turns - 3, effective_max_turns // 2))
-                and not self.tools.last_dry_run_passed
-                and not any(
-                    (tc.get("function") or {}).get("name") == "dry_run_policy"
-                    for tc in tool_calls
+            has_dry = any(
+                (tc.get("function") or {}).get("name") == "dry_run_policy"
+                for tc in tool_calls
+            )
+            if has_dry:
+                turns_since_last_dry_run = 0
+            else:
+                turns_since_last_dry_run += 1
+
+            if not has_dry and turn_idx < effective_max_turns:
+                budget_notice = self._build_post_tool_budget_notice(
+                    turn_idx=turn_idx,
+                    effective_max_turns=effective_max_turns,
+                    turns_since_last_dry_run=turns_since_last_dry_run,
+                    last_dry_run_passed=bool(
+                        getattr(self.tools, "last_dry_run_passed", False)
+                    ),
+                    last_peer_micro_pilot=getattr(
+                        self.tools, "last_peer_micro_pilot", None
+                    ),
                 )
-            ):
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"⚠️ Budget Notice: You are on Turn {turn_idx}/{effective_max_turns}. "
-                            "You have completed empirical research. Please synthesize your candidate code now and call `dry_run_policy(code=...)` "
-                            "to verify your hypothesis before tool turns run out."
-                        ),
-                    }
-                )
+                if budget_notice:
+                    messages.append({"role": "user", "content": budget_notice})
 
             try:
-                has_dry = any(
-                    (tc.get("function") or {}).get("name") == "dry_run_policy"
-                    for tc in tool_calls
-                )
                 if has_dry:
                     t_type = "DRY_RUN_CHECK"
                     t_stat = (
@@ -924,6 +1000,7 @@ class AuthorAgent:
                     completion_tokens=comp_toks,
                     reasoning_tokens=reasoning_toks,
                     agent_role=self.agent_role,
+                    cost_usd=turn_cost_usd,
                     wall_ms=turn_ms,
                 )
             except Exception as log_exc:
@@ -1141,7 +1218,7 @@ class AuthorAgent:
 
                 t0_rep = time.perf_counter()
                 rep_llm_messages = self._compact_tool_messages(
-                    messages, keep_recent_turns=4
+                    messages, keep_recent_turns=2
                 )
                 repair_msg = self._invoke_llm(
                     rep_llm_messages, allow_tools=True, tool_specs=active_tool_specs
@@ -1169,7 +1246,7 @@ class AuthorAgent:
                             }
                         )
                     rep_llm_messages2 = self._compact_tool_messages(
-                        messages, keep_recent_turns=4
+                        messages, keep_recent_turns=2
                     )
                     repair_msg = self._invoke_llm(
                         rep_llm_messages2,
@@ -1181,6 +1258,7 @@ class AuthorAgent:
                 rep_text = repair_msg.get("content") or ""
                 rep_reasoning = repair_msg.get("_reasoning") or ""
                 rep_p, rep_c, rep_r = extract_usage_tokens(repair_msg.get("_usage"))
+                rep_cost_usd = extract_usage_cost(repair_msg.get("_usage"))
                 clean_rep = re.sub(
                     r"<think>.*?</think>", "", rep_text, flags=re.DOTALL
                 ).strip()
@@ -1224,6 +1302,7 @@ class AuthorAgent:
                         completion_tokens=rep_c,
                         reasoning_tokens=rep_r,
                         agent_role=self.agent_role,
+                        cost_usd=rep_cost_usd,
                         wall_ms=rep_ms,
                     )
                 except Exception as log_exc:
@@ -1349,6 +1428,7 @@ class AuthorAgent:
                 ).strip()
                 reasoning_text = str(msg.get("_reasoning") or "")
                 p_toks, c_toks, r_toks = extract_usage_tokens(msg.get("_usage"))
+                ts_cost_usd = extract_usage_cost(msg.get("_usage"))
                 if content:
                     last_content = content
                 tcs = msg.get("tool_calls") or []
@@ -1415,6 +1495,7 @@ class AuthorAgent:
                             completion_tokens=c_toks,
                             reasoning_tokens=r_toks,
                             agent_role=self.agent_role,
+                            cost_usd=ts_cost_usd,
                             wall_ms=turn_ms,
                         )
                     except Exception as log_exc:
@@ -1474,6 +1555,7 @@ class AuthorAgent:
                         completion_tokens=c_toks,
                         reasoning_tokens=r_toks,
                         agent_role=self.agent_role,
+                        cost_usd=ts_cost_usd,
                         wall_ms=turn_ms,
                     )
                 except Exception as log_exc:
