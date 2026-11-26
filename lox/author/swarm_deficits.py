@@ -71,6 +71,7 @@ class DeficitReport:
     recent_attempts: list[str] = field(default_factory=list)
     recent_theories: list[str] = field(default_factory=list)
     organic_shards: list[Any] = field(default_factory=list)
+    cooled_down_deficits: dict[str, int] = field(default_factory=dict)
 
     def format_brief(self) -> str:
         lines = [
@@ -142,8 +143,14 @@ class DeficitReport:
             lines.append("- Objective Trajectory Outcome Slices (D_fail):")
             for c in self.fail_clusters:
                 r_ids = f", run_ids={c.sample_run_ids[:1]}" if c.sample_run_ids else ""
+                cd_n = int((self.cooled_down_deficits or {}).get(c.cluster_id, 0) or 0)
+                cd_tag = (
+                    f" [COOLDOWN: failed {cd_n}x in last 4 gens — prefer untouched slices]"
+                    if cd_n >= 2
+                    else ""
+                )
                 lines.append(
-                    f"  * [{c.cluster_id}] {c.label} (runs={c.run_count}, avg_depth={c.avg_depth:.2f}, avg_turns={c.avg_turns:.0f}{r_ids}): {c.evidence}"
+                    f"  * [{c.cluster_id}] {c.label}{cd_tag} (runs={c.run_count}, avg_depth={c.avg_depth:.2f}, avg_turns={c.avg_turns:.0f}{r_ids}): {c.evidence}"
                 )
         return "\n".join(lines)
 
@@ -349,8 +356,7 @@ class DeficitAnalyzer:
                        ROUND(AVG(COALESCE(pct_wait, 0.0)), 1),
                        ROUND(AVG(COALESCE(pct_search, 0.0)), 1),
                        SUM(CASE WHEN COALESCE(starved_with_food, FALSE) THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN COALESCE(died_unarmored, FALSE) THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN LOWER(COALESCE(milestones_json, '')) LIKE '%\"unworn_armor_in_pack\": true%' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN COALESCE(died_unarmored, FALSE) OR LOWER(COALESCE(milestones_json, '')) LIKE '%\"unworn_armor_in_pack\": true%' THEN 1 ELSE 0 END),
                        SUM(COALESCE(auto_esc_count, 0)),
                        SUM(COALESCE(policy_exceptions, 0))
                 FROM runs
@@ -363,11 +369,11 @@ class DeficitAnalyzer:
                 report.vital_summary = (
                     f"gen={lat_gen} (N={n_r}): avg_ac={row[1]}, avg_xl={row[2]}, "
                     f"avg_tiles={int(row[3] or 0)}, pct_wait={row[4]}%, pct_search={row[5]}%, "
-                    f"starved_with_food={int(row[6] or 0)}, unworn_armor_deaths={int(row[7] or 0) or int(row[8] or 0)}, "
-                    f"auto_esc={int(row[9] or 0)}, policy_exc={int(row[10] or 0)}"
+                    f"starved_with_food={int(row[6] or 0)}, unworn_armor_deaths={int(row[7] or 0)}, "
+                    f"auto_esc={int(row[8] or 0)}, policy_exc={int(row[9] or 0)}"
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("Failed populating vital_summary: %s", exc)
 
     @classmethod
     def _populate_efficiency_telemetry(cls, con: Any, report: DeficitReport) -> None:
@@ -445,24 +451,51 @@ class DeficitAnalyzer:
 
             expert_res: dict[int, float] = {}
             try:
-                exp_rows = con.execute(
+                cov_row = con.execute(
                     """
-                    WITH per_exp AS (
-                        SELECT run_id, depth, MAX(turn) - MIN(turn) AS span
+                    WITH per_dep AS (
+                        SELECT run_id,
+                               depth,
+                               MAX(turn) - MIN(turn) AS dspan,
+                               MAX(turn) AS max_t,
+                               MIN(turn) AS min_t
                         FROM expert_ticks
-                        WHERE depth IS NOT NULL AND depth BETWEEN 1 AND 5
+                        WHERE depth IS NOT NULL AND turn IS NOT NULL
                         GROUP BY run_id, depth
+                    ),
+                    per_run AS (
+                        SELECT run_id,
+                               SUM(dspan) AS sum_dspan,
+                               MAX(max_t) - MIN(min_t) + 1 AS total_span
+                        FROM per_dep
+                        GROUP BY run_id
                     )
-                    SELECT depth, ROUND(AVG(span), 0)
-                    FROM per_exp
-                    GROUP BY depth
+                    SELECT AVG(CAST(sum_dspan AS DOUBLE) / GREATEST(total_span, 1))
+                    FROM per_run
                     """
-                ).fetchall()
-                for ed, es in exp_rows:
-                    if es is not None and float(es) > 0:
-                        expert_res[int(ed)] = float(es)
-            except Exception:
-                pass
+                ).fetchone()
+                exp_span_cov = (
+                    float(cov_row[0]) if (cov_row and cov_row[0] is not None) else 0.0
+                )
+                if exp_span_cov >= 0.25:
+                    exp_rows = con.execute(
+                        """
+                        WITH per_exp AS (
+                            SELECT run_id, depth, MAX(turn) - MIN(turn) AS span
+                            FROM expert_ticks
+                            WHERE depth IS NOT NULL AND depth BETWEEN 1 AND 5
+                            GROUP BY run_id, depth
+                        )
+                        SELECT depth, ROUND(AVG(span), 0)
+                        FROM per_exp
+                        GROUP BY depth
+                        """
+                    ).fetchall()
+                    for ed, es in exp_rows:
+                        if es is not None and float(es) > 0:
+                            expert_res[int(ed)] = float(es)
+            except Exception as exp_exc:
+                _LOG.warning("Failed querying expert residence spans: %s", exp_exc)
 
             parts: list[str] = []
             for d_val, n_r, avg_t in depth_rows:
@@ -479,8 +512,8 @@ class DeficitAnalyzer:
                 )
             if parts:
                 report.efficiency_summary = " | ".join(parts)
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("Failed populating efficiency_summary: %s", exc)
 
     @classmethod
     def _populate_expert_parity_gaps(cls, con: Any, report: DeficitReport) -> None:
@@ -518,6 +551,23 @@ class DeficitAnalyzer:
             exp_cnt_row = con.execute("SELECT COUNT(*) FROM expert_ticks").fetchone()
             if not exp_cnt_row or int(exp_cnt_row[0] or 0) == 0:
                 return
+
+            dens_row = con.execute(
+                """
+                SELECT AVG(cnt * 1.0 / NULLIF(max_t - min_t + 1, 0))
+                FROM (
+                    SELECT run_id, COUNT(*) AS cnt, MIN(turn) AS min_t, MAX(turn) AS max_t
+                    FROM expert_ticks
+                    GROUP BY run_id
+                )
+                """
+            ).fetchone()
+            exp_density = (
+                float(dens_row[0])
+                if (dens_row is not None and dens_row[0] is not None)
+                else 1.0
+            )
+            is_sparse_milestones = exp_density < 0.25
 
             _norm_act_expr = (
                 "CASE WHEN action_name LIKE 'seq(%' "
@@ -572,32 +622,42 @@ class DeficitAnalyzer:
             champ_map = {str(a): float(p or 0.0) for a, p in champ_acts}
 
             missing_gaps: list[str] = []
-            for act, epct in sorted(
-                exp_map.items(), key=lambda kv: kv[1], reverse=True
-            ):
-                if epct < 0.5:
-                    continue
-                cpct = champ_map.get(act, 0.0)
-                if cpct <= 0.01 or cpct < 0.2 * epct:
-                    missing_gaps.append(
-                        f"`{act}` (expert {epct:.1f}% vs champ {cpct:.2f}%)"
-                    )
-                if len(missing_gaps) >= 8:
-                    break
-
             excess_gaps: list[str] = []
-            for act, cpct in sorted(
-                champ_map.items(), key=lambda kv: kv[1], reverse=True
-            ):
-                if cpct < 5.0:
-                    continue
-                epct = exp_map.get(act, 0.0)
-                if cpct > max(5.0, 3.0 * epct):
-                    excess_gaps.append(
-                        f"`{act}` (champ {cpct:.1f}% vs expert {epct:.1f}%)"
-                    )
-                if len(excess_gaps) >= 4:
-                    break
+            unused_verbs: list[str] = []
+            if is_sparse_milestones:
+                _cardinal = {"N", "S", "E", "W", "NE", "NW", "SE", "SW"}
+                for act in sorted(exp_map.keys()):
+                    if act in _cardinal:
+                        continue
+                    cpct = champ_map.get(act, 0.0)
+                    if cpct < 0.005:
+                        unused_verbs.append(f"`{act}` (champ {cpct:.4f}%)")
+            else:
+                for act, epct in sorted(
+                    exp_map.items(), key=lambda kv: kv[1], reverse=True
+                ):
+                    if epct < 0.5:
+                        continue
+                    cpct = champ_map.get(act, 0.0)
+                    if cpct <= 0.01 or cpct < 0.2 * epct:
+                        missing_gaps.append(
+                            f"`{act}` (expert {epct:.1f}% vs champ {cpct:.2f}%)"
+                        )
+                    if len(missing_gaps) >= 8:
+                        break
+
+                for act, cpct in sorted(
+                    champ_map.items(), key=lambda kv: kv[1], reverse=True
+                ):
+                    if cpct < 5.0:
+                        continue
+                    epct = exp_map.get(act, 0.0)
+                    if cpct > max(5.0, 3.0 * epct):
+                        excess_gaps.append(
+                            f"`{act}` (champ {cpct:.1f}% vs expert {epct:.1f}%)"
+                        )
+                    if len(excess_gaps) >= 4:
+                        break
 
             exp_st_row = con.execute(
                 """
@@ -607,18 +667,22 @@ class DeficitAnalyzer:
                 """,
                 [tier_max],
             ).fetchone()
-            exp_pace_row = con.execute(
-                """
-                SELECT ROUND(AVG(span_t), 0)
-                FROM (
-                    SELECT run_id, depth, MAX(turn) - MIN(turn) + 1 AS span_t
-                    FROM expert_ticks
-                    WHERE depth BETWEEN 1 AND ?
-                    GROUP BY run_id, depth
-                )
-                """,
-                [tier_max],
-            ).fetchone()
+            exp_pace_row = (
+                None
+                if is_sparse_milestones
+                else con.execute(
+                    """
+                    SELECT ROUND(AVG(span_t), 0)
+                    FROM (
+                        SELECT run_id, depth, MAX(turn) - MIN(turn) + 1 AS span_t
+                        FROM expert_ticks
+                        WHERE depth BETWEEN 1 AND ?
+                        GROUP BY run_id, depth
+                    )
+                    """,
+                    [tier_max],
+                ).fetchone()
+            )
             champ_pace_row = con.execute(
                 f"""
                 WITH gen_runs AS (
@@ -640,25 +704,35 @@ class DeficitAnalyzer:
             ]
             if exp_st_row and exp_st_row[0] is not None:
                 pace_s = ""
-                if (
-                    champ_pace_row
-                    and champ_pace_row[0] is not None
-                    and exp_pace_row
-                    and exp_pace_row[0] is not None
-                ):
-                    pace_s = f", turns/floor={int(champ_pace_row[0])}t vs expert {int(exp_pace_row[0])}t"
+                if champ_pace_row and champ_pace_row[0] is not None:
+                    if exp_pace_row and exp_pace_row[0] is not None:
+                        pace_s = f", turns/floor={int(champ_pace_row[0])}t vs expert {int(exp_pace_row[0])}t"
+                    else:
+                        pace_s = f", turns/floor={int(champ_pace_row[0])}t"
                 parts.append(
                     f"State Parity: champ(AC={c_ac:.1f}, XL={c_xl:.1f}, branches={c_br:.2f}{pace_s}) "
                     f"vs expert@D1..{tier_max}(AC={float(exp_st_row[0]):.1f}, XL={float(exp_st_row[1] or 1.0):.1f})"
                 )
-            if missing_gaps:
+            if is_sparse_milestones:
+                if unused_verbs:
+                    parts.append(
+                        "Near-Zero Champion Action Verbs: "
+                        + ", ".join(unused_verbs[:8])
+                    )
                 parts.append(
-                    "Under-Used/Missing Expert Actions: " + ", ".join(missing_gaps)
+                    f"Expert Data Note: `expert_ticks` are sparse progression milestones (density={exp_density * 100:.1f}%), "
+                    "NOT per-turn action frequencies—do NOT chase action-share % or synthetic turns/floor ratios; "
+                    "diagnose real gaps from `champion_runs`/`champion_ticks` and NetHack Wiki rules."
                 )
-            if excess_gaps:
-                parts.append(
-                    "Over-Concentrated Champion Actions: " + ", ".join(excess_gaps)
-                )
+            else:
+                if missing_gaps:
+                    parts.append(
+                        "Under-Used/Missing Expert Actions: " + ", ".join(missing_gaps)
+                    )
+                if excess_gaps:
+                    parts.append(
+                        "Over-Concentrated Champion Actions: " + ", ".join(excess_gaps)
+                    )
             report.expert_parity_gaps = "\n- ".join(parts)
         except Exception as exc:
             _LOG.warning("Failed computing expert_parity_gaps: %s", exc)
@@ -667,6 +741,37 @@ class DeficitAnalyzer:
     def _populate_recent_attempts(con: Any, report: DeficitReport) -> None:
         attempts: list[str] = []
         min_g = max(1, int(report.generation) - 12)
+        # Track recently rejected deficit_ids since last promotion (4-gen window) for rotation cooldown
+        try:
+            lp_row = con.execute(
+                "SELECT COALESCE(MAX(generation), 0) FROM batches WHERE hypothesis_passed = TRUE AND generation < ?",
+                [int(report.generation)],
+            ).fetchone()
+            last_prom_g = int(lp_row[0] or 0) if lp_row else 0
+            cd_min_g = max(last_prom_g + 1, int(report.generation) - 4, 1)
+            cd_rows = con.execute(
+                """
+                SELECT deficit_id, COUNT(*) AS fails
+                FROM tournament_attempts
+                WHERE generation >= ? AND generation < ?
+                  AND COALESCE(promoted, FALSE) = FALSE
+                  AND COALESCE(deficit_id, '') != ''
+                GROUP BY deficit_id
+                HAVING COUNT(*) >= 2
+                """,
+                [cd_min_g, int(report.generation)],
+            ).fetchall()
+            _skip_cd = {
+                "proactive_expert_capability",
+                "proactive_sheltered_branch",
+            }
+            report.cooled_down_deficits = {
+                str(did): int(cnt)
+                for did, cnt in cd_rows
+                if str(did) not in _skip_cd and not str(did).startswith("revision_")
+            }
+        except Exception as exc:
+            _LOG.warning("Failed computing cooled_down_deficits: %s", exc)
         # 1. Query exact challenger records from `tournament_attempts` (including rejected peers & tracebacks)
         try:
             mech_by_gen_peer: dict[tuple[int, str], str] = {}
@@ -697,8 +802,8 @@ class DeficitAnalyzer:
                         mech_snip = " ".join(tail.split())[:140]
                     if mech_snip:
                         mech_by_gen_peer[key] = mech_snip
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOG.warning("Failed loading theory mechanism snippets: %s", exc)
 
             ta_cols = {
                 str(r[1])
@@ -850,8 +955,8 @@ class DeficitAnalyzer:
                     if len(summary) > 110:
                         summary = summary[:107] + "..."
                     syn_by_gen.setdefault(int(sg), []).append(f"{srole}: {summary}")
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOG.warning("Failed querying synthesis_logs summaries: %s", exc)
             attempts: list[str] = []
             for gen_i, pid, passed, ad, md, asc in b_rows:
                 tag = "PROMOTED" if passed else "REJECTED"
@@ -861,8 +966,8 @@ class DeficitAnalyzer:
                     f"Gen {gen_i} [{tag} | {pid} | D={ad} (Max={md}), S={asc}]{hyp_str}"
                 )
             report.recent_attempts = attempts
-        except Exception:
-            pass
+        except Exception as exc:
+            _LOG.warning("Failed populating recent_attempts fallback: %s", exc)
 
     @classmethod
     def _populate_plateau_signal(cls, con: Any, report: DeficitReport) -> None:
@@ -1049,23 +1154,23 @@ class DeficitAnalyzer:
             ).fetchall()
         if not raw_rows:
             return
-        if len(raw_rows) <= 64:
+        if len(raw_rows) <= 512:
             rows = list(raw_rows)
         else:
             # Symmetrically stratify across all 4 tails (shortest, longest/max_steps, deepest, median)
             by_turns = sorted(raw_rows, key=lambda x: int(x[4] or 0))
             by_depth = sorted(raw_rows, key=lambda x: int(x[3] or 1), reverse=True)
-            mid_start = max(0, (len(by_turns) // 2) - 8)
+            mid_start = max(0, (len(by_turns) // 2) - 64)
             picked: dict[str, tuple[Any, ...]] = {}
             for r in (
-                by_turns[:16]
-                + by_turns[-16:]
-                + by_depth[:16]
-                + by_turns[mid_start : mid_start + 16]
+                by_turns[:128]
+                + by_turns[-128:]
+                + by_depth[:128]
+                + by_turns[mid_start : mid_start + 128]
             ):
                 picked[str(r[0])] = r
             for r in raw_rows:
-                if len(picked) >= 64:
+                if len(picked) >= 512:
                     break
                 picked.setdefault(str(r[0]), r)
             rows = list(picked.values())
@@ -1129,7 +1234,7 @@ class DeficitAnalyzer:
             "escaped",
             "ended",
         }
-        recurring_end_min = max(4, len(rows) // 16)
+        recurring_end_min = max(4, len(rows) // 36)
         recurring_end_ranks: dict[str, int] = {}
         recurring_end_labels: dict[int, str] = {}
         for er_label, er_ds in sorted(
@@ -1140,14 +1245,14 @@ class DeficitAnalyzer:
                 er_low not in _generic_ends
                 and "stalled" not in er_low
                 and len(er_ds) >= recurring_end_min
-                and len(recurring_end_ranks) < 3
+                and len(recurring_end_ranks) < 4
             ):
                 r_idx = len(recurring_end_ranks) + 1
                 recurring_end_ranks[er_low] = r_idx
                 recurring_end_labels[r_idx] = er_label.strip()[:64]
 
         # Group split phrasings sharing a recurring `the <phrase>` subject when slots remain
-        if len(recurring_end_labels) < 3:
+        if len(recurring_end_labels) < 4:
             phrase_to_ers: dict[str, list[tuple[str, int]]] = {}
             for er_label, er_ds in end_counts.items():
                 er_low = er_label.strip().lower()
@@ -1168,7 +1273,7 @@ class DeficitAnalyzer:
                 key=lambda kv: sum(cnt for _, cnt in kv[1]),
                 reverse=True,
             ):
-                if len(recurring_end_labels) >= 3:
+                if len(recurring_end_labels) >= 4:
                     break
                 tot_cnt = sum(cnt for _, cnt in er_list)
                 if len(er_list) >= 2 and tot_cnt >= recurring_end_min:
@@ -1243,7 +1348,16 @@ class DeficitAnalyzer:
                 )
 
             # Purely domain-agnostic trajectory-outcome & capability slices (zero NetHack keywords)
-            if end_low == "max_steps" and int(max_depth or 1) <= 2:
+            if "stalled" in end_low or stall_count >= 50:
+                _add_to_cluster(
+                    "slice_stalled",
+                    "stalled_trajectory",
+                    f"Zero-turn / repeated-action stall terminations (avg Dlvl {int(max_depth or 1)})",
+                    row,
+                    f"end=`{end_str}`, fn=`{last_fn}`, Dlvl={max_depth}, turns={turns}"
+                    + (f", last_msg=`{gl_tail}`" if gl_tail else ""),
+                )
+            elif end_low == "max_steps" and int(max_depth or 1) <= 2:
                 _add_to_cluster(
                     "slice_max_steps_confinement",
                     "confinement_horizon",
@@ -1268,7 +1382,6 @@ class DeficitAnalyzer:
                 pass
             elif (
                 stall_count >= 25
-                or "stalled" in end_low
                 or "max_steps" in end_low
                 or (float(pct_wait or 0.0) + float(pct_search or 0.0) >= 65.0)
                 or (
@@ -1373,6 +1486,8 @@ class DeficitAnalyzer:
                 cluster_stats += f", unworn_armor={unarmored_cnt}/{n_c}"
             if top_ends:
                 cluster_stats += f", top_ends=[{top_ends}]"
+            if cid == "slice_stalled" and dom_fns:
+                cluster_stats += f", top_fns=[{', '.join(dom_fns[:4])}]"
             rep_note = f"; ex1: {notes[0]}" if notes else ""
             fixtures: list[dict[str, Any]] = []
             for r in c_rows[:2]:
@@ -1408,16 +1523,18 @@ class DeficitAnalyzer:
             )
 
         built: list[DeficitCluster] = []
+        _kind_weights = {
+            "stalled_trajectory": 1.6,
+            "confinement_horizon": 1.5,
+            "search_or_horizon_loop": 1.5,
+            "recurring_terminal_state": 1.3,
+        }
         for cid, data in sorted(
             clusters.items(),
             key=lambda kv: (
                 len(kv[1]["rows"])
-                * (
-                    1.5
-                    if kv[1]["kind"]
-                    in ("confinement_horizon", "search_or_horizon_loop")
-                    else (1.2 if kv[1]["kind"] == "recurring_terminal_state" else 1.0)
-                ),
+                * _kind_weights.get(str(kv[1]["kind"]), 1.0)
+                * (0.35 if kv[0] in (report.cooled_down_deficits or {}) else 1.0),
                 len(kv[1]["rows"]),
             ),
             reverse=True,
@@ -1517,7 +1634,7 @@ class DeficitAnalyzer:
                         )
             built = expanded
 
-        report.fail_clusters = built[:6]
+        report.fail_clusters = built[:8]
 
     @staticmethod
     def _attach_premortem_and_wiki_context(con: Any, report: DeficitReport) -> None:
@@ -1573,7 +1690,11 @@ class DeficitAnalyzer:
                                 hits = wiki_engine.search_wiki(last_msg, top_k=1)
                                 if hits:
                                     snip = (
-                                        str(hits[0].get("content", "") or "")
+                                        str(
+                                            hits[0].get("snippet")
+                                            or hits[0].get("text")
+                                            or ""
+                                        )
                                         .replace("\n", " ")[:180]
                                         .strip()
                                     )
@@ -1581,8 +1702,8 @@ class DeficitAnalyzer:
                                         extras.append(
                                             f"wiki[{hits[0].get('title', '')}]: {snip}"
                                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _LOG.warning("Failed attaching pre-mortem/wiki context: %s", exc)
             if extras:
                 cl.evidence = (
                     f"{cl.evidence}; " + "; ".join(extras)

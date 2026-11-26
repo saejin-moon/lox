@@ -21,6 +21,7 @@ from lox.author.agent import AuthorAgent
 from lox.author.directives import extract_policy_branches, prune_unused_skills
 from lox.author.parsing import safe_normalize_skill_key
 from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+from lox.core.contracts import opt_float, opt_int
 from lox.env.harness import NetHackHarness, policy_handles_menus
 from lox.lang.compiler import _COMPILE_EXEC_LOCK, compile_policy_package
 from lox.ui.console import ui
@@ -780,11 +781,9 @@ class SwarmPeerAgent:
             streak_n = int(getattr(deficit_report, "plateau_streak", 0) or 0)
             streak_txt = f" (streak={streak_n} gens)" if streak_n > 0 else ""
             plateau_directive = (
-                f"\n### Plateau Regime Directive{streak_txt}:\n"
-                "- Progression has plateaued; avoid narrow single-seed band-aids that trigger 0W/0L on unseen seeds.\n"
-                "- Inspect Floor Residence & Action Concentration Telemetry and `champion_ticks` to target upstream "
-                "efficiency, loop-termination, or capability bottlenecks across the owning subsystem.\n"
-                "- Non-regressing drift (`OK`) on `GUARD` seeds is expected and healthy for systemic improvements.\n"
+                f"\n### Plateau Regime Directive{streak_txt} (Optimize Promotion SNR):\n"
+                "- Progression has plateaued; avoid both `0W/0L` dead patches AND broad core-loop rewrites that regress healthy `GUARD` seeds.\n"
+                "- Target ONE untouched, high-signal failure class (`>= 3%` of runs, e.g., zero-turn stalls, encumbrance, fatal encounters) or a clean additive capability whose trigger fires reliably on failing states without disrupting healthy floors (`W >> L`, `guard_depth_delta >= 0`).\n"
             )
 
         directive_block = ""
@@ -827,14 +826,16 @@ class SwarmPeerAgent:
         ).strip()
         if peer_track == "proactive_capability":
             proactive_block = (
-                f"\n### Proactive Capability Track (`{self.peer_id}` — Expert-Driven & Future-Oriented):\n"
+                f"\n### Proactive Capability Track (`{self.peer_id}` — Capability & Progression-Driven):\n"
                 "- **Mission**: Unlike reactive peers fixing recent death clusters, YOU start from the current champion "
-                "and mine `expert_ticks` / `expert_runs` + the NetHack Wiki across `Dlvl 1 .. p90+2` to design ONE clean, "
-                "self-contained missing capability or proactive efficiency upgrade (as a modular 2-level skill under `skills/<domain>/<module>.py`).\n"
-                "- **Empirical Grounding**: Query `expert_ticks` directly via `query_db` (e.g., actions, item/consumable usage, "
-                "floor residence, or branch behavior at your target depths) and verify exact C rules with `query_wiki` / `query_item` / `query_monster`.\n"
+                "and inspect `champion_runs` / `champion_ticks`, `expert_runs` progression milestones (`AC`, `XL`, depth), "
+                "and the NetHack Wiki across `Dlvl 1 .. p90+2` to design ONE clean, self-contained missing capability "
+                "(as a modular 2-level skill under `skills/<domain>/<module>.py`) with tight blast radius.\n"
+                "- **Empirical Grounding**: Verify in `champion_ticks` that the target inventory/game state actually occurs "
+                "(e.g., carried unused items, encumbrance, specific dungeon features) and check exact C rules via "
+                "`query_wiki` / `query_item` / `query_monster`. Do NOT chase synthetic `expert_ticks` action-share percentages.\n"
                 "- **Triggered Confirmation Ready**: Your candidate competes directly in the tournament and benefits from "
-                "Triggered Divergent-Seed Confirmation (`max N=128`) — so clean capabilities that trigger selectively without regressing early floors can promote cleanly!\n"
+                "Triggered Divergent-Seed Confirmation — so clean additive capabilities that fire selectively without regressing healthy floors promote cleanly!\n"
                 + (f"\n{expert_gaps_txt}\n" if expert_gaps_txt else "")
             )
         elif peer_track == "proactive_branch":
@@ -859,15 +860,15 @@ class SwarmPeerAgent:
                 "- **Two-Tier Gate Advantage**: Your branch advances safely on a non-catastrophic branch-internal `S_select` gate "
                 "(0 exceptions, non-catastrophic depth) without polluting the Champion, and **graduates to Champion** as soon as it "
                 f"beats the Champion on strict `S_confirm` (resets to Champion after {br_max} steps if ungraduated).\n"
-                "- **Mission**: Mine `expert_ticks` + Wiki + codebase architecture (`architecture_map`) to build multi-step proactive "
-                "capabilities, structural efficiency upgrades (e.g., vectorized `state.trap_mask`, cleaner goal planning, inventory/resource/branch prep) "
-                "that single-step reactive patches cannot reach in one generation.\n"
+                "- **Mission**: Inspect `champion_runs` / `champion_ticks` + Wiki rules + `expert_runs` milestones + codebase architecture (`architecture_map`) "
+                "to build multi-step proactive capabilities (inventory/resource/consumable management, tactical prep, branch/dungeon progression) "
+                "that single-step reactive patches cannot reach in one generation. Do NOT chase synthetic `expert_ticks` action-share percentages.\n"
                 + (f"\n{expert_gaps_txt}\n" if expert_gaps_txt else "")
             )
 
         situational_expert_note = (
-            "\n- Optional Situational Expert Check: When inspecting a specific encounter, floor, or stuck state in `champion_ticks`, "
-            "you may optionally check how human ascensions acted in `expert_ticks` (`WHERE depth = <D>` or `message LIKE '%...%'` / `screen_ascii LIKE '%...%'`)."
+            "\n- Optional Rule & Milestone Verification: Check exact C rules via `query_wiki` / `query_monster` / `query_item` "
+            "and high-level `AC`/`XL`/depth progression benchmarks via `expert_runs` (remember `expert_ticks` are sparse milestones, not per-turn action frequencies)."
             if peer_track in ("reactive", "revision")
             else ""
         )
@@ -970,17 +971,17 @@ class SwarmPeerAgent:
             } == {k: v.strip() for k, v in last_skills_pruned.items()}
             if final_matches_last_mp:
                 effective_mp = last_mp
-                last_div = int(last_mp.get("diverged", 0) or 0)
-                last_dd = float(last_mp.get("avg_depth_delta", 0.0) or 0.0)
-                last_w = int(last_mp.get("wins", 0) or 0)
-                last_exc = int(last_mp.get("policy_exceptions", 0) or 0)
+                last_div = opt_int(last_mp, "diverged", 0)
+                last_dd = opt_float(last_mp, "avg_depth_delta", 0.0)
+                last_w = opt_int(last_mp, "wins", 0)
+                last_exc = opt_int(last_mp, "policy_exceptions", 0)
                 last_bad = (
                     last_div == 0 or last_exc > 0 or (last_dd <= -0.75 and last_w == 0)
                 )
                 if last_bad and isinstance(best_mp, dict) and best_mp is not last_mp:
-                    best_div = int(best_mp.get("diverged", 0) or 0)
-                    best_dd = float(best_mp.get("avg_depth_delta", -999.0) or -999.0)
-                    best_exc = int(best_mp.get("policy_exceptions", 0) or 0)
+                    best_div = opt_int(best_mp, "diverged", 0)
+                    best_dd = opt_float(best_mp, "avg_depth_delta", -999.0)
+                    best_exc = opt_int(best_mp, "policy_exceptions", 0)
                     best_code = str(best_mp.get("code", "") or "").strip()
                     strictly_better = last_exc > 0 or last_div == 0 or best_dd > last_dd
                     if best_div > 0 and best_exc == 0 and best_code and strictly_better:
@@ -995,9 +996,9 @@ class SwarmPeerAgent:
                         )
 
         if isinstance(effective_mp, dict):
-            eff_div = int(effective_mp.get("diverged", 0) or 0)
-            eff_dd = float(effective_mp.get("avg_depth_delta", 0.0) or 0.0)
-            eff_w = int(effective_mp.get("wins", 0) or 0)
+            eff_div = opt_int(effective_mp, "diverged", 0)
+            eff_dd = opt_float(effective_mp, "avg_depth_delta", 0.0)
+            eff_w = opt_int(effective_mp, "wins", 0)
             if eff_div == 0:
                 dead_cand = PeerCandidate(
                     peer_id=self.peer_id,
@@ -1068,6 +1069,79 @@ class SwarmPeerAgent:
             probe_seeds=probe_seeds,
             db_path=self.db_path,
         )
+
+        # Post-incubation auto-recovery: if an un-piloted late-turn edit failed incubation,
+        # rescue a strictly positive, zero-regression earlier `best_peer_micro_pilot` draft.
+        if not cand.sandbox_passed and isinstance(best_mp, dict):
+            best_div = int(best_mp.get("diverged", 0) or 0)
+            best_exc = int(best_mp.get("policy_exceptions", 0) or 0)
+            best_greg = int(best_mp.get("guard_regressions", 0) or 0)
+            best_dd = float(best_mp.get("avg_depth_delta", 0.0) or 0.0)
+            best_w = int(best_mp.get("wins", 0) or 0)
+            best_l = int(best_mp.get("losses", 0) or 0)
+            best_code = str(best_mp.get("code", "") or "").strip()
+            best_skills_pruned = prune_unused_skills(
+                best_code, dict(best_mp.get("skills") or {})
+            )
+            differs_from_failed = bool(
+                best_code
+                and (
+                    best_code != pol_code.strip()
+                    or {k: v.strip() for k, v in best_skills_pruned.items()}
+                    != {k: v.strip() for k, v in kept_skills.items()}
+                )
+            )
+            if (
+                differs_from_failed
+                and best_div > 0
+                and best_exc == 0
+                and best_greg == 0
+                and best_dd > 0.0
+                and best_w > best_l
+            ):
+                rec_touched_sk, rec_touched_br, rec_clobbers = (
+                    compute_candidate_footprint(
+                        best_code,
+                        best_skills_pruned,
+                        base_inc_policy,
+                        base_inc_skills,
+                        protected_branches=deficit_report.protected_branches,
+                    )
+                )
+                rec_cand = PeerCandidate(
+                    peer_id=self.peer_id,
+                    claimed_deficit_id=claimed_deficit.cluster_id,
+                    claimed_label=claimed_deficit.label,
+                    hypothesis_yaml=hyp,
+                    policy_code=best_code,
+                    skills=best_skills_pruned,
+                    pruned_skills=pruned,
+                    touched_skills=rec_touched_sk,
+                    touched_branches=rec_touched_br,
+                    touched_skill_symbols=compute_candidate_skill_symbols(
+                        best_skills_pruned, base_inc_skills
+                    ),
+                    clobbers_protected=rec_clobbers,
+                    track=peer_track,
+                )
+                rec_cand = incubate_candidate(
+                    rec_cand,
+                    deficit_report=deficit_report,
+                    claimed_deficit=claimed_deficit,
+                    eval_pool=eval_pool,
+                    incumbent_shard_runs=incumbent_shard_runs,
+                    shard_seeds=shard_seeds,
+                    frontier_checkpoints=sampled_frontier,
+                    probe_seeds=probe_seeds,
+                    db_path=self.db_path,
+                )
+                if rec_cand.sandbox_passed:
+                    ui.info(
+                        f"Peer [{self.peer_id}]: Post-incubation recovered earlier winning micro-pilot "
+                        f"(attempt #{best_mp.get('attempt', '?')}, Δdepth={best_dd:+.2f}, "
+                        f"W/L={best_w}/{best_l}) over failed final draft ({cand.error[:60]})."
+                    )
+                    cand = rec_cand
 
         status_lbl = (
             f"PASSED (depth={cand.sandbox_metrics.get('avg_depth', 1.0):.2f}, Δ={cand.sandbox_metrics.get('depth_delta', 0.0):+.2f})"

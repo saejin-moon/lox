@@ -16,7 +16,7 @@ from typing import Any
 
 from lox.author.tools.code_tools import merge_skill_module_update, unpack_xml_bundle
 from lox.author.tools.micro_pilot import run_peer_paired_micro_pilot
-from lox.core.contracts import CandidatePackage
+from lox.core.contracts import CandidatePackage, opt_int
 from lox.db.schema import connect_db
 from lox.env.harness import policy_handles_menus
 from lox.lang.bundle import strip_code_fences
@@ -492,8 +492,12 @@ def execute_dry_run_policy(
             if not done and int(getattr(state, "depth", 0) or 0) > 0:
                 last_live_state = state
             msg_l = (state.message or "").lower()
-            is_prompt = getattr(state, "in_yn_prompt", False) or getattr(
-                state, "in_text_prompt", False
+            is_prompt = (
+                getattr(state, "in_yn_prompt", False)
+                or getattr(state, "in_text_prompt", False)
+                or getattr(state, "in_getdir_prompt", False)
+                or getattr(state, "in_getobj_prompt", False)
+                or getattr(state, "in_menu", False)
             )
             if is_prompt:
                 if msg_l == last_prompt_text:
@@ -673,6 +677,18 @@ def execute_dry_run_policy(
                 policy_code=spliced_policy,
                 cand_skills=cand_skills,
             )
+            last_mp_rec = getattr(registry, "last_peer_micro_pilot", None)
+            mp_exc = (
+                opt_int(last_mp_rec, "policy_exceptions", 0)
+                if isinstance(last_mp_rec, dict)
+                else 0
+            )
+            if mp_exc > 0:
+                return (
+                    f"Dry-Run FAILED: Paired micro-pilot raised {mp_exc} runtime exception(s). "
+                    f"Fix all exceptions before finalizing.{micro_pilot_block}",
+                    "RUNTIME_ERROR",
+                )
 
         registry.last_passed_code = (
             spliced_policy

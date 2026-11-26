@@ -16,25 +16,18 @@ from typing import Any
 import numpy as np
 
 from lox.author.swarm_peer import PeerCandidate
-from lox.core.contracts import BatchEvaluation, split_full_and_shard_runs
+from lox.core.contracts import (
+    BatchEvaluation,
+    opt_float,
+    opt_int,
+    split_full_and_shard_runs,
+)
 from lox.engine.hypothesis import (
     cvar_bottom_quantile,
     interquartile_mean,
     progression_metric,
 )
 from lox.lang.validator import is_ast_equivalent
-
-
-def opt_float(d: dict[str, Any], key: str, default: float = 0.0) -> float:
-    """Explicit `is None` float extraction — NEVER uses `or default` (safe when value == 0.0)."""
-    val = d.get(key)
-    return float(default) if val is None else float(val)
-
-
-def opt_int(d: dict[str, Any], key: str, default: int = 0) -> int:
-    """Explicit `is None` int extraction — NEVER uses `or default` (safe when value == 0)."""
-    val = d.get(key)
-    return int(default) if val is None else int(val)
 
 
 @dataclass

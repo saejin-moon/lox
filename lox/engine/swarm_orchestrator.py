@@ -270,6 +270,7 @@ class SwarmCampaignOrchestrator:
                 verify_steps=250,
             )
             if ref_changed:
+                old_fp = cur_fp
                 ui.info(f"Gen {generation} Pre-Gen Side Refactor: {ref_msg}")
                 current_policy = ref_pol
                 initial_skills = ref_skills
@@ -279,6 +280,18 @@ class SwarmCampaignOrchestrator:
                 # Fix H-12: Recompute `cur_fp` immediately after pre-gen side cohesion refactor!
                 cur_fp = _package_fingerprint(current_policy, initial_skills)
                 self._attempted_ast_modular_fps.add(cur_fp)
+                if cur_fp != old_fp:
+                    try:
+                        self.db_logger.retire_stepping_stones_for_parent(
+                            old_fp, new_status="superseded"
+                        )
+                        self.db_logger.retire_proactive_branches_for_champion(
+                            old_fp, new_status="superseded"
+                        )
+                    except Exception as ret_exc:
+                        ui.warn(
+                            f"Pre-gen refactor lifecycle retirement warning: {ret_exc}"
+                        )
 
         # 1. Deterministic Deficit Discovery + Organic Scenario Bank + Adaptive Horizon
         active_max_steps = self._compute_active_max_steps()
@@ -1081,26 +1094,30 @@ class SwarmCampaignOrchestrator:
             )
             if runs
             else 10.0,
-            "avg_xp_level": float(np.mean([r.get("xp_level", 1) or 1 for r in runs]))
+            "avg_xp_level": float(
+                np.mean([opt_float(r, "xp_level", 1.0) for r in runs])
+            )
             if runs
             else 1.0,
             "avg_unique_tiles": float(
-                np.mean([r.get("unique_tiles", 0) or 0 for r in runs])
+                np.mean([opt_float(r, "unique_tiles", 0.0) for r in runs])
             )
             if runs
             else 0.0,
             "avg_branches": float(
-                np.mean([r.get("dungeons_visited", 1) or 1 for r in runs])
+                np.mean([opt_float(r, "dungeons_visited", 1.0) for r in runs])
             )
             if runs
             else 1.0,
-            "pct_wait": float(np.mean([r.get("pct_wait", 0.0) for r in runs]))
+            "pct_wait": float(np.mean([opt_float(r, "pct_wait", 0.0) for r in runs]))
             if runs
             else 0.0,
-            "pct_search": float(np.mean([r.get("pct_search", 0.0) for r in runs]))
+            "pct_search": float(
+                np.mean([opt_float(r, "pct_search", 0.0) for r in runs])
+            )
             if runs
             else 0.0,
-            "avg_turns": float(np.mean([r.get("turns", 0.0) for r in runs]))
+            "avg_turns": float(np.mean([opt_float(r, "turns", 0.0) for r in runs]))
             if runs
             else 100.0,
         }

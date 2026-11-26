@@ -456,8 +456,12 @@ def run_scenario_gate(
                         last_end_reason = msg_s.split(".")[0][:60] if msg_s else "died"
                     else:
                         last_end_reason = "ended"
-                is_prompt = getattr(state, "in_yn_prompt", False) or getattr(
-                    state, "in_text_prompt", False
+                is_prompt = (
+                    getattr(state, "in_yn_prompt", False)
+                    or getattr(state, "in_text_prompt", False)
+                    or getattr(state, "in_getdir_prompt", False)
+                    or getattr(state, "in_getobj_prompt", False)
+                    or getattr(state, "in_menu", False)
                 )
                 msg_l = (state.message or "").lower()
                 if is_prompt:
@@ -484,6 +488,9 @@ def run_scenario_gate(
                     and not (
                         getattr(state, "in_yn_prompt", False)
                         or getattr(state, "in_text_prompt", False)
+                        or getattr(state, "in_getdir_prompt", False)
+                        or getattr(state, "in_getobj_prompt", False)
+                        or getattr(state, "in_menu", False)
                     )
                 )
             )

@@ -262,9 +262,36 @@ def update_proactive_branch_lifecycle(
     inc_sel_d = float(getattr(verdict, "select_inc_avg_depth", 1.0) or 1.0)
     inc_sel_esc = int(getattr(verdict, "select_inc_auto_esc", 0) or 0)
 
+    # Guard: if proactive_2 advanced to S_confirm and crashed or failed safety/holdout gates,
+    # do NOT advance the broken/unsafe code onto the multi-generation sheltered branch.
+    confirm_safety_ok = True
+    conf_pair = getattr(verdict, "confirm_challenger_eval", None)
+    if (
+        isinstance(conf_pair, tuple)
+        and len(conf_pair) == 2
+        and str(conf_pair[0] or "") == "proactive_2"
+    ):
+        conf_eval = conf_pair[1] if isinstance(conf_pair[1], dict) else {}
+        conf_runs = list(conf_eval.get("runs", []) or [])
+        conf_exc = sum(opt_int(r, "policy_exceptions", 0) for r in conf_runs)
+        reason_low = str(getattr(verdict, "reason", "") or "").lower()
+        safety_fail_tokens = (
+            "policy_exceptions",
+            "exception",
+            "auto_esc",
+            "scenario_gate",
+        )
+        if (
+            conf_exc > 0
+            or bool(getattr(verdict, "holdout_rejected", False))
+            or any(tok in reason_low for tok in safety_fail_tokens)
+        ):
+            confirm_safety_ok = False
+
     branch_gate_ok = bool(
         p2_cand.sandbox_passed
         and str(p2_cand.policy_code or "").strip()
+        and confirm_safety_ok
         and p2_exc == 0
         and p2_esc <= max(inc_sel_esc, 2)
         and (p2_w + p2_l) > 0
@@ -358,10 +385,12 @@ def build_layout_a_assignments(
 ]:
     """Constructs per-peer `(peer_id, cluster, start_policy, start_skills, directive, stone, track, branch)` tuples."""
     _high_leverage_kinds = {
-        "search_or_horizon_loop",
-        "confinement_horizon",
         "stalled_trajectory",
+        "recurring_terminal_state",
+        "confinement_horizon",
+        "search_or_horizon_loop",
     }
+    cooled_down = dict(getattr(deficit_report, "cooled_down_deficits", {}) or {})
     reactive_slots = [pid for pid, trk in roster_specs if trk == "reactive"]
     assigned_reactive_clusters: list[Any] = []
     n_react = max(1, len(reactive_slots))
@@ -378,6 +407,7 @@ def build_layout_a_assignments(
                     if str(getattr(c, "kind", "")) in _high_leverage_kinds
                     else (1.2 if int(getattr(c, "run_count", 0) or 0) >= 8 else 1.0)
                 )
+                * (0.25 if str(getattr(c, "cluster_id", "")) in cooled_down else 1.0)
                 * max(1, int(getattr(c, "run_count", 0) or 1))
             ),
             reverse=True,
@@ -386,8 +416,17 @@ def build_layout_a_assignments(
             assigned_reactive_clusters.append(ranked_cl[idx_r % len(ranked_cl)])
     else:
         substantial = [
-            c for c in orthogonal_clusters if int(getattr(c, "run_count", 0) or 0) >= 5
+            c
+            for c in orthogonal_clusters
+            if int(getattr(c, "run_count", 0) or 0) >= 5
+            and str(getattr(c, "cluster_id", "")) not in cooled_down
         ]
+        if len(substantial) < 2:
+            substantial = [
+                c
+                for c in orthogonal_clusters
+                if int(getattr(c, "run_count", 0) or 0) >= 5
+            ]
         climb_pool = substantial if len(substantial) >= 2 else orthogonal_clusters
         for idx_r in range(n_react):
             assigned_reactive_clusters.append(
@@ -402,9 +441,9 @@ def build_layout_a_assignments(
     )
     cluster_by_id = {str(getattr(c, "cluster_id", "") or ""): c for c in clusters}
     _angles = (
-        "Hypothesis Angle A (Primary Loop/Navigation): Redesign loop-termination / state-budget / transition rules in the primary loop module, avoiding any mechanisms marked CRN_REJECTED in Rejection Memory.",
-        "Hypothesis Angle B (Upstream Resource/Survival/Capability): Fix upstream resource, survival, or capability bottlenecks causing `top_ends` terminations — do NOT edit the same navigation loop as Angle A.",
-        "Hypothesis Angle C (Fallback/Precondition Redesign): Redesign preconditions, action-selection, or fallback priorities so stalled or repetitive states exit cleanly.",
+        "Hypothesis Angle A (Surgical Failure Fix): Isolate the exact failure precondition in the owning module so broken runs are rescued with zero regression on healthy GUARD seeds.",
+        "Hypothesis Angle B (Upstream Resource/Survival/Capability): Fix upstream resource, encumbrance, survival, or capability bottlenecks causing `top_ends` terminations without touching unrelated exploration loops.",
+        "Hypothesis Angle C (Stall/Trap Exit Guard): Add clean exit preconditions so stalled or repeated-failure states recover cleanly without perturbing healthy play.",
     )
 
     assignments: list[

@@ -987,3 +987,112 @@ def test_v3_deficit_12gen_memory_fresh_guards_and_expert_parity_gaps(tmp_path):
     assert "State Parity:" in rep.expert_parity_gaps
     assert "QUAFF" in rep.expert_parity_gaps
     assert "SEARCH" in rep.expert_parity_gaps
+
+
+def test_sparse_expert_ticks_full_batch_stalled_and_cooldown(tmp_path):
+    """Verifies Fixes 1-3: sparse expert_ticks suppress fake action %, 256-run full clustering surfaces stalled_zero_turn + >=2.8% recurring outcomes, and cooldown tracks repeated rejections."""
+    from lox.author.swarm_deficits import DeficitAnalyzer
+    from lox.db.schema import init_db
+
+    dbp = str(tmp_path / "plan7_deficits.duckdb")
+    con = init_db(dbp)
+    try:
+        con.execute(
+            """
+            INSERT INTO batches (batch_id, generation, mode, hypothesis_passed)
+            VALUES ('batch_swarm_g76_prom', 76, 'SWARM', TRUE),
+                   ('batch_swarm_g87_inc_retained_1', 87, 'SWARM', FALSE)
+            """
+        )
+        # 256 champion runs in Gen 87: 16 stalled_zero_turn (with high pct_search!), 9 floating eye split phrasings, rest combat
+        for i in range(256):
+            if i < 16:
+                er, pct_s, turns, fn = (
+                    "stalled_zero_turn",
+                    42.0,
+                    2200,
+                    "explore._dir_to",
+                )
+            elif i < 21:
+                er, pct_s, turns, fn = (
+                    "You hit the floating eye! You are frozen",
+                    20.0,
+                    1200,
+                    "explore._search_fallback",
+                )
+            elif i < 25:
+                er, pct_s, turns, fn = (
+                    "You miss the floating eye",
+                    20.0,
+                    1200,
+                    "explore._search_fallback",
+                )
+            else:
+                er, pct_s, turns, fn = f"killed_by_mob_{i % 40}", 25.0, 1500, "combat"
+            con.execute(
+                """
+                INSERT INTO runs (
+                    run_id, batch_id, generation, seed, depth, max_depth, score, turns,
+                    final_ac, xp_level, end_reason, pct_search, last_active_function, run_kind
+                )
+                VALUES (?, 'batch_swarm_g87_inc_retained_1', 87, ?, 3, 3, 500, ?, 5, 3, ?, ?, ?, 'champion')
+                """,
+                [f"r87_{i}", 10870000 + i, turns, er, pct_s, fn],
+            )
+        # Champion ticks include WEAR via seq(WEAR,a), zero QUAFF
+        for step in range(1, 201):
+            act = "seq(WEAR,a)" if step == 1 else "SEARCH"
+            con.execute(
+                "INSERT INTO ticks (run_id, step_idx, turn, depth, hp, max_hp, ac, xp_level, action_name, active_function) VALUES ('r87_0', ?, ?, 2, 16, 16, 5, 3, ?, 'explore')",
+                [step, step, act],
+            )
+        # Sparse multi-depth expert_ticks (10 rows across depths 1..3, turns 1..9040 -> low density & span coverage)
+        for idx_e, act_e in enumerate(
+            [
+                "WEAR",
+                "WIELD",
+                "QUAFF",
+                "EAT",
+                "OPEN",
+                "KICK",
+                "DOWN",
+                "SEARCH",
+                "QUAFF",
+                "QUAFF",
+            ],
+            start=0,
+        ):
+            depth_e = (idx_e // 3) + 1
+            turn_e = (depth_e - 1) * 3000 + (idx_e % 3) * 20 + 1
+            con.execute(
+                "INSERT INTO expert_ticks (run_id, step_idx, turn, depth, hp, max_hp, ac, xp_level, action_name) VALUES ('exp_sparse', ?, ?, ?, 20, 20, 2, 4, ?)",
+                [idx_e + 1, turn_e, depth_e, act_e],
+            )
+        # Repeated rejections in last 4 gens trigger cooldown
+        for g_fail in (85, 86, 87):
+            con.execute(
+                """
+                INSERT INTO tournament_attempts (attempt_id, generation, peer_id, deficit_id, promoted, sandbox_passed)
+                VALUES (?, ?, 'reactive_1', 'slice_high_search_or_horizon_burn', FALSE, FALSE)
+                """,
+                [f"att_{g_fail}", g_fail],
+            )
+    finally:
+        con.close()
+
+    rep = DeficitAnalyzer(dbp).analyze(
+        generation=88, current_policy="class Policy: pass"
+    )
+    # 1. Sparse expert_ticks must NOT emit fake action % or fake `vs expert ~Xt`
+    assert "Under-Used/Missing Expert Actions" not in rep.expert_parity_gaps
+    assert "vs expert " not in rep.expert_parity_gaps.split("vs expert@")[0]
+    assert "vs expert ~" not in rep.efficiency_summary
+    assert "sparse progression milestones" in rep.expert_parity_gaps
+    # 2. All 16 stalled_zero_turn runs preserved (not truncated to 64 and not swallowed by is_high_burn)
+    cmap = {c.cluster_id: c for c in rep.fail_clusters}
+    assert "slice_stalled" in cmap and cmap["slice_stalled"].run_count == 16
+    assert "explore._dir_to" in cmap["slice_stalled"].evidence
+    # 3. 9/256 floating eye deaths surface via recurring_end_min = max(4, 256//36) = 7
+    assert any("floating eye" in c.label.lower() for c in rep.fail_clusters)
+    # 4. Cooldown flags slice_high_search_or_horizon_burn (failed 3x since Gen 76 promotion)
+    assert rep.cooled_down_deficits.get("slice_high_search_or_horizon_burn") == 3

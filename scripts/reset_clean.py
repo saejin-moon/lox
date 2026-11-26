@@ -113,15 +113,15 @@ def reset_clean(
                 try:
                     con.execute(f"DELETE FROM {table}")
                     print(f"Cleared table `{table}`")
-                except Exception:
-                    pass
+                except Exception as del_exc:
+                    print(f"Warning: failed clearing table `{table}`: {del_exc}")
             try:
                 exp_count = con.execute("SELECT COUNT(*) FROM expert_runs").fetchone()[
                     0
                 ]
                 print(f"Preserved `expert_runs` ({exp_count} expert runs ready)")
-            except Exception:
-                pass
+            except Exception as exp_exc:
+                print(f"Warning: could not count `expert_runs`: {exp_exc}")
         finally:
             con.close()
 

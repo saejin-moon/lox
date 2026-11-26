@@ -190,10 +190,10 @@ class GameState:
                 self.inv_oclasses = raw_obs[9]
                 self.program_state = raw_obs[10] if len(raw_obs) > 10 else None
                 self.internal = raw_obs[11] if len(raw_obs) > 11 else None
-                self.screen_descriptions = raw_obs[12] if len(raw_obs) > 12 else None
-                self.tty_chars = raw_obs[13] if len(raw_obs) > 13 else None
-                self.tty_colors = raw_obs[14] if len(raw_obs) > 14 else None
-                self.tty_cursor = raw_obs[15] if len(raw_obs) > 15 else None
+                self.tty_chars = raw_obs[12] if len(raw_obs) > 12 else None
+                self.tty_colors = raw_obs[13] if len(raw_obs) > 13 else None
+                self.tty_cursor = raw_obs[14] if len(raw_obs) > 14 else None
+                self.screen_descriptions = raw_obs[15] if len(raw_obs) > 15 else None
                 self.misc = raw_obs[16] if len(raw_obs) > 16 else None
         else:
             self._raw_dict = raw_obs
@@ -1345,11 +1345,13 @@ class GameState:
 
     @property
     def worn_oprop_mask(self) -> int:
-        """Bitwise OR of C `objclass.oc_oprop` across all worn or wielded inventory items."""
+        """Bitmask (`1 << objclass.oc_oprop`) across all worn or wielded inventory items."""
         mask = 0
         for it in self.inventory:
             if (it.is_worn or it.is_wielded) and it.info is not None:
-                mask |= int(getattr(it.info, "oprop", 0) or 0)
+                op = int(getattr(it.info, "oprop", 0) or 0)
+                if op > 0:
+                    mask |= 1 << op
         return mask
 
     def _effective_cmap_glyph(self, y: int, x: int) -> int:

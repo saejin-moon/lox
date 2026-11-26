@@ -10,6 +10,19 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+
+def opt_float(d: dict[str, Any], key: str, default: float = 0.0) -> float:
+    """Explicit `is None` float extraction — NEVER uses `or default` (safe when value == 0.0)."""
+    val = d.get(key)
+    return float(default) if val is None else float(val)
+
+
+def opt_int(d: dict[str, Any], key: str, default: int = 0) -> int:
+    """Explicit `is None` int extraction — NEVER uses `or default` (safe when value == 0)."""
+    val = d.get(key)
+    return int(default) if val is None else int(val)
+
+
 # Canonical alias map: accessing or setting any alias automatically resolves to both
 _KEY_ALIASES: dict[str, str] = {
     "final_xp_level": "xp_level",

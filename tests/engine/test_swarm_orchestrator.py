@@ -1051,3 +1051,74 @@ def test_expert_model_always_routes_proactive_2(tmp_path):
     assert seen_models.get("reactive_1") == "z-ai/glm-5.3-flash:nitro"
     assert seen_models.get("reactive_2") == "z-ai/glm-5.3-flash:nitro"
     assert seen_models.get("proactive_1") == "z-ai/glm-5.3-flash:nitro"
+
+
+def test_cooldown_rotation_in_directives_and_lifecycle(tmp_path):
+    """Verifies Fix 3: cooled-down clusters rotate behind untouched high-signal clusters."""
+    from lox.author.directives import SwarmDirectivePlanner
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.engine.lifecycle import build_layout_a_assignments
+
+    cl_stale = DeficitCluster(
+        cluster_id="slice_high_search_or_horizon_burn",
+        kind="search_or_horizon_loop",
+        label="high search",
+        run_count=20,
+        sample_seeds=[1, 2],
+    )
+    cl_stalled = DeficitCluster(
+        cluster_id="slice_stalled",
+        kind="stalled_trajectory",
+        label="zero-turn stalls",
+        run_count=16,
+        sample_seeds=[3, 4],
+    )
+    cl_eye = DeficitCluster(
+        cluster_id="slice_recurring_outcome_1",
+        kind="recurring_terminal_state",
+        label="recurring phrase `floating eye`",
+        run_count=9,
+        sample_seeds=[5, 6],
+    )
+    rep = DeficitReport(
+        generation=88,
+        regime="PLATEAU",
+        fail_clusters=[cl_stale, cl_stalled, cl_eye],
+        cooled_down_deficits={"slice_high_search_or_horizon_burn": 3},
+    )
+
+    planner = SwarmDirectivePlanner(
+        provider="mock", db_path=str(tmp_path / "cd.duckdb")
+    )
+    dirs = planner.plan_peer_directives(
+        generation=88,
+        fresh_peer_ids=["reactive_1", "reactive_2", "proactive_1", "proactive_2"],
+        deficit_report=rep,
+        peer_roles={
+            "reactive_1": "reactive",
+            "reactive_2": "reactive",
+            "proactive_1": "proactive_capability",
+            "proactive_2": "proactive_branch",
+        },
+    )
+    by_p = {d["peer_id"]: d for d in dirs}
+    assert by_p["reactive_1"]["target_cluster_id"] == "slice_stalled"
+    assert by_p["reactive_2"]["target_cluster_id"] == "slice_recurring_outcome_1"
+
+    assigns = build_layout_a_assignments(
+        generation=88,
+        roster_specs=[("reactive_1", "reactive"), ("reactive_2", "reactive")],
+        clusters=rep.fail_clusters,
+        orthogonal_clusters=rep.fail_clusters,
+        deficit_report=rep,
+        current_policy="class Policy: pass",
+        initial_skills={},
+        probe_seeds=[100, 101],
+        planned_directives={},
+        active_stone=None,
+        active_branch=None,
+        plateau_streak=5,
+        near_misses=[],
+    )
+    assigned_cids = [a[1].cluster_id for a in assigns]
+    assert assigned_cids == ["slice_stalled", "slice_recurring_outcome_1"]

@@ -10,6 +10,8 @@ import threading
 import time
 from typing import Any
 
+from lox.core.contracts import opt_float, opt_int
+
 _PEER_MICRO_PILOT_LOCK = threading.Lock()
 
 
@@ -404,11 +406,10 @@ def run_peer_paired_micro_pilot(
             )
             prev_rank = (
                 (
-                    1 if int(prev_best.get("diverged", 0) or 0) > 0 else 0,
-                    1 if int(prev_best.get("guard_regressions", 0) or 0) == 0 else 0,
-                    float(prev_best.get("avg_depth_delta", -999.0) or -999.0),
-                    int(prev_best.get("wins", 0) or 0)
-                    - int(prev_best.get("losses", 0) or 0),
+                    1 if opt_int(prev_best, "diverged", 0) > 0 else 0,
+                    1 if opt_int(prev_best, "guard_regressions", 0) == 0 else 0,
+                    opt_float(prev_best, "avg_depth_delta", -999.0),
+                    opt_int(prev_best, "wins", 0) - opt_int(prev_best, "losses", 0),
                 )
                 if isinstance(prev_best, dict)
                 else None

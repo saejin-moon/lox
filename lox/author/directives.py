@@ -240,6 +240,7 @@ class SwarmDirectivePlanner:
             or []
         )
         cluster_ids = [str(getattr(c, "cluster_id", "") or "") for c in clusters]
+        cooled_down = dict(getattr(deficit_report, "cooled_down_deficits", {}) or {})
         expert_gaps_txt = str(
             getattr(deficit_report, "expert_parity_gaps", "") or ""
         ).strip()
@@ -255,6 +256,13 @@ class SwarmDirectivePlanner:
                 if isinstance(active_proactive_branch, dict)
                 else ""
             )
+            ordered_clusters = sorted(
+                clusters,
+                key=lambda c: (
+                    1 if str(getattr(c, "cluster_id", "")) in cooled_down else 0,
+                    -int(getattr(c, "run_count", 0) or 0),
+                ),
+            )
             r_idx = 0
             for pid in peer_ids:
                 role = roles_map.get(pid, "reactive")
@@ -264,10 +272,10 @@ class SwarmDirectivePlanner:
                             "peer_id": pid,
                             "track": "proactive_capability",
                             "target_cluster_id": "proactive_expert_capability",
-                            "focus_subsystem": "skills/goals (expert parity capability)",
+                            "focus_subsystem": "skills/goals (additive capability)",
                             "investigative_question": (
-                                "Contrast `champion_ticks` against `expert_ticks` across Dlvl 1..p90+2 and consult "
-                                "Wiki rules to design one self-contained missing capability module."
+                                "Inspect `champion_runs`/`champion_ticks`, `expert_runs` progression milestones "
+                                "(AC/XL/depth), and NetHack Wiki rules to design one clean, self-contained additive capability."
                             ),
                             "exclude_overlap": (
                                 "Do NOT patch reactive death traces covered by reactive_1/reactive_2"
@@ -299,14 +307,18 @@ class SwarmDirectivePlanner:
                                 + (
                                     f"build upon '{branch_goal}' toward champion graduation."
                                     if branch_goal
-                                    else "diagnose structural/efficiency parity gaps vs `expert_ticks` and start a clean multi-step architecture upgrade."
+                                    else "inspect `champion_runs`/`champion_ticks` + Wiki rules + `expert_runs` milestones and start a clean multi-step capability upgrade."
                                 )
                             ),
                             "exclude_overlap": "Do NOT collide with reactive_1/reactive_2 failure patches or proactive_1's single-gen capability.",
                         }
                     )
                 else:
-                    cl = clusters[r_idx % len(clusters)] if clusters else None
+                    cl = (
+                        ordered_clusters[r_idx % len(ordered_clusters)]
+                        if ordered_clusters
+                        else None
+                    )
                     r_idx += 1
                     cid = str(getattr(cl, "cluster_id", "general")) if cl else "general"
                     lbl = (
@@ -366,8 +378,20 @@ class SwarmDirectivePlanner:
             f"- `{pid}`: track=`{roles_map.get(pid, 'reactive')}`" for pid in peer_ids
         )
         parity_section = (
-            f"\n### Champion-vs-Expert Parity Gaps (`expert_ticks` vs `champion_ticks`):\n{expert_gaps_txt[:1500]}\n"
+            f"\n### Champion-vs-Expert State Milestones & Unused Verbs:\n{expert_gaps_txt[:1500]}\n"
             if expert_gaps_txt
+            else ""
+        )
+        cooldown_section = (
+            "\n### Recently Cooled-Down Clusters (ROTATE AWAY Unless Zero Untouched Alternatives):\n"
+            + ", ".join(
+                f"`{cid}` (failed {cnt}x in last 4 gens)"
+                for cid, cnt in sorted(
+                    cooled_down.items(), key=lambda kv: kv[1], reverse=True
+                )
+            )
+            + "\n"
+            if cooled_down
             else ""
         )
 
@@ -379,7 +403,7 @@ class SwarmDirectivePlanner:
 
 ### Active Sheltered Proactive Branch (`proactive_2`):
 {branch_txt}
-{parity_section}
+{parity_section}{cooldown_section}
 ### Empirical Deficit Report:
 {brief_txt}
 
@@ -388,11 +412,12 @@ class SwarmDirectivePlanner:
 
 ### Strict Rules ("Hard Code Nothing"):
 1. Assign each peer in {peer_ids} a **distinct `focus_subsystem` and neutral `investigative_question`** so NO two peers investigate or patch the same mechanism/subsystem (and none duplicate recently rejected mechanisms in Rejection Memory).
-2. Respect each peer's track:
+2. **Stagnation Rotation**: Prefer fresh, non-cooled-down, high-signal failure clusters (`slice_stalled`, `slice_recurring_outcome_*`, `slice_max_steps_confinement`, `slice_frontier_failures`, etc.) over clusters listed in `Recently Cooled-Down Clusters`. Do NOT keep re-assigning the same subsystem after 2+ rejections.
+3. Respect each peer's track:
    - `reactive` / `revision` peers target concrete empirical failure clusters from `champion_runs` / `champion_ticks` (prefer valid `target_cluster_id` from {cluster_ids or ["general"]}).
-   - `proactive_capability` (`proactive_1`) targets a missing or underused capability/efficiency gap revealed by `expert_ticks` + Wiki across Dlvl 1..p90+2 (starts from champion; use `target_cluster_id: "proactive_expert_capability"`).
+   - `proactive_capability` (`proactive_1`) targets a clean, self-contained missing capability or state-progression gap grounded in `champion_runs`/`champion_ticks` + Wiki rules + `expert_runs` milestones across Dlvl 1..p90+2 (use `target_cluster_id: "proactive_expert_capability"`). Never tell peers to chase synthetic `expert_ticks` action-share percentages.
    - `proactive_branch` (`proactive_2`) advances the multi-step sheltered proactive architecture branch over its 4-generation horizon (use `target_cluster_id: "proactive_sheltered_branch"`).
-3. Do NOT prescribe code changes, thresholds, or hardcoded game tactics — only specify WHICH empirical failure mode / parity gap / subsystem to investigate and WHAT other peers are covering (`exclude_overlap`).
+4. Do NOT prescribe code changes, thresholds, or hardcoded game tactics — only specify WHICH empirical failure mode / capability gap / subsystem to investigate and WHAT other peers are covering (`exclude_overlap`).
 
 Return ONLY a valid JSON array of {len(peer_ids)} objects, each with keys:
 - "peer_id": one of {peer_ids}

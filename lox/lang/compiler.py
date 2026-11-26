@@ -69,10 +69,12 @@ from lox.lang.instrument import (
     _TracerProxy,
 )
 from lox.lang.sandbox import (
+    _STRICT_FORBIDDEN_ATTRS,
     ALLOWED_DUNDERS,
     ALLOWED_LOX_SUBMODULES,
     FORBIDDEN_DUNDERS,
     FORBIDDEN_IMPORT_NAMES,
+    FORBIDDEN_MODULE_ATTRS,
     SAFE_STDLIB_SUBMODULES,
     PolicyValidationError,
     normalize_skill_key,
@@ -90,10 +92,16 @@ def _is_forbidden_attr(obj: Any, name: Any) -> bool:
         name.startswith("__") and name not in ALLOWED_DUNDERS
     ):
         return True
-    if isinstance(obj, types.ModuleType) and (
-        name.startswith("_") or name in FORBIDDEN_IMPORT_NAMES
-    ):
+    if name in _STRICT_FORBIDDEN_ATTRS:
         return True
+    if isinstance(obj, types.ModuleType):
+        mod_root = str(getattr(obj, "__name__", "") or "").split(".")[0]
+        if (
+            name.startswith("_")
+            or name in FORBIDDEN_IMPORT_NAMES
+            or name in FORBIDDEN_MODULE_ATTRS.get(mod_root, frozenset())
+        ):
+            return True
     return False
 
 
@@ -290,8 +298,14 @@ def _make_safe_module_proxy(
 ) -> types.ModuleType:
     """Builds a sanitized module proxy stripping all private (`_*`), forbidden, and submodule attributes."""
     proxy = types.ModuleType(mod_name)
+    root_name = mod_name.split(".")[0]
+    mod_denied = FORBIDDEN_MODULE_ATTRS.get(root_name, frozenset())
     for attr_name in dir(raw_mod):
-        if attr_name.startswith("_") or attr_name in FORBIDDEN_IMPORT_NAMES:
+        if (
+            attr_name.startswith("_")
+            or attr_name in FORBIDDEN_IMPORT_NAMES
+            or attr_name in mod_denied
+        ):
             continue
         try:
             val = getattr(raw_mod, attr_name)
@@ -362,8 +376,14 @@ def _make_scoped_import(scoped_modules: dict[str, types.ModuleType] | None = Non
         root = name.split(".")[0]
 
         if root in _SAFE_STDLIB_MODULES:
+            mod_denied = FORBIDDEN_MODULE_ATTRS.get(root, frozenset())
             for item in fromlist or ():
-                if str(item).startswith("_") or str(item) in FORBIDDEN_IMPORT_NAMES:
+                s_item = str(item)
+                if (
+                    s_item.startswith("_")
+                    or s_item in FORBIDDEN_IMPORT_NAMES
+                    or s_item in mod_denied
+                ):
                     raise ImportError(
                         f"Import of private/re-exported symbol '{item}' from '{name}' is forbidden."
                     )

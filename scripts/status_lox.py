@@ -13,7 +13,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lox.db.schema import DEFAULT_DB_PATH, NON_SHARD_RUNS_SQL, connect_db
+from lox.db.schema import (
+    DEFAULT_DB_PATH,
+    NON_CHAMPION_BATCH_MODES,
+    NON_SHARD_RUNS_SQL,
+    connect_db,
+)
 
 
 def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> None:
@@ -55,8 +60,9 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
         return
 
     try:
-        # Window stats (exclude non-campaign modes like PILOT / BASELINE_BACKFILL / MACRO_WRITE)
-        _valid_mode_sql = "UPPER(COALESCE(mode, '')) NOT IN ('PILOT', 'BASELINE_BACKFILL', 'MACRO_WRITE')"
+        # Window stats (exclude non-champion modes using canonical list from lox.db.schema)
+        _excluded_modes = ", ".join(f"'{m}'" for m in NON_CHAMPION_BATCH_MODES)
+        _valid_mode_sql = f"UPPER(COALESCE(mode, '')) NOT IN ({_excluded_modes})"
         batch_row = con.execute(
             f"""
             SELECT COUNT(*), MIN(generation), MAX(generation),
@@ -153,8 +159,8 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
                     )
             else:
                 print("\n💡 PROMOTED DISCOVERIES IN WINDOW: (None in this window)")
-        except Exception:
-            pass
+        except Exception as disc_exc:
+            print(f"\n⚠️ Could not query discoveries: {disc_exc}")
 
         # Deepest runs in window
         try:
@@ -180,8 +186,8 @@ def show_status(db_path: str = DEFAULT_DB_PATH, since_hours: float = 12.0) -> No
                     print(
                         f"  • `{rid}` (Seed={s}): Dlvl {md_s}, Score {sc_s:,}, XL {xl_s}, AC {ac_s} -> {reason}"
                     )
-        except Exception:
-            pass
+        except Exception as run_exc:
+            print(f"\n⚠️ Could not query deepest runs: {run_exc}")
 
     finally:
         con.close()

@@ -873,3 +873,51 @@ def test_unified_runs_ticks_concurrency_and_stepping_stones(tmp_path):
         assert abs(float(r_att[1]) - 0.0042) < 1e-6
     finally:
         con_v3.close()
+
+
+def test_champion_views_include_latest_inc_retained_batch(tmp_path):
+    """Verifies Fix 7: champion_runs / champion_ticks / champion_function_stats pick latest inc_retained champion batch."""
+    from lox.db.schema import init_db
+
+    db_p = str(tmp_path / "champ_views.duckdb")
+    con = init_db(db_p)
+    try:
+        con.execute(
+            """
+            INSERT INTO batches (batch_id, generation, mode, hypothesis_passed, created_at)
+            VALUES ('batch_swarm_g76_prom', 76, 'SWARM', TRUE, '2026-01-01 10:00:00'),
+                   ('batch_swarm_g87_inc_retained_1', 87, 'SWARM', FALSE, '2026-01-02 10:00:00'),
+                   ('batch_swarm_g87_rejected_peer', 87, 'SWARM', FALSE, '2026-01-02 11:00:00'),
+                   ('pilot_g88', 88, 'PILOT', FALSE, '2026-01-03 10:00:00')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO runs (run_id, batch_id, generation, seed, run_kind)
+            VALUES ('r76', 'batch_swarm_g76_prom', 76, 1, 'champion'),
+                   ('r87_a', 'batch_swarm_g87_inc_retained_1', 87, 10, 'champion'),
+                   ('r87_b', 'batch_swarm_g87_inc_retained_1', 87, 11, 'champion'),
+                   ('r87_rej', 'batch_swarm_g87_rejected_peer', 87, 12, 'champion'),
+                   ('r88_p', 'pilot_g88', 88, 13, 'champion')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO ticks (run_id, step_idx, turn, depth, hp, max_hp, action_name, active_function)
+            VALUES ('r76', 1, 1, 1, 16, 16, 'E', 'explore'),
+                   ('r87_a', 1, 1, 1, 16, 16, 'W', 'explore')
+            """
+        )
+        champ_ids = [
+            r[0]
+            for r in con.execute(
+                "SELECT run_id FROM champion_runs ORDER BY run_id"
+            ).fetchall()
+        ]
+        tick_ids = [
+            r[0] for r in con.execute("SELECT run_id FROM champion_ticks").fetchall()
+        ]
+        assert champ_ids == ["r87_a", "r87_b"]
+        assert tick_ids == ["r87_a"]
+    finally:
+        con.close()

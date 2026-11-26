@@ -105,6 +105,8 @@ pub fn fast_update_floor_memory(
                 }
             } else if rg_sl[i] == 2359 {
                 rg_sl[i] = 0;
+                pm_sl[i] = is_passable_byte(rc_sl[i]);
+                spm_sl[i] = pm_sl[i] && rt_sl[i] == 0;
             }
             if (f & F_OBJECT) != 0 {
                 ro_sl[i] = g as i32;
@@ -162,6 +164,13 @@ pub fn fast_trap_mask<'py>(
     let shape = glyphs.shape();
     let h = shape[0];
     let w = shape[1];
+    if remembered_trap_glyphs.shape() != [h, w] {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "fast_trap_mask shape mismatch: glyphs={:?}, remembered_trap_glyphs={:?}",
+            shape,
+            remembered_trap_glyphs.shape()
+        )));
+    }
     let n = h * w;
     let py_arr = unsafe { PyArray2::new_bound(py, [h, w], false) };
     let out = unsafe { py_arr.as_slice_mut()? };
@@ -171,14 +180,10 @@ pub fn fast_trap_mask<'py>(
     let lut = is_trap_lut.as_slice()?;
     let lut_len = lut.len();
 
-    if rt_sl.len() == n && g_sl.len() == n {
-        for i in 0..n {
-            let g = g_sl[i];
-            let vis_trap = g >= 0 && (g as usize) < lut_len && lut[g as usize];
-            out[i] = rt_sl[i] > 0 || vis_trap;
-        }
-    } else {
-        out.fill(false);
+    for i in 0..n {
+        let g = g_sl[i];
+        let vis_trap = g >= 0 && (g as usize) < lut_len && lut[g as usize];
+        out[i] = rt_sl[i] > 0 || vis_trap;
     }
     Ok(py_arr)
 }
@@ -196,7 +201,14 @@ pub fn fast_unexplored_frontier_mask<'py>(
     let shape = passable.shape();
     let h = shape[0];
     let w = shape[1];
-    let n = h * w;
+    if visited.shape() != [h, w] || remembered_chars.shape() != [h, w] {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "fast_unexplored_frontier_mask shape mismatch: passable={:?}, visited={:?}, remembered_chars={:?}",
+            shape,
+            visited.shape(),
+            remembered_chars.shape()
+        )));
+    }
     let py_arr = unsafe { PyArray2::new_bound(py, [h, w], false) };
     let out = unsafe { py_arr.as_slice_mut()? };
     out.fill(false);
@@ -204,9 +216,6 @@ pub fn fast_unexplored_frontier_mask<'py>(
     let vis = visited.as_slice()?;
     let pass = passable.as_slice()?;
     let rchars = remembered_chars.as_slice()?;
-    if vis.len() != n || pass.len() != n || rchars.len() != n {
-        return Ok(py_arr);
-    }
 
     let dys: [isize; 8] = [-1, 1, 0, 0, -1, -1, 1, 1];
     let dxs: [isize; 8] = [0, 0, -1, 1, -1, 1, -1, 1];

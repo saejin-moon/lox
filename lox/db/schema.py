@@ -31,13 +31,13 @@ _INITIALIZED_DBS: dict[str, tuple[int, int]] = {}
 def _db_file_sig(abs_path: str) -> tuple[int, int] | None:
     try:
         st = os.stat(abs_path)
-        return (int(st.st_ino), int(st.st_mtime_ns))
+        return (int(st.st_dev), int(st.st_ino))
     except OSError:
         return None
 
 
 def is_db_initialized(db_path: str) -> bool:
-    """True only if `abs_path` exists on disk and matches the (inode, mtime_ns) initialized in this process."""
+    """True only if `abs_path` exists on disk and matches the (dev, inode) initialized in this process."""
     abs_path = os.path.abspath(db_path)
     recorded = _INITIALIZED_DBS.get(abs_path)
     if recorded is None:
@@ -54,6 +54,20 @@ NON_SHARD_RUNS_SQL = (
     "COALESCE(is_shard, FALSE) = FALSE "
     "AND COALESCE(run_id, '') NOT LIKE 'shard_%' "
     "AND COALESCE(run_kind, 'champion') = 'champion'"
+)
+
+# Canonical tuple of non-champion batch modes excluded from champion views & campaign dashboards
+NON_CHAMPION_BATCH_MODES: tuple[str, ...] = (
+    "PILOT",
+    "BASELINE_BACKFILL",
+    "MACRO_WRITE",
+    "MICRO_PILOT",
+    "MICRO_PILOT_BASELINE",
+    "INCUBATE",
+    "INCUBATE_BASELINE",
+    "SELECT",
+    "SELECT_INCUMBENT",
+    "CONFIRM_CHALLENGER",
 )
 
 
@@ -453,7 +467,7 @@ CREATE OR REPLACE VIEW champion_runs AS
 SELECT * FROM runs
 WHERE batch_id = (
     SELECT batch_id FROM batches
-    WHERE hypothesis_passed = TRUE
+    WHERE (hypothesis_passed = TRUE OR batch_id LIKE '%_inc_%')
       AND mode NOT IN (
           'PILOT',
           'BASELINE_BACKFILL',
@@ -477,7 +491,7 @@ CREATE OR REPLACE VIEW champion_function_stats AS
 SELECT * FROM function_stats
 WHERE batch_id = (
     SELECT batch_id FROM batches
-    WHERE hypothesis_passed = TRUE
+    WHERE (hypothesis_passed = TRUE OR batch_id LIKE '%_inc_%')
       AND mode NOT IN (
           'PILOT',
           'BASELINE_BACKFILL',
@@ -864,7 +878,7 @@ def get_schema_markdown(
         return "\n".join(
             [
                 "### DuckDB Schema (`query_db(sql)`)",
-                "- Views: `champion_runs` / `champion_function_stats` / `champion_ticks` (latest promoted batch), `peer_runs` / `peer_ticks` (all non-champion peer micro-pilot/incubate/select/confirm_challenger runs+ticks with `generation`, `peer_id`, `run_kind`, `attempt_num`, `seed`), `all_ticks` (unified ticks across ALL runs joined with run metadata).",
+                "- Views: `champion_runs` / `champion_function_stats` / `champion_ticks` (latest champion batch — promoted or retained incumbent), `peer_runs` / `peer_ticks` (all non-champion peer micro-pilot/incubate/select/confirm_challenger runs+ticks with `generation`, `peer_id`, `run_kind`, `attempt_num`, `seed`), `all_ticks` (unified ticks across ALL runs joined with run metadata).",
                 f"- `runs`: {_fmt_cols('runs', {'action_bytes'})}. *(Notes: `run_kind` distinguishes `'champion'`, `'micro_pilot'`, `'micro_pilot_baseline'`, `'incubate'`, `'select'`, `'confirm_challenger'`; `hunger_state` on `ticks`; `seed` on `runs`; `pct_wait`/`pct_search` in 0..100; filter shards via `NOT is_shard`.)*",
                 f"- `ticks`: {_fmt_cols('ticks')}. *(Unified lossless ticks across 100% of runs, joined via `run_id`.)*",
                 f"- `batches`: {_fmt_cols('batches')}.",

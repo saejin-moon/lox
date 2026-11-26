@@ -1196,3 +1196,81 @@ def test_query_wiki_and_read_wiki_article_char_caps(tmp_path):
     assert len(r_out) < 17000
     assert "TRUNCATED:" in r_out
     assert "offset=16000" in r_out
+
+
+def test_post_incubation_auto_recover_rescues_winning_micro_pilot(tmp_path):
+    """Verifies Fix 4: if an un-piloted late-turn edit fails incubation, SwarmPeerAgent recovers a strictly winning best_peer_micro_pilot."""
+    from unittest.mock import patch
+
+    from lox.author.agent import SynthesisProposal
+    from lox.author.swarm_deficits import DeficitCluster, DeficitReport
+    from lox.author.swarm_peer import SwarmPeerAgent
+    from lox.db.schema import init_db
+
+    dbp = str(tmp_path / "post_rec.duckdb")
+    init_db(dbp).close()
+
+    base_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.WAIT\n"
+    win_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.E\n"
+    bad_final_pol = "from lox.env.actions import Action\nclass Policy:\n    def step(self, s):\n        return Action.W\n"
+
+    peer = SwarmPeerAgent(peer_id="proactive_2", provider="openrouter", db_path=dbp)
+    rep = DeficitReport(generation=87, regime="PLATEAU", d_succ_seeds=[10])
+    cl = DeficitCluster(
+        cluster_id="proactive_sheltered_branch",
+        kind="proactive_branch",
+        label="step 4/4",
+        sample_seeds=[20],
+    )
+
+    def _fake_synth(**kwargs):
+        peer.author.tools.best_peer_micro_pilot = {
+            "attempt": 2,
+            "code": win_pol,
+            "skills": {},
+            "avg_depth_delta": 0.643,
+            "wins": 3,
+            "losses": 0,
+            "ties": 11,
+            "diverged": 4,
+            "probe_diverged": 3,
+            "policy_exceptions": 0,
+            "guard_regressions": 0,
+        }
+        peer.author.tools.last_peer_micro_pilot = (
+            peer.author.tools.best_peer_micro_pilot
+        )
+        return SynthesisProposal(
+            mode="SWARM_PEER",
+            hypothesis={"mechanism": "late_unpiloted_rewrite"},
+            raw_code_patch=bad_final_pol,
+            full_policy_code=bad_final_pol,
+            full_macros_code="",
+            target_functions=["step"],
+        )
+
+    def _fake_incubate(cand, **kwargs):
+        if "Action.W" in cand.policy_code:
+            cand.sandbox_passed = False
+            cand.error = "Incubation paired depth regression (depth_delta=-2.62)"
+        else:
+            cand.sandbox_passed = True
+            cand.error = ""
+            cand.sandbox_metrics = {"avg_depth": 4.6, "depth_delta": 0.6}
+        return cand
+
+    with (
+        patch.object(peer.author, "synthesize", side_effect=_fake_synth),
+        patch("lox.author.swarm_peer.incubate_candidate", side_effect=_fake_incubate),
+    ):
+        res = peer.run_cycle(
+            generation=87,
+            deficit_report=rep,
+            claimed_deficit=cl,
+            current_policy=base_pol,
+            current_skills={},
+            eval_pool=None,
+            track="proactive_branch",
+        )
+    assert res.sandbox_passed is True
+    assert "Action.E" in res.policy_code

@@ -627,6 +627,7 @@ class SwarmReferee:
                 sel_inc_stats = _extract_stats(
                     sel_inc_eval, base_policy, base_skills, loc_override=base_loc
                 )
+                self._incumbent_cache[sel_inc_key] = (sel_inc_eval, sel_inc_stats)
             else:
                 sel_inc_eval = None
                 sel_inc_stats = _extract_eval_stats(
@@ -812,6 +813,7 @@ class SwarmReferee:
                         "deficit": c.claimed_deficit_id,
                         "stage": "select",
                         "avg_depth": round(float(st["avg_depth"]), 3),
+                        "max_depth": opt_int(st, "max_depth", 1),
                         "avg_score": round(float(st["avg_score"]), 1),
                         "winsor_delta": round(opt_float(pr, "winsor_delta", 0.0), 4),
                         "iqm_delta": round(opt_float(pr, "iqm_delta", 0.0), 4),
@@ -952,6 +954,7 @@ class SwarmReferee:
                 inc_stats = _extract_stats(
                     inc_batch_eval, base_policy, base_skills, loc_override=base_loc
                 )
+                self._incumbent_cache[conf_inc_key] = (inc_batch_eval, inc_stats)
             else:
                 inc_batch_eval = None
                 inc_stats = _extract_eval_stats(
@@ -1427,6 +1430,7 @@ class SwarmReferee:
                     "deficit": cand.claimed_deficit_id,
                     "stage": "direct",
                     "avg_depth": round(float(st["avg_depth"]), 3),
+                    "max_depth": opt_int(st, "max_depth", 1),
                     "avg_score": round(float(st["avg_score"]), 1),
                     "winsor_delta": round(opt_float(pr, "winsor_delta", 0.0), 4),
                     "iqm_delta": round(opt_float(pr, "iqm_delta", 0.0), 4),
@@ -1694,6 +1698,17 @@ class SwarmReferee:
             stats=best_stats,
             benchmark=bm_name,
         )
+        b_sel_out_prom = {
+            c.peer_id: be
+            for c, be, _st, _pr, _cb, _cs, _cr in eval_rows_b
+            if c.peer_id != best_cand.peer_id
+        }
+        b_pair_map_prom = {
+            c.peer_id: dict(pr) for c, _be, _st, pr, _cb, _cs, _cr in eval_rows_b
+        }
+        b_stats_map_prom = {
+            c.peer_id: dict(st) for c, _be, st, _pr, _cb, _cs, _cr in eval_rows_b
+        }
         return TournamentVerdict(
             promoted=True,
             winner_id=best_cand.peer_id,
@@ -1714,6 +1729,13 @@ class SwarmReferee:
             holdout_iqm_delta=holdout_iqm_delta,
             holdout_rejected=False,
             best_pair=dict(best_pair),
+            select_batches=b_sel_out_prom,
+            select_pair_by_peer=b_pair_map_prom,
+            select_stats_by_peer=b_stats_map_prom,
+            select_inc_avg_depth=opt_float(inc_stats, "avg_depth", 1.0),
+            select_inc_auto_esc=opt_int(
+                inc_stats, "auto_esc_total", opt_int(inc_stats, "auto_esc", 0)
+            ),
             reason=(
                 f"Promoted `{best_cand.peer_id}` targeting `{best_cand.claimed_deficit_id}` "
                 f"(Δdepth={d_delta:+.2f}, Δscore={s_delta:+.1f}, "

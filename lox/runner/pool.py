@@ -550,7 +550,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             adapter.extract_milestones_and_stalls(ticks)
             if record_ticks and ticks
             else (
-                f"Overview: Progress={curr_d} (Max={max_depth}) | Steps={last_turn} | Score={last_score}",
+                f"Overview: Progress={last_depth} (Max={max_depth}) | Steps={last_turn} | Score={last_score}",
                 death_msg,
                 {
                     "depths_visited": [max_depth],
@@ -563,7 +563,7 @@ def run_single_episode(task: dict[str, Any]) -> dict[str, Any]:
             summarize_episode_ticks(ticks)
             if record_ticks and ticks
             else (
-                f"Overview: Depth={curr_d} (Max={max_depth}) | Turns={last_turn} | Score={last_score}",
+                f"Overview: Depth={last_depth} (Max={max_depth}) | Turns={last_turn} | Score={last_score}",
                 death_msg,
                 {"depths_visited": [max_depth], "best_ac": last_ac, "max_xl": last_xl},
             )

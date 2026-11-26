@@ -813,7 +813,7 @@ class AuthorAgent:
                             )
                         )
                         self.db_logger.save_synthesis_log(
-                            log_id=f"syn_{generation}_{turn_idx}_autodry_{int(time.time() * 1000)}",
+                            log_id=f"syn_{self.agent_role}_{generation}_{turn_idx}_autodry_{uuid.uuid4().hex[:6]}",
                             generation=generation,
                             batch_id=batch_id,
                             mode=mode,
@@ -877,6 +877,38 @@ class AuthorAgent:
                         )
                     messages.append({"role": "user", "content": nudge_msg})
                     continue
+
+                try:
+                    _, final_turn_code = self.extract_yaml_and_python(msg_text)
+                    self.db_logger.save_synthesis_log(
+                        log_id=f"syn_{self.agent_role}_{generation}_{turn_idx}_final_{uuid.uuid4().hex[:6]}",
+                        generation=generation,
+                        batch_id=batch_id,
+                        mode=mode,
+                        turn_index=turn_idx,
+                        turn_type="FINAL_SYNTHESIS",
+                        repair_idx=0,
+                        model=self.model,
+                        thinking_content=reasoning_text,
+                        message_content=clean_text,
+                        tool_calls_json="[]",
+                        tool_results_json="[]",
+                        candidate_code=final_turn_code,
+                        skill_name=str((latest_hyp or {}).get("skill_module", "")),
+                        skill_code=self.extract_skill_code(clean_text, latest_hyp),
+                        hypothesis_yaml=yaml.dump(latest_hyp) if latest_hyp else "",
+                        status="FINAL_SUBMITTED",
+                        error_diagnostic="",
+                        prompt_sent="",
+                        prompt_tokens=prompt_toks,
+                        completion_tokens=comp_toks,
+                        reasoning_tokens=reasoning_toks,
+                        agent_role=self.agent_role,
+                        cost_usd=turn_cost_usd,
+                        wall_ms=turn_ms,
+                    )
+                except Exception as log_exc:
+                    _LOG.warning("save_synthesis_log failed: %s", log_exc)
 
                 final_content = msg_text
                 break
@@ -975,7 +1007,7 @@ class AuthorAgent:
                     t_stat = "TOOL_CALLS"
                 _, cand_code_turn = self.extract_yaml_and_python(msg_text)
                 self.db_logger.save_synthesis_log(
-                    log_id=f"syn_{generation}_{turn_idx}_0_{int(time.time() * 1000)}",
+                    log_id=f"syn_{self.agent_role}_{generation}_{turn_idx}_0_{uuid.uuid4().hex[:6]}",
                     generation=generation,
                     batch_id=batch_id,
                     mode=mode,
@@ -1223,6 +1255,8 @@ class AuthorAgent:
                 repair_msg = self._invoke_llm(
                     rep_llm_messages, allow_tools=True, tool_specs=active_tool_specs
                 )
+                rep_p, rep_c, rep_r = extract_usage_tokens(repair_msg.get("_usage"))
+                rep_cost_usd = extract_usage_cost(repair_msg.get("_usage"))
                 if repair_msg.get("tool_calls"):
                     tcs = repair_msg.get("tool_calls") or []
                     messages.append(
@@ -1253,12 +1287,19 @@ class AuthorAgent:
                         allow_tools=False,
                         tool_specs=active_tool_specs,
                     )
+                    rep_p2, rep_c2, rep_r2 = extract_usage_tokens(
+                        repair_msg.get("_usage")
+                    )
+                    rep_cost2 = extract_usage_cost(repair_msg.get("_usage"))
+                    rep_p += rep_p2
+                    rep_c += rep_c2
+                    rep_r += rep_r2
+                    if rep_cost2 is not None:
+                        rep_cost_usd = (rep_cost_usd or 0.0) + rep_cost2
                 rep_ms = (time.perf_counter() - t0_rep) * 1000.0
 
                 rep_text = repair_msg.get("content") or ""
                 rep_reasoning = repair_msg.get("_reasoning") or ""
-                rep_p, rep_c, rep_r = extract_usage_tokens(repair_msg.get("_usage"))
-                rep_cost_usd = extract_usage_cost(repair_msg.get("_usage"))
                 clean_rep = re.sub(
                     r"<think>.*?</think>", "", rep_text, flags=re.DOTALL
                 ).strip()

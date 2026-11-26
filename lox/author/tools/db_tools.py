@@ -74,6 +74,9 @@ _FORBIDDEN_TABLE_FUNCTIONS = frozenset(
         "st_read",
         "duckdb_secrets",
         "duckdb_settings",
+        "duckdb_databases",
+        "duckdb_extensions",
+        "pragma_database_list",
         "current_setting",
         "getenv",
     }
@@ -128,18 +131,28 @@ def strip_sql_comments_and_literals(sql: str) -> str:
                 i += 1
             out.append("''")
             continue
-        # Double-quoted identifier "..." with "" escape
+        # Double-quoted identifier "..." with "" escape.
+        # Preserve forbidden system/table-function names (e.g. "read_text"(...))
+        # so quoting cannot bypass _FORBIDDEN_TABLE_FUNCTIONS checks, while keeping
+        # ordinary quoted column identifiers harmless.
         if ch == '"':
             i += 1
+            ident_chars: list[str] = []
             while i < n:
                 if sql[i] == '"':
                     if i + 1 < n and sql[i + 1] == '"':
+                        ident_chars.append('"')
                         i += 2
                         continue
                     i += 1
                     break
+                ident_chars.append(sql[i])
                 i += 1
-            out.append('""')
+            ident_val = "".join(ident_chars)
+            if ident_val.lower() in _FORBIDDEN_TABLE_FUNCTIONS:
+                out.append(f" {ident_val} ")
+            else:
+                out.append('""')
             continue
         # Dollar-quoted string $$...$$ or $tag$...$tag$
         if ch == "$":
@@ -332,8 +345,11 @@ class DBToolsMixin:
             # Defense-in-depth at C engine level: disable all external file/network access
             try:
                 con.execute("SET enable_external_access = false")
-            except Exception:
-                pass
+            except Exception as sec_exc:
+                return (
+                    f"Error: Failed to enforce DuckDB external-access sandbox: {sec_exc}",
+                    "error",
+                )
             cur = con.execute(clean)
             self.db_queries_run += 1
             text, count = format_cursor_yaml(cur, max_rows=max_rows_cap)

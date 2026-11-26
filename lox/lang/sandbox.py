@@ -72,6 +72,31 @@ SAFE_STDLIB_SUBMODULES: dict[str, tuple[str, ...]] = {
     "numpy": ("linalg", "random", "fft", "ma", "exceptions"),
 }
 
+# Per-module attribute denylist blocking host filesystem I/O, pickle deserialization,
+# dynamic eval(), and C-level getattr bypasses inside allowlisted modules.
+FORBIDDEN_MODULE_ATTRS: dict[str, frozenset[str]] = {
+    "operator": frozenset({"attrgetter", "methodcaller"}),
+    "typing": frozenset({"get_type_hints", "ForwardRef", "eval_type_backport"}),
+    "numpy": frozenset(
+        {
+            "load",
+            "save",
+            "savez",
+            "savez_compressed",
+            "fromfile",
+            "fromregex",
+            "memmap",
+            "loadtxt",
+            "savetxt",
+            "genfromtxt",
+            "DataSource",
+            "lib",
+            "ctypeslib",
+        }
+    ),
+}
+FORBIDDEN_MODULE_ATTRS["np"] = FORBIDDEN_MODULE_ATTRS["numpy"]
+
 
 def _validate_stdlib_submodule(mod_name: str, root_mod: str) -> None:
     """Rejects nested or unauthorized submodules under allowlisted stdlib roots (e.g. `collections.sys`)."""
@@ -110,6 +135,11 @@ FORBIDDEN_IMPORT_NAMES: frozenset[str] = frozenset(
         "nh",
         "nle",
         "lox_core",
+        "attrgetter",
+        "methodcaller",
+        "get_type_hints",
+        "ForwardRef",
+        "eval_type_backport",
     }
 )
 
@@ -127,6 +157,10 @@ FORBIDDEN_CALLS: frozenset[str] = frozenset(
         "breakpoint",
         "exit",
         "quit",
+        "attrgetter",
+        "methodcaller",
+        "get_type_hints",
+        "eval_type_backport",
     }
 )
 
@@ -278,6 +312,39 @@ _STRICT_FORBIDDEN_ATTRS: frozenset[str] = frozenset(
         "nh",
         "nle",
         "lox_core",
+        # Frame / generator / coroutine / traceback / code introspection (sandbox escape vectors)
+        "gi_frame",
+        "gi_code",
+        "gi_yieldfrom",
+        "cr_frame",
+        "cr_code",
+        "cr_await",
+        "ag_frame",
+        "ag_code",
+        "ag_await",
+        "tb_frame",
+        "tb_next",
+        "f_back",
+        "f_globals",
+        "f_builtins",
+        "f_locals",
+        "f_code",
+        "co_consts",
+        "co_code",
+        "co_names",
+        "func_globals",
+        "func_code",
+        "func_closure",
+        # Arbitrary host file I/O & pickle serialization methods (e.g. ndarray.tofile/dump)
+        "tofile",
+        "dump",
+        "dumps",
+        # C-level getattr / eval helpers
+        "attrgetter",
+        "methodcaller",
+        "get_type_hints",
+        "ForwardRef",
+        "eval_type_backport",
     }
 )
 
@@ -288,6 +355,7 @@ class SandboxASTVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         super().__init__()
         self._imported_modules: set[str] = set(_PRELOADED_MODULE_NAMES)
+        self._module_roots: dict[str, str] = {m: m for m in _PRELOADED_MODULE_NAMES}
 
     def _track_module_alias(self, target: ast.expr, value: ast.expr | None) -> None:
         if (
@@ -296,6 +364,7 @@ class SandboxASTVisitor(ast.NodeVisitor):
             and value.id in self._imported_modules
         ):
             self._imported_modules.add(target.id)
+            self._module_roots[target.id] = self._module_roots.get(value.id, value.id)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         for tgt in node.targets:
@@ -325,6 +394,7 @@ class SandboxASTVisitor(ast.NodeVisitor):
             bound_as = alias.asname or root_mod
             if root_mod != "skills":
                 self._imported_modules.add(bound_as)
+                self._module_roots[bound_as] = root_mod
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -356,9 +426,14 @@ class SandboxASTVisitor(ast.NodeVisitor):
                     )
         elif root_mod != "skills":
             _validate_stdlib_submodule(full_mod, root_mod)
+            mod_denied = FORBIDDEN_MODULE_ATTRS.get(root_mod, frozenset())
             for alias in node.names:
                 nm = str(alias.name or "")
-                if nm.startswith("_") or nm in FORBIDDEN_IMPORT_NAMES:
+                if (
+                    nm.startswith("_")
+                    or nm in FORBIDDEN_IMPORT_NAMES
+                    or nm in mod_denied
+                ):
                     raise PolicyValidationError(
                         f"Import of private/re-exported symbol '{nm}' from '{full_mod}' is forbidden in policy sandbox."
                     )
@@ -384,7 +459,13 @@ class SandboxASTVisitor(ast.NodeVisitor):
                 f"Access to internal/system attribute '{node.attr}' is forbidden in policy sandbox."
             )
         if isinstance(node.value, ast.Name) and node.value.id in self._imported_modules:
-            if node.attr.startswith("_") or node.attr in FORBIDDEN_IMPORT_NAMES:
+            root_mod = self._module_roots.get(node.value.id, node.value.id)
+            mod_denied = FORBIDDEN_MODULE_ATTRS.get(root_mod, frozenset())
+            if (
+                node.attr.startswith("_")
+                or node.attr in FORBIDDEN_IMPORT_NAMES
+                or node.attr in mod_denied
+            ):
                 raise PolicyValidationError(
                     f"Access to private/forbidden module attribute '{node.value.id}.{node.attr}' is forbidden in policy sandbox."
                 )
